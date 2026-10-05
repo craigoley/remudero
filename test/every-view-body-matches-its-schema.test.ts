@@ -24,6 +24,7 @@ import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } fr
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "../src/lib/inbox-view.js";
 import type { NeedsYouData } from "../src/lib/needs-you-view.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
+import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
 
@@ -106,7 +107,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve" } }));
   // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
   writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -118,7 +119,8 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
     hostProbe: { rateLimit: () => 4321, diskFree: () => 10_000 },
   });
   const instances = createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances], clock, holder: "schema-test", post: () => {} });
+  const workstreams = createWorkstreamsView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", planPath: deps.panelGraph.planPath }], ledgerSource });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -143,7 +145,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -179,6 +181,8 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual((bodies.get("inbox")!.data as { items: Array<{ proposalId: string; lane?: string }> }).items.map((i) => [i.proposalId, i.lane]), [["ruling:schema", "notReady"]]);
   assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-1", "fb-schema"]);
   assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
+  const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
+  assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
   assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 
