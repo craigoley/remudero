@@ -1,0 +1,50 @@
+- id: W1-T5883
+  title: "THE FLEET RUNS NODE 24 — move the repository pin from 22.22.3 to 24.21.0 in one change: .nvmrc (every workflow reads it), the image base deploy/Dockerfile FROM node:24.21.0-bookworm-slim by digest, engines and @types/node, so CI and all three daemons run the release Node 20 and 22 users are being moved to"
+  repo: remudero
+  depends_on: [W1-T5882, W1-T5725]
+  dispatch_hold: true
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: Node 22 to 24 upgrade (console and site already moved, #1978 and remudero-site #186)"
+  plan_refs: [W1-T2770]
+  files: [.nvmrc, deploy/Dockerfile, test/the-fleet-runs-node-24.test.ts, package.json, package-lock.json, README.md, docs/adr/0002-node-version-pin.md, docs/deploy-image-forensics.md, scripts/coverage-baseline.json]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main: .nvmrc is 22.22.3 and every setup-node step reads it
+    (node-version-file); deploy/Dockerfile:16 pins node:22.22.3-bookworm-slim@sha256:e21fc383...; the
+    four running containers report v22.22.3; engines is >=22.22.3 and @types/node ^22.20.1.
+    test/merge-lcov-node-drift-cluster-and-image-pin.test.ts already requires FROM to equal .nvmrc
+    exactly, so the two move in one commit. The latest Node 24 LTS is v24.21.0 (2026-09-07); its
+    official image node:24.21.0-bookworm-slim is multi-arch index
+    sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 (Docker Hub, read
+    2026-10-05). remudero-console and remudero-site already run Node 24 in CI and on Vercel.
+    Node 24 also stops marking TypeScript type-only lines as coverage lines, so .ts line totals move;
+    the coverage baseline is re-measured on 24 in this change rather than inherited.
+  design: |
+    One commit moves .nvmrc to 24.21.0, the Dockerfile FROM to the tag and digest above, engines to
+    >=24.21.0 (lock root mirrored by hand) and @types/node to ^24 (typecheck clean). README, ADR 0002
+    and deploy-image-forensics state the new pin. CI on the PR runs on 24 through .nvmrc.
+  acceptance:
+    - claim: ".nvmrc pins Node 24.21.0"
+      proof: 'grep: 24\.21\.0 in .nvmrc'
+    - claim: "the image base is node:24.21.0-bookworm-slim pinned by its multi-arch digest"
+      proof: 'grep: test("W1-T5883: the image base is node 24\.21\.0 pinned by its multi-arch digest" in test/the-fleet-runs-node-24.test.ts'
+    - claim: "engines requires Node 24.21.0 or later"
+      proof: 'grep: "node": ">=24\.21\.0" in package.json'
+    - claim: "the Node type definitions are the 24 line"
+      proof: 'grep: "@types/node": "\^24\. in package.json'
+  falsifier: |
+    Leave the Dockerfile on 22.22.3 with .nvmrc at 24.21.0: the existing image-pin test fails.
+  note: |
+    DISPATCH HOLD: operator hand build (2026-10-05). A merge rebuilds the image and recycles core,
+    site and console; stage it: set DEPLOY_IMAGE_MANUAL for core and console before merging, let site
+    recycle, verify `docker exec <c> node --version` and the worker smoke, then release the others.
+    Rollback is a revert PR (rebuild and recycle). Operator follow-ups outside this repo's diff: the
+    Mac's Homebrew node@24 (preflight-author requires the pinned version exactly), the Azure host's
+    nodesource node_22.x apt source, and remudero-sandbox's .nvmrc.

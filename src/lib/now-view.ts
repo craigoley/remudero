@@ -28,6 +28,7 @@ import {
   isBlockedRow,
   isRunningRow,
   type BoardSnapshot,
+  type PrQueueRow,
   type RecentActivityCache,
 } from "./board.js";
 import { createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type Row } from "./board-projection.js";
@@ -186,7 +187,7 @@ export interface NowViewData {
     tasks: NowTask[];
     groups: NowGroups;
   };
-  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean }> };
+  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
   recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
   health: NowHealth;
@@ -444,7 +445,7 @@ export function assembleNowView(input: {
     prQueue: {
       complete: snapshot.prQueue.complete,
       ...(snapshot.prQueue.unavailableReason ? { unavailableReason: snapshot.prQueue.unavailableReason } : {}),
-      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held })),
+      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held, reviewState: r.reviewState })),
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
@@ -781,6 +782,7 @@ export function createNowView(opts: NowViewOptions): {
   version: number;
   materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
   prepare(ctx: NowViewContext, more: () => boolean): boolean;
+  stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
   perInstance: true;
 } {
@@ -984,6 +986,8 @@ export function createNowView(opts: NowViewOptions): {
     body?: { key: string; data: NowViewData; sources: ViewSource[] };
   }
   const builds = new Map<string, NowBuild>();
+  /** Each instance's stage timings since its last `prepare`, for the worker's `read_model.slow_view` row. */
+  const ran = new Map<string, Record<string, number>>();
   const ledgerPathOf = (instance: NowInstance): string => join(instance.ledgerDir, LEDGER_FILENAME);
   const depsOf = (instance: NowInstance, b: NowBuild) => ({
     plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
@@ -1075,6 +1079,7 @@ export function createNowView(opts: NowViewOptions): {
       const started = clock.now();
       run(instance, b);
       const ms = clock.now() - started;
+      (ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!)[stage] = ms;
       if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
       b.stage++;
     }
@@ -1177,9 +1182,16 @@ export function createNowView(opts: NowViewOptions): {
     },
     /** W1-T5066: one bounded step per stage per instance; the worker builds no body until every stage is done. */
     prepare(ctx, more) {
+      for (const { state } of ctx.instances) ran.delete(state.instance);
       let done = true;
       eachInstance(ctx, (instance, entry) => void (done = step(instance, entry, ctx.now, more) && done));
       return done;
+    },
+    /** `ReadModelView.stages`: each stage's ms `step` ran for `ctx`'s instances since their last `prepare` (one worker call),
+     *  which the worker names in `read_model.slow_view`, so a slow build's dominant stage reads below NOW_SLOW_STAGE_MS. */
+    stages(ctx) {
+      const out = Object.assign({}, ...ctx.instances.map(({ state }) => ran.get(state.instance) ?? {})) as Record<string, number>;
+      return Object.keys(out).length > 0 ? out : undefined;
     },
     /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {

@@ -1,0 +1,35 @@
+- id: W1-T5890
+  title: "A DRAFT MAY CREATE A NEW SUBDIRECTORY UNDER AN EXISTING TOP DIRECTORY — W1-T5660's draft-missing-directory check refuses a files: entry whose IMMEDIATE parent is absent, where its record specified the TOP directory, so a ratified draft that adds src/lib/newmod/x.ts is refused; and the check reads this repo's worktree even for a task aimed at another repo"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the missing-directory refusal judges the right directory in the right repo
+  band_meaning: span
+  origin: "operator session 2026-10-05: fix agent on #9313 (W1-T5660) follow-up"
+  plan_refs: [W1-T5660, W1-T5541]
+  files: [src/lib/inbox.ts, test/a-draft-may-create-a-new-subdirectory-under-an-existing-top-directory.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main bcd3ff34. `lintDraftedFragment` (src/lib/inbox.ts, W1-T5660,
+    merged #9313) blocks `draft-missing-directory` when `dirname(path)` does not exist in the
+    destination worktree. W1-T5660's record says the refusal is for "a files: entry whose top
+    directory does not exist in the worktree". The immediate-parent check is stricter: a draft
+    that adds a module in a new subdirectory (src/lib/newmod/x.ts, where src/lib exists) is
+    refused, though creating that directory is exactly what the build would do. The check also
+    ignores `task.repo`, so a draft for a consumer repo (e.g. `repo: remudero-console`) is judged
+    against this repo's tree and can be refused for a path that exists in its own repo.
+  design: |
+    Judge the entry's first path segment (its top directory), as the record specified; a path
+    whose top directory exists passes even when deeper directories are new. For a task whose
+    `repo` is not this repo, skip the directory check (the drafting worktree cannot see that
+    repo's tree) rather than refuse. A top directory that does not exist still blocks.
+  acceptance:
+    - claim: "a draft naming src/lib/newmod/x.ts is filed when src/lib exists, a draft naming nosuchtop/x.ts is refused with draft-missing-directory naming nosuchtop, and a draft whose task.repo is another repo is not refused for a directory this worktree lacks"
+      proof: "unit test: test/a-draft-may-create-a-new-subdirectory-under-an-existing-top-directory.test.ts"
+  falsifier: |
+    Keep `dirname(path)`: the new-subdirectory draft is refused and the test fails.

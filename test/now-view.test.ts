@@ -1262,3 +1262,23 @@ test("a queued order set by a costed row only the day's spend read is legacy_hor
   const member = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
   assert.equal(member?.classification, "real", JSON.stringify(member));
 });
+
+test("each pull-request queue row carries its review state, so the console never has to print unknown", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const failed = { number: 9301, url: "https://github.com/o/r/pull/9301", state: "OPEN", title: "classify operator items", headRefName: "run-unfiled-1", headRefOid: "aaa1" };
+  const unreviewed = { number: 9313, url: "https://github.com/o/r/pull/9313", state: "OPEN", title: "block placeholder drafts", headRefName: "run-unfiled-2", headRefOid: "bbb2" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({
+      github: stubGateway({ listOpenHeadBranches: () => [failed, unreviewed], reviewState: (url: string) => (url === failed.url ? "failure" : undefined) }),
+      generation: "g",
+      source: { asOf: null, state: "fresh" },
+    }),
+  });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.reviewState]), [[9301, "failure"], [9313, "none"]]);
+});

@@ -104,6 +104,8 @@ export const CLI_ONLY = {
       // W1-T5533: runs git worktree add and cp -al on the operator's own host filesystem for a HAND
       // build; the console's remote HTTP client cannot create a local checkout for its caller.
       "hand-worktree",
+      // W1-T5859: pushes a git ref from the operator's own checkout for a HAND build; not a console action.
+      "claim",
       "emissions",
       "receipt",
       // W1-T3800: replays a privacy-safe offline corpus from the local filesystem;

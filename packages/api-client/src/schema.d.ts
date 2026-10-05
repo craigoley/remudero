@@ -2970,6 +2970,21 @@ export interface components {
         page: ViewPage;
       };
     };
+    /** GET /v1/views/workstreams (docs/views.md, src/lib/workstreams-view.ts; W1-T5050, P4-T11): the operator activity page as one body across instances. Each entry is what GET /v1/operator-activity answers for that instance, built by the same function in the read-model worker from the projector's `activity_ring` (the newest rows of any step) plus the instance checkout's plan. Rebuilt on a ring insert, a plan change or a GitHub snapshot re-save, debounced 1 s. Dark until state/read-model/switches.json sets `workstreams` to `serve`. */
+    WorkstreamsView: {
+      view: "workstreams";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          activity: OperatorActivityResult;
+        })[];
+      };
+    };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
       view: "needs-you";
@@ -3059,6 +3074,8 @@ export interface components {
             disposition: string;
             queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
             held: boolean;
+            /** The PR head's remudero-review state from the board snapshot; absent from bodies built before it was projected. */
+            reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
           })[];
         };
         /** Blocked PRs and merge holds, most urgent tone first. */
@@ -5231,6 +5248,17 @@ export interface paths {
     get: {
       responses: {
           "200": NeedsYouView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/workstreams": {
+    get: {
+      responses: {
+          "200": WorkstreamsView;
           "304": undefined;
           "401": Error;
           "403": Error;

@@ -216,7 +216,10 @@ test("a restarted worker serves its last committed bodies before its first tick"
   const logs: string[] = [];
   const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], log: (step) => void logs.push(step) });
   const warm = restarted.bodies.get(readModelBodyKey("read-model"));
-  assert.deepEqual(warm, posted.entry, "the committed body is served as the worker posted it");
+  // Its build start is not persisted: a stored body's build is over, and its start belongs to that run's latency.
+  const stored = { ...posted.entry };
+  delete stored.buildStartedMs;
+  assert.deepEqual(warm, stored, "the committed body is served as the worker posted it");
   assert.equal(restarted.state().at, undefined, "no tick has run");
   assert.deepEqual(logs, ["read_model.warm_boot", "read_model.switch_absent"], "no switch file: every view dark, and the reason ledgered");
   assert.equal(restarted.stop(), false, "a never-started worker has nothing to confirm");

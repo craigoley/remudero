@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=5f8b98d122f788e4
   attempts: 0
   files:
     - LEARNINGS.md
