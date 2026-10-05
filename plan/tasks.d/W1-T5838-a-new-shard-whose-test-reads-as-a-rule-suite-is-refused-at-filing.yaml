@@ -1,0 +1,45 @@
+- id: W1-T5838
+  title: "A NEW SHARD WHOSE TEST READS AS A RULE SUITE IS REFUSED AT FILING — `listRuleSuites` classes any test named census/ratchet/baseline as a CI rule suite and W1-T5616's census refuses one with no parity row, but nothing checks a shard's own test path until CI; the trap hit three tasks in one day (W1-T5676, W1-T5691, W1-T5692), each found by a red build"
+  repo: remudero
+  depends_on: [W1-T5785]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the changed-tasks lint reads a new shard's test name as listRuleSuites does
+  band_meaning: span
+  origin: "operator session 2026-10-05: third census-name rename of the day (#9275, W1-T5691)"
+  plan_refs: [W1-T5785, W1-T5616, W1-T5676, W1-T5691, W1-T5692]
+  files: [src/lib/task-linter.ts, src/lib/ci-parity.ts, test/a-new-shard-whose-test-reads-as-a-rule-suite-is-refused-at-filing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 2a15706f. `listRuleSuites` (src/lib/ci-parity.ts) keeps a
+    tracked test when `/(?:census|ratchet|baseline)/i` matches its name, and
+    test/every-ci-census-is-asked-before-the-push.test.ts (W1-T5616) fails on a member in neither
+    `PRECHECK_PARITY` (scripts/census-precheck.mjs) nor the shrink-only parity baseline. The test
+    path is fixed when the shard is filed, yet nothing reads it until the build's CI.
+    THREE HITS 2026-10-05: W1-T5676's falsifier (#9209 renamed the slug, #9229); W1-T5691 built as
+    #9267 under its census-named slug, #9275 renames the record; W1-T5692 (#9276), a real census
+    suite whose design named `PRECHECK_PARITY` for other rows but never its own new test, needed
+    hand commit 24aec859 to model it. W1-T5785 (queued) adds the `@not-a-rule-suite: <reason>`
+    test-header marker; its design reads the test file, so it acts only once the test exists.
+    src/lib/task-linter.ts sits exactly at its comment-load ceiling (1300): add no comment lines.
+  design: |
+    A changed-tasks check for a task that is NEW in the diff (`opts.riskTransition.baseTask ===
+    undefined`; silent without `riskTransition`, so the whole-plan pass and existing shards are
+    untouched). Each `test/**/*.test.ts` path in its `files:` or in a `unit test:` proof whose name
+    after `test/` matches the rule-suite name pattern is refused (block) unless the shard declares
+    which it is: its design carries `@not-a-rule-suite:` with a reason (the builder copies the
+    marker into the test header, which W1-T5785 honours), or its `files:` names
+    scripts/census-precheck.mjs and its design names that test's basename beside `PRECHECK_PARITY`.
+    The refusal names the path and the three remedies (rename the slug, declare the marker, name
+    the parity row). The name pattern is exported once from src/lib/ci-parity.ts and read by both
+    `listRuleSuites` and the check.
+  acceptance:
+    - claim: "a new shard declaring test/x-census.test.ts is refused naming that path, the same shard with a reasoned not-a-rule-suite marker in its design or with census-precheck.mjs in files and the basename beside PRECHECK_PARITY passes, an unchanged base shard with that path is not refused, and listRuleSuites reads the same exported pattern"
+      proof: "unit test: test/a-new-shard-whose-test-reads-as-a-rule-suite-is-refused-at-filing.test.ts"
+  falsifier: |
+    Drop the check from the changed-tasks pass: the new shard declaring test/x-census.test.ts
+    lints clean and the test fails.
