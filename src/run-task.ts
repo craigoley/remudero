@@ -26471,7 +26471,7 @@ export interface PlanReconcileDeps {
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
   readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
-  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> };
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -26498,6 +26498,15 @@ function readPlanShards(dir: string): Array<{ taskId: string; path: string; text
     if (id) out.push({ taskId: id, path, text });
   }
   return out;
+}
+
+export function windowShortShards(
+  shards: ReadonlyArray<{ taskId: string; text: string }>,
+  credited: ReadonlySet<string>,
+  windowShort: readonly string[] = [],
+): string[] {
+  const short = new Set(windowShort);
+  return shards.filter((sh) => short.has(sh.taskId) && reconcileShardStatus(sh.text, sh.taskId, (id) => credited.has(id)).skipped === "not-credited-merged").map((sh) => sh.taskId).sort();
 }
 
 /**
@@ -26540,13 +26549,22 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   let credited: Set<string>;
   let boardFloor: string | undefined;
   let unreadPrIds: Set<string> | undefined;
+  let windowShort: string[] = [];
+  const reportWindowShort = () => {
+    if (windowShort.length === 0) return;
+    const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
+  };
   try {
     const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
     const read = projection();
     credited = read.ids;
+    windowShort = windowShortShards(shards, credited, read.windowShort);
     if (read.unknownReason !== undefined) {
       console.error(`### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (${read.unknownReason}); no reconcile count can be derived from it and nothing was written`);
       (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
+      reportWindowShort();
       return 2;
     }
     boardFloor = read.boardFloor;
@@ -26591,7 +26609,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     console.error(`### rmd plan-reconcile: CAVEAT — the closed-PR board read stopped at its page cap: PRs last updated before ${boardFloor} were not read, so the count above is exact for every shard credited by a commit trailer or by a PR read since then and a LOWER BOUND for any shard credited only by an older PR's body or branch${suffix}`);
     (deps.log ?? (() => {}))("plan.reconcile.board_floor", { floor: boardFloor, withheld: withheld.length });
   }
-  return 0;
+  reportWindowShort();
+  return windowShort.length > 0 ? 2 : 0;
 }
 
 type InlineReconcileReport = { queued: number; creditable: readonly string[] } | { unreadable: string };
@@ -26627,7 +26646,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
-): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -26636,19 +26655,22 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable);
-  const ids = new Set(candidates.map((c) => c.taskId));
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
+  const reconcilable = candidates.filter(creditIsReconcilable);
+  const ids = new Set(reconcilable.map((c) => c.taskId));
+  const windowShort = candidates.filter((c) => c.merged === true && c.creditIsImplementation === undefined && c.creditHasBuildDiff === undefined && c.creditHasOtherBuildMerge !== true).map((c) => c.taskId).sort();
+  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}) };
   const state = gateway.readState?.();
-  if (state === "failed") return { ids, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
+  if (state === "failed") return { ...projection, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
   if (state === "ok" && gateway.readTruncated?.()) {
     const coverage = gateway.readBoardCoverage?.();
     if (coverage?.openTruncated === false && coverage.closedFloor) {
-      const unreadPrIds = new Set(candidates.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
-      return { ids, boardFloor: coverage.closedFloor, unreadPrIds };
+      const unreadPrIds = new Set(reconcilable.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
+      return { ...projection, boardFloor: coverage.closedFloor, unreadPrIds };
     }
-    return { ids, unknownReason: "truncated" };
+    return { ...projection, unknownReason: "truncated" };
   }
-  return { ids };
+  return projection;
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
@@ -40256,13 +40278,13 @@ function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptio
 
 /** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
  *  merge outside the window has no entry and takes the pre-existing path. */
-const MERGED_PATHS_SCAN_LIMIT = 4000;
+export const MERGED_PATHS_SCAN_LIMIT = 4000;
 /** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
  *  1,000-file merge does not need 1,000 strings held to decide it. */
 const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
-const MERGE_SUBJECT_SCAN_LIMIT = 5000;
+export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
 const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
@@ -51361,7 +51383,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };
