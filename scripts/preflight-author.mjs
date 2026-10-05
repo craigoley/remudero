@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { affectedSelectionOrFull, readAffectedSuitesInput } from '../src/lib/affected-suites.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
@@ -36,6 +36,15 @@ export function completeTestResult(result) {
     /^# tests [1-9][0-9]*$/m.test(output) && /^# pass [1-9][0-9]*$/m.test(output) && /^# fail 0$/m.test(output);
 }
 
+export function testSummary(output) {
+  const fields = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
+  const summary = Object.fromEntries(fields.map((field) => {
+    const value = [...output.matchAll(new RegExp(`^# ${field} ([0-9]+)$`, 'gm'))].at(-1)?.[1];
+    return [field, value === undefined ? null : Number(value)];
+  }));
+  return fields.every((field) => summary[field] !== null) ? summary : null;
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed) => affectedSelectionOrFull(changed, () => readAffectedSuitesInput(root, changed)) } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
@@ -45,6 +54,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
     node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
+  let diagnosticsRoot;
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
     env: authorEnvironment(process.env), ...extra,
@@ -57,9 +67,29 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     return result.stdout;
   };
   const report = (name, result, ok) => {
-    process.stdout.write(result.stdout ?? '');
-    process.stderr.write(result.stderr ?? '');
-    receipt.steps.push({ name, ok, exitCode: result.status, signal: result.signal ?? null });
+    if (!diagnosticsRoot) {
+      mkdirSync(join(root, 'coverage'), { recursive: true });
+      diagnosticsRoot = mkdtempSync(join(root, 'coverage', 'rmd-author-'));
+    }
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? '';
+    const logs = { stdout: join(diagnosticsRoot, `${name}.stdout.log`), stderr: join(diagnosticsRoot, `${name}.stderr.log`) };
+    writeFileSync(logs.stdout, stdout, { mode: 0o600, flag: 'wx' });
+    writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
+    receipt.steps.push({ name, ok, exitCode: result.status, signal: result.signal ?? null,
+      error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
+      ...(name === 'affected-tests' ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
+      diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
+        stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr),
+        mayBeIncomplete: Boolean(result.error || result.signal) } });
+    // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
+    console.log(`${name}: ${ok ? 'PASS' : 'FAIL'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
+    const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
+    if (failures.length) console.log(failures.slice(0, 40).join('\n').slice(0, 4096));
+    if (failures.length > 40) console.log(`additional failure titles in the saved log: ${failures.length - 40}`);
+    process.stdout.write(stdout.slice(-4096));
+    process.stderr.write(stderr.slice(-4096));
+    if (result.error) console.error(`${name}: ${result.error.code ?? 'spawn-error'}: ${result.error.message}; captured logs may be incomplete`);
   };
   try {
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
@@ -109,6 +139,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   receipt.durationMs = Date.now() - startedAt;
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
+    if (diagnosticsRoot) writeFileSync(join(diagnosticsRoot, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     writeFileSync(join(root, 'coverage/preflight-author.json'), JSON.stringify(receipt, null, 2) + '\n');
   } catch (error) {
     console.error(`author receipt could not be written: ${error.message}`);

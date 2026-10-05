@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -202,4 +202,50 @@ test('author preflight rejects skipped-only verification and accepts a real pass
   assert.equal(mod.main([], { root: f.root, select: selection }), 0);
   assert.equal(f.receipt().verdict, 'passed');
   assert.equal(f.receipt().steps[2].ok, true);
+});
+
+test('author preflight retains large real failures privately while keeping terminal feedback bounded', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), "import { test } from 'node:test'; test('durable failure witness', () => { console.log('large-output:' + 'x'.repeat(90000)); console.error('stderr-witness'); throw Error('load-bearing failure witness'); });\n");
+  f.git('add', '.'); f.git('commit', '-m', 'test: retain a large failure');
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import { main } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], { root: ${JSON.stringify(f.root)} }));`],
+  { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'failed');
+  const step = receipt.steps.find((s: { name: string }) => s.name === 'affected-tests');
+  assert.deepEqual(step.testSummary, { tests: 1, suites: 0, pass: 0, fail: 1, cancelled: 0, skipped: 0, todo: 0 });
+  assert.ok(step.diagnostics.stdoutBytes > 90000);
+  const path = join(f.root, step.diagnostics.stdout);
+  const log = readFileSync(path, 'utf8');
+  assert.match(log, /load-bearing failure witness/);
+  assert.match(log, /^# fail 1$/m);
+  assert.equal(statSync(path).mode & 0o077, 0, 'test output can contain private fixture evidence');
+  const priorReceipt = readFileSync(join(dirname(path), 'receipt.json'), 'utf8');
+  assert.equal(JSON.parse(priorReceipt).headSha, receipt.headSha);
+  assert.ok(result.stdout.length + result.stderr.length < 30000, 'full noisy TAP belongs in the durable logs, not a truncated terminal');
+  assert.match(result.stdout, /not ok .*durable failure witness/);
+  assert.match(result.stdout, /complete output:/);
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  assert.equal(readFileSync(join(dirname(path), 'receipt.json'), 'utf8'), priorReceipt, 'a later run must not overwrite the failure receipt');
+});
+
+test('author preflight records spawn errors and incomplete summaries instead of losing the failure cause', () => {
+  const f = fixture();
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import { spawnSync } from 'node:child_process'; import { main } from ${JSON.stringify(pathToFileURL(SCRIPT).href)};
+    process.exit(main([], { root: ${JSON.stringify(f.root)}, spawn: (file, args, opts) => args.includes('--test')
+      ? { status: null, signal: 'SIGTERM', stdout: 'partial diagnostic witness', stderr: 'buffer limit witness', error: Object.assign(new Error('buffer exhausted'), { code: 'ENOBUFS' }) }
+      : spawnSync(file, args, opts) }));`],
+  { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const step = f.receipt().steps.at(-1);
+  assert.equal(step.ok, false);
+  assert.equal(step.signal, 'SIGTERM');
+  assert.deepEqual(step.error, { message: 'buffer exhausted', code: 'ENOBUFS' });
+  assert.equal(step.testSummary, null);
+  assert.equal(step.diagnostics.mayBeIncomplete, true);
+  assert.match(readFileSync(join(f.root, step.diagnostics.stdout), 'utf8'), /partial diagnostic witness/);
+  assert.match(readFileSync(join(f.root, step.diagnostics.stderr), 'utf8'), /buffer limit witness/);
 });
