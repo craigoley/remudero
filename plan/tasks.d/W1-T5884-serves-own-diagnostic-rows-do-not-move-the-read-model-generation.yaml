@@ -42,4 +42,5 @@
     Keep the unconditional `sql.generation.run()` in `commit()`: the diagnostic-only batch moves
     the generation and the test fails.
   note: |
-    reservation hand-off: run-unfiled-1791213096665 -> run-unfiled-1791218044465 (re-filed from #9347, closed for a 104-character commit header).
+    Re-filed from #9347, closed for a 104-character commit header.
+    reservation hand-off: run-unfiled-1791213096665 -> run-unfiled-1791218044465
