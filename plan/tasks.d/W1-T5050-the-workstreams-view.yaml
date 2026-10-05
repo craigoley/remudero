@@ -2,7 +2,6 @@
   title: "OPERATOR ACTIVITY COSTS 1 TO 3.6 S WARM AND 42 TO 150 S COLD — /v1/operator-activity is a request-time fold with a boot prewarm; add the workstreams view over the activity_ring projection so the page reads one materialized body"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 2
   type: implement
   verify: auto
