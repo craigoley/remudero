@@ -26,7 +26,7 @@ import {
   type HostViewData,
 } from "../src/lib/host-view.js";
 import type { LatestMeasurementRowsResult } from "../src/lib/measurement-cadence.js";
-import { buildControlStatusRoute } from "../src/lib/panel-actions.js";
+import { buildControlStatusRoute, controlStatusBody } from "../src/lib/panel-actions.js";
 import { buildSkillsRoute } from "../src/lib/panel-skills.js";
 import { writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
@@ -334,6 +334,16 @@ test("W1-T5053: the host view's config is the slow lane's inputs and its rate li
   } finally {
     process.env.PATH = savedPath;
     rmSync(shim.dir, { recursive: true, force: true });
+    w.cleanup();
+  }
+});
+
+test("W1-T5053: the control part reads an unreadable ledger as unknown liveness, not a failed body", () => {
+  const w = world();
+  try {
+    const body = controlStatusBody({ root: w.root, ledgerPath: w.ledgerPath, readLedger: () => { throw new Error("EACCES"); } });
+    assert.deepEqual([body.paused, body.daemonLive, body.daemonLiveReason], [true, undefined, "ledger-unreadable"]);
+  } finally {
     w.cleanup();
   }
 });
