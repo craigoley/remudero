@@ -43528,8 +43528,7 @@ export function buildSweepHook(
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
-  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` above is:
+  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here once per daemon start, as `draftHook` below is:
   // this function runs once per daemon start, the closure it returns runs once per poll.
   //
   // THE DELTA WAS ALREADY BUILT AND A CONSTRUCTOR'S LIFETIME WAS DEFEATING IT. `buildBatchedGithub`
@@ -43563,6 +43562,7 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const openPrReads = createGhReadWarmer(ghJsonAsync);
@@ -46476,7 +46476,10 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
+  github?: GitHub,
 ): (tickRead?: TickReadFacts) => Promise<void> {
+  let lazyGithub: GitHub | undefined;
+  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
@@ -46536,7 +46539,7 @@ export function buildInboxDraftHook(
       let draftReadiness: ReadinessContext | undefined;
       try {
         const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
         const { isMerged, depsUnobservable } = tickRead
           ? projectionReadinessAccessors(new Map(tickRead.projection))
           : buildDepsReadinessAccessors(plan, deriveDeps);
@@ -46849,7 +46852,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never

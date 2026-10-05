@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -118,6 +120,41 @@ test('coverage sharding: every declared lossless V8 bundle is required before No
   assert.match(runs, /node --expose-internals scripts\/coverage-merge-ratchet\.mjs --output coverage\/lcov\.info/);
   assert.match(runs, /scripts\/diff-coverage\.mjs --lcov coverage\/lcov\.info/);
   assert.match(runs, /scripts\/coverage-ratchet\.mjs --lcov coverage\/lcov\.info/);
+});
+
+test('hosted coverage admission accepts legacy bundles and bounded manifests but refuses chunks without a manifest', () => {
+  const step = workflow.jobs['coverage-ratchet-required'].steps?.find(
+    candidate => candidate.name === 'Merge raw V8 coverage shards before assigning LCOV branch indexes',
+  )?.run;
+  assert.ok(step);
+  const start = step.lastIndexOf('for SHARD in ');
+  const end = step.indexOf('mkdir -p coverage', start);
+  assert.ok(start >= 0 && end > start, 'execute the actual shipped artifact-admission loop');
+  const guard = step.slice(start, end);
+  const root = mkdtempSync(join(tmpdir(), 'rmd-hosted-corpus-admission-'));
+  try {
+    for (const [kind, name, accepted] of [
+      ['legacy', 'coverage-bundle-1-0000000000000-0.json', true],
+      ['bounded', 'coverage-corpus-1-0000000000000.json', true],
+      ['partial', 'coverage-reports-1-0000000000000-00000000.json', false],
+      ['missing', undefined, false],
+    ] as const) {
+      const directory = join(root, kind); mkdirSync(directory);
+      for (let shard = 1; shard <= CI_SHARD_COUNT; shard++) {
+        const raw = join(directory, 'coverage-shards', `coverage-shard-${shard}`, 'raw');
+        mkdirSync(raw, { recursive: true });
+        if (name) writeFileSync(join(raw, name), '{}');
+      }
+      const run = () => execFileSync('bash', ['-e', '-c', guard], { cwd: directory, encoding: 'utf8', stdio: 'pipe' });
+      if (accepted) assert.doesNotThrow(run);
+      else assert.throws(run, (error: unknown) => {
+        const failure = error as { status: number; stdout: string };
+        assert.equal(failure.status, 1);
+        assert.match(failure.stdout, /expected compact V8 coverage for shard 1/);
+        return true;
+      });
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('shard aggregators are the only always() jobs and no step can disappear conditionally', () => {

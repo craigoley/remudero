@@ -1,0 +1,50 @@
+- id: W1-T5768
+  title: "THE PRE-PUSH PRECHECK ASKS host-capability-fixtures AND every-priced-ledger-step WHEN A DIFF CAN MOVE THEM — both are CI-only, and on 2026-10-04 they reddened #9172 (a literal chmod 0o555 in a test), #9179 and #9181 (new priced sweep steps missing from CONFIG_GARDEN_LEDGER_STEPS) after the push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the pre-push precheck asks the census suites a diff can move
+  band_meaning: span
+  origin: "operator session 2026-10-04: WAITING item 'admit the census suites that reddened fleet PRs this round' (operator: go with your recommendations); watch log 22:57Z, 23:11Z"
+  plan_refs: [W1-T5692, W1-T5617, W1-T5616, W1-T5527, W1-T5737]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, package.json, test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. scripts/census-precheck.mjs lists
+    test/host-capability-fixtures.test.ts in `PRECHECK_EXTRA_CI_CENSUSES` ("#8994") and
+    scripts/census-precheck-parity-baseline.json keeps it `ciOnly`;
+    test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts (W1-T5527) is in neither
+    table, so nothing asks it before a push. Batch-10 W1-T5692 (#9155) adds content triggers for
+    ledger-rotation, the union-read census, spend-is-counted-once, env-var-registry and
+    error-subclass-census only; DECISION_RELEVANT_LEDGER_STEPS (#9177's red) is covered there.
+    REDS on 10-04: #9172 shard 4 (host-capability-fixtures, a literal chmod 0o555 in a new test,
+    hand-fixed 038189eb); #9181 shard 4 (three new sweep.review_* steps missing from the config
+    garden census); #9179 (W1-T5318, needed an exemption line in the same census). Fleet fix
+    dispatches 10-03..10-05 also name host-capability-fixtures (W1-T5281) and every-priced
+    (an unfiled review PR). Timed alone at 9c38366f on the fleet host: host-capability-fixtures
+    27.5 s, every-priced 7.6 s, so neither belongs in every push. operator-gated-default-
+    reachability (5.9 s) stays ciOnly: no fix dispatch named it in the window.
+  design: |
+    BUILD AFTER W1-T5692 (filed in batch 10, #9155, not on main when this was filed, so it cannot be
+    a depends_on edge yet): if main has no `PRECHECK_TRIGGERED_SUITES`, stop and record needs-design
+    rather than building a second trigger table.
+    Two rows in W1-T5692's `PRECHECK_TRIGGERED_SUITES`: every-priced on a changed src/**/*.ts whose
+    added lines write a ledger payload naming `pr_url` or `cost_usd` (the census's own three write
+    idioms) or a change to src/lib/config-gardener.ts; host-capability-fixtures on a changed
+    test/**/*.ts whose added lines carry a host-capability token (`chmod`, `process.platform`,
+    `getuid`, `hostname`, `/usr/bin/`) — a textual prefilter, since the .mjs precheck cannot load
+    the census's TS scanner; a false start costs one ~27 s child, a miss is caught by CI as today.
+    Each gets a `census:*` package.json script and a PRECHECK_PARITY `{ run }` entry, every-priced
+    joins the population via PRECHECK_EXTRA_CI_CENSUSES, and host-capability-fixtures leaves
+    `ciOnly`.
+  acceptance:
+    - claim: "with injected runSuites, a src diff adding a cost_usd ledger write starts every-priced, a test diff adding a chmod site starts host-capability-fixtures, and a diff adding neither starts no child"
+      proof: "unit test: test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts"
+  falsifier: |
+    Drop the two trigger rows: the #9172- and #9181-shaped fixtures exit 0 with no child started and
+    the test fails.
