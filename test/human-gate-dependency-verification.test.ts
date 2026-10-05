@@ -180,7 +180,7 @@ test("a held root has one gate only while live dependents remain stalled", () =>
   // Production read: the stalled set comes from heldDependencyRoots over the board's merge state.
   const plan = loadPlanFromYaml([humanTask("H"), task("A", "", ["H"]), task("B", "", ["A"])].join(""), "fixture");
   const rows: Row[] = [{ ts: AT, task_id: "H", step: "verify_human.judged", judge_decision: "needs_operator", judge_reason: "sign-off", observed_state: "H:deps=1:cited=0" }];
-  const board = (a: string, b: string) => snapshot([boardRow("H", { verifyHumanPending: true, prUrl: pull(7) }), boardRow("A", { status: a }), boardRow("B", { status: b })]);
+  const board = (a: BoardRow["status"], b: BoardRow["status"]) => snapshot([boardRow("H", { verifyHumanPending: true, prUrl: pull(7) }), boardRow("A", { status: a }), boardRow("B", { status: b })]);
   const stalled = projectHumanGates(nowDependencyVerificationGates({ instance: "core", repo: REPO, plan, snapshot: board("queued", "queued"), rows, github: issuesOpen(new Set()) }));
   assert.deepEqual(stalled.gates.map((g) => [g.key, g.url]), [["held_root:core:H", pull(7)]]);
   assert.match(stalled.gates[0]!.reason, /2 task\(s\) stalled behind it: A, B/);
