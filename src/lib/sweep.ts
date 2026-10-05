@@ -4921,9 +4921,10 @@ export interface RollupCheckEntry {
   externalId?: string;
 }
 
-/** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. */
+/** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. A posted
+ *  gate's external id is `job:<id>` or run-scoped `run:<runId>:<attempt>:job:<id>` (W1-T5802). */
 export function checkJobId(check: Pick<RollupCheckEntry, "detailsUrl" | "externalId">): string | undefined {
-  return check.detailsUrl?.match(/\/job\/(\d+)/)?.[1] ?? check.externalId?.match(/^job:(\d+)$/)?.[1];
+  return check.detailsUrl?.match(/\/job\/(\d+)/)?.[1] ?? check.externalId?.match(/^(?:run:\d+:\d+:)?job:(\d+)$/)?.[1];
 }
 
 /** Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):

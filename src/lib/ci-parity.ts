@@ -1770,9 +1770,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     job: "commitlint",
     mirrored: false,
     reason:
-      "this job lints the SQUASH-MERGE PR TITLE (github.event.pull_request.title), which does not exist until the PR is opened; " +
-      "rmd preflight's default (no-flag) route already lints the commit-range header/body shape locally via the commitlint and " +
-      "emitter-checks steps, which is the closest local proxy available pre-push",
+      "this job bundles the one-runner gates (W1-T4399) and posts each gate's verdict as its own check run; every bundled gate is " +
+      "mirrored by its own row in this table, and the PR-title lint has no local equivalent: the title is read from GitHub " +
+      "(github.event.pull_request.title), which does not exist until the PR is opened. rmd preflight's default (no-flag) route " +
+      "lints the commit-range header/body shape locally via the commitlint and emitter-checks steps",
   },
   {
     job: "leak-grep",
