@@ -2800,6 +2800,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // AFTER `fix.dispatch` is unchanged: the strike is real, `runSweep` must keep recording
       // `acted:true` exactly as it always has, so it is still swallowed below.
       let dispatchStarted = false;
+      // W1-T5919: a registered-owner decline names its head and reports itself, never a dispatch.
+      const declineClaim = (fields: Record<string, unknown> & { owner_recovery_reason: string }): FixClaimDeclined => {
+        log("sweep.fix.checkout_claim_declined", { ...fields, head_sha: pr.headSha });
+        return { claimDeclined: true, ownerRecoveryReason: fields.owner_recovery_reason };
+      };
       try {
         const terminalKey = terminalUncreditableHeadKey(pr.prNumber, pr.headSha);
         const priorTerminal = terminalHeads.get(terminalKey);
@@ -2960,7 +2965,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         try {
           registeredOwner = registeredWorktreeOwnerImpl(repoDir, branchRef);
         } catch (e) {
-          log("sweep.fix.checkout_claim_declined", {
+          declineClaim({
             reason: "registered_worktree_owner",
             owner_recovery_reason: "worktree_registry_unreadable",
             pr_number: pr.prNumber,
@@ -2985,7 +2990,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               claimKey: fixBranchClaimKey(owner, repo, realBranch),
             });
           } catch (e) {
-            log("sweep.fix.checkout_claim_declined", {
+            return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason: "owner_snapshot_unreadable",
               pr_number: pr.prNumber,
@@ -2994,7 +2999,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               worktree_path: boundedWorktreeOwnerPath(registeredOwner),
               error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
             });
-            return;
           }
           const recovery = decideRegisteredFixOwnerRecovery(snapshot);
           if (recovery.kind === "keep") {
@@ -3006,7 +3010,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 worktree_path: snapshot.path,
               });
             }
-            log("sweep.fix.checkout_claim_declined", {
+            return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason: recovery.reason,
               pr_number: pr.prNumber,
@@ -3015,13 +3019,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               worktree_path: snapshot.path,
               process_probe_reason: snapshot.processProbeReason,
             });
-            return;
           }
           let preservedRecoveryRef: string | undefined;
           if (recovery.kind === "preserve-tracked-dirty") {
             const localSha = snapshot.localSha;
             if (!localSha) {
-              log("sweep.fix.checkout_claim_declined", {
+              return declineClaim({
                 reason: "registered_worktree_owner",
                 owner_recovery_reason: "owner_dirty_recovery_identity_unreadable",
                 pr_number: pr.prNumber,
@@ -3029,7 +3032,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 branch: realBranch,
                 worktree_path: snapshot.path,
               });
-              return;
             }
             try {
               preservedRecoveryRef = String((registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
@@ -3046,7 +3048,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 recovery_ref: preservedRecoveryRef.slice(0, 512),
               });
             } catch (e) {
-              log("sweep.fix.checkout_claim_declined", {
+              return declineClaim({
                 reason: "registered_worktree_owner",
                 owner_recovery_reason: "owner_dirty_recovery_preserve_failed",
                 pr_number: pr.prNumber,
@@ -3056,7 +3058,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 local_sha_prefix: localSha.slice(0, 12),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
-              return;
             }
             // The recovery ref above is now durably proven to reproduce this owner's tree. Plain
             // `git worktree remove` below refuses a dirty worktree, so the owner's tracked
@@ -3070,7 +3071,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 localSha,
               );
             } catch (e) {
-              log("sweep.fix.checkout_claim_declined", {
+              return declineClaim({
                 reason: "registered_worktree_owner",
                 owner_recovery_reason: "owner_dirty_recovery_reset_failed",
                 pr_number: pr.prNumber,
@@ -3081,13 +3082,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 recovery_ref: preservedRecoveryRef.slice(0, 512),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
-              return;
             }
           } else if (recovery.kind !== "reclaim-contained") {
             const localSha = snapshot.localSha;
             const remoteSha = snapshot.remoteSha;
             if (!localSha || !remoteSha) {
-              log("sweep.fix.checkout_claim_declined", {
+              return declineClaim({
                 reason: "registered_worktree_owner",
                 owner_recovery_reason: "owner_salvage_identity_unreadable",
                 pr_number: pr.prNumber,
@@ -3095,7 +3095,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 branch: realBranch,
                 worktree_path: snapshot.path,
               });
-              return;
             }
             try {
               if (recovery.kind === "publish-ahead") {
@@ -3128,7 +3127,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 });
               }
             } catch (e) {
-              log("sweep.fix.checkout_claim_declined", {
+              return declineClaim({
                 reason: "registered_worktree_owner",
                 owner_recovery_reason:
                   recovery.kind === "publish-ahead" ? "owner_ahead_publish_failed" : "owner_divergence_preserve_failed",
@@ -3140,13 +3139,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 remote_sha_prefix: remoteSha.slice(0, 12),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
-              return;
             }
           }
           try {
             registeredOwnerRecovery.remove(repoDir, registeredOwner);
           } catch (e) {
-            log("sweep.fix.checkout_claim_declined", {
+            return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason: "owner_remove_failed",
               pr_number: pr.prNumber,
@@ -3155,13 +3153,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               worktree_path: snapshot.path,
               error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
             });
-            return;
           }
           let ownerAfterRemoval: string | undefined;
           try {
             ownerAfterRemoval = registeredWorktreeOwnerImpl(repoDir, branchRef);
           } catch (e) {
-            log("sweep.fix.checkout_claim_declined", {
+            return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason: "worktree_registry_reread_failed",
               pr_number: pr.prNumber,
@@ -3170,10 +3167,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               worktree_path: snapshot.path,
               error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
             });
-            return;
           }
           if (ownerAfterRemoval) {
-            log("sweep.fix.checkout_claim_declined", {
+            return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason:
                 ownerAfterRemoval === registeredOwner ? "owner_registration_remained" : "owner_registration_changed",
@@ -3182,7 +3178,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               branch: realBranch,
               worktree_path: boundedWorktreeOwnerPath(ownerAfterRemoval),
             });
-            return;
           }
           log("sweep.fix.checkout_owner_reclaimed", {
             pr_number: pr.prNumber,
@@ -3220,6 +3215,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
               reason: "inflight_lock_owner",
+              head_sha: pr.headSha,
               pr_number: pr.prNumber,
               task_id: task.id,
               branch: realBranch,
@@ -9439,9 +9435,53 @@ export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
 /** W1-T2231 — the SAME "undefined means the pre-existing assumption" idiom {@link armOutcomeArmed}
  *  establishes for `deps.arm`, applied to `deps.dispatchFix`. A `false` return is the ONLY signal
  *  that stands a dispatch's `spent` field down; `undefined` and `true` both read as spent. */
-export function dispatchFixSpent(outcome: boolean | void): boolean {
+export function dispatchFixSpent(outcome: boolean | void | FixClaimDeclined): boolean {
   if (outcome === undefined) return true;
+  if (typeof outcome === "object") return false;
   return outcome;
+}
+
+/** W1-T5919 — `dispatchFix` declined at the registered-worktree-owner checkout claim: no worktree,
+ *  worker or strike, so `runSweep` records the pass acted:false and seeds no `prior.fixed` dedup. */
+export interface FixClaimDeclined {
+  claimDeclined: true;
+  ownerRecoveryReason: string;
+}
+
+function fixClaimDeclinedReason(outcome: boolean | void | FixClaimDeclined): string | undefined {
+  if (typeof outcome !== "object") return undefined;
+  return `fix dispatch declined at the checkout claim (registered worktree owner, ${outcome.ownerRecoveryReason}) — ` +
+    "no worker spawned and no strike spent; the next pass re-attempts the claim";
+}
+
+function isOwnerClaimDecline(line: Record<string, unknown>): boolean {
+  return line.step === "sweep.fix.checkout_claim_declined" && line.reason === "registered_worktree_owner" &&
+    typeof line.pr_number === "number" && typeof line.head_sha === "string";
+}
+
+/** W1-T5919 — BACKSTOP: registered-owner claim declines one (PR, head) may accrue before the sweep
+ *  stops re-attempting it and escalates needs-human once. A decline spends no strike; three is the
+ *  first attempt plus two retries, time for an exiting owner to clear. */
+export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
+
+/** W1-T5919 — at {@link FIX_CLAIM_DECLINE_BACKSTOP}, the stand-down; escalates once per (PR, head, reason). */
+async function holdRepeatedFixClaimDecline(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  escalate: SweepDeps["escalate"],
+): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
+  const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+  if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return undefined;
+  const last = declines[declines.length - 1];
+  const why = String(last.owner_recovery_reason);
+  const reason =
+    `fix checkout claim declined ${declines.length} times on #${pr.prNumber} at head ${pr.headSha.slice(0, 7)} ` +
+    `(registered worktree owner ${String(last.worktree_path ?? "path unread")}, ${why}) — ` +
+    `FIX_CLAIM_DECLINE_BACKSTOP ${FIX_CLAIM_DECLINE_BACKSTOP} reached, no further claim is attempted at this head`;
+  const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
+    l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
+  if (!escalated) await escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+  return { reason, fields: { fix_claim_decline_escalated: why } };
 }
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
@@ -9545,7 +9585,7 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
-  ) => boolean | void | Promise<boolean | void>;
+  ) => boolean | void | FixClaimDeclined | Promise<boolean | void | FixClaimDeclined>;
   /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
    *  `criterionFieldTampered` (review.ts) refuses a non-plan-only diff (any body repair) touching
@@ -10311,6 +10351,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
+  const realFixDispatches = new Set<string>();
   for (const line of lines) {
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
       const refusal = reviewFreshnessRefusals.get(line.review_key);
@@ -10411,6 +10452,16 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       ) {
         missingTaskTrailerRepairs.add(`${line.pr_number}@${line.head_sha}@${line.task_id}`);
       }
+      continue;
+    }
+    // W1-T5919 — a declined claim is not a dispatched fix: it voids this head's dedup unless a real
+    // dispatch marker (`fix.dispatch`/`fix.retrigger`) was written at that head.
+    if ((line.step === "fix.dispatch" || line.step === "fix.retrigger") && typeof line.head_sha === "string") {
+      realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
+      continue;
+    }
+    if (isOwnerClaimDecline(line)) {
+      if (!realFixDispatches.has(`${String(line.task_id)}@${String(line.head_sha)}`)) fixed.delete(`${line.pr_number}@${line.head_sha}`);
       continue;
     }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
@@ -13451,6 +13502,13 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
+              const declineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate);
+              if (declineHold) {
+                extraDisposedFields = { ...extraDisposedFields, ...declineHold.fields };
+                acted = false;
+                standDownReason = declineHold.reason;
+                break;
+              }
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
@@ -13501,6 +13559,8 @@ export async function runSweep(
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
+              const declinedReason = fixClaimDeclinedReason(dispatchOutcome);
+              if (declinedReason) [acted, standDownReason] = [false, declinedReason];
               break;
             }
             case "conflicted": {
@@ -13548,6 +13608,13 @@ export async function runSweep(
                 standDownReason = stackHold.reason;
                 break;
               }
+              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate);
+              if (conflictedDeclineHold) {
+                extraDisposedFields = { ...extraDisposedFields, ...conflictedDeclineHold.fields };
+                acted = false;
+                standDownReason = conflictedDeclineHold.reason;
+                break;
+              }
               const conflictedFixClaim = claimFixDispatch(pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
@@ -13574,6 +13641,8 @@ export async function runSweep(
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
               if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
+              const conflictedDeclinedReason = fixClaimDeclinedReason(conflictedDispatchOutcome);
+              if (conflictedDeclinedReason) [acted, standDownReason] = [false, conflictedDeclinedReason];
               break;
             }
             case "stale": {
