@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { startReadPlane, startReadPlaneTelemetry, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -36582,7 +36582,8 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
-          () => tickReadGeneration?.facts,
+          onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined })),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -43354,7 +43355,7 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
-  tickReadFor?: () => TickReadFacts | undefined,
+  tickReadFor?: () => TickReadFacts | undefined | Promise<TickReadFacts | undefined>,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -43412,7 +43413,7 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = tickReadFor?.();
+    const tickRead = await tickReadFor?.();
     try {
       await mainHealthRung?.();
     } catch (e) {
