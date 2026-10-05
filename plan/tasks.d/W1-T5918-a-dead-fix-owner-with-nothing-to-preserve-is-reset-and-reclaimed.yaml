@@ -1,0 +1,85 @@
+- id: W1-T5918
+  title: "A DEAD FIX OWNER WITH NOTHING TO PRESERVE IS RESET AND RECLAIMED — W1-T3822's dirty-owner recovery throws `dirty owner has no HEAD-relative tracked diff` when git status reports tracked changes but the working tree equals HEAD (an interrupted merge's unmerged index entries), so a proven-dead owner is declined on every pass instead of having its index residue recorded and reset"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a dead registered fix owner whose dirt lives only in the index or operation state is reset and reclaimed with a record of what was discarded; the dispatch dedup is W1-T5919
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
+  plan_refs: [W1-T2863, W1-T2952, W1-T3170, W1-T3822, W1-T3825, W1-T5919]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05. The daemon restarted at about 19:26Z (new pid 163869). Fix workers dispatched
+    before then left their registered worktrees in the container:
+    `sweep-W1-T5285-1791220689982` (branch run-W1-T5285-1791213871375, PR #9362) and
+    `sweep-W1-T5882-1791223661951` (branch run-W1-T5882-1791222943000, PR #9379). Later sweeps
+    disposed #9362 `blocked-fixable` at 19:58:27 and #9379 at 20:48:16. Each dispatch then logged
+    `sweep.fix.checkout_claim_declined` with reason `registered_worktree_owner`,
+    owner_recovery_reason `owner_dirty_recovery_preserve_failed` and error "dirty owner has no
+    HEAD-relative tracked diff" (rows at 19:58:28 and 20:48:17). No `fix.dispatch` row followed
+    for either head (83175eb / f251fd2). The 20:09:10 `worktree.reaped` row kept both owners as
+    `live-branch`, which is correct under W1-T378/W1-T381. That left nothing that could clear
+    them, so both PRs waited until the operator merged main by hand at about 22:00.
+
+    WHAT THE CODE PROVES THE STATE IS. `captureRegisteredFixOwnerSnapshot` (src/run-task.ts) sets
+    `treeState: "tracked_dirty"` when `git status --porcelain=v1 -uall` is non-empty and
+    `git ls-files --others --exclude-standard` is empty. `decideRegisteredFixOwnerRecovery`
+    returns `preserve-tracked-dirty` only after the claim census and the process-cwd census both
+    read `clear`, so the owner is already proven dead when the preserve runs.
+    `preserveTrackedDirtyFixOwner` then diffs the WORKING TREE against HEAD
+    (`git diff --binary --no-ext-diff <localSha>`) and throws on an empty patch. The error
+    therefore means "status shows tracked changes, nothing is untracked, and the working tree
+    equals HEAD". All the residue is in the index or in an in-progress operation, so the
+    worktree-diff capture has nothing to hold.
+
+    Reproduced in a scratch repository: (1) `git merge --no-commit --no-ff` with a conflict, then
+    `git checkout --ours` on the conflicted path and `git checkout HEAD --` on the cleanly merged
+    one. Status reads `UU f`, MERGE_HEAD is present, and the HEAD diff is 0 bytes.
+    (2) A staged change whose working copy was restored to HEAD: status `MM g`, HEAD diff
+    0 bytes. A plain `git worktree remove` refuses both ("contains modified or untracked
+    files"). After `git reset --hard HEAD`, status is clean, MERGE_HEAD is gone, and removal
+    succeeds. Note that MERGE_HEAD with index == HEAD is NOT this state: porcelain reads clean,
+    and the owner takes the ordinary clean-owner path. The fleet owners were not inspected
+    (container worktrees are off-limits to the operator session), so a test must pin shape (1),
+    the interrupted merge that the merge-conflict and harness-commit paths can leave behind.
+
+    W1-T3822 deliberately refuses to lose work. Here nothing in the working tree differs from
+    HEAD, so the decline protects no work and only blocks the PR's one repair.
+  design: |
+    (1) Classify an empty HEAD-relative working-tree diff as a distinct outcome rather than a
+    throw. On this branch, read a bounded discard record: the in-progress operation marker
+    (MERGE_HEAD, CHERRY_PICK_HEAD or REVERT_HEAD, with its sha) if any, the unmerged paths
+    (`git diff --name-only --diff-filter=U`), and the stage-0 paths whose index entry differs
+    from HEAD. Bound the path lists and count the remainder.
+    (2) Admit the reset only when the residue carries no work. That means the working tree
+    equals HEAD and EITHER an operation marker is present (the index residue is that
+    operation's, reproducible from HEAD plus the recorded marker sha) OR the only index
+    differences are unmerged entries. Staged stage-0 content with no operation marker keeps the
+    owner under a new named reason (`owner_dirty_staged_only_refused`). An untracked path, an
+    unreadable probe, a moved HEAD, a live claim or an occupied/unknown process census keeps the
+    owner exactly as W1-T2952/W1-T3822 do today.
+    (3) On admission, ledger one bounded `sweep.fix.checkout_owner_residue_discarded` row before
+    any mutation. It names the PR, task, branch, bounded path, local sha prefix, marker kind and
+    sha prefix, and the bounded path lists. Then reset through the existing
+    `resetTrackedDirtyFixOwner` (`git reset --hard <localSha>`, which also clears MERGE_HEAD),
+    re-read the registration, remove through the existing non-force `git worktree remove` path,
+    and continue into the unchanged claim and one-worker dispatch. This row is an audit receipt
+    that no decider reads, so it needs no DECISION_RELEVANT_LEDGER_STEPS entry.
+    Add no force-remove, no timer, no kill, no branch deletion, and no change to the
+    non-empty-diff preserve path.
+  acceptance:
+    - claim: "a registered managed fix owner proven dead whose git status is dirty only through an interrupted merge (unmerged entries, MERGE_HEAD present, working tree equal to HEAD) is recorded as residue_discarded with the marker sha and unmerged paths, reset, removed and the same pass dispatches one repair worker, while staged-only content without an operation marker, an untracked path, a live claim or an occupied process census keeps the owner and dispatches nothing"
+      proof: "unit test: test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts"
+  falsifier: |
+    In a real temporary git fixture, register a managed `sweep-<task>-<epoch>` worktree on the
+    exact PR branch, start a conflicting `git merge --no-commit`, restore every path to HEAD, and
+    clear the claim and process census. Delete the new empty-diff arm: the pass must log
+    `owner_dirty_recovery_preserve_failed` with "dirty owner has no HEAD-relative tracked diff"
+    and dispatch nothing, so the test fails. Restore it: one residue_discarded row, then reset,
+    removal and exactly one dispatch.
