@@ -21018,7 +21018,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  * `which claude`, which does not exist on a CI runner.
  */
 export interface DepReviewDeps {
-  now?: () => number;
+  clock?: Clock;
   gh?: (args: string[]) => unknown;
   prDiff?: (prUrl: string) => string;
   config?: Config;
@@ -21096,7 +21096,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const runId = `dep-review-PR${view.number}-${Date.now()}`;
+  const clock = deps.clock ?? systemClock;
+  const runId = `dep-review-PR${view.number}-${clock.now()}`;
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
@@ -21120,7 +21121,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       body: view.body ?? "",
       headSha: view.headRefOid,
       result,
-      nowMs: (deps.now ?? Date.now)(),
+      nowMs: clock.now(),
       escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
       log,
     });
