@@ -2717,7 +2717,8 @@ export const MIN_RULE_SUITE_COUNT = 20;
 /**
  * Return the committed test files that form the quick rule-check population. The census roster
  * contributes suites whose names do not advertise their shape; the filename convention catches
- * every other census, ratchet, and baseline suite. `git ls-files` is intentional: preflight runs
+ * other census, ratchet, and baseline suites unless a header declares @not-a-rule-suite: <reason>.
+ * Roster members cannot opt out. `git ls-files` is intentional: preflight runs
  * after the commit exists, so a newly added untracked suite cannot make its own population test
  * pass before Git can see it.
  */
@@ -2734,7 +2735,20 @@ export function listRuleSuites(repoRoot: string): string[] {
   const roster = new Set(CENSUS_POPULATION.map((member) => member.testFile));
   const ruleName = /(?:census|ratchet|baseline)/i;
   const suites = [...tracked]
-    .filter((path) => path.endsWith(".test.ts") && (roster.has(path) || ruleName.test(path.slice("test/".length))))
+    .filter((path) => {
+      if (!path.endsWith(".test.ts")) return false;
+      if (roster.has(path)) return true;
+      if (!ruleName.test(path.slice("test/".length))) return false;
+      const text = readFileSync(join(repoRoot, path), "utf8");
+      const header = text.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)![0];
+      const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];
+      for (const marker of markers) {
+        if (!/^[ \t]*:[ \t]*\S/.test(marker[1]!.replace(/\*\/.*$/, "").trimEnd())) {
+          throw new Error(`${path}: @not-a-rule-suite requires a reason`);
+        }
+      }
+      return markers.length === 0;
+    })
     .sort();
   if (suites.length < MIN_RULE_SUITE_COUNT) {
     throw new Error(`rule-check population too small: found ${suites.length}, expected at least ${MIN_RULE_SUITE_COUNT}`);

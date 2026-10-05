@@ -91,6 +91,7 @@ export type LintCheck =
   | "deferred-follow-up"
   | "proof-base-discrimination"
   | "proof-unit-test-base-wrapper"
+  | "proof-test-only-discrimination"
   | "shard-shape";
 export type LintSeverity = "block" | "warn";
 
@@ -1806,6 +1807,43 @@ export function proofUnitTestBaseWrapperViolations(task: Task, opts: LintOpts = 
   return violations;
 }
 
+// ── PROOF-TEST-ONLY-DISCRIMINATION (W1-T5662 — a task that changes only test/ cannot fail at base) ──
+// `buildBaseProofDir` (run-task.ts, W1-T3098) copies the diff's ADDED `test/**` files into the
+// merge-base checkout so a `unit test:` proof can run there at all. A task whose `files:` are all
+// under `test/` changes no src, so every `unit test:` proof passes at BOTH trees, grades
+// `executed_stale`, and discriminates nothing. Hit twice in one week: W1-T5527 (#9103) and W1-T5622
+// (#9120) each needed a plan amendment — a `grep:` criterion on the new test file — before the build
+// could go green. WARN across the plan; promoted to BLOCK on a new or changed shard through
+// PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS. The exits are a `grep:` proof (which misses at base because
+// the file is absent there) or `kind: guard` on the criteria that deliberately preserve behaviour.
+
+/** W1-T5662 — a `verify: auto` task whose every non-`plan/` `files:` entry is under `test/` and
+ *  whose every judged criterion (not `kind: guard`, no `satisfied_by`) is a `unit test:` proof,
+ *  with no `grep:` proof among them. WARN; see the section comment above for the promotion. */
+export function proofTestOnlyDiscriminationViolations(task: Task): LintViolation[] {
+  if (task.verify !== "auto") return [];
+  const declared = (task.files ?? []).filter((f) => !f.startsWith("plan/"));
+  if (declared.length === 0 || !declared.every((f) => f.startsWith("test/"))) return [];
+  const judged = (task.acceptance ?? []).filter(
+    (c) => !c.satisfied_by && (c as { kind?: unknown }).kind !== "guard",
+  );
+  const kinds = judged.map((c) => parseWhitelistedProof(c.proof ?? "")?.kind);
+  if (kinds.length === 0 || kinds.some((k) => k !== "test")) return []; // a grep (or unparsed) proof is another check's concern
+  return [
+    {
+      check: "proof-test-only-discrimination",
+      severity: "warn",
+      message:
+        `task ${task.id} declares only test/ files (${declared.join(", ")}) and every judged criterion is a ` +
+        "`unit test:` proof, so it discriminates nothing: buildBaseProofDir copies the diff's added test " +
+        "files into the merge-base checkout, the proof passes on BOTH trees, grades executed_stale, and " +
+        "the build cannot go green without a plan amendment (W1-T5527 #9103, W1-T5622 #9120). Add a " +
+        "`grep:` criterion on a line the new test file introduces, which misses at base, and mark the " +
+        "census/preservation criterion `kind: guard`.",
+    },
+  ];
+}
+
 function exactUnitTestTargetPath(proof: string): string | undefined {
   const whitelisted = parseWhitelistedProof(proof);
   if (!whitelisted || whitelisted.kind !== "test" || whitelisted.nameFiltered) return undefined;
@@ -3363,6 +3401,7 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "proof-scope",
   "shard-shape",
   "proof-grep-already-true",
+  "proof-test-only-discrimination",
 ]);
 
 /** W1-T4700 (#7608): verify in the enum, a known repo, criteria unless human. WARN; promoted above when introduced. */
@@ -3581,6 +3620,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-unit-test-unresolvable",
   "proof-base-discrimination",
   "proof-unit-test-base-wrapper",
+  "proof-test-only-discrimination",
   "shared-proof",
   "unbound-criterion",
 ]);
@@ -3643,6 +3683,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
+  violations.push(...proofTestOnlyDiscriminationViolations(task));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));

@@ -1,0 +1,40 @@
+- id: W1-T5866
+  title: "AN UNFILED PR HAS ITS OWN FIX AND ESCALATION IDENTITY — after W1-T5839 a run-unfiled PR's review rows are its own, but the fix lane (strikes, fixRoundTally, fix claims), escalations and the sweep's review-admission dedup key still read `pr.taskId ?? PR-<n>`, so every run-unfiled PR that is not a plan filing shares one `unfiled` strike budget and escalation, and a plan filing's admission key flips with its classification"
+  repo: remudero
+  depends_on: [W1-T5839]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the branch-shape sentinel never identifies a PR on the fix, escalation or admission surfaces
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5839 (#9320) builder's follow-ups 1, 2 and 4"
+  plan_refs: [W1-T5839, W1-T3535, W1-T5813, W1-T2860]
+  files: [src/lib/sweep.ts, test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 10f3aca0 and W1-T5839's head 92d5c9cc. W1-T5839 adds
+    `reviewLedgerKeyFor` (src/lib/review.ts: an undefined or `unfiled` id becomes `PR-<n>`) and
+    matches review rows by pr_url. Its builder listed the sites it left: `escalationTaskIdFor`
+    (src/lib/sweep.ts, `pr.taskId ?? PR-<n>`) feeds the fix lane's strike count, `fixRoundTally`,
+    fix claims and the needs-human escalation, so all non-plan run-unfiled PRs share the strike
+    budget and escalation keyed `unfiled`: one PR's strikes can exhaust another's before it is
+    repaired, and one escalation can stand down another's. `reviewOutcomeKeyForPr`'s
+    `sweep.review_admitted` review_key is `pr.taskId ?? PR-<n>`, so a run-unfiled plan filing's
+    admission dedup key changes when its classification does (#9249 flipped on 2026-10-05).
+    `decideSweepArm`'s armId is the same expression; it is correct now only because W1-T5839's
+    readers match by url.
+  design: |
+    Every sweep surface that derives a PR identity from `pr.taskId ?? PR-<n>` (escalationTaskIdFor,
+    reviewOutcomeKeyForPr, decideSweepArm's armId) derives it through W1-T5839's
+    `reviewLedgerKeyFor`, so the sentinel maps to `PR-<n>` everywhere and a real task id is
+    unchanged. Legacy `unfiled`-keyed strike and escalation rows that carry the PR's url keep
+    counting for that PR; rows without a url are not reattributed.
+  acceptance:
+    - claim: "two non-plan run-unfiled PRs keep separate strike counts and escalations keyed PR-<n>, a run-unfiled plan filing has the same admission review_key whether or not it is classified plan-only, and a PR with a real task id keeps its task-keyed strikes and escalation"
+      proof: "unit test: test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts"
+  falsifier: |
+    Keep `pr.taskId ?? PR-<n>` in escalationTaskIdFor: the second unfiled PR inherits the first's
+    strikes and the test fails.

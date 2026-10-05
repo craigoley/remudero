@@ -32,7 +32,7 @@ const runner = (await import(pathToFileURL(RUNNER).href)) as {
   main: (argv: string[], deps?: { root?: string; run?: (...args: unknown[]) => { status: number | null } }) => number;
 };
 
-type Job = { name?: unknown; if?: unknown; env?: Record<string, string>; steps?: Array<{ run?: string }> };
+type Job = { name?: unknown; if?: unknown; env?: Record<string, string>; steps?: Array<{ id?: string; if?: unknown; run?: string; env?: Record<string, string> }> };
 type Wf = { on?: unknown; jobs?: Record<string, Job> };
 const GATE_TEXT = readFileSync(join(WORKFLOWS, "ci-gate.yml"), "utf8");
 const ci = parseYaml(readFileSync(join(WORKFLOWS, "ci.yml"), "utf8")) as Wf;
@@ -81,18 +81,35 @@ function mergeGroupWorkflows(): Array<[string, Wf]> {
     });
 }
 
-/** The REQUIRED names a group commit really produces: a job in a `merge_group` workflow whose literal
- *  `name:` is in REQUIRED and whose job `if` is neither the PR-only guard nor `false`. */
-function mergeGroupCensus(): string[] {
-  const names = new Set<string>();
+/** The REQUIRED names a group commit really produces, from every job in a `merge_group` workflow whose
+ *  job `if` is neither the PR-only guard nor `false`: its literal `name:` (the `jobs` half), and
+ *  (W1-T5522) each `report "<name>"` line its steps post through the checks API, unless every
+ *  constituent step that line reads an outcome from is itself PR-guarded (the `reported` half). */
+function mergeGroupCensus(): { jobs: string[]; reported: string[]; all: string[] } {
+  const jobs = new Set<string>();
+  const reported = new Set<string>();
   for (const [, wf] of mergeGroupWorkflows()) {
     for (const job of Object.values(wf.jobs ?? {})) {
-      if (typeof job.name !== "string" || !REQUIRED.includes(job.name)) continue;
       if (job.if === false || job.if === PR_ONLY_GUARD) continue;
-      names.add(job.name);
+      if (typeof job.name === "string" && REQUIRED.includes(job.name)) jobs.add(job.name);
+      const steps = job.steps ?? [];
+      const stepOfVar = new Map<string, string>();
+      for (const step of steps) {
+        for (const [k, v] of Object.entries(step.env ?? {})) {
+          const m = /steps\.([\w-]+)\.outcome/.exec(String(v));
+          if (m) stepOfVar.set(k, m[1]!);
+        }
+      }
+      for (const step of steps) {
+        for (const m of (step.run ?? "").matchAll(/^\s*report "([^"]+)"(.*)$/gm)) {
+          const constituents = [...m[2]!.matchAll(/\$\{(\w+)\}/g)].map((v) => steps.find((st) => st.id === stepOfVar.get(v[1]!)));
+          assert.ok(constituents.length > 0 && constituents.every(Boolean), `report "${m[1]}" must read a real step outcome`);
+          if (REQUIRED.includes(m[1]!) && constituents.some((st) => st!.if !== PR_ONLY_GUARD)) reported.add(m[1]!);
+        }
+      }
     }
   }
-  return [...names].sort();
+  return { jobs: [...jobs].sort(), reported: [...reported].sort(), all: [...new Set([...jobs, ...reported])].sort() };
 }
 
 /** A copy of the real contract with MERGE_GROUP_REQUIRED replaced (or removed when `value` is undefined). */
@@ -116,14 +133,18 @@ test("W1-T5515: a merge group commit is gated on exactly ci, coverage-ratchet an
   assert.equal(job.env!.SHA, "${{ github.event.pull_request.head.sha || github.sha }}");
   assert.match(job.steps!.map((s) => s.run ?? "").join("\n"), /node scripts\/ci-gate-from-contract\.mjs --event "\$\{\{ github\.event_name \}\}"/);
 
-  // The contract's merge-group list is exactly the census of what a group commit produces.
+  // The contract's merge-group list is exactly the census of what a group commit produces. The JOBS
+  // that run there are exactly ci, coverage-ratchet and test-slow; W1-T5522 added the names the
+  // light-gates job posts there, each with a constituent step that is not PR-guarded.
   const mergeGroupRequired = JSON.parse(CONTRACT_ENV.MERGE_GROUP_REQUIRED!) as string[];
-  assert.deepEqual([...mergeGroupRequired].sort(), mergeGroupCensus());
-  assert.deepEqual([...mergeGroupRequired].sort(), ["ci", "coverage-ratchet", "test-slow"]);
-  assert.ok(mergeGroupRequired.length >= 3);
+  const census = mergeGroupCensus();
+  assert.deepEqual([...mergeGroupRequired].sort(), census.all);
+  assert.deepEqual(census.jobs, ["ci", "coverage-ratchet", "test-slow"]);
+  assert.ok(census.reported.includes("comment-load-ratchet") && !census.reported.includes("prompt-surface-gate"));
+  assert.ok(mergeGroupRequired.length >= 18);
   // ...and it is a strict subset: the census found real PR-only names it leaves out.
   assert.ok(REQUIRED.length > mergeGroupRequired.length);
-  for (const name of ["claims", "acceptance-author-gate", "scan-pr / osv-scan", "License Review"]) {
+  for (const name of ["prompt-surface-gate", "mutation-ratchet", "commitlint", "acceptance-author-gate", "scan-pr / osv-scan", "License Review"]) {
     assert.ok(REQUIRED.includes(name) && !mergeGroupRequired.includes(name), name);
   }
 
@@ -230,7 +251,7 @@ test("W1-T5515: the pull_request gate keeps the full REQUIRED list", () => {
     const subsetOnly = runGate(green(subset), args, env);
     assert.notEqual(subsetOnly.status, 0, label);
     assert.match(subsetOnly.out, /TIMED OUT/, label);
-    assert.ok(subsetOnly.out.includes("  - claims"), label);
+    assert.ok(subsetOnly.out.includes("  - acceptance-author-gate"), label);
   }
   // Without the flag a malformed merge-group list is never consulted: behaviour is unchanged.
   const untouched = runGate(green(REQUIRED), [], {}, contractWith("[]"));

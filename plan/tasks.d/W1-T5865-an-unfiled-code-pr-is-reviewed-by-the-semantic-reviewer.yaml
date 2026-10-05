@@ -1,0 +1,40 @@
+- id: W1-T5865
+  title: "AN UNFILED CODE PR IS REVIEWED BY THE SEMANTIC REVIEWER — reviewCommand gives an untasked PR default risk and budget only when `!taskId`, but a run-unfiled head resolves to the truthy sentinel `unfiled`, so every unfiled code PR logs review.reviewer.skipped head-task-metadata-unavailable and is judged by the keyword floor alone"
+  repo: remudero
+  depends_on: [W1-T5839]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the branch-shape sentinel reads as untasked when the review sets risk and budget
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5839 (#9320) builder's follow-up"
+  plan_refs: [W1-T3387, W1-T5839, W1-T3535]
+  files: [src/run-task.ts, test/an-unfiled-code-pr-is-reviewed-by-the-semantic-reviewer.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 10f3aca0. In `reviewCommand` (src/run-task.ts), semantic mode
+    applies W1-T3387's untasked defaults (`DEFAULT_RISK`, `UNTASKED_REVIEW_BUDGET_USD`) under
+    `if (!taskId)`. `resolveReviewTaskId` maps every `run-unfiled-<ms>` head that is not a plan-only
+    filing to the literal `unfiled`, which is truthy, so the defaults are skipped; no shard supplies
+    risk or budget either, and the reviewer is skipped with `head-task-metadata-unavailable`, a
+    reason whose own comment says it means "a task id WAS derived". MEASURED over the 2026-10-04 and
+    2026-10-05 ledger union: 51 `review.reviewer.skipped head-task-metadata-unavailable` rows carry
+    task_id `unfiled` (plus `unfiled-runtime` 2, `unfiled-review` 2), against 2 and 1 for real
+    task ids. So every operator hotfix PR (run-unfiled is the mandated head form, W1-T3388) is
+    judged by the keyword floor without the semantic reviewer W1-T3387 exists to run.
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    The untasked-defaults condition treats an id `isSupersessionOwnerTaskId` rejects (the
+    branch-shape sentinel) exactly like an absent id, so such a PR gets the default risk and the
+    untasked hard cap and the semantic reviewer runs. A real task id from a trailer or a
+    `run-<taskId>-<ms>` branch keeps today's shard-metadata path, including its distinct
+    `head-task-metadata-unavailable` reason when its shard lacks risk or budget.
+  acceptance:
+    - claim: "a semantic review of a non-plan run-unfiled PR logs review.reviewer.untasked_defaults and spawns the semantic reviewer under the default risk and untasked cap, a PR with no task id still does, and a real task id whose shard lacks risk still logs head-task-metadata-unavailable"
+      proof: "unit test: test/an-unfiled-code-pr-is-reviewed-by-the-semantic-reviewer.test.ts"
+  falsifier: |
+    Keep `if (!taskId)`: the run-unfiled fixture skips the reviewer with head-task-metadata-unavailable
+    and the test fails.

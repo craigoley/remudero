@@ -31,7 +31,7 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -1348,6 +1348,9 @@ import {
   postReviewPending,
   postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
+  reviewLedgerKeyFor,
+  reviewRowNamesPr,
+  UNFILED_RUN_SENTINEL,
   resolveAutoMergeArm,
   planOnlyDiff,
   enforcementDataInDiff,
@@ -1881,6 +1884,21 @@ export function spawnRmdReviewForFreshTree(
   });
 }
 
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode">): string[] {
+  return [
+    ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
+    ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
+  ];
+}
+
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode"> {
+  const mode = flagValue(rest, "--execution-mode");
+  return {
+    ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
+    ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
+  };
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1920,7 +1938,7 @@ export function buildReviewerCodeFreshnessGate(
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
-          return reviewFromFreshTree(prArg, rest, freshness, (why) => { failure = why; }).then((code) => {
+          return reviewFromFreshTree(prArg, [...rest, ...reviewOptionFlags(reviewDeps)], freshness, (why) => { failure = why; }).then((code) => {
             if (code !== undefined) {
               const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
@@ -2189,7 +2207,7 @@ export function buildSweepEffects(
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
       const prior = readLedgerLines(deps.ledgerPath)
-        .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+        .filter((line) => line.step === "review.posted" && reviewRowNamesPr(line, pr.taskId, pr.prUrl) && line.decision_verdict)
         .at(-1)?.decision_verdict as ReviewVerdict | undefined;
       if (
         !pr.taskId ||
@@ -2249,7 +2267,7 @@ export function buildSweepEffects(
                 sha: pr.headSha,
                 state: verdict.state,
                 description: reviewPostedDescription(verdict),
-                taskId: pr.taskId,
+                taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                 evidence: reviewEvidenceStrength(verdict.criteria),
                 ledgerPath: deps.ledgerPath,
                 runId: deps.runId,
@@ -2263,7 +2281,7 @@ export function buildSweepEffects(
               } else {
                 appendLedger(deps.ledgerPath, {
                   run_id: deps.runId,
-                  task_id: pr.taskId,
+                  task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
                   step: "review.posted",
                   context: REVIEW_CONTEXT,
                   state: verdict.state,
@@ -2316,7 +2334,7 @@ export function buildSweepEffects(
       return fallbackToFullReview("unknown review reuse mode");
     }
     const prior = readLedgerLines(deps.ledgerPath)
-      .filter((line) => line.step === "review.posted" && line.task_id === pr.taskId && line.decision_verdict)
+      .filter((line) => line.step === "review.posted" && reviewRowNamesPr(line, pr.taskId, pr.prUrl) && line.decision_verdict)
       .at(-1);
     const verdict = prior?.decision_verdict as ReviewVerdict | undefined;
     if (!pr.taskId || !verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
@@ -2329,7 +2347,7 @@ export function buildSweepEffects(
       sha: pr.headSha,
       state: verdict.state,
       description: reviewPostedDescription(verdict),
-      taskId: pr.taskId,
+      taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       evidence: reviewEvidenceStrength(verdict.criteria ?? []),
       ledgerPath: deps.ledgerPath,
       runId: deps.runId,
@@ -2341,7 +2359,7 @@ export function buildSweepEffects(
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
-      task_id: pr.taskId,
+      task_id: reviewLedgerKeyFor(pr.taskId, pr.prNumber),
       step: "review.posted",
       context: REVIEW_CONTEXT,
       state: verdict.state,
@@ -2723,7 +2741,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
+import { fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -4718,6 +4736,7 @@ export function withdrawArmIfVerdictRefuses(
         (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
         ctx.taskId,
         ctx.headSha,
+        ctx.prUrl,
       )
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
@@ -7623,7 +7642,7 @@ async function runReview(args: {
   // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
   // the #388 fixture this fixes and why it is asymmetric (downgrades only).
   const prior = args.ledgerPath
-    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
+    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id, args.prUrl)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
   const contractDigest = reviewContractDigest({
@@ -11812,6 +11831,16 @@ export async function runFixRung(opts: {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
+      if (!merged.started) {
+        strikes = attempt;
+        deps.log("fix.dispatch", {
+          strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
+          verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: merged.reason,
+          conflicted_files: conflictedFilePaths(currentMergeConflict),
+        });
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
+        continue;
+      }
     }
 
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
@@ -11899,6 +11928,7 @@ export async function runFixRung(opts: {
         admitTests: admitFixTests,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
+        requireMergeHead: currentMergeConflict !== undefined,
         log: deps.log,
         say: deps.say,
         onRefusal: (reason, undeclared = []) => {
@@ -11986,6 +12016,7 @@ export async function runFixRung(opts: {
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
+    const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -12051,9 +12082,9 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (!harnessCommitRefused) strikes = attempt;
+      if (!harnessCommitRefused || mergeCommitRefused) strikes = attempt;
       deps.log("fix.dispatch", {
-        round_id: roundId,
+        ...(mergeCommitRefused ? {} : { round_id: roundId }),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
@@ -12257,6 +12288,7 @@ export async function runFixRung(opts: {
         });
       }
       logFixDone();
+      if (mergeCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
@@ -20589,6 +20621,7 @@ export function makeLandingReviewRequest(
 }
 
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+  deps = { ...reviewOptionsFromFlags(rest), ...deps };
   const {
     fetchView,
     loadConfig: loadConfigDep,
@@ -20672,9 +20705,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     view.headRefName,
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
+  const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -20706,7 +20740,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       subjectRepoDir,
       join(config.root, "state", `managed-checkout-${repo}.lock`),
       log,
-      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, taskId ?? `PR-${view.number}`, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, reviewKey, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
       deps.refreshSubjectInstall,
     );
   }
@@ -20778,7 +20812,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     }
   }
 
-  const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
+  const provenanceKey = { taskId: reviewKey, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
 
@@ -20852,7 +20886,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       owner,
       repo,
       sha: view.headRefOid,
-      taskId: taskId ?? `PR-${view.number}`,
+      taskId: reviewKey,
       runId,
       ledgerPath,
       prUrl: view.url,
@@ -20908,7 +20942,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
           task: {
-            id: taskId ?? `PR-${view.number}`,
+            id: reviewKey,
             acceptance: criteria,
             files: taskDeclaredFiles,
             risk: taskRisk,
@@ -20956,7 +20990,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     const restored = await postStatusDep({
       owner, repo, sha: view.headRefOid, state: verdict.state,
       description: reviewPostedDescription(verdict),
-      taskId: taskId ?? `PR-${view.number}`, evidence: reviewEvidenceStrength(verdict.criteria),
+      taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -38634,8 +38668,7 @@ function reviewPostRefusedFor(
   return ledger.some(
     (l) =>
       l.step === "review.post_refused" &&
-      l.task_id === taskId &&
-      l.pr_url === prUrl &&
+      reviewRowNamesPr(l, taskId, prUrl) &&
       l.head_sha === headSha &&
       l.review_input_digest === inputDigest &&
       // A thrown post (a transient 401, a timeout) is the sweep's bounded retry clock, not a refusal;
@@ -38665,7 +38698,7 @@ export function reviewAttemptsForInput(
   let latestTs = -Infinity;
   for (const line of ledger) {
     if (line.step !== "review.posted") continue;
-    if (line.task_id !== taskId || line.pr_url !== prUrl) continue;
+    if (!reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (line.head_sha !== headSha || line.review_input_digest !== inputDigest) continue;
     attempts++;
     const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
@@ -38697,10 +38730,10 @@ function isReviewPostedStep(step: unknown): boolean {
 /** W1-T1015 — the old head a successful sweep update superseded. The three non-success siblings
  * are deliberately read here too so ledger rotation retains their evidence, but they never add a
  * head to the suppression set: a conflict or error minted no replacement head. */
-function sweepUpdatedHeadsForTask(ledger: Array<Record<string, unknown>>, taskId: string): Set<string> {
+function sweepUpdatedHeadsForTask(ledger: Array<Record<string, unknown>>, taskId: string, prUrl?: string): Set<string> {
   const updatedHeads = new Set<string>();
   for (const line of ledger) {
-    if (line.task_id !== taskId) continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (
       line.step !== "sweep.update_branch.attempted" &&
       line.step !== "sweep.update_branch.updated" &&
@@ -38812,11 +38845,12 @@ export function terminalArmRefusal(
   ledger: Array<Record<string, unknown>>,
   taskId: string | undefined,
   headSha: string | undefined,
+  prUrl?: string,
 ): boolean | undefined {
-  const facts = postedArmFactsFromLedger(ledger, taskId, headSha);
+  const facts = postedArmFactsFromLedger(ledger, taskId, headSha, prUrl);
   if (!facts) return undefined;
   if (!facts.capped || facts.planOnly) return false;
-  return cappedOverrideFromLedger(ledger, taskId!, headSha!) === undefined;
+  return cappedOverrideFromLedger(ledger, taskId!, headSha!, prUrl) === undefined;
 }
 
 export function reviewOrphansFor(
@@ -38824,13 +38858,14 @@ export function reviewOrphansFor(
   taskId: string | undefined,
   headSha: string,
   diffDigestForHead?: (sha: string) => string | undefined,
+  prUrl?: string,
 ): ReviewOrphanFacts {
   if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
-  const sweepUpdatedHeads = sweepUpdatedHeadsForTask(ledger, taskId);
+  const sweepUpdatedHeads = sweepUpdatedHeadsForTask(ledger, taskId, prUrl);
   const priorHeads = new Map<string, number>(); // sha -> latest parseable ts (ms since epoch)
   for (const l of ledger) {
     if (!isReviewPostedStep(l.step)) continue;
-    if (l.task_id !== taskId) continue;
+    if (prUrl === undefined ? l.task_id !== taskId : !reviewRowNamesPr(l, taskId, prUrl)) continue;
     const sha = typeof l.head_sha === "string" ? l.head_sha : "";
     if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
     if (sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head
@@ -39471,7 +39506,7 @@ function resolveOpenPrTaskId(pr: RawOpenPr, planOnlyFiling: boolean): string | u
  * a trailer or a `run-<taskId>-<epochMs>` branch still groups exactly as before.
  */
 function isSupersessionOwnerTaskId(taskId: string | undefined): taskId is string {
-  return taskId !== undefined && taskId !== "unfiled";
+  return taskId !== undefined && taskId !== UNFILED_RUN_SENTINEL;
 }
 
 /** Recover refusal metadata from a review's structured decision verdict. It is deliberately not
@@ -39530,13 +39565,14 @@ export function verifiedReviewFindingsForFix(
  * re-derives the authoritative verdict when it runs. Proof context comes from
  * that row's decision verdict; legacy missing execution outcomes stay unknown.
  */
-function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
+function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, prUrl?: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
   let refusals = new Map<string, CriterionRefusal>();
   let proofContext = new Map<string, Partial<CriterionVerdict>>();
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     proofContext = new Map();
     if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
@@ -39589,11 +39625,12 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
  * {@link actionableGateFailuresFromReasons} (lib/sweep.ts) — this function's own job is only the
  * ledger scan, mirroring `unmetFromLedger` immediately above.
  */
-function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>, key: string): ActionableGateFailure[] {
+function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>, key: string, prUrl?: string): ActionableGateFailure[] {
   let unmetCount = 0;
   let reasons: string[] = [];
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== key) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== key : !reviewRowNamesPr(line, key, prUrl)) continue;
     if (line.state === "success") { unmetCount = 0; reasons = []; continue; }
     unmetCount = Array.isArray(line.unmet_criteria) ? line.unmet_criteria.length : 0;
     reasons = Array.isArray(line.reasons) ? line.reasons.map(String) : [];
@@ -39613,8 +39650,7 @@ function instrumentEntanglementFromLedger(
   for (const line of lines) {
     if (
       line.step !== "review.posted" ||
-      line.task_id !== key ||
-      line.pr_url !== prUrl ||
+      !reviewRowNamesPr(line, key, prUrl) ||
       line.head_sha !== headSha ||
       line.review_input_digest !== inputDigest
     ) {
@@ -39652,7 +39688,7 @@ function previousInstrumentEntanglementFromLedger(
 ): InstrumentEntanglementPaths | undefined {
   let result: InstrumentEntanglementPaths | undefined;
   for (const line of lines) {
-    if (line.step !== "fix.instrument_entangled" || line.task_id !== key || line.pr_url !== prUrl) continue;
+    if (line.step !== "fix.instrument_entangled" || !reviewRowNamesPr(line, key, prUrl)) continue;
     result = undefined;
     const candidate = { instrumentPaths: line.instrument_paths, srcPaths: line.src_paths };
     if (!usableInstrumentEntanglementPaths(candidate)) continue;
@@ -40072,14 +40108,10 @@ export function buildOpenPrViews(
   // `reviewOrphanedByPush`, over the SAME ledger already in hand, so this adds no read and cannot
   // disagree with the field the disposition rows gate on.
   const reviewOrphanedPrs = raw
-    .filter(
-      (pr) =>
-        reviewOrphansFor(
-          ledger,
-          resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false),
-          pr.headRefOid,
-        ).orphanedByPush,
-    )
+    .filter((pr) => {
+      const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
+      return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
+    })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
   const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
   const scannerBlockers = hydrateScannerBlockerObservations(
@@ -40125,7 +40157,7 @@ export function buildOpenPrViews(
       resequence && resequence.unmetDependencies.length > 0 ? resequence.unmetDependencies : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
-    const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
+    const reviewLedgerKey = reviewLedgerKeyFor(taskId, pr.number);
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = isSupersessionOwnerTaskId(taskId) ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
@@ -40144,13 +40176,13 @@ export function buildOpenPrViews(
         : undefined;
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
+    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
     const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
@@ -40169,14 +40201,14 @@ export function buildOpenPrViews(
     // "criteria unrecoverable", and never dispatched the already-supported synthetic fix rung.
     // Read the identity the producer actually wrote for every PR; an absent row still returns
     // `[]`, and this does not invent a creditable plan task or widen `criteriaRecoverable`.
-    const unmetKey = taskId ?? `PR-${pr.number}`;
+    const unmetKey = reviewLedgerKey;
     // W1-T913: the SAME synthetic `PR-<n>` fallback `reviewCommand`/`runReview` already key every
     // `review.pending_posted`/`review.posted` ledger line with (task.id there, `taskId ?? PR-<n>`
     // here) — never a second, independently-derived key. Only consulted when the LIVE rollup
     // itself reads "pending" (never speculatively), and only trusted when the ledger's own
     // `head_sha` still matches the CURRENT head — an older pending record surviving under a
     // superseded head must never be read as dating the head observed right now.
-    const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey) : undefined;
+    const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey, pr.url) : undefined;
     const currentPendingRecord = pendingRecord?.headSha === pr.headRefOid ? pendingRecord : undefined;
     const reviewPendingSince = currentPendingRecord?.postedAt;
     const reviewPendingOwnerDead =
@@ -40186,7 +40218,7 @@ export function buildOpenPrViews(
     // confines `filingUnmetKey` above to plan filings, and #1991 (the motivating case) is a
     // `DECISIONS.md` PR, not a filing. This widens WHERE a gate failure's remedy can be READ
     // FROM; it does not touch `unmetKey`/`criteriaRecoverable` or what either means.
-    const gateFailureKey = taskId ?? `PR-${pr.number}`;
+    const gateFailureKey = reviewLedgerKey;
     const instrumentEntanglement = reviewState === "failure"
       ? instrumentEntanglementFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest)
       : undefined;
@@ -40204,7 +40236,7 @@ export function buildOpenPrViews(
       checksState,
       // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
       checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts),
-      unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey) : [],
+      unmetCriteria: reviewState === "failure" ? unmetFromLedger(ledger, unmetKey, pr.url) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above is attributable to a plan task. The synthetic key can populate it
       // for a task-id-less PR too, but that does not make the PR creditable to a plan task; this
@@ -40232,7 +40264,7 @@ export function buildOpenPrViews(
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
-      actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
+      actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey, pr.url) : [],
       instrumentEntangled: instrumentEntanglement === undefined ? undefined : true,
       instrumentEntanglementPaths: instrumentEntanglement,
       previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
@@ -40328,7 +40360,7 @@ export function buildOpenPrViews(
       // from the SAME two ledger reads `decideSweepArm` makes, over the SAME lines already in hand
       // — no extra request, and no second opinion that could disagree with the arming path it
       // warns about. TERMINAL means capped, NOT plan-only, and no override recorded for this head.
-      armRefusalIsTerminal: terminalArmRefusal(ledger, taskId, pr.headRefOid),
+      armRefusalIsTerminal: terminalArmRefusal(ledger, taskId && reviewLedgerKey, pr.headRefOid, pr.url),
       reviewedOwnDiffDigest: priorReviewForReuse?.ownDiffDigest,
       reviewedMergeBaseSha: priorReviewForReuse?.mergeBaseSha,
       reviewedHeadSha: priorReviewForReuse?.headSha,
@@ -41471,14 +41503,17 @@ function temporaryIndexTree(
   repoDir: string,
   baseSha: string,
   mutate: (env: NodeJS.ProcessEnv) => void,
+  seedIndexPath?: string,
 ): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-dirty-fix-owner-index-"));
   const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
   try {
-    execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    if (seedIndexPath === undefined) {
+      execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
     mutate(env);
     return execFileSync("git", ["-C", repoDir, "write-tree"], {
       encoding: "utf8",
@@ -41787,19 +41822,24 @@ export function commitWorkerEdits(
     runGit(["commit", "-m", message]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
+    const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
       execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
-    });
-    if (tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
+    }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
+    if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
     }
-    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, "-m", message]).trim();
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", message]).trim();
     try {
       runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
     } catch (error) {
       const refusal = movedHead(undeclared, error);
       if (refusal) return refusal;
       throw error;
+    }
+    if (mergeHead !== undefined) {
+      runGit(["merge", "--quit"]);
+      runGit(["read-tree", sha]);
     }
   }
   return {
@@ -41884,10 +41924,17 @@ function mergeHeadPresent(runGit: GitRunner): boolean {
  */
 export function startShellLessMergeConflictMerge(
   worktreePath: string,
-  runGit: GitRunner = (args) =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  injectedGit?: GitRunner,
 ): { started: boolean; reason?: string } {
+  const runGit = injectedGit ?? worktreeGitRunner(worktreePath);
   if (mergeHeadPresent(runGit)) return { started: true };
+  if (injectedGit === undefined) {
+    try {
+      fetchOriginRetryingRefLock(runGit, undefined, 3, "main");
+    } catch (e) {
+      return { started: false, reason: `fetch of origin main failed: ${String((e as Error)?.message ?? e)}` };
+    }
+  }
   try {
     runGit(["merge", "--no-commit", "--no-ff", "origin/main"]);
   } catch (e) {
@@ -41897,7 +41944,17 @@ export function startShellLessMergeConflictMerge(
       return { started: false, reason: String((e as Error)?.message ?? e) };
     }
   }
-  return { started: true };
+  return mergeHeadPresent(runGit) ? { started: true } : { started: false, reason: MERGE_UP_TO_DATE_REASON };
+}
+
+export const MERGE_UP_TO_DATE_REASON =
+  "origin/main is already in this branch: the merge left no MERGE_HEAD and no conflict, so there is nothing to resolve";
+
+export const MERGE_HEAD_ABSENT_REASON =
+  "a merge-conflict round's commit needs MERGE_HEAD, so current main is its second parent; no merge is in progress";
+
+function worktreeGitRunner(worktreePath: string): GitRunner {
+  return (args) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /**
@@ -42052,6 +42109,7 @@ export function harnessCommitForShellLessWorker(
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
     assignmentId?: string;
+    requireMergeHead?: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
@@ -42062,6 +42120,11 @@ export function harnessCommitForShellLessWorker(
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
   if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
+  if (input.requireMergeHead && !mergeHeadPresent(worktreeGitRunner(input.worktreePath))) {
+    input.log("implement.harness_commit_refused", { reason: MERGE_HEAD_ABSENT_REASON });
+    input.onRefusal?.(MERGE_HEAD_ABSENT_REASON, []);
+    return input.commitCount;
+  }
   const commit = deps.commit ?? commitWorkerEdits;
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;

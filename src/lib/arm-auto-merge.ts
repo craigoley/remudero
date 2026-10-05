@@ -832,8 +832,9 @@ export function armAutoMergeDetailed(
   }
   // ONE ledger read feeds both the verdict and its override.
   const ledgerLines = deps.ledgerLines();
-  const prior = priorReviewVerdictFromLedger(ledgerLines, taskId);
-  const override = prior?.capped ? cappedOverrideFromLedger(ledgerLines, taskId, headSha) : undefined;
+  // W1-T5839: matched by THIS PR's url, never by the key alone — `unfiled` is shared by every run-unfiled PR.
+  const prior = priorReviewVerdictFromLedger(ledgerLines, taskId, prUrl);
+  const override = prior?.capped ? cappedOverrideFromLedger(ledgerLines, taskId, headSha, prUrl) : undefined;
   const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
@@ -1594,6 +1595,7 @@ export function armIfVerdictPermits(
         (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
         ctx.taskId,
         ctx.headSha,
+        ctx.prUrl,
       )
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
