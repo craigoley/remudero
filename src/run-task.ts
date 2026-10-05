@@ -1532,6 +1532,7 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
+  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -43539,6 +43540,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
+          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
           ledgerPath,
           runId,
           log,

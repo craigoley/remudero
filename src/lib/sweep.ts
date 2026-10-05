@@ -9387,6 +9387,10 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /** W1-T5749 — a fresh read of ONE PR's live head sha, consulted immediately before ANY acting
+   *  disposition fires. A head that differs from the snapshot's stands the act down as
+   *  `sweep.head_moved`. Omitted, or `undefined` (unreadable): the act proceeds as before. */
+  readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -10929,6 +10933,14 @@ function contradictoryPrior(
     row.pr_number === pr.prNumber && row.head_sha === pr.headSha && typeof row.contradictory_key === "string") };
 }
 
+/** W1-T5749 — {@link SweepDeps.readLiveHeadSha} from the SAME fresh `readLiveState` read the fix
+ *  rung already wires: its head, or `undefined` when unwired or unreadable. */
+export function liveHeadShaFrom(
+  readLiveState: SweepDeps["readLiveState"],
+): (pr: OpenPrView) => Promise<string | undefined> {
+  return async (pr) => (await readLiveState?.(pr))?.headSha;
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -12293,7 +12305,15 @@ export async function runSweep(
           deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
       } else {
         try {
-          switch (disposition) {
+          // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
+          const liveHead = await deps.readLiveHeadSha?.(pr);
+          if (liveHead !== undefined && liveHead !== pr.headSha) {
+            acted = false;
+            standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
+              "since this pass's snapshot — not acting; the next pass re-derives from the live head";
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
+              pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead });
+          } else switch (disposition) {
             case "mergeable": {
               // ARMING PARITY (see {@link decideSweepArm}): the run flow's capped refusal is
               // worthless while this independent path arms the same verdict seconds later. Stand
