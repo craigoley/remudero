@@ -225,3 +225,19 @@ test("W1-T5520: an unreadable list opens as before", async () => {
     error: "the open-PR list was not an array",
   });
 });
+
+test("W1-T5520: an unreadable files read for a trailer-only match is unreadable, never none", async () => {
+  const hand = row(8800, "hand-built-fix", `fix\n\nRemudero-Task: ${TASK_ID}`);
+  const readerFor = (filesRead: () => unknown): OpenPrJsonReader => async (args) => {
+    if (/pulls\/8800\/files/.test(args[1] ?? "")) return filesRead();
+    return [hand];
+  };
+  assert.deepEqual(
+    await readOtherOpenPrForTask("acme", "remudero", TASK_ID, "x", readerFor(() => { throw new Error("gh api: HTTP 503"); })),
+    { state: "unreadable", error: "gh api: HTTP 503" },
+  );
+  assert.deepEqual(await readOtherOpenPrForTask("acme", "remudero", TASK_ID, "x", readerFor(() => ({ not: "an array" }))), {
+    state: "unreadable",
+    error: "pulls/8800/files was not an array",
+  });
+});
