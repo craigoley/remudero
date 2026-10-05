@@ -428,6 +428,7 @@ export interface BoardFetchResult {
   mode: "full" | "delta";
   /** True if {@link BOARD_MAX_PAGES} stopped the walk — a truncated view, never silent. */
   truncated: boolean;
+  closedFloor?: string;
   /** Which halves this call actually walked — see {@link BoardFetchHalf}. */
   half: BoardFetchHalf;
 }
@@ -466,6 +467,7 @@ export function fetchBoardPrsRest(
   const out = new Map<number, BoardPrRest>(known ?? []);
   let calls = 0;
   let truncated = false;
+  let closedFloor: string | undefined;
   const wantOpen = half !== "closed";
   const wantClosed = half !== "open";
 
@@ -498,10 +500,13 @@ export function fetchBoardPrsRest(
       out.set(pr.number, pr);
     }
     if (reachedKnown || rows.length < perPage) break;
-    if (page === BOARD_MAX_PAGES) truncated = true;
+    if (page === BOARD_MAX_PAGES) {
+      truncated = true;
+      closedFloor = rows[rows.length - 1]!.updated_at;
+    }
   }
 
-  return { rows: [...out.values()], calls, mode, truncated, half };
+  return { rows: [...out.values()], calls, mode, truncated, half, ...(closedFloor === undefined ? {} : { closedFloor }) };
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────

@@ -68,6 +68,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.disposed": A_LANE_RUN_ID,
   "pr.terminal": A_LANE_RUN_ID, // W1-T5318: the sweep's terminal-row rung, under SWEEP-/DAEMON- run ids
   "sweep.escalation_closed": A_LANE_RUN_ID,
+  "sweep.head_moved": A_LANE_RUN_ID, // W1-T5749: the act-time head guard, under SWEEP-/DAEMON- run ids
   "sweep.missing_task_trailer_repaired": A_LANE_RUN_ID,
   "sweep.post_fix_redriven": A_LANE_RUN_ID,
   "sweep.post_review.attempt": A_LANE_RUN_ID,
@@ -107,6 +108,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "automerge.capped_override_granted": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
+  "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,
   "dep-review.migrate.capture_failed": A_LANE_RUN_ID,
   "dep-review.migrate.closed": A_LANE_RUN_ID,
   "dep-review.migrate.completed": A_LANE_RUN_ID,

@@ -9,10 +9,11 @@
  */
 import { systemClock, type Clock } from "./clock.js";
 import { projectClassifiedHumanGates, projectProposalHumanGates } from "./ask-classification.js";
-import type { HumanGateObservation, HumanGateProjection, HumanGateSource } from "./human-gate.js";
+import { consumeHumanGateCounts, shownHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import type { InboxClassification, InboxState } from "./inbox.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, type InboxViewData } from "./inbox-view.js";
 import type { NowDecision } from "./now-decisions.js";
+import { NAV_BADGE_VIEW_NAME, withNavBadgeDecisions, type NavBadgeData } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowAction, type NowViewData } from "./now-view.js";
 import type { ReadModelBodyEntry, ReadModelWorkerHandle } from "./read-model-worker.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
@@ -33,6 +34,8 @@ export interface NeedsYouInstance {
 
 export interface NeedsYouData {
   humanGates: HumanGateProjection;
+  /** W1-T5373: the composite's header count, read through the shared consumer over every instance and the Inbox. */
+  needsYou: HumanGateCountSummary;
   /** Every present instance's open decisions, newest `askedAt` first. */
   decisions: NowDecision[];
   /** The `inbox` view's `section=needsYou` first page. */
@@ -151,11 +154,16 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     named.add(source.name);
     sources.push(source);
   }
+  const humanGates = projectClassifiedHumanGates([...gateSources, ...sources.filter((source) => source.state !== "fresh").map((source): HumanGateSource => ({
+    name: source.name, instance: source.instance ?? "core", state: source.state === "unavailable" ? "unavailable" : "partial",
+    reason: source.reason ?? `source is ${source.state}`, gates: [],
+  }))]);
+  const shown = shownHumanGates(humanGates, [
+    ...decisions.map((decision) => ({ instance: decision.instance, ...decisionObservation(decision) })),
+    ...(page?.items ?? []).map((item) => ({ instance: "core", kind: "proposal" as const, subject: item.proposalId })),
+  ]);
   const data: NeedsYouData = {
-    humanGates: projectClassifiedHumanGates([...gateSources, ...sources.filter((source) => source.state !== "fresh").map((source): HumanGateSource => ({
-      name: source.name, instance: source.instance ?? "core", state: source.state === "unavailable" ? "unavailable" : "partial",
-      reason: source.reason ?? `source is ${source.state}`, gates: [],
-    }))]),
+    humanGates, needsYou: consumeHumanGateCounts(humanGates, { shown }),
     decisions: decisions.sort(newestFirst), ...(page ? { inbox: page } : {}), instances, ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
   return { data, sources: sources.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)), generation: Math.max(0, ...inputs.map((i) => i.generation)) };
@@ -177,7 +185,20 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
     current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body };
     return current;
   };
-  const merged = (): Map<string, ReadModelBodyEntry> => new Map([...inner.bodies, [`${NEEDS_YOU_VIEW_NAME}\u0000`, compose()]]);
+  // W1-T5373: a served nav-badge body carries the same composite count; the worker's own body stays the shadow's.
+  const badges = new WeakMap<ReadModelBodyEntry, { etag: string; entry: ReadModelBodyEntry }>();
+  const badge = (entry: ReadModelBodyEntry): ReadModelBodyEntry => {
+    if (entry.view !== NAV_BADGE_VIEW_NAME) return entry;
+    const composite = compose();
+    const memo = badges.get(entry);
+    if (memo?.etag === composite.etag) return memo.entry;
+    const data = withNavBadgeDecisions(entry.body.data as NavBadgeData, (composite.body.data as NeedsYouData).humanGates);
+    const decorated = { ...entry, etag: viewEtag(entry.view, entry.version, entry.body.stale, data), body: { ...entry.body, data } };
+    badges.set(entry, { etag: composite.etag, entry: decorated });
+    return decorated;
+  };
+  const merged = (): Map<string, ReadModelBodyEntry> => new Map([...[...inner.bodies].map(([key, entry]): [string, ReadModelBodyEntry] => [key, badge(entry)]),
+    [`${NEEDS_YOU_VIEW_NAME}\u0000`, compose()]]);
   const bodies: ReadonlyMap<string, ReadModelBodyEntry> = {
     get size() { return merged().size; },
     get: (key) => merged().get(key),
@@ -190,15 +211,21 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
   };
   const listeners = new Set<(entry: ReadModelBodyEntry) => void>();
   inner.onBody((entry) => {
-    for (const listener of listeners) listener(entry);
+    for (const listener of listeners) listener(badge(entry));
     const isInput = entry.view === NOW_VIEW_NAME || (entry.view === INBOX_VIEW_NAME && entry.key === NEEDS_YOU_INBOX_KEY);
     const before = current;
-    if (isInput && compose() !== before) for (const listener of listeners) listener(current!);
+    if (!isInput || compose() === before) return;
+    for (const listener of listeners) listener(current!);
+    for (const held of inner.bodies.values()) if (held.view === NAV_BADGE_VIEW_NAME) for (const listener of listeners) listener(badge(held));
   });
   return {
     ...inner,
     bodies,
-    body: (view, key = "") => (view === NEEDS_YOU_VIEW_NAME && key === "" ? compose() : inner.body(view, key)),
+    body: (view, key = "") => {
+      if (view === NEEDS_YOU_VIEW_NAME && key === "") return compose();
+      const entry = inner.body(view, key);
+      return entry && badge(entry);
+    },
     onBody: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
