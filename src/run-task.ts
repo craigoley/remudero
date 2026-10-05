@@ -28289,7 +28289,9 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  */
 function retroShippedGithubGateway(): ShippedGithub {
   const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = ghGateway(owner, repo);
+  // W1-T5649: BATCHED, never the per-call `ghGateway` — this runs on the daemon's event loop, where
+  // one trailer search per run was a 44m52s stall (2026-10-04). Both answers below come off ONE fetch.
+  const baseGithub = buildBatchedGithub(owner, repo);
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
