@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/dep-review.ts, src/run-task.ts, test/dep-review-held-escalation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: a dependency-review escalation opens a human issue, but a hold caused by red

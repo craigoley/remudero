@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: #9124 (head 0704ab90) paid fix worker on a green PR at 17:45:56Z"
   plan_refs: [W1-T4586, W1-T1275, W1-T2300, W1-T1223, W1-T4902, W1-T3345, W1-T4075]
   files: [src/lib/sweep.ts, test/the-ci-fix-arm-acts-on-its-fresh-rollup-not-the-pass-snapshot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

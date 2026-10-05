@@ -9,10 +9,10 @@
  */
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { readClassificationSnapshot, writeClassificationSnapshot } from "./fleet-lane.js";
+import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readSlowLaneInbox, type ClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -20,9 +20,9 @@ export const INBOX_CLASSIFY_INTERVAL_MS = 60_000;
 /** An unchanged classification is re-stamped this often, so its age keeps saying how recently it was checked. */
 export const INBOX_CLASSIFICATION_RESTAMP_MS = INBOX_STALE_AFTER_MS / 2;
 
-/** What the last pass wrote: its states, keyed for comparison, and when. Seeded from disk on the first pass. */
+/** What the last pass wrote: its content's identity, and when. Seeded from disk on the first pass. */
 export interface InboxRefreshMemo {
-  states?: string;
+  identity?: string;
   writtenAtMs?: number;
 }
 
@@ -39,22 +39,26 @@ export interface InboxRefresh {
   generatedAt: string | null;
 }
 
-/** The states and whether the pass saw every input: a change to either rewrites the snapshot. Unrecorded completeness keys apart from both. */
-function statesKey(states: Record<string, string>, complete: boolean | undefined): string {
-  return JSON.stringify([complete ?? null, Object.entries(states).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
+/** What serve's inbox readers take from one pass (W1-T5897): enough to build every lane, the census and the threads. */
+function persistedContent(classified: ClassifiedInbox): PersistedInboxContent {
+  const ledgerRows = classified.ledgerLines.filter((row) => row.step === "fleet_lane.decided" || (row.step === "ratify.approved" && row.released === "verify-human"));
+  const projection = [...classified.projection];
+  return {
+    ...inboxClassificationEvidence(classified), proposals: classified.proposals, classifications: classified.classifications, ledgerRows,
+    mergedTaskIds: projection.filter(([, p]) => p.merged).map(([id]) => id), projectionIndeterminate: projection.some(([, p]) => p.indeterminate === true),
+  };
 }
 
 /**
- * One pass: classify every proposal, heal ratified rows out of the registry, and write the snapshot
- * when the classification changed or its stamp is due. The prune re-reads under the registry lock and
- * reapplies only the pruned ids (W1-T240), as the GET did.
+ * One pass: classify every proposal, heal ratified rows out of the registry, and persist the classification when
+ * it changed or its stamp is due: the whole of it for serve's readers, and its states for the fleet lane and the
+ * nav badge. The prune re-reads under the registry lock and reapplies only the pruned ids (W1-T240), as the GET did.
  */
 export async function refreshInboxClassification(deps: PanelGraphDeps, memo: InboxRefreshMemo, clock: Clock = systemClock): Promise<InboxRefresh> {
   const stateDir = join(deps.inboxRoot, "state");
-  if (memo.states === undefined) {
-    const onDisk = readClassificationSnapshot(stateDir);
-    const writtenMs = onDisk?.generatedAt ? Date.parse(onDisk.generatedAt) : Number.NaN;
-    Object.assign(memo, onDisk ? { states: statesKey(onDisk.states, onDisk.complete) } : {}, Number.isFinite(writtenMs) ? { writtenAtMs: writtenMs } : {});
+  if (memo.identity === undefined) {
+    const onDisk = readPersistedInbox(stateDir);
+    if (onDisk) Object.assign(memo, { identity: onDisk.identity, writtenAtMs: Date.parse(onDisk.generatedAt) });
   }
   const classified = await classifyAllProposalsSliced(deps);
   const { registryPath, proposals, classifications } = classified;
@@ -66,23 +70,21 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
       return fresh.length === current.length ? null : fresh;
     });
   }
-  const states: Record<string, string> = {};
-  for (const c of classifications) states[c.proposalId] = c.state;
-  const evidence = inboxClassificationEvidence(classified);
-  const key = statesKey(states, evidence.complete);
+  const content = persistedContent(classified);
+  const identity = persistedInboxIdentity(content);
   const now = clock.now();
-  const changed = key !== memo.states;
+  const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   if (written) {
-    writeClassificationSnapshot(stateDir, classifications, clock, evidence);
-    memo.states = key;
+    writePersistedInbox(stateDir, content, now);
+    writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
+    memo.identity = identity;
     memo.writtenAtMs = now;
   }
-  const writtenAt = memo.writtenAtMs;
-  const source: ViewSource = { name: `inbox-store:${INBOX_VIEW_INSTANCE}`, asOf: fixedClock(now).iso(), state: "fresh" };
+  const generatedAt = fixedClock(memo.writtenAtMs!).iso();
   return {
-    bodies: inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source),
-    proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt: writtenAt === undefined ? null : fixedClock(writtenAt).iso(),
+    bodies: inboxViewBodies(inboxLanes(classified, deps.inboxRoot), inboxStoreSource(generatedAt)),
+    proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt,
   };
 }
 
@@ -90,6 +92,12 @@ export const INBOX_VIEW_NAME = "inbox";
 export const INBOX_VIEW_VERSION = 1;
 /** The inbox is core's alone today; its source is named for the instance that classifies it. */
 const INBOX_VIEW_INSTANCE = "core";
+const INBOX_STORE_SOURCE = `inbox-store:${INBOX_VIEW_INSTANCE}`;
+
+/** The one source of every inbox body: the persisted classification, as of its `generatedAt`, so both shadow sides name the snapshot they read. */
+function inboxStoreSource(generatedAt: string, state: ViewSource["state"] = "fresh"): ViewSource {
+  return { name: INBOX_STORE_SOURCE, asOf: generatedAt, state };
+}
 export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet"] as const;
 export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
 
@@ -140,20 +148,25 @@ export function inboxViewBodies(lanes: Lanes, source: ViewSource): InboxViewBody
 }
 
 /**
- * The `inbox` view computed on serve's main thread: the shadow comparator's legacy side, and the answer
- * while the view is dark. It never classifies: it pages the last classification GET /v1/inbox's memo
- * holds, so a cold serve answers that none has been made yet.
+ * The `inbox` view computed on serve's main thread: the shadow comparator's legacy side, and the answer while the
+ * view is dark. It never classifies. Under serve's slow lane (W1-T5897) it pages the persisted classification, as
+ * of its `generatedAt`, and pairs every path with that read, so a body built over another snapshot differs as
+ * `timing`; otherwise it pages the last classification GET /v1/inbox's memo holds.
  */
 export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): ViewDefinition<InboxViewData> {
   return {
     name: INBOX_VIEW_NAME,
     version: INBOX_VIEW_VERSION,
+    ...(deps.inboxFromSlowLane ? { shadowSources: { items: INBOX_STORE_SOURCE, counts: INBOX_STORE_SOURCE, page: INBOX_STORE_SOURCE } } : {}),
     compute: (params) => {
       const section = params.get("section");
       if (!INBOX_VIEW_SECTIONS.includes(section as InboxViewSection)) return { error: `section must be one of ${INBOX_VIEW_SECTIONS.join(", ")}` };
-      const classified = peekClassifiedInbox(deps);
+      const read = deps.inboxFromSlowLane ? readSlowLaneInbox(deps) : undefined;
+      const classified = read?.classified ?? (deps.inboxFromSlowLane ? undefined : peekClassifiedInbox(deps));
       if (!classified) return { error: "serve has not classified the inbox yet" };
-      const source: ViewSource = { name: `inbox-store:${INBOX_VIEW_INSTANCE}`, asOf: clock.iso(), state: "fresh" };
+      const source = read
+        ? inboxStoreSource(read.generatedAt, clock.now() - Date.parse(read.generatedAt) > INBOX_STALE_AFTER_MS ? "stale" : "fresh")
+        : inboxStoreSource(clock.iso());
       const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source).find((b) => b.key === viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },

@@ -10,7 +10,7 @@
   risk: low
   origin: "operator session 90be18e2, 2026-10-02: first live ci-friction ladder filing"
   files: [src/lib/ci-friction-remedy.ts, test/a-generic-term-locates-no-owner.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02: the ci-friction ladder's first live filing (#8780, W1-T5378) drafted the cause
