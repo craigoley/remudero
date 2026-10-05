@@ -11,7 +11,7 @@ import {
 } from "../src/lib/human-gate.js";
 import { nowDependencyVerificationGates } from "../src/lib/now-view.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import { currentVerifyHumanRulings } from "../src/lib/verify-human-judge.js";
 
 const AT = "2026-10-04T12:00:00.000Z";
@@ -52,8 +52,8 @@ function snapshot(tasks: BoardRow[], prs: number[] = [], complete = true): Pick<
   };
 }
 
-const githubWith = (open: ReadonlySet<string>): GitHub =>
-  ({ issueByUrl: (url: string) => ({ state: open.has(url) ? "OPEN" : "CLOSED" }) }) as unknown as GitHub;
+const issuesOpen = (open: ReadonlySet<string>) =>
+  fakeGitHub({ issueByUrl: (url: string) => ({ state: open.has(url) ? "OPEN" : "CLOSED" }) });
 
 const task = (id: string, extra = "", deps: string[] = [], status = "queued") =>
   `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: [${deps.join(", ")}]\n  status: ${status}\n${extra}`;
@@ -87,7 +87,7 @@ test("migration and repairable dependency holds create no human gate", () => {
   ];
   const live = projectHumanGates(nowDependencyVerificationGates({
     instance: "core", repo: REPO, plan: loadPlanFromYaml(task("R"), "fixture"), snapshot: snapshot([boardRow("R")], [41, 42, 43]), rows,
-    github: githubWith(new Set([issue(941), issue(942), issue(943)])),
+    github: issuesOpen(new Set([issue(941), issue(942), issue(943)])),
   }));
   assert.deepEqual(live.gates.map((g) => [g.kind, g.url]), [["dependency_review", issue(943)]]);
   assert.equal(live.sources.find((s) => s.name === "dependency-review")?.state, "complete");
@@ -127,7 +127,7 @@ test("judge-cleared verification stays fleet-owned and unknown stays explicit", 
   const pending = ["V1", "V3", "V4", "V5", "V6"].map((id) => boardRow(id, { verifyHumanPending: true }));
   const live = projectHumanGates(nowDependencyVerificationGates({
     instance: "core", repo: REPO, plan: loadPlanFromYaml(["V1", "V3", "V4", "V5", "V6"].map((id) => task(id, "  verify: human\n")).join(""), "fixture"),
-    snapshot: snapshot([...pending, boardRow("V7")]), rows, github: githubWith(new Set()),
+    snapshot: snapshot([...pending, boardRow("V7")]), rows, github: issuesOpen(new Set()),
   }));
   assert.deepEqual(live.gates.map((g) => g.key), ["verify_human:core:V3"]);
   const liveVerify = live.sources.find((source) => source.name === "verify-human")!;
@@ -157,16 +157,16 @@ test("a held root has one gate only while live dependents remain stalled", () =>
   const plan = loadPlanFromYaml([task("H", "  verify: human\n"), task("A", "", ["H"]), task("B", "", ["A"])].join(""), "fixture");
   const rows: Row[] = [{ ts: AT, task_id: "H", step: "verify_human.judged", judge_decision: "needs_operator", judge_reason: "sign-off", observed_state: "H:deps=1:cited=0" }];
   const stalled = projectHumanGates(nowDependencyVerificationGates({ instance: "core", repo: REPO, plan,
-    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A"), boardRow("B")]), rows, github: githubWith(new Set()) }));
+    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A"), boardRow("B")]), rows, github: issuesOpen(new Set()) }));
   assert.deepEqual(stalled.gates.map((g) => g.key), ["held_root:core:H"]);
   assert.match(stalled.gates[0]!.reason, /A, B/);
   const drained = projectHumanGates(nowDependencyVerificationGates({ instance: "core", repo: REPO, plan,
-    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A", { status: "merged" }), boardRow("B", { status: "merged" })]), rows, github: githubWith(new Set()) }));
+    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A", { status: "merged" }), boardRow("B", { status: "merged" })]), rows, github: issuesOpen(new Set()) }));
   // With no live dependent stalled the root is no longer a held root; the judge's ruling still asks once.
   assert.deepEqual(drained.gates.map((g) => g.key), ["verify_human:core:H"]);
   const releasedRows: Row[] = [...rows, { ts: LATER, task_id: "H", step: "ratify.approved", released: "verify-human" }];
   const freed = projectHumanGates(nowDependencyVerificationGates({ instance: "core", repo: REPO, plan,
-    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A"), boardRow("B")]), rows: releasedRows, github: githubWith(new Set()) }));
+    snapshot: snapshot([boardRow("H", { verifyHumanPending: true }), boardRow("A"), boardRow("B")]), rows: releasedRows, github: issuesOpen(new Set()) }));
   assert.deepEqual(freed.gates, [], "an existing release resolves both the hold and the verify ask");
 });
 
