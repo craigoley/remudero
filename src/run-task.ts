@@ -46412,7 +46412,6 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-  // W1-T5650: the sweep's daemon-lifetime BATCHED gateway; omitted ⇒ one batched gateway per hook.
   github?: GitHub,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   let lazyGithub: GitHub | undefined;
@@ -46789,7 +46788,6 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  // W1-T5650: BATCHED — the daemon's intake `inbox` rung runs this function, so it is a loop path.
   const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
