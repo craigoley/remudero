@@ -1,0 +1,44 @@
+- id: W1-T5825
+  title: "A MERGED GATE-GARDEN PR CANNOT HOLD THE DEFUSE LANE — the gate gardener has awaited #9019 (a refresh, merged 2026-10-04 02:21Z) ever since, because its metric only grows on a `measured` fire-rate report and the daily report has read `partial` since; `gardenPass` plans nothing while any class is pending, so W1-T5539's defuse saw test/auto-merge-blocked-codeql-review-thread.test.ts and never filed it, and main went red on that fixture on 2026-10-05"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the gate garden's pending judgement cannot stall its other classes
+  band_meaning: span
+  origin: "operator session 2026-10-05: root cause of the main-red expiring-fixture crossing hot-fixed by #9259"
+  plan_refs: [W1-T5539, W1-T4116, W1-T4802, W1-T3272]
+  files: [src/lib/gardener.ts, src/lib/gate-gardener.ts, test/a-merged-gate-garden-pr-cannot-hold-the-defuse-lane.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767 and the live state (read-only). ~/rmd-state2/state/
+    gate-gardener.json holds `pending: {prUrl: #9019, actionClass: refresh, baseline 657/651,
+    atMerge 657/651}` and a lastPass fingerprint naming
+    `expiring-fixture:test/auto-merge-blocked-codeql-review-thread.test.ts`. Every `gate.scorecard`
+    row from 2026-10-04 02:31Z to 2026-10-05 04:26Z (6 rows, zgrep over the 10-03..10-05 .gz
+    rotations and the live ledger; 2 earlier rows that day are the control) reads `awaiting: #9019`,
+    `proposed: 0`, tally 657/651, and there is no `gate_garden.defuse_*` row.
+    Mechanism: `judgeGardenPending` (src/lib/gardener.ts) waits until `now.trials` exceeds
+    `atMerge.trials`. The gate metric is `updateTally` (src/lib/gate-gardener.ts), which folds a
+    fire-rate report only when `status === "measured"`. The `gate.fire_rates` rows read `partial` on
+    09-28, 09-29, 09-30, 10-02, 10-03 and 10-05, and `measured` only at 10-04 01:01Z, before #9019
+    merged. While `state.pending` is set, `gardenPass` plans `{actions: []}`, so no class acts,
+    defuse included. W1-T5539 (merged 10-04 04:31Z) shipped the defuse class after this hold began.
+    A defuse PR would itself be judged on the same fire-rate tally, which does not measure defusal.
+  design: |
+    (i) A metric-judged pending PR that has merged records when its merge was first seen; if its
+    metric gains no trials within a bound (a named backstop constant, about 24 h), the pass releases
+    it with no credit or debit and ledgers `<garden>.pending_released` with the PR, class and wait.
+    (ii) The gate garden judges `defuse` by its PR decision (merged earns credit, closed a debit),
+    as it already does `demote`, so a defuse PR never waits on the fire-rate tally. The other gate
+    classes and other gardens keep their metric judgement.
+  acceptance:
+    - claim: "with an injected clock, a merged metric-judged pending whose tally never moves is released after the bound with a pending_released row and the next pass plans a defuse candidate, a pending whose tally moves is judged as today, and a merged defuse PR is settled by its decision"
+      proof: "unit test: test/a-merged-gate-garden-pr-cannot-hold-the-defuse-lane.test.ts"
+  falsifier: |
+    Remove the release: the frozen-tally fixture stays awaiting the PR forever, plans nothing, and the
+    test fails.
