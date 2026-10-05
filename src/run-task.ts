@@ -9139,6 +9139,27 @@ export function ghLiveStateByNumber(
 }
 
 /**
+ * W1-T5719: {@link ghLiveStateByNumber} over the ASYNC transport ({@link ghJsonAsync}), so the
+ * dispatch pass's per-candidate live-state reads (measured ~45 s of the 490 s post-boot freeze) park
+ * promises instead of the event loop. SAME REST row, SAME OPEN/CLOSED/MERGED fold, SAME polarity: a
+ * failed read resolves `undefined` ("unknown, still in flight, skip"), never a false dispatch.
+ */
+export async function ghLiveStateByNumberAsync(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<string | undefined> {
+  try {
+    const row = (await fetch(singlePrRestArgs(owner, repo, prNumber))) as Parameters<typeof prStateFromRest>[0];
+    return prStateFromRest(row);
+  } catch (e) {
+    void e; // unreadable => undefined; drain's wrapper ledgers `dispatch.live_state_indeterminate`
+    return undefined;
+  }
+}
+
+/**
  * W1-T1095 (capability 1 of 3, RECORD-AND-RESUME — design note (i)): recognizes the "blocked
  * on #N" idiom in a review's own summary or an UNMET criterion's own reason — the phrase a
  * reviewer already writes when a criterion cannot be satisfied from INSIDE this diff because it
@@ -31656,6 +31677,27 @@ export type UsageProbeRunner = (
 const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileSync(bin, argv, opts);
 
 /**
+ * W1-T5719: the ASYNC usage-probe runner — the one the headroom CLI fallback awaits, so a slow
+ * `claude -p "/usage"` (measured 14 s of the 490 s post-boot freeze) parks one promise rather than
+ * the event loop. `timeout` is enforced twice: by `execFile` (kills the child) and by
+ * {@link readUsageSnapshotAsync}'s own race (so an injected runner that never answers still ends).
+ */
+export type AsyncUsageProbeRunner = (
+  bin: string,
+  argv: string[],
+  opts: { encoding: "utf8"; env: Record<string, string>; maxBuffer: number; timeout: number },
+) => Promise<string>;
+
+/** BACKSTOP: ceiling on the CLI fallback. A timeout is reported as the existing `"spawn"` failure stage. */
+export const USAGE_PROBE_TIMEOUT_MS = 30_000;
+
+const usageProbeExecFile = promisify(execFile);
+export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, argv, opts) => {
+  const { stdout } = await usageProbeExecFile(bin, argv, opts);
+  return String(stdout);
+};
+
+/**
  * Which half of {@link readUsageSnapshot} failed. `"spawn"` is genuinely unreadable — the CLI
  * could not be run, or ran and failed. `"parse"` means the read SUCCEEDED and the text could not
  * be understood, which is a completely different problem with a completely different fix, and
@@ -31828,12 +31870,13 @@ export async function readUsageSnapshotPreferSdk(
   config: Config,
   deps: {
     viaSdk?: (onUnreadable: UsageProbeFailureSink) => Promise<UsageSnapshot | undefined>;
-    viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined;
+    viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   } = {},
 ): Promise<UsageSnapshot | undefined> {
   const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
   const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s));
-  const viaCli = deps.viaCli ?? ((s) => readUsageSnapshot(config, defaultUsageProbeRunner, s));
+  // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
+  const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
   // A SOURCE THAT CANNOT ANSWER MUST NOT BREAK THE CALLER. `readUsageSnapshotViaSdk` already
   // converts its three unreadable states into `undefined`, but OPENING the session can throw
   // before any of that runs (a transport failure, a malformed config). Left uncaught, an
@@ -31851,7 +31894,38 @@ export async function readUsageSnapshotPreferSdk(
     sink("sdk", `usage control request could not be opened: ${String((e as Error)?.message ?? e)}`);
   }
   if (fromSdk) return fromSdk;
-  return viaCli(sink);
+  return await viaCli(sink);
+}
+
+/**
+ * The shared, synchronous half of a usage probe: materialise the stable probe home and build the
+ * worker env. THROWS on failure — the caller owns the `"spawn"` try (see {@link readUsageSnapshot}).
+ */
+function prepareUsageProbeEnv(config: Config, onUnreadable: UsageProbeFailureSink): Record<string, string> {
+  const realHome = process.env.HOME ?? homedir();
+  // A stable, non-per-call home (never a fresh `perRunWorkerHomeDir` per read) so
+  // repeated probe reads reuse — and idempotently refresh — one materialized
+  // directory rather than littering `worker-home-*` siblings on every tick.
+  const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
+  const workerKeychainPath = workerKeychainPaths(join(config.root, "state")).keychainPath;
+  const home = materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+  // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent
+  // (several grants are legitimately unavailable), but a target that EXISTS and could not be
+  // reached is a lost capability — and it is why this probe read `stage: "parse"` 33 times out
+  // of 33 in the Azure container: a real `.claude` DIRECTORY occupied the symlink slot, so
+  // `claude -p "/usage"` ran LOGGED OUT and emitted a 207-byte cost summary with no account
+  // panel to parse. `displaced` is reported too: the slot HEALED, and a heal that goes
+  // unrecorded is how a poisoned slot survived days of re-materialisation unnoticed.
+  for (const g of home.outcomes ?? []) {
+    if (g.state === "failed") onUnreadable("grant", `${g.relFrom} -> ${g.to}: ${g.reason ?? "unknown"}`);
+    else if (g.state === "displaced") onUnreadable("grant", `${g.relFrom}: real directory displaced to ${g.displacedTo}`);
+  }
+
+  return buildWorkerEnv({}, process.env, {
+    zdotdir: workerZdotdir(config),
+    shell: workerShell(config),
+    home: workerHome,
+  });
 }
 
 export function readUsageSnapshot(
@@ -31862,30 +31936,7 @@ export function readUsageSnapshot(
   let out: string;
   // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
   try {
-    const realHome = process.env.HOME ?? homedir();
-    // A stable, non-per-call home (never a fresh `perRunWorkerHomeDir` per read) so
-    // repeated probe reads reuse — and idempotently refresh — one materialized
-    // directory rather than littering `worker-home-*` siblings on every tick.
-    const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
-    const workerKeychainPath = workerKeychainPaths(join(config.root, "state")).keychainPath;
-    const home = materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
-    // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent
-    // (several grants are legitimately unavailable), but a target that EXISTS and could not be
-    // reached is a lost capability — and it is why this probe read `stage: "parse"` 33 times out
-    // of 33 in the Azure container: a real `.claude` DIRECTORY occupied the symlink slot, so
-    // `claude -p "/usage"` ran LOGGED OUT and emitted a 207-byte cost summary with no account
-    // panel to parse. `displaced` is reported too: the slot HEALED, and a heal that goes
-    // unrecorded is how a poisoned slot survived days of re-materialisation unnoticed.
-    for (const g of home.outcomes ?? []) {
-      if (g.state === "failed") onUnreadable("grant", `${g.relFrom} -> ${g.to}: ${g.reason ?? "unknown"}`);
-      else if (g.state === "displaced") onUnreadable("grant", `${g.relFrom}: real directory displaced to ${g.displacedTo}`);
-    }
-
-    const env = buildWorkerEnv({}, process.env, {
-      zdotdir: workerZdotdir(config),
-      shell: workerShell(config),
-      home: workerHome,
-    });
+    const env = prepareUsageProbeEnv(config, onUnreadable);
     out = runUsageProbe(config.claudeBin, ["-p", "/usage"], {
       encoding: "utf8",
       env,
@@ -31910,12 +31961,55 @@ export function readUsageSnapshot(
   // DURABLY, naming the offending line, before the same `undefined` is returned. The RETURN
   // POLARITY is deliberately unchanged — an unreadable read still lets the drain continue, which
   // is ratified and not this function's to change; only the silence is fixed.
+  return parseUsageReporting(out, onUnreadable);
+}
+
+/** The PARSE half, in its own try so a successful read that cannot be understood is `"parse"`,
+ *  never `"spawn"`. Shared by the sync and async readers so the two cannot drift. */
+function parseUsageReporting(out: string, onUnreadable: UsageProbeFailureSink): UsageSnapshot | undefined {
   try {
     return parseUsage(out);
   } catch (e) {
     onUnreadable("parse", String((e as Error)?.message ?? e));
     return undefined;
   }
+}
+
+/**
+ * W1-T5719: {@link readUsageSnapshot} with the probe run OFF THE LOOP. Identical stages and
+ * polarity — only the runner is async and bounded. A runner that rejects, or that has not answered
+ * within `timeoutMs`, is the existing `"spawn"` failure and yields `undefined` (the drain continues);
+ * it is never a hang. The timer is cleared on every path so it cannot keep the process alive.
+ */
+export async function readUsageSnapshotAsync(
+  config: Config,
+  runUsageProbe: AsyncUsageProbeRunner = defaultAsyncUsageProbeRunner,
+  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
+  timeoutMs: number = USAGE_PROBE_TIMEOUT_MS,
+): Promise<UsageSnapshot | undefined> {
+  let out: string;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const env = prepareUsageProbeEnv(config, onUnreadable);
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`usage probe timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    const probe = runUsageProbe(config.claudeBin, ["-p", "/usage"], {
+      encoding: "utf8",
+      env,
+      maxBuffer: 1 << 24,
+      timeout: timeoutMs,
+    });
+    // A probe that loses the race must not become an unhandled rejection; its outcome is reported by the race.
+    probe.then(undefined, () => undefined);
+    out = await Promise.race([probe, timedOut]);
+  } catch (e) {
+    onUnreadable("spawn", String((e as Error)?.message ?? e));
+    return undefined; // unreadable ⇒ the drain continues (max + budget still bound it)
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  return parseUsageReporting(out, onUnreadable);
 }
 
 /**
@@ -33452,7 +33546,7 @@ async function drainCommand(
         readClosedRunBranchPrs: () => readRunBranchClosedPrsOutput(owner, repo),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
-        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(owner, repo, prNumber),
+        readLiveState: (_taskId, prNumber) => ghLiveStateByNumberAsync(owner, repo, prNumber),
         isIndeterminate,
         isIndependentFailureBlocked,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
