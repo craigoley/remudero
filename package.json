@@ -96,6 +96,9 @@
     "census:spend": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/spend-is-counted-once-at-its-producer.test.ts",
     "census:env-var-registry": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/env-var-registry.test.ts",
     "census:error-subclass": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/error-subclass-census.test.ts",
+    "census:cycle-ratchet": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/cycle-ratchet.test.ts",
+    "census:source-size": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/source-size-baseline-is-enforced.test.ts",
+    "census:citation-anchor": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/citation-anchor-census.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
