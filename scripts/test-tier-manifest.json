@@ -15,6 +15,7 @@
     "test/a-blocked-task-with-no-disposition-is-reported.test.ts": 1300,
     "test/a-body-proof-that-names-a-missing-path-is-refused.test.ts": 1400,
     "test/a-body-repair-proof-safety-is-enforced-at-the-write-boundary.test.ts": 5259,
+    "test/a-boot-reviews-before-it-runs-its-cadences.test.ts": 5000,
     "test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts": 2900,
     "test/a-broken-body-is-repairable-not-ambiguous.test.ts": 2700,
     "test/a-browser-boundary-has-no-directive.test.ts": 320,
