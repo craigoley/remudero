@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.08
   status: queued
@@ -36,3 +36,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The filed task targets preventing a specific wasted fix round; its declared scope is src/run-task.ts and a dedicated test, consistent with that remedy."
+      - "The supplied plan does not describe secrets, permission changes, deletion, irreversible actions, or changes to merge, deploy, infrastructure, or review policy."
+      - "This is a filing-time assessment with verify: auto; no failed gates are reported. The family’s 39 declines warrant caution but do not establish danger in this candidate."
+    judged_at: "2026-10-05T05:16:40.698Z"
+    pin: "172c426a60d1ad1faca8bda8ff0095b4b6c1940dbe58b8de8d6a8ed31a781ec7"
