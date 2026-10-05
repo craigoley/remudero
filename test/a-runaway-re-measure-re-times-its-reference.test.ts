@@ -1,4 +1,4 @@
-// test/a-census-runaway-re-measure-re-times-its-reference.test.ts — W1-T5676.
+// test/a-runaway-re-measure-re-times-its-reference.test.ts — W1-T5676.
 //
 // THE DEFECT, OBSERVED 2026-10-04. `runPreflightFast` re-measures a census entry that crossed its
 // runaway bound, but compared that re-measure with pass one's median — a reference fixed at
