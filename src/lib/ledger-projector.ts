@@ -63,10 +63,15 @@ export function openProjectorReadModel(stateDir: string, instance: string, clock
     INSERT OR IGNORE INTO meta(k, v) VALUES('instance', '${instance}');`, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
 }
 
+/** A run's worker liveness transition: the now view carries `workerState` from it, so the fact store must keep it.
+ *  Written only when the state changes, so it adds a row per transition, never one per worker event. */
+const WORKER_STATE_STEP = "worker.state";
+
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */
 export function isFactStep(step: string): boolean {
   return DECISION_RELEVANT_LEDGER_STEPS.has(step) || RENDER_RELEVANT_LEDGER_STEPS.has(step)
-    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === EXTERNAL_EFFECT_RECONCILED_STEP
+    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === WORKER_STATE_STEP
+    || step === EXTERNAL_EFFECT_RECONCILED_STEP
     || step.startsWith("panel.");
 }
 
@@ -111,21 +116,36 @@ const activityRingInserts = new WeakMap<ReadModelDb, ReadModelStatement>();
 /**
  * The newest {@link ACTIVITY_RING_ROWS} rows of ANY step: operator activity ranks the newest rows of
  * every step, which `fact` cannot answer. Each transaction inserts its rows and then trims the ring
- * back to the newest by `(ts_ms, h)`, so any read order leaves the same rows.
+ * back to the newest by `(ts_ms, seq)`, so any read order leaves the same rows.
+ *
+ * `seq` is the order the projector applied the rows: within a file, the file's order. Operator
+ * activity numbers and truncates same-millisecond rows in the order it is handed them, and the route
+ * hands them in file order, so a ring ordered by `h` (version 1) gave a busy ledger's ties different
+ * ids than the route (2026-10-05: 6 diffs in 7 shadow samples). A new row's rowid exceeds every row the
+ * ring holds, which is all an order among held rows needs. A row whose `ts` is not its first key is
+ * placed by its parsed `ts`, as the route ranks it, not at epoch 0 where `ledgerLineIdentity` puts it.
+ * An exact duplicate line is applied once, as the route's union reader keeps it once (W1-T4820).
+ * Residual: a tie split across a rotation boundary is applied archive-first, while the union reads the
+ * live file first.
  */
 export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
   name: "activity_ring",
-  version: 1,
+  version: 2,
   tables: ["activity_ring"],
-  ddl: "CREATE TABLE IF NOT EXISTS activity_ring(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;",
+  // Version 1's table had no `seq`; a version change empties the store, so dropping it loses nothing.
+  ddl: `DROP TABLE IF EXISTS activity_ring;
+    CREATE TABLE activity_ring(seq INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, UNIQUE(ts_ms, h));
+    CREATE INDEX activity_ring_order ON activity_ring(ts_ms, seq);`,
   markers: [STEP_KEY],
-  apply(db, line, id) {
+  apply(db, line, id, parse) {
     let insert = activityRingInserts.get(db);
     if (!insert) activityRingInserts.set(db, insert = db.prepare("INSERT OR IGNORE INTO activity_ring(ts_ms, h, body) VALUES(?, ?, ?)"));
-    insert.run(id.tsMs, id.h, line);
+    const ts = id.ts ? undefined : parse()?.ts;
+    const parsed = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    insert.run(Number.isFinite(parsed) ? parsed : id.tsMs, id.h, line);
   },
   settle(db) {
-    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, h) < (SELECT ts_ms, h FROM activity_ring ORDER BY ts_ms DESC, h DESC
+    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, seq) < (SELECT ts_ms, seq FROM activity_ring ORDER BY ts_ms DESC, seq DESC
       LIMIT 1 OFFSET ${ACTIVITY_RING_ROWS - 1})`).run();
   },
 };
@@ -259,6 +279,22 @@ export function runWorkerRow(body: string, fields: string): Record<string, unkno
   return row;
 }
 
+/**
+ * Serve's own diagnostics, which it writes into the ledger it projects (W1-T5884). A committed batch
+ * whose fresh rows are ALL these is still projected and checkpointed, but does not advance
+ * `generation`: advancing it made `now@core` due on its own telemetry, a rebuild loop. Each member is
+ * diagnostic-only: not an {@link isFactStep} step, no `task_id`/`run_id` for the task, run or recent
+ * projections, outside the repo index's markers, and no view reads it back (only the unread
+ * activity ring keeps it).
+ * - `read_model.slow_view`: a view build that overran its pass (read-model-worker `build`).
+ * - `read_model.materialize_deferred`: the units a pass had no time for (read-model-worker `materialize`).
+ * - `read_model.now_slow_stage`: one now build stage over its bound (now-view `step`).
+ * - `view.emitted`: the per-key publish latency sample (view-events).
+ */
+export const SERVE_DIAGNOSTIC_STEPS: ReadonlySet<string> = new Set([
+  "read_model.slow_view", "read_model.materialize_deferred", "read_model.now_slow_stage", "view.emitted",
+]);
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
 export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION, RUN_WORKER_PROJECTION, RECENT_ROW_PROJECTION];
 
@@ -374,6 +410,8 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
   let linesPerMs: number | undefined;
   let deadline = Number.POSITIVE_INFINITY;
+  /** Whether the open transaction applied a fresh row that is not one of {@link SERVE_DIAGNOSTIC_STEPS}. */
+  let advances = false;
 
   /** Out of budget: every tick applies at least one transaction, so a backlog always moves. */
   function spent(c: ProjectorTickResult): boolean {
@@ -424,6 +462,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       c.fresh++;
       const at = line.indexOf(STEP_KEY);
       const scanned = at < 0 ? "" : line.slice(at + STEP_KEY.length, line.indexOf('"', at + STEP_KEY.length));
+      // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
+      const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
+      // Only a step named unambiguously counts as serve's own diagnostic; any other fresh row may be one a view reads.
+      if (ambiguous || !SERVE_DIAGNOSTIC_STEPS.has(scanned)) advances = true;
       if (id.tsMs > now + FUTURE_ROW_TOLERANCE_MS) {
         sql.quarantine.run(id.tsMs, id.h, id.ts, scanned, now, line);
         c.quarantined++;
@@ -432,8 +474,6 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       let parsed: { row?: Record<string, unknown> } | undefined;
       const parse = (): Record<string, unknown> | undefined => (parsed ??= { row: parseRow(line) }).row;
       for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, id, parse);
-      // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
-      const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
       if (!ambiguous && !(at >= 0 && factStep(scanned)) && !line.includes(COST_KEY)) continue;
       const row = parse();
       if (!row) {
@@ -451,11 +491,15 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     const started = clock.now();
     const linesBefore = c.lines;
     withWriteTransaction(db, lease, () => {
+      const freshBefore = c.fresh;
+      advances = false;
       apply();
       for (const p of projections) p.settle?.(db);
       opts.beforeCheckpoint?.(source);
       sql.checkpoint.run(source, checkpoint.ino, checkpoint.size, checkpoint.off, checkpoint.fp);
-      sql.generation.run();
+      // A batch of only serve diagnostics changes nothing a view reads (W1-T5884). One with no fresh
+      // row still advances: a re-read is the progress the stall watchdog counts by this generation.
+      if (advances || c.fresh === freshBefore) sql.generation.run();
     });
     c.transactions++;
     opts.onCommit?.(source, c.lines - linesBefore);

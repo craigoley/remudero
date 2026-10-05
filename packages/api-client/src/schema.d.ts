@@ -2742,6 +2742,44 @@ export interface components {
         };
       };
     };
+    /** One console-v1 metric (src/lib/analytics-route.ts's `ConsoleV1Metric`); `value` is null, never 0, when not collected. */
+    AnalyticsViewMetric: {
+      key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
+      class: "observed" | "provider_reported" | "modeled";
+      value: number | null;
+      notCollectedReason?: string;
+    };
+    /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
+    AnalyticsView: {
+      view: "analytics";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
+        overview: ({
+          key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
+          class: "observed" | "provider_reported" | "modeled";
+          value: number | null;
+          notCollectedReason?: string;
+          instances: number;
+        })[];
+        /** How many instances the overview counts, of how many serve projects; `missing` have no snapshot yet. */
+        coverage: {
+          counted: number;
+          of: number;
+          missing: (string)[];
+        };
+        /** Each instance's own metrics, or a `reason` when it has no snapshot yet. */
+        instances: ({
+          instanceId: string;
+          metrics?: (AnalyticsViewMetric)[];
+          reason?: string;
+        })[];
+      };
+    };
     /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
     ReadModelStatusView: {
       view: "read-model";
@@ -3289,6 +3327,12 @@ export interface components {
         servedModel?: string;
         requestedModel?: string;
       };
+      /** The run's worker liveness from its newest `worker.state` transition (BoardRow.workerState). The console's fleet map evidences a worker process only from this; absent means no transition was seen. */
+      workerState?: "working" | "tool-executing" | "quiet";
+      /** When the run went quiet; present only while `workerState` is `quiet`. */
+      workerStateSince?: string;
+      /** Running only on an open PR's strength, with no live lock and no recent activity. */
+      processUnevidenced?: true;
     };
     /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the time of the sweep row that began the PR's current disposition (a re-emitted one does not move it). */
     NowAction: {
@@ -5194,6 +5238,16 @@ export interface paths {
           "200": NavBadgeView;
           "304": undefined;
           "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/views/analytics": {
+    get: {
+      responses: {
+          "200": AnalyticsView;
+          "304": undefined;
           "401": Error;
           "403": Error;
         };

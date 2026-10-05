@@ -9,6 +9,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
+import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { analyticsSourceBodies, type AnalyticsViewData } from "../src/lib/analytics-view.js";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createHostView, type HostViewData } from "../src/lib/host-view.js";
@@ -106,7 +108,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", workstreams: "serve", host: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", host: "serve" } }));
   // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
   writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -128,6 +130,9 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   const workstreams = createWorkstreamsView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", planPath: deps.panelGraph.planPath }], ledgerSource });
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, host], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
+  // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
+  const analytics = deriveAnalyticsSnapshot([], clock.iso());
+  assert.equal(ticker.acceptSnapshot({ instance: "core", ok: true, asOf: analytics.asOf!, bodies: analyticsSourceBodies(analytics) }), true);
   // The slow lane's views, built as its units build them and handed over as the worker does.
   const panel = { ...deps.panelGraph, inboxRoot: root, ratify: { approve: () => {}, reframe: () => {} }, inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true };
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: (await refreshInboxClassification(panel, {}, clock)).bodies });
@@ -148,7 +153,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", workstreams: "", host: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", host: "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -185,6 +190,7 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-1", "fb-schema"]);
   const host = bodies.get("host")!.data as HostViewData;
   assert.deepEqual([host.skills.length, host.selfMeasurement.status, host.gauges.rateLimitRemaining, host.accountUsage.accountUuid !== undefined], [1, "ok", 4321, true], JSON.stringify(host));
+  assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
   const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
@@ -196,7 +202,7 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual(Object.keys(versions.views).sort(), routed, "the versions body matches its declared schema with every view in it");
 
   // The kill switch: nav-badge `off` answers its Phase 0 computation, which must match the same schema.
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "off" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "off", analytics: "off" } }));
   for (const each of runs) each();
   const legacy = await fetch(`${url}/v1/views/nav-badge`, { headers: READ });
   const legacyBody = (await legacy.json()) as { sources: Array<{ name: string }> };
@@ -207,6 +213,11 @@ test("every registered view body validates against its declared schema", async (
   const hostLegacy = (await (await fetch(`${url}/v1/views/host`, { headers: READ })).json()) as { data: HostViewData; sources: Array<{ name: string }> };
   assert.deepEqual(hostLegacy.sources.map((s) => s.name), ["account:core"], "control: serve's own computation, not the read model's body");
   assert.deepEqual(violations(hostLegacy, declaredBody("/v1/views/host", "GET", 200)), []);
+  // W1-T5055: analytics `off` answers serve's own merge over its analytics caches, under the same schema.
+  const analyticsLegacy = (await (await fetch(`${url}/v1/views/analytics`, { headers: READ })).json()) as { data: AnalyticsViewData; sources: Array<{ name: string; asOf: string | null }> };
+  assert.equal(analyticsLegacy.data.coverage.of, 1);
+  assert.notEqual(analyticsLegacy.sources.find((s) => s.name === "analytics:core")?.asOf, iso(0), "control: serve's own cache, not the read model's committed snapshot");
+  assert.deepEqual(violations(analyticsLegacy, declaredBody("/v1/views/analytics", "GET", 200)), []);
 });
 
 test("the strict view validator refuses an undeclared field and a wrong enum in a view body", () => {

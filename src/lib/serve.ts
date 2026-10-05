@@ -87,6 +87,7 @@ import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOpti
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
+import { analyticsLegacyView } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, providerRoutingBody, type HostViewData } from "./host-view.js";
@@ -2787,10 +2788,12 @@ function assembleServeRoutes(
   // W1-T5053: the host view's legacy side reads through the same deps its four routes answer with.
   const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
     () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
+  // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
+  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
-    legacy: [navBadge, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
+    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
     withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),

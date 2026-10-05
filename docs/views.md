@@ -296,6 +296,8 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
 - `tasks[].lastActivityAt` and `actions[].sortAt` move only on a row that changed something: a
   `sweep.disposed` row re-emitting the disposition already recorded for that PR is not activity.
 - `groups` is the console's `groupBoard` as ordered id lists.
+- `tasks[].workerState` (`working`/`tool-executing`/`quiet`), `workerStateSince` (quiet only) and `processUnevidenced` are
+  the board row's worker liveness, added without a version bump: /fleet evidences a worker process only from them.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
 - `decisions[]` is every open thing the operator answers (`src/lib/now-decisions.ts`), newest first, at most 50

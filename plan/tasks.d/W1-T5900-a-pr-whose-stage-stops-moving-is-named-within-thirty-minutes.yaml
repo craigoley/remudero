@@ -1,0 +1,42 @@
+- id: W1-T5900
+  title: "A PR WHOSE STAGE STOPS MOVING IS NAMED WITHIN THIRTY MINUTES — on 2026-10-05 three distinct stalls (a review loop on run-unfiled plan PRs, a merge-conflict round that never merged, a fleet duplicate of a hand-build) each sat for hours until the operator noticed; the sweep re-disposes a stuck PR every pass but nothing measures how long it has been in the same stage"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a PR held in one blocker past its stage bound raises one named stall
+  band_meaning: span
+  origin: "operator session 2026-10-05: throughput research ('stuck PRs are the worst case scenario')"
+  plan_refs: [W1-T520, W1-T5863, W1-T5839, W1-T5864, W1-T5859, W1-T2860]
+  files: [src/lib/sweep.ts, test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main and the fleet ledger. Every sweep pass writes
+    `sweep.disposed` per open PR with `disposition`, `blocker`, `blocker_owner`, `blocker_since`
+    and `blocker_age_ms`, so the age of the current stage is already computed, but nothing acts on
+    it. Today's stalls, each found by hand: #9305 sat 'post-review / awaiting-review' 11:56-12:38Z
+    with 16+ SUCCESS reviews and no automerge row (review-key loop, fixed by #9321/W1-T5839);
+    #9301 sat 'conflicted' 11:43-12:45Z after a single-parent "merge" (W1-T5864); W1-T5836 was
+    built twice (#9300/#9308, W1-T5859). W1-T520's stall report names armed-but-behind PRs only;
+    W1-T5863 bounds one specific re-review demand. There is no general "this PR has not moved"
+    signal, so the worst outcome (a stuck PR) is detected by a human.
+  design: |
+    A stage bound per blocker class, as data in the sweep policy, each tagged BACKSTOP:
+    mergeable/awaiting-arm (green and reviewed, unmerged) 30 min; conflicted with no fix round
+    started 30 min; own-red with no fix round or push 45 min; post-review/awaiting-review 30 min.
+    When `blocker_age_ms` passes its bound, the sweep writes one `pr.stuck` row per (PR, blocker,
+    blocker_since) and raises one needs-human escalation naming the PR, the stage, its age and a
+    DIAGNOSIS from the known signatures it can check from rows already in hand: review.posted rows
+    since blocker_since with no automerge row (review loop); a dirty PR whose last fix commit has
+    one parent (failed merge); a second run branch for the PR's task (duplicate build). Unknown
+    signature: the escalation says so. A PR that moves (its blocker or blocker_since changes)
+    resolves the stall.
+  acceptance:
+    - claim: "a PR held mergeable/awaiting-arm past its bound writes one pr.stuck row and one escalation naming the stage and age, a review-loop fixture is diagnosed as a review loop, a PR that changes blocker before its bound raises nothing, and a second pass over the same stuck stage raises no second escalation"
+      proof: "unit test: test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts"
+  falsifier: |
+    Drop the bound check: the 40-minute awaiting-arm fixture raises nothing and the test fails.

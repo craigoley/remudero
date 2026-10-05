@@ -34,6 +34,7 @@ import {
   type ShadowRequest,
 } from "../src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "../src/lib/views.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -497,6 +498,7 @@ test("the worker compares a shadow sample off the main thread and the status vie
   const badge: ReadModelView = { name: "nav-badge", version: 1, materialize: () => [{ key: "", data: { count: 2 }, sources: [] }] };
   const broken: ReadModelView = { name: "broken", version: 1, materialize: () => [{ key: "", data: 1, sources: [] }] };
   const status = (): Record<string, unknown> | undefined => posted.flatMap((m) => (m.type === "body" && m.entry.view === "read-model" ? [m.entry.body.data as Record<string, unknown>] : [])).at(-1);
+  switchViewsOn(stateDir, ["nav-badge", "broken"], "shadow");
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, post: (m) => posted.push(m), views: [badge, broken, readModelStatusView] });
   closesFirst(t, "ticker released", () => ticker.release());
   assert.equal(ticker.shadow({ view: "nav-badge", key: "", requests: 1, legacy: { data: { count: 1 }, asOfMs: T0 } }), false, "no body before the first tick");
