@@ -9462,8 +9462,7 @@ export function dispatchFixSpent(outcome: boolean | void | FixClaimDeclined): bo
   return outcome;
 }
 
-/** W1-T5919 — `dispatchFix` declined at the registered-worktree-owner checkout claim: no worktree,
- *  worker or strike, so `runSweep` records the pass acted:false and seeds no `prior.fixed` dedup. */
+/** W1-T5919 — a registered-owner claim decline: no worker or strike, so acted:false and no dedup seed. */
 export interface FixClaimDeclined {
   claimDeclined: true;
   ownerRecoveryReason: string;
@@ -9480,9 +9479,8 @@ function isOwnerClaimDecline(line: Record<string, unknown>): boolean {
     typeof line.pr_number === "number" && typeof line.head_sha === "string";
 }
 
-/** W1-T5919 — BACKSTOP: registered-owner claim declines one (PR, head) may accrue before the sweep
- *  stops re-attempting it and escalates needs-human once. A decline spends no strike; three is the
- *  first attempt plus two retries, time for an exiting owner to clear. */
+/** W1-T5919 — BACKSTOP: owner-claim declines per (PR, head) before the sweep stops and escalates once;
+ *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
 
 /** W1-T5919 — at {@link FIX_CLAIM_DECLINE_BACKSTOP}, the stand-down; escalates once per (PR, head, reason). */
@@ -10479,8 +10477,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       }
       continue;
     }
-    // W1-T5919 — a declined claim is not a dispatched fix: it voids this head's dedup unless a real
-    // dispatch marker (`fix.dispatch`/`fix.retrigger`) was written at that head.
+    // W1-T5919: a declined claim voids this head's dedup unless fix.dispatch/fix.retrigger exists at it.
     if ((line.step === "fix.dispatch" || line.step === "fix.retrigger") && typeof line.head_sha === "string") {
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
