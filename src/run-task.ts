@@ -45812,17 +45812,10 @@ export async function planCommand(
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
-  // ONE-ARGUMENT ON PURPOSE — the only Architect-tier site that does NOT read the mounts
-  // `architect:` row, so this resolves through `config.architectModel ?? "opus"`. #781 wired the
-  // other three and scoped this one out in terms: "judge and the manual `rmd plan` command are
-  // out of the ruling's scope and unchanged" (fb-1784921980488-44b355 §4). Passing `mountsTable`
-  // here would be a MODEL CHANGE for this lane, not a cleanup — see .remudero/mounts.yaml's
-  // `architect:` block for the measured before/after and why the invariant is unaffected either
-  // way. `mountsTable` loads below because this lane does take its turn cap from the row.
-  const arch = architectModel(config);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable);
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
@@ -45830,7 +45823,7 @@ export async function planCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
-  log("plan.start", { mode, brief, architect: arch, worker: wrk });
+  log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
   const settingsFile = renderWorkerSettings({
@@ -45919,6 +45912,7 @@ export async function planCommand(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch, // the Architect tier
+          effort: mountsTable.architect.effort,
           maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
           config,
@@ -46070,7 +46064,7 @@ export async function planCommand(
       .map((line) => line.trim())
       .filter(Boolean);
     const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
+      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
       criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
