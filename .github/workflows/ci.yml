@@ -1615,7 +1615,7 @@ jobs:
           fi
           for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
-            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-bundle-*.json' -print -quit 2>/dev/null | grep -q .; then
+            if ! find "$RAW_DIR" -maxdepth 1 -type f \( -name 'coverage-bundle-*.json' -o -name 'coverage-corpus-*.json' \) -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
             fi
