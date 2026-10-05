@@ -1,0 +1,33 @@
+- id: W1-T5844
+  title: "A COVERAGE SKIP MESSAGE NAMES THE DIFF CLASS IT SKIPPED FOR — ci.yml's fast-lane skip lines still say no src/** or test/** path is in the diff, which W1-T5699's NO_SRC class (tests plus plan, no src/) makes false"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — a skip line states the class that skipped the step
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: W1-T5699 (#9281) builder's follow-up; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T5699, W1-T2428, W1-T3512]
+  files: [.github/workflows/ci.yml, test/a-coverage-skip-message-names-the-diff-class.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329. .github/workflows/ci.yml's coverage-ratchet job
+    echoes "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/**
+    path in this diff, so coverage cannot newly move)" and a matching step-summary line, and
+    the Diff coverage skip says the same. W1-T5699 (#9281, merged 09:42Z) added the NO_SRC class:
+    a diff with no src/ path but possibly test/ paths skips instrumented coverage. For that diff
+    the message asserts something false about the PR, and an operator reading a skipped
+    coverage step on a test-only change is told there was no test path.
+  design: |
+    Each fast-lane skip line in ci.yml names its reason by class: the existing wording for the
+    classes it is true of, and for NO_SRC that the diff has no src/ path, so instrumented
+    coverage cannot move. The steps' conditions are unchanged.
+  acceptance:
+    - claim: "every ci.yml fast-lane coverage skip line that can run for the NO_SRC class states that the diff has no src/ path and none claims the diff has no test/ path for it, while the step conditions are unchanged"
+      proof: "unit test: test/a-coverage-skip-message-names-the-diff-class.test.ts"
+  falsifier: |
+    Leave the old wording: the NO_SRC skip line still claims no test/ path and the test fails.

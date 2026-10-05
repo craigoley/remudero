@@ -1,0 +1,39 @@
+- id: W1-T5841
+  title: "A SETTLED GARDENER PENDING FORGETS ITS HELD PASS — the held pass's fingerprint is forgotten only when a pending is RELEASED, so after a normal credit or debit the candidates seen during the hold stay suppressed until the candidate set itself changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — every way a pending ends forgets the pass it held
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5825 (#9283) builder's residual-defect report"
+  plan_refs: [W1-T5825, W1-T4780, W1-T5740]
+  files: [src/lib/gardener.ts, test/a-gardener-judges-its-own-actions.test.ts, test/a-settled-gardener-pending-forgets-its-held-pass.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329. In src/lib/gardener.ts's pass, a judged pending
+    becomes `state = judged.verdict === "released" ? heldPassForgotten(judged.state) :
+    judged.state`. `heldPassForgotten`'s own doc says why it exists: the pass recorded while a
+    pending held every class saw its candidates but never offered them. A credit or debit ends
+    the hold the same way, yet keeps that `lastPass`, so the next pass with an unchanged
+    fingerprint is trusted as done and acts on nothing. W1-T5825's builder narrowed its fix to
+    the release arm because the existing test `W1-T4780: a merged metric PR progresses with
+    unchanged action fingerprint` (test/a-gardener-judges-its-own-actions.test.ts) asserts
+    that nothing lands after such a settlement; that file is named in `files:` here so the
+    builder can correct the expectation if it pins the held pass, not a landed one.
+  design: |
+    Forget the held pass on every verdict that ends a pending (credit, debit, released), and
+    only when that `lastPass` was recorded while the pending held (it landed nothing); a pass
+    that landed the pending PR itself stays trusted so the same action is not re-filed. Reuse
+    `heldPassForgotten`. Change W1-T4780's test only where it asserts the held pass survives a
+    settlement, and say so in the PR body.
+  acceptance:
+    - claim: "after a pending settles by credit or by debit, the next pass with an unchanged fingerprint offers the candidates the held pass saw, while a lastPass that landed the pending PR stays trusted"
+      proof: "unit test: test/a-settled-gardener-pending-forgets-its-held-pass.test.ts"
+  falsifier: |
+    Forget the held pass only on `released` (today's code): the credit and debit fixtures land
+    nothing on the next pass and the test fails.

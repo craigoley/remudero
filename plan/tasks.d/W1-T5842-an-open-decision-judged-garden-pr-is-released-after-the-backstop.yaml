@@ -1,0 +1,36 @@
+- id: W1-T5842
+  title: "AN OPEN DECISION-JUDGED GARDEN PR IS RELEASED AFTER THE BACKSTOP — W1-T5825 releases a metric-judged pending whose metric never moves within 24 h of its merge, but a `review` or `decision` class pending is judged only by its PR merging or closing, so one that stays open holds the gardener's lane forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — a decision-judged pending cannot hold the lane without bound
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5825 (#9283) builder's no-merge-hold report"
+  plan_refs: [W1-T5825, W1-T4780]
+  files: [src/lib/gardener.ts, test/an-open-decision-judged-garden-pr-is-released-after-the-backstop.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329. src/lib/gardener.ts judges a pending whose class
+    is `judgedByDecision` through `judgeGardenDecision`: merged credits, closed debits, and any
+    other PR state leaves it pending. W1-T5825's release (`<garden>.pending_released`, bound
+    `GARDEN_PENDING_RELEASE_MS`) runs only on the metric path, after `mergeSeenAt`. So a
+    decision-judged garden PR that nobody merges or closes (a defuse or retire PR that fails a
+    gate, as the knowledge gardener's did eight times before W1-T5837) holds every class of that
+    garden for as long as it stays open. Nothing on the board names that hold.
+  design: |
+    A decision-judged pending whose PR is still open past a backstop measured from when the
+    pending was recorded is released through the same arm as W1-T5825's (same row, a
+    `reason` naming the open PR), with neither credit nor debit, and its held pass is forgotten.
+    The PR is left open and untouched; a later merge or close of it is not re-judged. The bound
+    is tagged BACKSTOP with its own constant.
+  acceptance:
+    - claim: "a decision-judged pending whose PR stays open past the backstop is released with a pending_released row naming the open PR and no credit or debit, one open within the backstop still holds, and a merged or closed one is judged as before"
+      proof: "unit test: test/an-open-decision-judged-garden-pr-is-released-after-the-backstop.test.ts"
+  falsifier: |
+    Keep the release on the metric path only: the open decision PR past the backstop stays
+    pending and the test fails.

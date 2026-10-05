@@ -1,0 +1,35 @@
+- id: W1-T5845
+  title: "A BLOCK-SEQUENCE RATIONALE IS REPLACED WHOLE — W1-T5541's ratification writer replaces a collection-valued `rationale:` only to the end of its key's line, so a block sequence under the key leaves its items behind and the written shard is malformed"
+  repo: remudero
+  depends_on: [W1-T5541]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — the rationale edit spans the whole value node
+  band_meaning: span
+  origin: "operator session 2026-10-05: found while covering #9230 (W1-T5541) by hand"
+  plan_refs: [W1-T5541, W1-T5507]
+  files: [src/lib/inbox.ts, test/a-block-sequence-rationale-is-replaced-whole.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9230's head 1a180cdd (W1-T5541, not yet merged).
+    `carryRatificationRationale` (src/lib/inbox.ts) edits the fragment text in place. A scalar
+    value is replaced through its own range. For a non-scalar value it takes the arm that
+    replaces from just after the key's colon to the next newline. A flow collection on one line
+    (`rationale: [not, prose]`, the case the hand-added coverage test pins) is replaced whole.
+    A block sequence (`rationale:` then `  - item` lines) is not: probed with the repo's yaml
+    package, its value node's range starts on the next line, so the edit replaces only the empty
+    rest of the key line and the items remain under the new rationale.
+  design: |
+    For a non-scalar value, replace from just after the key through the value node's own end
+    (`pair.value.range[1]`, plus its trailing newline), as the scalar arm already does through
+    the scalar's range.
+  acceptance:
+    - claim: "a draft whose rationale is a block sequence is written with the follow-up text as its only rationale, no sequence item remains, the next key is preserved verbatim, and the flow-sequence case still passes"
+      proof: "unit test: test/a-block-sequence-rationale-is-replaced-whole.test.ts"
+  falsifier: |
+    Keep the end-of-line edit: the block-sequence fixture leaves its items in the written shard
+    and the test fails.
