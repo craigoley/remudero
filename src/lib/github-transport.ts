@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -326,6 +326,61 @@ export async function ghTextAsync(
   } finally {
     if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
   }
+}
+
+/**
+ * W1-T5836: a plain-text `gh` response handed to `onLine` one line at a time, never held whole —
+ * the Actions job log, whose coverage-shard body outgrew every `maxBuffer` it was given (ENOBUFS).
+ * Lines split on "\n" exactly as `String.split` would, the last segment included. Same sentinel
+ * refusal, read cadence and kill escalation as {@link ghTextAsync}; a throwing `onLine` ends the
+ * read with that error.
+ */
+export async function ghLinesAsync(
+  args: string[],
+  onLine: (line: string) => void,
+  opts: { timeout?: number } = {},
+): Promise<void> {
+  const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  refuseSentinelGhToken("gh", args, undefined);
+  await applyGhReadCadenceAsync(args);
+  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+  // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
+  const deadline = setTimeout(() => child.kill("SIGTERM"), timeout);
+  let partial = "";
+  let stderr = "";
+  let refused: unknown;
+  const emit = (lines: string[]): void => {
+    try {
+      for (const line of lines) if (refused === undefined) onLine(line);
+    } catch (err) {
+      // Carried, not dropped: the close handler rejects the read with this error.
+      refused = err;
+      child.kill();
+    }
+  };
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+    const lines = (partial + chunk).split("\n");
+    partial = lines.pop() ?? "";
+    emit(lines);
+  });
+  // BACKSTOP: only the end of stderr is kept, enough to carry the CLI's own one-line refusal.
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => void (stderr = (stderr + chunk).slice(-4096)));
+  const read = new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    child.on("error", (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(deadline);
+      if (code === 0) emit([partial]);
+      if (refused !== undefined) return reject(refused);
+      if (code === 0) return resolve({ stdout: "", stderr });
+      const cause = signal ? `was killed by ${signal}` : `failed with exit code ${code}`;
+      reject(new Error(`gh ${args.slice(0, 2).join(" ")} ${cause}\n${stderr.trim()}`));
+    });
+  }) as Promise<{ stdout: string; stderr: string }> & { child?: typeof child };
+  read.child = child;
+  await withGhKillEscalation(read, args, timeout);
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
