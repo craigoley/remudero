@@ -123,7 +123,7 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   mkdirSync(join(root, ".remudero", "skills"), { recursive: true });
   copyFileSync(new URL("../.remudero/skills/review.yaml", import.meta.url), join(root, ".remudero", "skills", "review.yaml"));
   const host = createHostView({ config: { controlRoot: root, ledgerPath: deps.ledgerPath, skillsRoot: root, accountFilePath }, ledgerSource, clock,
-    deps: { rateLimit: async () => 4321, diskFree: () => 10_000, selfMeasurement: async () => ({ status: "ok", rows: [{ ts: iso(0), result: { autonomyRate: { status: "measured", zeroTouchRate: 0.5 } } }] }) } });
+    rateLimit: async () => 4321, diskFree: () => 10_000, selfMeasurement: async () => ({ status: "ok", rows: [{ ts: iso(0), result: { autonomyRate: { status: "measured", zeroTouchRate: 0.5 } } }] }) });
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, host], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // The slow lane's views, built as its units build them and handed over as the worker does.

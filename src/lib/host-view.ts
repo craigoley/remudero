@@ -43,7 +43,7 @@ export interface HostViewConfig {
   controlRoot: string;
   /** Core's live ledger; its directory is the state dir the self-measurement union and statfs read. */
   ledgerPath: string;
-  /** The checkout whose `.remudero/skills/` GET /v1/skills lists. */
+  /** The checkout whose skills registry GET /v1/skills lists. */
   skillsRoot: string;
   accountFilePath?: string;
 }
@@ -72,15 +72,15 @@ export interface HostViewData {
 }
 
 /** Each host route's own deps, so the view and the routes read through one object per part. */
-export interface HostReadDeps {
+export interface HostRouteReads {
   control: ControlStatusDeps;
   account: AccountUsageDeps;
-  providerRouting: { root: string; now?: () => number; read?: typeof readProviderRoutingStatus };
+  providerRouting: Pick<ControlStatusDeps, "now"> & { root: string; read?: typeof readProviderRoutingStatus };
   skillsRoot: string;
 }
 
 /** The route deps a config names, defaulted exactly as serve's routes default them. */
-export function hostReadDeps(config: HostViewConfig): HostReadDeps {
+export function hostReadDeps(config: HostViewConfig): HostRouteReads {
   return {
     control: { root: config.controlRoot, ledgerPath: config.ledgerPath },
     account: { ledgerPath: config.ledgerPath, root: config.controlRoot, ...(config.accountFilePath ? { accountFilePath: config.accountFilePath } : {}) },
@@ -97,7 +97,7 @@ export function providerPolicyConfigFromStatus(status: ProviderRoutingStatus): {
 }
 
 /** GET /v1/provider-routing's body: the daemon's last routing decision with the live policy overlaid. */
-export function providerRoutingBody(deps: HostReadDeps["providerRouting"]): ProviderRoutingStatus {
+export function providerRoutingBody(deps: HostRouteReads["providerRouting"]): ProviderRoutingStatus {
   const status = (deps.read ?? readProviderRoutingStatus)(deps.root, { now: deps.now });
   const config = providerPolicyConfigFromStatus(status);
   const policy = config ? resolveProviderRoutingPolicy(deps.root, config, { now: deps.now }) : status.policy;
@@ -112,7 +112,7 @@ export function hostAccountUsage(snapshot: AccountUsageSnapshot): AccountUsageSn
 }
 
 /** The parts read synchronously from files: one live-ledger read serves both the control and the account part. */
-export function hostFileParts(deps: HostReadDeps): Pick<HostViewData, "control" | "accountUsage" | "providerRouting" | "skills"> {
+export function hostFileParts(deps: HostRouteReads): Pick<HostViewData, "control" | "accountUsage" | "providerRouting" | "skills"> {
   const lines = (deps.account.readLedger ?? readLedgerLines)(deps.account.ledgerPath);
   return {
     control: controlStatusBody(deps.control, lines),
@@ -135,13 +135,11 @@ export interface HostViewOptions {
   ledgerSource: (state: ReadModelInstanceState, now: number) => ViewSource;
   clock?: Clock;
   intervalMs?: number;
-  /** Seams; production reads the files, `statfs`, `gh api rate_limit` and the ledger union. */
-  deps?: {
-    read?: Partial<HostReadDeps>;
-    diskFree?: (path: string) => number | undefined;
-    rateLimit?: () => Promise<number | undefined>;
-    selfMeasurement?: (stateDir: string, n: number) => Promise<LatestMeasurementRowsResult>;
-  };
+  /** Seams below; production reads the files, `statfs`, `gh api rate_limit` and the ledger union. */
+  read?: Partial<HostRouteReads>;
+  diskFree?: (path: string) => number | undefined;
+  rateLimit?: () => Promise<number | undefined>;
+  selfMeasurement?: (stateDir: string, n: number) => Promise<LatestMeasurementRowsResult>;
 }
 
 type HostBody = { key: string; data: HostViewData; sources: ViewSource[] };
@@ -155,11 +153,11 @@ export function createHostView(opts: HostViewOptions): {
   const clock = opts.clock ?? systemClock;
   const intervalMs = opts.intervalMs ?? HOST_PROBE_INTERVAL_MS;
   const config = opts.config;
-  const read = config ? { ...hostReadDeps(config), ...opts.deps?.read } : undefined;
+  const read = config ? { ...hostReadDeps(config), ...opts.read } : undefined;
   const stateDir = config ? dirname(config.ledgerPath) : "";
-  const rateLimit = opts.deps?.rateLimit ?? (() => readGhRateLimitRemainingAsync());
-  const selfMeasurement = opts.deps?.selfMeasurement ?? createLatestMeasurementReader();
-  const diskFree = opts.deps?.diskFree ?? readDiskFreeBytes;
+  const rateLimit = opts.rateLimit ?? (() => readGhRateLimitRemainingAsync());
+  const selfMeasurement = opts.selfMeasurement ?? createLatestMeasurementReader();
+  const diskFree = opts.diskFree ?? readDiskFreeBytes;
   // The async readings, each held until its next answer lands; a landing makes the next pass re-compose.
   const held: { rateLimit?: number; rateLimitReason: string; measurement?: LatestMeasurementRowsResult } = { rateLimitReason: "gh api rate_limit has not answered yet" };
   const inFlight = { rateLimit: false, measurement: false };
@@ -242,7 +240,7 @@ export function createHostView(opts: HostViewOptions): {
  * The gauges and the self-measurement are the view's own readings while it has a body, as `now`'s legacy side
  * takes its probe gauges: two samples moments apart are not a diff, and serve must not re-read the archive union.
  */
-export function hostLegacyView(deps: HostReadDeps, viewData: () => HostViewData | undefined): ViewDefinition<HostViewData> {
+export function hostLegacyView(deps: HostRouteReads, viewData: () => HostViewData | undefined): ViewDefinition<HostViewData> {
   return {
     name: HOST_VIEW_NAME,
     version: HOST_VIEW_VERSION,

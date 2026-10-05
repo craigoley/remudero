@@ -135,7 +135,7 @@ test("W1-T5053: a credit state change is ledgered once with no reader", async ()
   const w = world();
   const l = lane({ accountUsage: { ledgerPath: w.ledgerPath, root: w.root, accountFilePath: w.accountFilePath }, intervalMs: 60_000 });
   const at = { ms: NOW };
-  const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config), rateLimit: async () => 1, diskFree: () => 1 } });
+  const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config), rateLimit: async () => 1, diskFree: () => 1 });
   try {
     l.lease();
     await l.settled(1);
@@ -189,7 +189,7 @@ test("W1-T5053: the host view carries each host route's body over the same input
   const w = world();
   const at = { ms: NOW };
   const deps = pinned(w.config);
-  const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: deps, rateLimit: async () => 4321, diskFree: () => 123_456_789 } });
+  const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: deps, rateLimit: async () => 4321, diskFree: () => 123_456_789 });
   const server = await serving([
     buildControlStatusRoute(deps.control),
     buildAccountUsageRoute(deps.account),
@@ -232,7 +232,7 @@ test("W1-T5053: the host view never waits on the rate limit and re-reads no file
   const read = { ...base, account: { ...base.account, readLedger: (path: string) => (reads++, JSON.parse(`[${readFileSync(path, "utf8").trim().split("\n").join(",")}]`) as Array<Record<string, unknown>>) } };
   const view = createHostView({
     config: w.config, ledgerSource, clock: clockAt(at), intervalMs: 1_000,
-    deps: { read, diskFree: () => undefined, rateLimit: () => (rateCalls++, new Promise<number | undefined>((resolve) => (answer = resolve as (n: number) => void))), selfMeasurement: async () => ({ status: "ok", rows: [] }) },
+    read, diskFree: () => undefined, rateLimit: () => (rateCalls++, new Promise<number | undefined>((resolve) => (answer = resolve as (n: number) => void))), selfMeasurement: async () => ({ status: "ok", rows: [] }),
   });
   try {
     const first = view.materialize(ctx(at.ms))[0]!.data as HostViewData;
@@ -257,9 +257,9 @@ test("W1-T5053: a failed async reading is named and a host view without inputs b
   const at = { ms: NOW };
   const view = createHostView({
     config: w.config, ledgerSource, clock: clockAt(at),
-    deps: { read: pinned(w.config), diskFree: () => 1, rateLimit: async () => { throw new Error("gh exploded"); }, selfMeasurement: async () => { throw new Error("union exploded"); } },
+    read: pinned(w.config), diskFree: () => 1, rateLimit: async () => { throw new Error("gh exploded"); }, selfMeasurement: async () => { throw new Error("union exploded"); },
   });
-  const quiet = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config), diskFree: () => 1, rateLimit: async () => undefined, selfMeasurement: async (): Promise<LatestMeasurementRowsResult> => ({ status: "ok", rows: [] }) } });
+  const quiet = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config), diskFree: () => 1, rateLimit: async () => undefined, selfMeasurement: async (): Promise<LatestMeasurementRowsResult> => ({ status: "ok", rows: [] }) });
   try {
     view.materialize(ctx(at.ms));
     quiet.materialize(ctx(at.ms));
@@ -273,7 +273,7 @@ test("W1-T5053: a failed async reading is named and a host view without inputs b
     // A probe whose file read throws is not retried inside its interval.
     rmSync(join(w.root, ".remudero", "skills", "review.yaml"));
     writeFileSync(join(w.root, ".remudero", "skills", "broken.yaml"), "tools: [unclosed\n");
-    const failing = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config), diskFree: () => 1, rateLimit: async () => 1, selfMeasurement: async () => ({ status: "ok", rows: [] }) } });
+    const failing = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config), diskFree: () => 1, rateLimit: async () => 1, selfMeasurement: async () => ({ status: "ok", rows: [] }) });
     assert.throws(() => failing.materialize(ctx(at.ms)));
     assert.deepEqual(failing.materialize(ctx(at.ms)), [], "inside the interval the failed probe is not re-run");
   } finally {
@@ -285,7 +285,7 @@ test("W1-T5053: the host legacy side computes the route parts and takes the view
   const w = world();
   const at = { ms: NOW };
   try {
-    const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config), diskFree: () => 7, rateLimit: async () => 9, selfMeasurement: async () => ({ status: "ok", rows: [] }) } });
+    const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config), diskFree: () => 7, rateLimit: async () => 9, selfMeasurement: async () => ({ status: "ok", rows: [] }) });
     const sampled = view.materialize(ctx(at.ms))[0]!.data as HostViewData;
     const withView = hostLegacyView(pinned(w.config), () => sampled).compute(new URLSearchParams());
     assert.ok(!("error" in withView));
@@ -298,7 +298,7 @@ test("W1-T5053: the host legacy side computes the route parts and takes the view
     const unknown = hostLegacyView(pinned(w.config), () => undefined).compute(new URLSearchParams());
     assert.ok(!("error" in unknown));
     assert.equal(unknown.sources[0]?.state, "stale", "an unreadable account file is a stale account source");
-    const unknownView = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config), diskFree: () => 7, rateLimit: async () => 9, selfMeasurement: async () => ({ status: "ok", rows: [] }) } });
+    const unknownView = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config), diskFree: () => 7, rateLimit: async () => 9, selfMeasurement: async () => ({ status: "ok", rows: [] }) });
     assert.match(unknownView.materialize(ctx(at.ms))[0]!.sources[1]!.reason ?? "", /^account usage unreadable$/);
   } finally {
     w.cleanup();
@@ -320,7 +320,7 @@ test("W1-T5053: the host view's config is the slow lane's inputs and its rate li
   const w = world();
   try {
     const at = { ms: NOW };
-    const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), deps: { read: pinned(w.config) } });
+    const view = createHostView({ config: w.config, ledgerSource, clock: clockAt(at), read: pinned(w.config) });
     view.materialize(ctx(at.ms));
     const deadline = Date.now() + 10_000;
     let data = view.materialize(ctx(at.ms))[0]!.data as HostViewData;

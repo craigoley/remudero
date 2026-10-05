@@ -270,9 +270,8 @@ export interface ControlStatusDeps extends Pick<PanelActionDeps, "root" | "ledge
   livenessBoundMs?: number;
 }
 
-/** GET /v1/control/status — read-scoped. Derives Pause/Resume/STOP/quiet-hours button states
- *  from the actual fleet-control flag files, never stateless buttons. Also carries `daemonLive`,
- *  read once per request from the same heartbeat GET /v1/daemon-health computes. */
+/** GET /v1/control/status — read-scoped. Pause/Resume/STOP/quiet-hours states from the real flag files, never
+ *  stateless buttons, plus `daemonLive` from the same heartbeat GET /v1/daemon-health computes. */
 export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
   return {
     method: "GET",

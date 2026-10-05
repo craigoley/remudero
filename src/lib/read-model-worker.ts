@@ -1205,7 +1205,6 @@ export interface ReadModelViewsData {
   viewsModule?: string;
   /** The inbox root the `inbox-thread` view reads its thread store from; absent, that view reports why it has no body. */
   inboxRoot?: string;
-  /** The `host` view's inputs (host-view.ts); absent, that view builds no body. */
   host?: HostViewConfig;
 }
 
@@ -1380,7 +1379,6 @@ export interface ReadModelWorkerData {
   viewsModule?: string;
 }
 
-/** The host view reads what the slow lane's credit-edge unit reads, plus the checkout's skills. */
 function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
   const host = hostViewConfig(slowLane);
   return host ? { host } : {};

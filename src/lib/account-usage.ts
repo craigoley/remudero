@@ -667,8 +667,7 @@ export function recordCreditStateEdge(deps: AccountUsageDeps): LedgerLine | unde
   return line;
 }
 
-/** `GET /v1/account-usage` — read-scoped, computed fresh per request, no cache or memoization
- *  (see this module's header for why); it writes nothing. */
+/** `GET /v1/account-usage` — read-scoped, fresh per request, no memo (module header); it writes nothing. */
 export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
   return {
     method: "GET",
