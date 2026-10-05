@@ -2,6 +2,7 @@ import type { FeedbackEntry } from "./feedback.js";
 import { readLedgerUnionRecordsSync, realLedgerFs } from "./ledger-union.js";
 import type { PolicyValues } from "./policy.js";
 import { ratificationPinCheck, type Ratifications } from "./ratification.js";
+import type { VerifyHumanRuling } from "./verify-human-judge.js";
 
 /** Source-owned decisions, projected without granting authority or performing actions. */
 export type HumanGateKind =
@@ -229,6 +230,110 @@ export function projectChangeManagementGates(
   };
 }
 
+/** One escalation still open on a Dependabot PR, named by the dep-review.ts producer that opened it: `manual`
+ *  (`dep-review-PR<n>`, a major or unparseable bump), `arm` (`dep-review-arm-PR<n>`, auto-merge never armed) or
+ *  `hold` (`dep-review-hold-PR<n>`, the bounded-age backstop escalating a hold past DEP_REVIEW_HOLD_AGE_MS). */
+export interface DependencyEscalation { producer: "manual" | "arm" | "hold"; class?: string; issueUrl?: string; openedAt?: string; unverified?: true }
+
+export interface DependencyReviewFact {
+  repo: string | null;
+  prNumber: number;
+  prUrl: string | null;
+  /** The newest `dep-review.decided` verdict for the PR; null when none was read. */
+  decision: string | null;
+  escalations: readonly DependencyEscalation[];
+  /** Whether the PR is still open; null when the open-PR index was incomplete. */
+  prOpen: boolean | null;
+}
+
+/** A `heldDependencyRoots` entry; `stalled` lists only dependents still live behind it. */
+export interface HeldRootFact { rootId: string; hold: "verify-not-auto" | "blocked"; stalled: readonly string[]; url: string | null }
+
+export interface VerifyHumanFact { taskId: string; url: string | null; judgment: VerifyHumanRuling }
+
+type FactPart<T> = Pick<HumanGateSource, "state" | "reason"> & { items: readonly T[] };
+
+const listed = (ids: readonly string[], cap = 10): string =>
+  ids.slice(0, cap).join(", ") + (ids.length > cap ? ` (+${ids.length - cap} more)` : "");
+
+function partOf(name: string, instance: string, part: FactPart<unknown>, gaps: readonly string[], notes: readonly string[], gates: HumanGateObservation[]): HumanGateSource {
+  const reasons = [...(part.reason ? [part.reason] : []), ...gaps, ...notes];
+  return { name, instance, state: part.state === "complete" && gaps.length > 0 ? "partial" : part.state,
+    ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates };
+}
+
+/**
+ * W1-T5370 (W1-T5021 slice 4): dependency review, held roots and verify-human. Read-only: it grants no approval,
+ * release or retirement and adds no PR or dispatch gate. MIGRATE closes its own PR and a HOLD is the sweep's to
+ * retry, so neither asks until the bounded-age hold producer itself escalates; no second timer lives here. A
+ * judge's automate or backlog ruling stays fleet-owned, and a task with no readable current ruling is a named gap
+ * that turns the count into a floor: never an approval, never a zero.
+ */
+export function projectDependencyVerificationGates(input: {
+  instance: string;
+  dependencyReview: FactPart<DependencyReviewFact>;
+  heldRoots: FactPart<HeldRootFact>;
+  verifyHuman: FactPart<VerifyHumanFact>;
+}): HumanGateSource[] {
+  const depGaps = new Set<string>();
+  const depGates = input.dependencyReview.items.flatMap((fact): HumanGateObservation[] => {
+    if (fact.prOpen === false || fact.decision === "migrate") return [];
+    const ask = fact.decision === "hold" ? fact.escalations.find((e) => e.producer === "hold")
+      : fact.escalations.find((e) => e.producer !== "hold" && (e.class ?? "MANUAL") === "MANUAL");
+    if (!ask) return [];
+    const unsure = [...(ask.unverified ? ["the escalation issue's open state could not be confirmed"] : []),
+      ...(fact.prOpen === null ? ["the PR's open state could not be confirmed"] : [])];
+    unsure.forEach((gap) => depGaps.add(gap));
+    const hold = ask.producer === "hold";
+    return [{
+      kind: "dependency_review", subject: `${fact.repo ?? ""}#${fact.prNumber}`, ownerSurface: "inbox",
+      openedAt: ask.openedAt ?? null, url: ask.issueUrl ?? fact.prUrl,
+      reason: (hold ? `dependency hold on PR #${fact.prNumber} outlived the dep-review backstop and its aged-hold escalation asks for a check repair`
+        : `MANUAL dependency escalation (${ask.producer}) for PR #${fact.prNumber}; latest dep-review verdict: ${fact.decision ?? "unread"}`) +
+        (unsure.length > 0 ? `; ${unsure.join("; ")}` : ""),
+      resolutionVerb: hold ? "rework" : "approve",
+    }];
+  });
+  const rulings = new Map(input.verifyHuman.items.map((fact) => [fact.taskId, fact.judgment]));
+  const rootIds = new Set<string>();
+  const fleetRoots: string[] = [];
+  const rootGates = input.heldRoots.items.flatMap((root): HumanGateObservation[] => {
+    const stalled = [...new Set(root.stalled)].sort();
+    if (stalled.length === 0) return [];
+    const ruling = rulings.get(root.rootId);
+    if (root.hold === "verify-not-auto" && ruling?.state === "judged" && ruling.decision === "automate") {
+      fleetRoots.push(`${root.rootId} (${stalled.length} stalled)`);
+      return [];
+    }
+    rootIds.add(root.rootId);
+    return [{
+      kind: "held_root", subject: root.rootId, ownerSurface: "inbox", openedAt: null, url: root.url,
+      reason: `${root.rootId} is held (${root.hold === "blocked" ? "blocked with no retirement ruling" : "its verify gate is not released"}); ` +
+        `${stalled.length} task(s) stalled behind it: ${listed(stalled)}` +
+        (ruling?.state === "judged" && ruling.decision === "needs_operator" ? `; the judge ruled a person is needed: ${ruling.reason}` : ""),
+      resolutionVerb: root.hold === "blocked" ? "retire" : "release",
+    }];
+  });
+  const unclassified: string[] = [];
+  const verifyGates = input.verifyHuman.items.flatMap((fact): HumanGateObservation[] => {
+    if (fact.judgment.state === "unclassified") unclassified.push(`${fact.taskId} (${fact.judgment.reason})`);
+    // A held root already asks once, through its held_root gate, carrying the ruling and its impact.
+    if (fact.judgment.state !== "judged" || fact.judgment.decision !== "needs_operator" || rootIds.has(fact.taskId)) return [];
+    return [{
+      kind: "verify_human", subject: fact.taskId, ownerSurface: "inbox", openedAt: fact.judgment.at, url: fact.url,
+      reason: `the verify-human judge ruled a person is needed: ${fact.judgment.reason}`, resolutionVerb: "verify",
+    }];
+  });
+  unclassified.sort();
+  return [
+    partOf("dependency-review", input.instance, input.dependencyReview, [...depGaps].sort(), [], depGates),
+    partOf("held-roots", input.instance, input.heldRoots, [],
+      fleetRoots.length > 0 ? [`fleet-owned by a judge automate ruling: ${listed(fleetRoots.sort())}`] : [], rootGates),
+    partOf("verify-human", input.instance, input.verifyHuman,
+      unclassified.length > 0 ? [`${unclassified.length} verify: human task(s) unclassified, with no readable current judge ruling: ${listed(unclassified)}`] : [], [], verifyGates),
+  ];
+}
+
 export interface PinReviewerGateInput {
   instance: string;
   state: HumanGateSource["state"];
@@ -388,6 +493,9 @@ const SOURCE_KINDS: Readonly<Record<string, readonly HumanGateKind[]>> = {
   "ratification-pins": ["pin_drift"],
   "reviewer-freshness": ["stale_reviewer"],
   proposals: ["proposal"],
+  "dependency-review": ["dependency_review"],
+  "held-roots": ["held_root"],
+  "verify-human": ["verify_human"],
 };
 
 /** One surface's needs-you number, read from the shared projection and never recounted. */
