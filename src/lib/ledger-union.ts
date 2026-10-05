@@ -6,7 +6,7 @@ import { addAbortSignal, type Readable } from "node:stream";
 import { readFile as nodeReadFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
-import { LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 
 const gunzipAsync = promisify(nodeGunzip);
@@ -122,6 +122,7 @@ function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "rea
   const rotationPaths = new Set(rotations.map((e) => e.path));
   const unclassified = names
     .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
+    .filter((n) => n !== `${LEDGER_FILENAME}${LEDGER_CARRIED_PREFIX_SUFFIX}` && n !== `${LEDGER_FILENAME}${LEDGER_RETAINED_STEPS_SUFFIX}`)
     .map((n) => join(stateDir, n))
     .filter((p) => !rotationPaths.has(p));
   return { rotations, unclassified };
