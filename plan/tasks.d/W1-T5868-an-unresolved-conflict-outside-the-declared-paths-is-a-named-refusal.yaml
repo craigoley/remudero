@@ -1,0 +1,32 @@
+- id: W1-T5868
+  title: "AN UNRESOLVED CONFLICT OUTSIDE THE DECLARED PATHS IS A NAMED REFUSAL — on the non-guarded commit path a merge-conflict round whose worker left conflict markers in a file outside the task's declared paths makes `git commit` throw, instead of a refusal that names the file and counts as a strike"
+  repo: remudero
+  depends_on: [W1-T5864]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — an unresolved merge path is reported by name, never thrown
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5864 (#9322) builder's follow-up 2 (pre-existing)"
+  plan_refs: [W1-T5864, W1-T4458, W1-T3696]
+  files: [src/run-task.ts, test/an-unresolved-conflict-outside-the-declared-paths-is-a-named-refusal.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on W1-T5864's head 5b72863f (#9322). W1-T5864 makes the GUARDED commit (the
+    sweep path) build from the merge's own index with MERGE_HEAD as a parent. On the non-guarded
+    path the harness runs `git commit`, which throws while any path is still unmerged; a merge of
+    current main can conflict in files the task never declared (main moved them), and the worker
+    is told to resolve only the conflicts it was shown. The throw surfaces as a generic error, not
+    as a strike whose reason names the unresolved files.
+  design: |
+    Before committing a merge-mode round, list unmerged paths (`git diff --name-only
+    --diff-filter=U`); if any remain, refuse with a reason naming them and count the round as a
+    failed strike, as W1-T5864's other refusals do. With none, commit as today.
+  acceptance:
+    - claim: "a merge-mode round that leaves an unmerged file outside the declared paths is refused naming that file and counted as a failed strike, with no thrown error, and a fully resolved merge commits with main as its second parent"
+      proof: "unit test: test/an-unresolved-conflict-outside-the-declared-paths-is-a-named-refusal.test.ts"
+  falsifier: |
+    Commit without checking unmerged paths: git commit throws and the test fails.
