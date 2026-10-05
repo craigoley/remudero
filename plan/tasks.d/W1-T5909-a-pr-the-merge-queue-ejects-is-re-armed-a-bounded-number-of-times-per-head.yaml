@@ -1,0 +1,94 @@
+- id: W1-T5909
+  title: "A PR THE MERGE QUEUE EJECTS IS RE-ARMED, A BOUNDED NUMBER OF TIMES PER HEAD — the sweep's own prior arm never outvotes GitHub's observed disarm: when the queue ejects a PR the sweep armed, GitHub disables its auto-merge, but the `mergeable` dedup still reads `prior.armed` at the unchanged head as 'already armed', so a clean PR is stood down every pass and never merges until its head moves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the sweep's `mergeable` dedup believes GitHub's observed disarm over its own prior-arm memory, bounded per head
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: #9392 stranded after a merge-queue ejection"
+  plan_refs: [W1-T4784, W1-T5376, W1-T975, W1-T1000002, W1-T4405, W1-T5403, W1-T1116, W1-T2345]
+  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/ledger.ts, src/run-task.ts, docs/forensics/sweep.md, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts, test/a-pr-the-merge-queue-ejects-is-re-armed-a-bounded-number-of-times.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05, PR #9392 (the W1-T5908 filing). The merge queue is on for main (ruleset
+    merge_queue SQUASH, ALLGREEN; required ci, coverage-ratchet, test-slow). The sweep armed #9392 at
+    19:31:25Z: an `automerge.armed` row, lane `sweep`, head 1f9c8198e, and a `sweep.disposed` row with
+    disposition mergeable and acted:true. That row seeds `prior.armed` with `9392@1f9c8198e...`
+    (`priorActionsFromLedger`, the `mergeable` arm). During a GitHub Actions outage the queue group's
+    jobs waited about 15 minutes for a runner and GitHub cancelled them. At 20:05:36Z the queue
+    removed #9392 (RemovedFromMergeQueueEvent, reason failed_checks), and that removal disables
+    auto-merge. From then on every full sweep pass wrote `sweep.disposed` with disposition
+    mergeable, blocker awaiting-arm, acted:false, deduped:true, and stand_down_reason "auto-merge
+    already armed by a prior sweep pass at this head (1f9c819)". repeat_streak reached 18 at 20:24:25Z.
+    It is never re-armed until its head moves, and a clean PR's head never moves.
+    The cause is the `case "mergeable"` dedup in src/lib/sweep.ts. `armedByGitHub` is
+    `pr.autoMergeArmed === true`, and `armedByPriorPass` is `!armedByGitHub &&
+    prior.armed.has(pr@head)`. The comment above them says "PREFER OBSERVED STATE: GitHub's own
+    `autoMergeArmed` is the authority", yet the memory disjunct fires exactly when GitHub reports the
+    PR disarmed. The disjunct was right before the queue existed: an armed PR stayed armed until it
+    merged or its head moved. W1-T1000002 already ruled that a bare disarm is not a hold (a hold is a
+    ledgered refusal), so nothing else stands behind this dedup.
+    The sweep cannot tell "disarmed" from "queued" today. A PR that IS in the merge queue also reads
+    `autoMergeRequest: null` / `auto_merge: null` (verified live on #9391 while queued), and the
+    sweep has no queue-membership read: `git grep isInMergeQueue src` is empty. The only queue read
+    is W1-T4405's `baseBranchRequiresMergeQueue` (src/lib/arm-auto-merge.ts), which asks whether
+    the base branch HAS a queue, not whether this PR is IN it. Dropping the memory disjunct alone
+    would re-arm every queued PR on every pass. GitHub answers that idempotently (`attemptQueueArm`
+    reads "already queued" as armed), but it spends one `gh pr merge` write per queued PR per pass.
+    A PR first armed by the review lane is not affected, because its arm never enters `prior.armed`.
+    W1-T4784 (queued) assumes "the sweep re-arms an ejected PR forever". For a sweep-armed PR the
+    truth is the opposite: it is never re-armed. Its goal still stands, though: re-entry needs a cap
+    per head, or a PR that fails only on its group commit loops through the queue. This task adds
+    that cap on the sweep side. W1-T4784's timeline read of removed_from_merge_queue events stays
+    its own follow-up.
+  design: |
+    1. QUEUE MEMBERSHIP, READ BESIDE W1-T4405'S QUEUE DETECTION. In src/lib/arm-auto-merge.ts add a
+       read of one PR's queue membership over GraphQL: `repository.pullRequest(number) { isInMergeQueue
+       headRefOid }`, sent through the gh transport (`ghJson`/`ghJsonAsync`, never a bare spawn). It
+       returns a three-valued result: `queued`, `not-queued`, or `{ unreadable: <reason> }`. Never a
+       boolean: an unreadable read is a third outcome the caller can see, per the doctrine's
+       "catch returning a success-shaped literal" rule. Expose it as a new optional SweepDeps effect,
+       `readMergeQueueMembership(pr)`. Add it to SWEEP_EFFECT_SURFACE and wire it in
+       `buildSweepEffects`, and in run-task.ts's wrapper where that Pick names the effects. Cache it
+       for one pass only (the effects object is rebuilt every poll). Membership changes minute to
+       minute, unlike the queue setting's 10-minute TTL, so it is never cached across passes. Read it
+       only for a `mergeable` PR that GitHub reports not armed, which is a small population.
+    2. A QUEUED PR IS ARMED; AN UNQUEUED, UNARMED PR WITH A PRIOR ARM AT THIS HEAD WAS DISARMED. In
+       the `mergeable` dedup:
+       (a) `queued` dedups like `armedByGitHub` and gets its own stand-down reason ("in the merge
+           queue (observed on GitHub) — nothing to re-arm"). It is NOT idle-eligible: the queue owns
+           the merge, so W1-T5492's guarded completion never runs on it.
+       (b) `not-queued` with `prior.armed` at this head means GitHub disarmed it. The memory no longer
+           dedups it, so `alreadyDone` stays false and the pass re-arms through the existing `deps.arm`
+           path (on a queue branch that is `attemptQueueArm`, which enqueues a clean PR). Before the
+           arm it writes `automerge.rearmed_after_disarm` with pr_number, head_sha, rearm_count (this
+           one included) and bound. The `sweep.disposed` row carries `queue_membership`.
+    3. BOUNDED PER (PR, HEAD). The re-arm count is the number of `automerge.rearmed_after_disarm`
+       rows at this pr@head in the ledger the pass already reads. A constant tagged BACKSTOP caps it,
+       e.g. MAX_REARMS_AFTER_DISARM_PER_HEAD = 3. This is W1-T4784's cap; a new head resets it. At
+       the bound the pass does NOT arm. Once per pr@head it writes `automerge.rearm_exhausted` (pr_number,
+       head_sha, rearms, bound) and escalates through a new effect `escalateRearmExhausted`, built
+       on `tryEscalate` like `escalateCancelledCheck` (class BLOCKED, cause `ci`, summary naming the
+       PR and head). Later passes stand down with a reason that names the bound and the escalation.
+       Register both new steps in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts, which is at its
+       comment ceiling, so add no comment) so rotation keeps the count. If a new row carries `pr_url`,
+       list it in the config-garden census's EXEMPT map as A_LANE_RUN_ID.
+    4. A FAILED QUEUE READ FALLS BACK TO TODAY'S MEMORY DEDUP, AND SAYS SO. On `{ unreadable }` the
+       pass keeps `armedByPriorPass` exactly as today. Its stand-down reason names the fallback
+       ("queue membership unreadable (<reason>) — fell back to the prior-pass arm memory at this
+       head"), and `queue_membership: "unreadable"` is on the row, so this case reads apart from a
+       real "already armed".
+    Comment budget: src/lib/sweep.ts sits at 4221 of its 4250-line comment ceiling. Put the long
+    "why" in docs/forensics/sweep.md behind a `// Why:` pointer.
+  acceptance:
+    - claim: "a PR the sweep armed whose auto-merge GitHub reports disabled at the same head, and which is not in the merge queue, is re-armed with an automerge.rearmed_after_disarm row; a queued PR is not re-armed; past the per-head bound the pass stops arming and escalates once naming the PR and head; a new head resets the count; and an unreadable queue read falls back to the prior-arm dedup with the fallback named on the row"
+      proof: "unit test: test/a-pr-the-merge-queue-ejects-is-re-armed-a-bounded-number-of-times.test.ts"
+  falsifier: |
+    Restore `armedByPriorPass = !armedByGitHub && prior.armed.has(pr@head)` without the membership
+    read. The disarmed-at-same-head case then stands down "auto-merge already armed by a prior sweep
+    pass", `deps.arm` is never called, and the test fails.
