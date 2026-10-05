@@ -858,6 +858,7 @@ import {
   planStateTruthRung,
   type PlanCoherenceShardListing,
   probeGithubThrottle,
+  probeGithubThrottleSteps,
   recordFollowupHarvest,
   renderGather,
   renderNetStateUnwiredAdvisories,
@@ -876,13 +877,15 @@ import {
   type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
-  shippedSince,
+  shippedSinceSteps,
   stampCitationsAndCommit,
   type GitLogCommit,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
   type ShippedGithub,
+  type ShippedGithubReads,
+  type ThrottleProbeResult,
   defaultRetroBackoffPolicy,
   evaluateRetroBackoff,
   loadRetroAttemptRecord,
@@ -2610,6 +2613,7 @@ import {
   type PushRunBranchAsyncOpts,
   type Steps,
 } from "./lib/git-push.js";
+import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -28254,31 +28258,74 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * publication (the gate + the human) [research].
  */
 /**
- * The GitHub gateway `shippedSince` needs, wired to this repo's real `gh` (W1-T132
- * design ii): `unavailable()` backed by ONE cheap `gh api rate_limit` probe. Shared by
- * `retroCommand`'s own gather AND the daemon's cadence-trigger check (W1-T160,
- * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
- * gateway construction, never two independently-behaving GitHub reads.
+ * The GitHub gateway `shippedSince` needs, wired to this repo's real `gh` (W1-T132 design ii):
+ * `unavailable()` is ONE cheap `gh api rate_limit` probe, and the trailer and head reads answer
+ * from ONE {@link buildBatchedGithub} walk (W1-T5649 iii), never one `gh` search per run.
+ * `mergedCommits` (W1-T2288) backs `runlessMergesSince` and `shippedSince`'s local candidate
+ * filter: full history, unscoped, a pure filter over the corpus as `citationStampPassFor` does.
  */
 function retroShippedGithubGateway(): ShippedGithub {
   const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = ghGateway(owner, repo);
+  const batched = buildBatchedGithub(owner, repo);
   return {
-    findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
-    headRefName: (prUrl) => baseGithub.headRefName(prUrl),
+    findMergedByTrailer: (taskId) => batched.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => batched.headRefName(prUrl),
     unavailable: () => probeGithubThrottle(),
-    // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
-    // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
-    // the SAME "no --since bound" discipline `citationStampPassFor`'s own git-log reader
-    // already uses for the identical reason (a marker-scoped read would need re-deriving on
-    // every threshold edit; a pure filter over the full corpus does not).
     mergedCommits: () =>
       parseGitLogCitationCommits(
-        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
-          encoding: "utf8",
-          maxBuffer: 1 << 26,
-        }),
+        execFileSync("git", ["-C", repoRoot, ...RETRO_MERGED_LOG_ARGS], { encoding: "utf8", maxBuffer: 1 << 26 }),
       ),
+  };
+}
+
+const RETRO_MERGED_LOG_ARGS = ["log", "--format=%x1e%aI%x1f%s%x1f%b"];
+
+/** W1-T5649: {@link retroShippedGithubGateway}'s reads, awaited, for the daemon loop. Each one is
+ *  an async child process bounded by its transport, so the loop keeps ticking while it runs. */
+export function retroShippedGithubGatewayAsync(root: string = repoRoot): ShippedGithubReads {
+  const git: AsyncGitRunner = (args, signal) =>
+    new Promise((resolve, reject) => {
+      const child = execFile("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 1 << 26, signal }, (err, out) =>
+        err ? reject(err) : resolve(out),
+      );
+      signal?.addEventListener("abort", () => killAfterGrace(child), { once: true });
+    });
+  let slug: Promise<string> | undefined;
+  const repoSlug = (): Promise<string> =>
+    (slug ??= boundGitCall(git, ["config", "--get", "remote.origin.url"], GATEWAY_FETCH_TIMEOUT_MS).then((url) => {
+      const m = /[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/.exec(url.trim());
+      if (!m) throw new Error(`cannot parse owner/repo from origin url of ${root}`);
+      return `${m[1]}/${m[2]}`;
+    }));
+  const probe = async (args: readonly string[]): Promise<ThrottleProbeResult> => {
+    try {
+      return { ok: true, stdout: await ghTextAsync([...args]), stderr: "" };
+    } catch (e) {
+      const err = e as { stderr?: unknown; message?: string };
+      return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "").trim() };
+    }
+  };
+  return {
+    findMergedByTrailer: async (taskId) => {
+      const q = `repo:${await repoSlug()} is:pr is:merged "Remudero-Task: ${taskId}" in:body`;
+      const found = (await ghJsonAsync(["api", `search/issues?q=${encodeURIComponent(q)}&sort=created&order=desc&per_page=1`])) as {
+        items?: Array<{ number: number; html_url: string; pull_request?: { merged_at?: string | null } }>;
+      };
+      const hit = found.items?.[0];
+      const mergedAt = hit?.pull_request?.merged_at;
+      return hit ? { number: hit.number, url: hit.html_url, ...(mergedAt ? { mergedAt } : {}) } : null;
+    },
+    headRefName: async (prUrl) => {
+      const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(prUrl);
+      if (!m) return undefined;
+      try {
+        return ((await ghJsonAsync(["api", `repos/${m[1]}/pulls/${m[2]}`])) as { head?: { ref?: string } }).head?.ref;
+      } catch {
+        return undefined; // "unresolved": shippedSince names it in a REJECTED discrepancy, never a credit
+      }
+    },
+    unavailable: () => runStepsAsync(probeGithubThrottleSteps(probe)),
+    mergedCommits: async () => parseGitLogCitationCommits(await boundGitCall(git, RETRO_MERGED_LOG_ARGS, GATEWAY_FETCH_TIMEOUT_MS)),
   };
 }
 
@@ -28426,47 +28473,44 @@ function reportRetroTriggerBackoff(
 }
 
 /**
- * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
- * GitHub read — the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure).
- * Returns `undefined` when there is nothing safe to evaluate this tick: a corrupt
- * marker (fail closed exactly like `retroCommand`'s own guard — never replay a torn
- * marker as "no marker") or a degraded GitHub read (never claim a false
- * merges-since-marker of 0 off an unhealthy gateway — this just skips ONE tick's
- * evaluation; the daemon re-tries every tick after, and the days-threshold path still
- * advances off `marker.ts` regardless of GitHub's health).
+ * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger + GitHub read —
+ * the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure). `undefined` means nothing is
+ * safe to evaluate this tick: a corrupt marker (fail closed like `retroCommand`'s own guard) or a
+ * degraded GitHub read (never a false merges-since-marker of 0; the next tick retries, and the
+ * days path still advances off `marker.ts`).
  *
- * `deps` is a test seam (W1-T160 coverage): a test injects a tmp `config` (pointing
- * at its own root's marker/ledger fixtures) and a fake `github` gateway to drive this
- * real marker/ledger/shipped wiring without a live `gh` round-trip. Production passes
- * neither, so `config` is the live `loadConfig()` and `github` the shared
- * `retroShippedGithubGateway` — the same construction `retroCommand`'s own gather uses.
- * `deps.policy` is the SAME seam for the cadence thresholds (W1-T264, P37 CONSUMER):
- * production passes none, so the cadence reads `plan/policy.yaml`'s `retro` row (the
- * same `loadPolicy(policyPath(repoRoot))` construction `daemonCommand`/`drainCommand`
- * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
- * injects a fixture `Policy` to prove a threshold edit changes the firing decision
- * with no source edit.
+ * `deps` is a test seam: a tmp `config`, a fake `github` and a fixture `policy` (W1-T264, P37
+ * CONSUMER: production reads `plan/policy.yaml`'s `retro` row, so a threshold edit needs no source
+ * edit). Production's `github` is `retroShippedGithubGateway`, the construction `retroCommand` uses.
  *
- * W1-T2288: `mergesSinceMarker` is no longer `shippedSince(runs, ...).shipped.length` alone.
- * `shippedSince` iterates `runs` (reduced from the ledger) — a merge with NO run at all (a
- * plan/triage/feedback filing; every plan filing has none) has no loop iteration there and is
- * structurally unreachable, not merely undercounted. `runlessMergesSince` (retro.ts) is the
- * DISJOINT complement, read off `github.mergedCommits?.()` (this repo's own `git log`, never
- * the ledger or a per-task search) rather than reimplementing `shippedSince`'s ledger∪GitHub
- * crediting or its P9 ownership assert — both stay exactly as they were. `mergedCommits` is
- * OPTIONAL on `ShippedGithub`: a fixture that does not implement it (every literal predating
- * this task) contributes zero runless merges, not a thrown error.
+ * W1-T2288: `mergesSinceMarker` adds `runlessMergesSince` (retro.ts), the DISJOINT complement of
+ * `shippedSince` read off `github.mergedCommits?.()` (this repo's own `git log`): a merge with NO
+ * run (a plan/triage/feedback filing) has no loop iteration in `shippedSince`. A fixture without
+ * `mergedCommits` contributes zero, not a throw. The ledger read is the archive∪live UNION
+ * (`resolveLedgerUnion`), falling back to the live file only when zero archives exist.
  *
- * Also W1-T2288: the ledger read backing `runs` is now the archive∪live UNION
- * (`resolveLedgerUnion`, lib/ledger-grep.ts) when at least one archive exists, so a run whose
- * rows already rotated out of the live `state/ledger.ndjson` is still visible — falling back to
- * the bare live-file read (today's exact behavior) only when zero archives are found, so a
- * fresh state dir (or any fixture below with no rotations) is never read as an empty corpus.
+ * W1-T5649: ONE body, as steps. This sync driver serves tests and the CLI; the daemon awaits
+ * {@link retroTriggerCheckAsync}, whose every read is an async child process, never on the loop.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
   deps: { config?: Config; github?: ShippedGithub; policy?: Policy } = {},
 ): RetroTriggerDecision | undefined {
+  return runStepsSync(retroTriggerCheckSteps(now, deps, retroShippedGithubGateway));
+}
+
+export function retroTriggerCheckAsync(
+  now: Date = new Date(),
+  deps: { config?: Config; github?: ShippedGithubReads; policy?: Policy } = {},
+): Promise<RetroTriggerDecision | undefined> {
+  return runStepsAsync(retroTriggerCheckSteps(now, deps, retroShippedGithubGatewayAsync));
+}
+
+function* retroTriggerCheckSteps(
+  now: Date,
+  deps: { config?: Config; github?: ShippedGithubReads; policy?: Policy },
+  defaultGithub: () => ShippedGithubReads,
+): Steps<RetroTriggerDecision | undefined> {
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
@@ -28503,6 +28547,9 @@ export function retroTriggerCheck(
   const records = parseLedger(ledgerNdjson);
   const runs = gatherRuns(records);
   const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
+  let gw: ShippedGithubReads | undefined;
+  const gateway = (): ShippedGithubReads => (gw ??= deps.github ?? defaultGithub());
+  let commits: GitLogCommit[] | undefined;
 
   const backoffPolicy = retroBackoffPolicyFor(policy);
   const lastAttempt = loadRetroAttemptRecord(retroAttemptPath(config.root));
@@ -28516,8 +28563,8 @@ export function retroTriggerCheck(
     // `Math.max` with the attempt's own recorded count keeps this a conservative LOWER BOUND on the
     // real (GitHub-credited) total: it omits `shippedSince`'s per-run crediting, so it can only
     // ever DELAY an early exit, never grant one the real count below would refuse.
-    const githubEarly = deps.github ?? retroShippedGithubGateway();
-    const runlessMergesEarly = runlessMergesSince(githubEarly.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+    commits = yield* step(() => gateway().mergedCommits?.() ?? []);
+    const runlessMergesEarly = runlessMergesSince(commits, marker?.ts, taskIdsWithRuns);
     const mergesProxy = Math.max(lastAttempt.mergesSinceMarker, runlessMergesEarly.length);
     const backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
     if (!backoff.eligible) {
@@ -28525,8 +28572,8 @@ export function retroTriggerCheck(
       return undefined;
     }
   }
-  const github = deps.github ?? retroShippedGithubGateway();
-  const githubUnavailable = github.unavailable?.();
+  const github = gateway();
+  const githubUnavailable = yield* step(() => github.unavailable?.());
   if (githubUnavailable) {
     reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
     return undefined;
@@ -28534,8 +28581,9 @@ export function retroTriggerCheck(
   if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
     lastRetroTriggerDecline = undefined;
   }
-  const { shipped } = shippedSince(runs, marker?.ts, github);
-  const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+  commits ??= yield* step(() => github.mergedCommits?.() ?? []);
+  const { shipped } = yield* shippedSinceSteps(runs, marker?.ts, github, commits);
+  const runlessMerges = runlessMergesSince(commits, marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
   // omitted (defaults to none): the trigger only needs to know something is WAITING, and the full
@@ -29032,6 +29080,8 @@ export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number 
 
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
+  /** W1-T5649: the awaited check {@link retroCheckOffLoop} drives; omitted ⇒ {@link retroTriggerCheckAsync}. */
+  checkAsync?: () => Promise<RetroTriggerDecision | undefined>;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
   config?: Config;
   runSubprocess?: typeof runAutomatedRetroSubprocess;
@@ -29047,16 +29097,51 @@ export function buildRetroDaemonHooks(deps: {
     log?: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<void>;
 } {
-  const check = deps.check ?? (() => retroTriggerCheck());
+  let fired = 0;
+  const check = deps.check ?? retroCheckOffLoop(deps.checkAsync ?? (() => retroTriggerCheckAsync()), () => fired);
   return {
     checkRetroTrigger: () => check(),
     runRetroTrigger: async (decision, log) => {
+      fired += 1;
       if (deps.runRetro) await deps.runRetro([], { automated: decision });
       else {
         recordRetroAttempt((deps.config ?? loadConfig()).root, systemClock.date(), decision.mergesSinceMarker);
         await (deps.runSubprocess ?? runAutomatedRetroSubprocess)(decision, { log });
       }
     },
+  };
+}
+
+/**
+ * W1-T5649: the daemon's retro check, awaited OFF the loop. `daemon.ts` calls the hook
+ * synchronously, so each call returns the decision the previous call started, once, and starts
+ * the next: a check that searches GitHub can delay a fire by one tick, never stall the loop. A
+ * decision begun before a retro fired (`fired()` moved) is dropped, so it cannot fire it twice; a
+ * rejected check is rethrown, which the daemon ledgers as `daemon.retro_trigger.check_failed`.
+ */
+export function retroCheckOffLoop(
+  compute: () => Promise<RetroTriggerDecision | undefined>,
+  fired: () => number,
+): () => RetroTriggerDecision | undefined {
+  let inFlight = false;
+  let ready: { at: number; ok: true; decision: RetroTriggerDecision | undefined } | { at: number; ok: false; error: unknown } | undefined;
+  return () => {
+    const settled = ready;
+    ready = undefined;
+    if (!inFlight) {
+      inFlight = true;
+      const at = fired();
+      void Promise.resolve()
+        .then(compute)
+        .then(
+          (decision) => { ready = { at, ok: true, decision }; },
+          (error: unknown) => { ready = { at, ok: false, error }; },
+        )
+        .finally(() => { inFlight = false; });
+    }
+    if (settled === undefined || settled.at !== fired()) return undefined;
+    if (!settled.ok) throw settled.error;
+    return settled.decision;
   };
 }
 
