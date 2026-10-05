@@ -7956,6 +7956,19 @@ components:
           properties:
             servedModel: {type: string}
             requestedModel: {type: string}
+        workerState:
+          type: string
+          enum: [working, tool-executing, quiet]
+          description: >
+            The run's worker liveness from its newest `worker.state` transition (BoardRow.workerState). The
+            console's fleet map evidences a worker process only from this; absent means no transition was seen.
+        workerStateSince:
+          type: string
+          description: When the run went quiet; present only while `workerState` is `quiet`.
+        processUnevidenced:
+          type: boolean
+          enum: [true]
+          description: Running only on an open PR's strength, with no live lock and no recent activity.
 
     NowAction:
       type: object
