@@ -59,7 +59,7 @@ import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
-import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
+import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
@@ -562,7 +562,7 @@ export function gitPlanBehind(
 /**
  * The `plan:<i>` source. A checkout as new as origin/main's plan is fresh as of now; one behind it is
  * as old as the oldest plan commit it lacks, which the budget table judges, so a checkout behind for
- * longer than {@link PLAN_BUDGET_MS} reads stale, phase `behind`.
+ * longer than {@link judgeSource}'s plan budget reads stale, phase `behind`.
  */
 export function planSource(name: string, behind: PlanBehind, now: number): ViewSource {
   if ("reason" in behind) return judgeSource({ name, asOf: null, state: "unavailable", reason: behind.reason }, now);
