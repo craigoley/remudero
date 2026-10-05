@@ -758,23 +758,24 @@ export function shippedSince(
   // W1-T5649: CANDIDATES ARE SELECTED LOCALLY, BEFORE ANY GATEWAY CALL. Every gateway call below can
   // spawn `gh` on the daemon's event loop, so the work is bounded by candidates, never by history.
   // The trailer dates are read lazily, once, off the local `git log`.
-  let trailerMergeMs: Map<string, number> | undefined;
-  const trailerMergeMsOf = (taskId: string): number | undefined => {
-    if (trailerMergeMs === undefined) {
-      trailerMergeMs = new Map();
+  let trailerMergeAt: Map<string, { ms: number; iso: string }> | undefined;
+  const trailerMergeOf = (taskId: string): { ms: number; iso: string } | undefined => {
+    if (trailerMergeAt === undefined) {
+      trailerMergeAt = new Map();
       let commits: GitLogCommit[] = [];
       try {
         commits = github.mergedCommits?.() ?? [];
       } catch (error) {
-        discrepancies.push(`merged-commit read failed — only runs started after the marker are candidates: ${String(error)}`);
+        const reason = `merged-commit read failed — only runs started after the marker are candidates: ${String(error)}`;
+        discrepancies.push(reason);
       }
       for (const c of commits) {
         const id = RETRO_TRAILER_RE.exec(c.message)?.[1];
         const ms = Date.parse(c.date);
-        if (id && Number.isFinite(ms) && ms > (trailerMergeMs.get(id) ?? -Infinity)) trailerMergeMs.set(id, ms);
+        if (id && Number.isFinite(ms) && ms > (trailerMergeAt.get(id)?.ms ?? -Infinity)) trailerMergeAt.set(id, { ms, iso: c.date });
       }
     }
-    return trailerMergeMs.get(taskId);
+    return trailerMergeAt.get(taskId);
   };
   const isCandidate = (r: RunSummary): boolean => {
     if (sinceMs === undefined || !Number.isFinite(sinceMs)) return true;
@@ -784,8 +785,8 @@ export function shippedSince(
       return ts === undefined || !Number.isFinite(Date.parse(ts)) || Date.parse(ts) > sinceMs;
     }
     if (r.startTs > (sinceTs as string)) return true;
-    const mergedMs = trailerMergeMsOf(r.taskId);
-    return mergedMs !== undefined && mergedMs > sinceMs;
+    const merged = trailerMergeOf(r.taskId);
+    return merged !== undefined && merged.ms > sinceMs;
   };
 
   for (const r of runs) {
@@ -833,8 +834,7 @@ export function shippedSince(
       }
       // The merge time is the gateway's own `mergedAt` or the local trailer commit's date, never a
       // per-PR `gh pr view` spawn (W1-T5649).
-      const trailerMs = sinceTs ? trailerMergeMsOf(r.taskId) : undefined;
-      const mergeTs = pr.mergedAt ?? (trailerMs !== undefined ? new Date(trailerMs).toISOString() : undefined);
+      const mergeTs = pr.mergedAt ?? (sinceTs ? trailerMergeOf(r.taskId)?.iso : undefined);
       if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
         discrepancies.push(`${r.taskId} (${r.runId}): merge time is unknown for ${pr.url} — cannot credit this window`);
         continue;

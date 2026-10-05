@@ -183,7 +183,7 @@ test("a pre-marker run merged after the marker is still credited, with its merge
   const result = shippedSince(gatherRuns(rows), marker, github);
   assert.deepEqual(result.shipped.map((s) => s.taskId), ["W1-P1"]);
   assert.equal(result.shipped[0].source, "github");
-  assert.equal(result.shipped[0].mergeTs, new Date(after).toISOString());
+  assert.equal(result.shipped[0].mergeTs, after);
   assert.ok(base.trailerSearches.length <= 3, `trailer searches: ${base.trailerSearches.length}`);
   assert.deepEqual(base.headLookups.filter((u) => /\/pull\/1\d\d\d$/.test(u)), []);
   const runs = gatherRuns(rows);
