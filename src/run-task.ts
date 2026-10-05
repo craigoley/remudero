@@ -1239,6 +1239,12 @@ import {
   type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
 import {
+  fixArmEvidence,
+  fixRoutingWeights,
+  readFixRoutingRows,
+  type FixLearnedArms,
+} from "./lib/fix-routing-learner.js";
+import {
   boundRiskJudgeChangeView,
   DEFAULT_RISK_POLICY,
   readRiskPolicy,
@@ -10186,6 +10192,32 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * suite. The real call site (`runTaskBody`) wires the module's own
  * `spawnWorker`/`waitForCiGreen`/`runReview` plus a small git-push wrapper.
  */
+/**
+ * W1-T5535: the fix lane's learned acceptance arms. `runFixRung` is the ONLY producer, so every other lane's
+ * auction weighs headroom alone, as before. The ledger read is async and cached; an unreadable ledger is named on
+ * its own row and the round routes by headroom, never blocks.
+ */
+async function fixLearnedArmsFor(
+  deps: { ledgerPath: string; log: (step: string, extra?: Record<string, unknown>) => void;
+    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>> },
+  strike: { strike: number; round: string },
+): Promise<FixLearnedArms | undefined> {
+  const nowMs = systemClock.now();
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = await (deps.readFixRoutingRows ?? readFixRoutingRows)(dirname(deps.ledgerPath), nowMs);
+  } catch (error) {
+    deps.log("fix.routing_learner_unavailable", { ...strike, reason: "ledger-read-failed", error: String(error) });
+    return undefined;
+  }
+  const evidence = fixArmEvidence(rows, nowMs);
+  return {
+    evidence,
+    weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed),
+    onDecision: (fields) => deps.log("fix.routing_decision", { ...strike, ...fields }),
+  };
+}
+
 export async function runFixRung(opts: {
   /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
   guardRoundHead?: boolean;
@@ -10442,6 +10474,8 @@ export async function runFixRung(opts: {
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
     ledgerPath: string;
+    /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
+    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     account: (r: WorkerResult) => WorkerResult;
@@ -11843,6 +11877,8 @@ export async function runFixRung(opts: {
     // The final fresh strike steps up: the fix mount has already failed this PR at least once.
     const strikeMount = opts.stepUpMount && round === "fresh" && attempt >= opts.strikeCap ? opts.stepUpMount : opts.mount;
     if (strikeMount !== opts.mount) deps.log("fix.step_up", { strike: attempt, from: opts.mount.model, to: strikeMount.model });
+    // W1-T5535: a mount that names its provider bypasses the auction, so there is nothing to learn for.
+    const learnedArms = strikeMount.provider === undefined ? await fixLearnedArmsFor(deps, { strike: attempt, round }) : undefined;
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
       permissionMode: "bypassPermissions",
@@ -11867,6 +11903,7 @@ export async function runFixRung(opts: {
       // candidate read `undefined` and the reclaim kill never fired on the process it exists to stop.
       runId: opts.runId,
       taskId: opts.taskId,
+      ...(learnedArms ? { providerRouting: { learnedArms } } : {}),
     };
 
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
