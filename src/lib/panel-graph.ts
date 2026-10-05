@@ -101,10 +101,11 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, readClassificationSnapshot, readFleetLaneStore, type ClassificationEvidence, type FleetLaneDecision } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
+import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
   buildAttentionCensus,
@@ -190,6 +191,8 @@ export interface PanelGraphDeps {
   inboxMainSha?: (root: string) => string | undefined;
   /** W1-T4261: one evidence-anchor grep at `ref`; defaults to {@link gitGrepAnchorTrue}. */
   inboxGrepAnchor?: (root: string, ref: string, anchor: EvidenceAnchor) => boolean;
+  /** W1-T5897: serve runs the slow lane that classifies; every inbox read answers from what it persisted, never a pass. */
+  inboxFromSlowLane?: boolean;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -1978,23 +1981,23 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
-    // W1-T4261: async so a recompute yields between slices; the console's cached-read wrapper serves the previous
-    // body meanwhile. An unchanged input set answers from the memo with no recompute at all.
+    // A read writes nothing: the ratified-row prune and the fleet lane's snapshot (W1-T4089) are the slow lane's (inbox-view.ts).
     handler: async (req, res) => {
       const shape = inboxShapeOf(req.url);
       if ("error" in shape) {
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
-      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = inboxLanes(await classifyAllProposalsSliced(deps, readPlanSnapshot), deps.inboxRoot);
-      // A read writes nothing: the ratified-row prune and the snapshot the daemon's fleet lane acts
-      // on (W1-T4089) are written by serve's slow lane on a cadence (inbox-view.ts).
+      const read = await inboxRead(deps, readPlanSnapshot);
+      if (!read) return void inboxNotReady(res);
+      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet };
-      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts });
-      else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts });
+      const at = read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt };
+      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts, ...at });
+      else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
         const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
-        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts });
+        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
       }
     },
   };
@@ -2089,8 +2092,9 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
     handler: async (_req, res) => {
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
-      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
-      const plan = classified.plan;
+      const classified = await inboxRead(deps, readPlanSnapshot);
+      if (!classified) return void inboxNotReady(res);
+      const plan = classified.plan();
       const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
         step: ["ratify.approved", "verify_human.judged"],
         refuseIncomplete: true,
@@ -2114,11 +2118,11 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
           judgeByTask.set(row.task_id, { decision: row.judge_decision, reason: row.judge_reason });
         }
       }
-      const registryStamp = statStamp(classified.registryPath);
-      const registryParse = parseProposalRegistryResult(readFileIfExists(classified.registryPath));
+      const { registryPath } = inboxInputPaths(deps);
+      const registryStamp = statStamp(registryPath);
+      const registryParse = parseProposalRegistryResult(readFileIfExists(registryPath));
       const liveStamp = statStamp(deps.ledgerPath);
-      const projectionPartial = [...classified.projection.values()].some((value) => value.indeterminate)
-        || classified.classifications.some((value) => value.referentUnverified);
+      const projectionPartial = classified.projectionIndeterminate || classified.classifications.some((value) => value.referentUnverified);
       const sourceState = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
       const census = buildAttentionCensus({
         views: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads,
@@ -2126,7 +2130,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         classifications: classified.classifications,
         taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
-        mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
+        mergedTaskIds: classified.mergedTaskIds,
         sources: {
           plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
@@ -2196,6 +2200,87 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
   return { classified: { proposals, classifications }, classifiedAtMs, complete, ...(incompleteReason === undefined ? {} : { incompleteReason }) };
 }
 
+interface InboxRead {
+  proposals: Proposal[];
+  classifications: InboxClassification[];
+  ledgerLines: LedgerLines;
+  mergedTaskIds: ReadonlySet<string>;
+  projectionIndeterminate: boolean;
+  plan: () => Plan;
+  lanes: () => ReturnType<typeof inboxLanes>;
+  classifiedAt?: string;
+}
+
+interface SlowLaneInbox extends InboxRead {
+  persisted: PersistedInbox;
+  generatedAt: string;
+  classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">;
+}
+const slowLaneInboxes = new WeakMap<PanelGraphDeps, { stamp: string | undefined; read: SlowLaneInbox | undefined }>();
+
+/** W1-T5897: what serve's main thread answers every inbox read from, re-read only when its file changes; undefined until one is persisted. */
+export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefined {
+  const stateDir = join(deps.inboxRoot, "state");
+  const stamp = (deps.inboxStatFile ?? statStamp)(persistedInboxPath(stateDir));
+  const held = slowLaneInboxes.get(deps);
+  if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
+  const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
+  const read = persisted && slowLaneInboxOf(deps, persisted);
+  slowLaneInboxes.set(deps, { stamp, read });
+  return read;
+}
+
+function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowLaneInbox {
+  const ledgerLines = Object.defineProperty([...persisted.ledgerRows], "torn", { value: 0 }) as LedgerLines;
+  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines };
+  let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
+  return {
+    ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
+    mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
+    plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
+    lanes: () => {
+      const stateDir = join(deps.inboxRoot, "state");
+      const key = JSON.stringify([statStamp(plainStorePath(stateDir)) ?? null, statStamp(fleetLaneStorePath(stateDir)) ?? null]);
+      if (lanes?.key !== key) lanes = { key, built: inboxLanes(classified, deps.inboxRoot) };
+      return lanes.built;
+    },
+  };
+}
+
+async function inboxRead(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Promise<InboxRead | undefined> {
+  if (deps.inboxFromSlowLane) return readSlowLaneInbox(deps);
+  const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+  const projection = [...classified.projection.values()];
+  return {
+    ...classified, plan: () => classified.plan, lanes: () => inboxLanes(classified, deps.inboxRoot),
+    mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)), projectionIndeterminate: projection.some((value) => value.indeterminate === true),
+  };
+}
+
+function inboxNotReady(res: ServerResponse): void {
+  res.setHeader("retry-after", "5");
+  sendJson(res, 503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" });
+}
+
+/** The persisted classification as the thread list's evidence: `classify` lands only one inside its freshness budget (W1-T5269). */
+function slowLaneThreadList(deps: PanelGraphDeps): { classify: () => Promise<ThreadListClassification<ThreadListInbox>>; peek: () => ThreadListClassification<ThreadListInbox> | undefined } {
+  const peek = (): ThreadListClassification<ThreadListInbox> | undefined => {
+    const read = readSlowLaneInbox(deps);
+    if (read === undefined) return undefined;
+    const { complete, incompleteReason } = read.persisted;
+    return { classified: read.classified, classifiedAtMs: Date.parse(read.generatedAt), complete, ...(incompleteReason === undefined ? {} : { incompleteReason }) };
+  };
+  return {
+    peek,
+    classify: async () => {
+      const held = peek();
+      if (held === undefined) throw new Error("serve's slow lane has not persisted an inbox classification yet");
+      if (systemClock.now() - held.classifiedAtMs > INBOX_STALE_AFTER_MS) throw new Error(`the slow lane's classification of ${fixedClock(held.classifiedAtMs).iso()} is past its ${INBOX_STALE_AFTER_MS} ms budget`);
+      return held;
+    },
+  };
+}
+
 /** The thread list's seams: the classifier, and the newer of this serve's and the slow lane's (W1-T5886) held classification. */
 export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ThreadListInbox> {
   const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ThreadListInbox> => {
@@ -2205,9 +2290,11 @@ export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: 
     return { classified, classifiedAtMs, ...inboxClassificationEvidence(classified) };
   };
   let reportedAtMs: number | undefined;
+  let reportedFailure: string | undefined;
   return {
     now: () => systemClock.now(),
     classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), systemClock.now()),
+    ...(deps.inboxFromSlowLane ? slowLaneThreadList(deps) : {}),
     peek: () => {
       const held = peekClassifiedInboxStamped(deps);
       const own = held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
@@ -2221,9 +2308,11 @@ export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: 
     inputsKey: () => statStamp(plainStorePath(join(deps.inboxRoot, "state"))) ?? "absent",
     report: (settled: ThreadListRefreshSettled) => {
       if (settled.outcome === "failed") {
-        deps.logProjection?.("inbox.thread_list_classification_failed", { error: settled.error, ms: settled.ms });
+        if (settled.error !== reportedFailure) deps.logProjection?.("inbox.thread_list_classification_failed", { error: settled.error, ms: settled.ms });
+        reportedFailure = settled.error;
       } else if (settled.classifiedAtMs !== reportedAtMs) {
         reportedAtMs = settled.classifiedAtMs;
+        reportedFailure = undefined;
         deps.logProjection?.("inbox.thread_list_classified", { ms: settled.ms, classifiedAt: fixedClock(settled.classifiedAtMs).iso() });
       }
     },
@@ -2281,7 +2370,8 @@ export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: (
     handler: async (req, res) => {
       const threadId = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
       const proposalId = proposalIdOfThread(threadId);
-      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+      const classified = await inboxRead(deps, readPlanSnapshot);
+      if (!classified) return void inboxNotReady(res);
       const item = proposalId ? operatorThreadItems(deps, readPlanSnapshot, classified).find((i) => i.proposalId === proposalId) : undefined;
       if (!item) {
         sendJson(res, 404, { error: "not_found", detail: `no inbox thread "${threadId}"` });
@@ -2363,7 +2453,8 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
       // The detail route and daemon responder both require a current operator-owned item.
       // A syntactically valid but orphaned id must not receive a success receipt for a
       // message the responder will silently have no item to answer.
-      const classified = await classifyAllProposalsSliced(deps);
+      const classified = await inboxRead(deps);
+      if (!classified) return void inboxNotReady(res);
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
