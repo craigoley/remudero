@@ -1,0 +1,37 @@
+- id: W1-T5903
+  title: "A QUEUED BRANCH IS NOT REFRESHED FOR STALENESS — the sweep merges main into any review-waiting PR 10+ commits behind (reviewWaitingBranchRefreshEnabled), 162 updates in one day, each a full CI cycle and a re-review; once main requires a merge queue the queue tests the merged result, so the staleness refresh only spends CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the behind-main refresh stands down when the queue validates the merge
+  band_meaning: span
+  origin: "operator session 2026-10-05: throughput research (PRs restarting CI)"
+  plan_refs: [W1-T528, W1-T1212, W1-T4405, W1-T5515, W1-T5522]
+  files: [src/lib/sweep.ts, test/a-queued-branch-is-not-refreshed-for-staleness.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main. `selectUpdateBranchTarget` (src/lib/sweep.ts) unions three
+    candidate sets: armed-but-stalled PRs, red PRs with a stale gate, and `openPrsBehindMain`,
+    which refreshes a review-waiting PR once it is `reviewWaitingBranchRefreshThreshold` (10)
+    commits behind (`reviewWaitingBranchRefreshEnabled: true`). MEASURED: the 2026-10-05 ledger
+    has 162 `sweep.update_branch.updated` rows; e.g. #9350 (green, mergeable, not conflicting) was
+    updated at 16:33Z for `behind_by: 11`, restarting its ~25-min CI and its review. Over 60 PRs
+    merged that day, 13 main-merge commits appeared in 11 PRs. main's protection is
+    `strict: false`, and with the merge queue on (W1-T5515/W1-T5522; ruleset pending) the group
+    commit is what CI validates, so freshness against main is the queue's job.
+  design: |
+    When the PR's base branch requires a merge queue (W1-T4405's `mergeQueue` detection, already
+    cached per PR), `openPrsBehindMain` contributes no candidate and the sweep logs one
+    `sweep.update_branch.skipped_queue` row per PR and head. Armed-but-stalled and stale-gate
+    refreshes are unchanged, and with no queue the behind-main refresh is unchanged.
+  acceptance:
+    - claim: "with the base requiring a merge queue, a review-waiting PR 11 commits behind is not selected for update and a skipped_queue row names it, an armed-but-stalled or stale-gate PR is still selected, and with no queue the behind-main refresh selects it as today"
+      proof: "unit test: test/a-queued-branch-is-not-refreshed-for-staleness.test.ts"
+  falsifier: |
+    Ignore the queue: the behind-main PR is selected for update under the queue and the test
+    fails.
