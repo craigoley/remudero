@@ -410,6 +410,16 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
   return armSessionPrs ? escalationTaskIdFor(pr) : pr.taskId;
 }
 
+/** W1-T5813 — the arm's ledger gate reads only THIS PR's `review.posted` rows (a legacy row with
+ *  no `pr_url` stays). `unfiled` is the sentinel every run-unfiled PR shares, so the gate's last-row-wins
+ *  read handed #9155 another PR's verdict: `ledger-refused` at 03:37, 04:02, 04:10 and 04:20Z. */
+export function armLedgerLinesForPr(
+  lines: Array<Record<string, unknown>>,
+  prUrl: string,
+): Array<Record<string, unknown>> {
+  return lines.filter((line) => line.step !== "review.posted" || typeof line.pr_url !== "string" || line.pr_url === prUrl);
+}
+
 /**
  * THE TASK THE FIX RUNG REPAIRS AGAINST — the plan task when the PR has one, otherwise a SYNTHETIC
  * stand-in keyed by the SAME id the review lane and the escalation lane already mint.
@@ -1897,7 +1907,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
   const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
-    return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
+    const armDeps = realArmDeps(() => config);
+    return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
+      { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl) });
   };
   let mainCommitRead: Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> | undefined;
   const readMainCommit = (): Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> => {
@@ -2146,7 +2158,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
         ...realArmDeps(() => config),
-        ledgerLines: () => readLedgerLines(ledgerPath), // ledger-read-intent: live
+        ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
           if (fresh.state !== "open" || !fresh.auto_merge || fresh.head?.sha !== pr.headSha) {
@@ -7154,8 +7166,15 @@ interface DispositionRule {
   /** Observed-state predicate over the PR and the tunable {@link SweepPolicy} thresholds. `now` is
    *  the same sweep-pass clock {@link ageDays} came from, threaded so the WAIT and stale-pending
    *  rows derive the pending age without a second, independently-sourced clock. */
-  readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => boolean;
+  readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number, facts?: DispositionFacts) => boolean;
   readonly reason: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => string;
+}
+
+/** W1-T5813 — ledger facts `runSweep` already folded, which no {@link OpenPrView} field carries.
+ *  Omitted (every caller but `runSweep`), each reads as unknown and the table behaves as before. */
+export interface DispositionFacts {
+  /** The review claim holds a DELIVERED verdict for this PR's exact current input. */
+  reviewVerdictDelivered?: boolean;
 }
 
 /** W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
@@ -7214,6 +7233,9 @@ export function reviewVerdictOvertakenByActivity(pr: OpenPrView): boolean {
   return activityAt > verdictAt;
 }
 
+/** W1-T3823's re-review demand. W1-T5813: `deliveredForInput` is the review claim's own answer for
+ *  this exact input; a delivered verdict IS the completed attempt, so the demand ends there instead
+ *  of re-disposing post-review that the claim stands down every pass (#9155, 03:17Z-04:44Z). */
 export function reviewStatusSupersedesLedgerAttempt(
   pr: Pick<
     OpenPrView,
@@ -7226,9 +7248,11 @@ export function reviewStatusSupersedesLedgerAttempt(
     | "reviewVerdictPostedAt"
     | "reviewPostRefused"
   >,
+  deliveredForInput = false,
 ): boolean {
   const attempts = pr.priorReviewAttemptsForInput;
   if (
+    deliveredForInput ||
     pr.checksState !== "green" ||
     pr.requiredContextsUnreadable === true ||
     pr.reviewState !== "success" ||
@@ -7786,7 +7810,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     disposition: "post-review",
-    when: (pr) => reviewStatusSupersedesLedgerAttempt(pr),
+    when: (pr, _policy, _ageDays, _now, facts) => reviewStatusSupersedesLedgerAttempt(pr, facts?.reviewVerdictDelivered),
     blocker: "awaiting-review",
     reason: () =>
       "review_status_supersedes_ledger_attempt — GitHub reports a dated success strictly later than " +
@@ -8139,13 +8163,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
  *  {@link DISPOSITION_RULES} row. W1-T1201 — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, once, before
  *  any row reads it, AND THE CLAMP DOES NOT SILENTLY RESCUE: when it changes the outcome the
  *  `reason` says so, because a shifted clock once closed eleven live PRs. */
-function selectDispositionRule(pr: OpenPrView, policy: SweepPolicy, now: number) {
+function selectDispositionRule(pr: OpenPrView, policy: SweepPolicy, now: number, facts?: DispositionFacts) {
   const parsed = Date.parse(pr.lastActivityAt);
   const activityAgeDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
   const createdParsed = pr.createdAt === undefined ? Number.NaN : Date.parse(pr.createdAt);
   const lifetimeAgeDays = Number.isNaN(createdParsed) ? Number.POSITIVE_INFINITY : (now - createdParsed) / MS_PER_DAY;
   const ageDays = Math.min(activityAgeDays, lifetimeAgeDays);
-  const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now));
+  const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now, facts));
   return { rule, activityAgeDays, lifetimeAgeDays, ageDays };
 }
 
@@ -8153,8 +8177,9 @@ export function deriveDisposition(
   pr: OpenPrView,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: number = Date.now(),
+  facts?: DispositionFacts,
 ): DispositionResult {
-  const { rule, activityAgeDays, lifetimeAgeDays, ageDays } = selectDispositionRule(pr, policy, now);
+  const { rule, activityAgeDays, lifetimeAgeDays, ageDays } = selectDispositionRule(pr, policy, now, facts);
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
     // no-disposition=none invariant against a future table edit that drops it.
@@ -9657,6 +9682,23 @@ function reviewOutcomeKey(
   return prUrl !== undefined && inputDigest !== undefined
     ? `input:${JSON.stringify([taskId, prUrl, headSha, inputDigest])}`
     : `${taskId}@${headSha}`;
+}
+
+/** W1-T5813 — does the consecutive run of this PR's post-review rows at its current head already
+ *  carry `standDownReason`? A row at another head or disposition, or not deduped, ends the run. */
+function standDownAlreadyLogged(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  standDownReason: string,
+): boolean {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.step !== "sweep.disposed" || line.pr_number !== pr.prNumber) continue;
+    if (line.head_sha !== pr.headSha || line.disposition !== "post-review" || line.deduped !== true) return false;
+    if (line.stand_down_reason === standDownReason) return true;
+    if (line.stand_down_unchanged !== true) return false;
+  }
+  return false;
 }
 
 function reviewOutcomeKeyForPr(pr: OpenPrView): string {
@@ -11852,6 +11894,10 @@ export async function runSweep(
       // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the walk
       // and read back by `index`, so all four call sites carry it with no signature change.
       const repeat = repeatMeta.get(index);
+      // W1-T5813: the row still rides every pass (W1-T3359's repeat detector counts it); only the
+      // DELIVERED stand-down sentence is written once per head instead of on every pass.
+      const deliveredStandDownLogged = disposition === "post-review" && deduped && standDownReason !== undefined &&
+        prior.reviewDelivered.has(reviewKey) && standDownAlreadyLogged(ledgerLines, pr, standDownReason);
       const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -11876,7 +11922,8 @@ export async function runSweep(
         ...(deduped ? { deduped: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
-        ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
+        ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
+        ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
         // W1-T2345: `repeat_streak` rides every row — always in hand by this point — so the next
         // pass's fold never has to guess it back out of row order. `repeat_escalated` is present
         // ONLY on the pass that actually fired the one-time escalation, which is the field the
@@ -11984,11 +12031,14 @@ export async function runSweep(
       freshnessRefusal?.attemptedAt !== undefined && Number.isFinite(pendingSince) &&
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
-    const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
+    // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
+    const dispositionFacts: DispositionFacts = { reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)) };
+    const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
+      deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
-      selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
+      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
     const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
@@ -12122,7 +12172,7 @@ export async function runSweep(
       disposition === "blocked-ambiguous" && pr.repeatedFixRefusal !== undefined && pr.priorStrikes < policy.strikeCap &&
       typeof deps.dispatchPlanOnlyRepair === "function" && metadataOnlyRed(pr) !== undefined &&
       proofRepairRouteEvidence(pr) !== undefined && priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES &&
-      selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted
+      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted
     ) {
       disposition = "blocked-fixable";
       reason =

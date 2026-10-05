@@ -20980,6 +20980,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
+      // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
+      log("review.posted", {
+        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+        evaluator_provenance: verdict.evaluatorProvenance,
+        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        status_confirmed: true,
+      });
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
     }
