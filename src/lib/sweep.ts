@@ -2681,7 +2681,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // fits the disposition semantically (this module's own header: "only a human hand can do
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
-      const cls: EscalationClass = isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
+      const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
       escalate(
         {
           class: cls,
@@ -2698,7 +2698,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // fix-rung-exhaustion issue named, `escalate()` appends here instead of
           // opening a sibling — the #412/#413-shaped duplicate this task fixes.
           headSha: pr.headSha,
-          ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
+          ...(reason.startsWith("PR stage stalled:") || reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
@@ -4490,6 +4490,8 @@ export const DEFAULT_CLARIFY_POLICY: ClarifyPolicy = { resetStrikeCounterOnAnswe
 /** Tunable thresholds as DATA (rule 2), never inlined constants in the predicate. A test proves
  *  that by tightening `staleDays` alone and flipping a fixture PR's disposition (acceptance 3). */
 export interface SweepPolicy {
+  /** BACKSTOP: name a stage only after its ordinary owner has failed to move it (W1-T5900). */
+  stageBackstops: Partial<Record<PrBlocker, { kind: "BACKSTOP"; minutes: number }>>;
   /** No activity in >= this many days ⇒ the PR is abandoned -> close. */
   staleDays: number;
   /** Max fix-rung strikes before a failing review escalates instead of fixing. */
@@ -4714,6 +4716,12 @@ function loadReviewPolicy(): { value: number; min: number; max: number; capacity
 const REVIEW_POLICY = loadReviewPolicy();
 
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
+  stageBackstops: {
+    "awaiting-arm": { kind: "BACKSTOP", minutes: 30 },
+    "conflict": { kind: "BACKSTOP", minutes: 30 },
+    "own-red": { kind: "BACKSTOP", minutes: 45 },
+    "awaiting-review": { kind: "BACKSTOP", minutes: 30 },
+  },
   staleDays: POLICY_SWEEP.staleDays,
   strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
@@ -9452,6 +9460,8 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  /** The already-listed peers retained when the light pass reconciles one PR at a time. */
+  stuckStagePeers?: readonly OpenPrView[];
   reviewerCodeStaleThisPass?: () => { oldSha: string; newSha: string } | undefined;
   readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
@@ -11260,6 +11270,73 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
+  const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
+  const stuckStages = new Map<string, Record<string, unknown>>();
+  const resolvedStages = new Set<string>();
+  for (const row of ledgerLines) {
+    if (row.step === "pr.stuck" || (row.step === "sweep.disposed" && row.stage_stuck === true)) {
+      stuckStages.set(stageKey(row), row);
+    }
+    if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
+  }
+  const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
+    standDownReason: string | undefined): Promise<void> => {
+    if (deps.dryRun) return;
+    const key = stageKey({ pr_number: pr.prNumber, ...fields });
+    const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
+      run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", ts: clockFromMillisFn(() => now).iso(),
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, step, ...extra,
+    });
+    for (const [oldKey, row] of stuckStages) {
+      if (row.pr_number !== pr.prNumber || oldKey === key || resolvedStages.has(oldKey)) continue;
+      record("pr.stuck.resolved", { blocker: row.blocker, blocker_since: row.blocker_since,
+        resolved_blocker: fields.blocker, resolved_blocker_since: fields.blocker_since });
+      resolvedStages.add(oldKey);
+    }
+    const bound = policy.stageBackstops[fields.blocker];
+    if (!bound || fields.blocker_age_ms <= bound.minutes * 60_000 || stuckStages.has(key) ||
+        /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
+    const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
+      (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
+    const since = Date.parse(fields.blocker_since);
+    const currentRows = readLedger(deps.ledgerPath);
+    const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
+    if (reportedStage) { stuckStages.set(key, reportedStage); return; }
+    const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
+    if ((fields.blocker === "conflict" || fields.blocker === "own-red") &&
+        (repairStarted || stageRows.some(row => row.step === "fix.dispatch" ||
+          (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
+          (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
+            ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
+    const diagnoses: string[] = [];
+    if (stageRows.some(row => row.step === "review.posted") &&
+        !stageRows.some(row => row.step === "automerge.armed")) diagnoses.push("review loop");
+    const lastFix = currentRows.findLast(row => belongs(row) && row.step === "fix.done" && row.pushed_head_sha === pr.headSha);
+    if (pr.mergeState === "dirty" && Array.isArray(lastFix?.parents) && lastFix.parents.length === 1) diagnoses.push("failed merge");
+    if (pr.taskId && isDispatchedRunBranch(pr.headRefName) && (deps.stuckStagePeers ?? openPrs).some(other => other.prNumber !== pr.prNumber &&
+        other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
+      diagnoses.push("duplicate build");
+    }
+    const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
+    const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
+      `${Math.floor(fields.blocker_age_ms / 60_000)} minutes (BACKSTOP ${bound.minutes}); ` +
+      `since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}`;
+    const row = { pr_number: pr.prNumber, ...fields, diagnosis, bound_minutes: bound.minutes, bound_kind: bound.kind };
+    record("pr.stuck", row);
+    stuckStages.set(key, row);
+    try {
+      await deps.escalate(pr, reason, {
+        taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
+        criterion: "", reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [],
+        resolutions: [
+          { label: "repair the stalled stage", detail: `Inspect ${fields.blocker} and its ${diagnosis} diagnosis.` },
+          { label: "close the PR", detail: "Close it if the work is redundant or no longer needed." },
+        ],
+      });
+    } catch (error) {
+      record("pr.stuck.escalation_failed", { ...row, reason: String(error) });
+    }
+  };
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
@@ -11985,7 +12062,7 @@ export async function runSweep(
    *  factored out so the synchronous walk and the concurrent review batch ledger and log IDENTICALLY.
    *  Unconditional counting matches the original inline placement: a deduped PR reaches here with
    *  `acted:false` and no error, so neither counter moves. W1-T1061: `armOutcome` rides alongside. */
-  function finalizeDisposition(
+  async function finalizeDisposition(
     index: number,
     pr: OpenPrView,
     disposition: Disposition,
@@ -12007,7 +12084,7 @@ export async function runSweep(
     // W1-T4459: dedup keys on this pass's row (see `sameHeadRedFixRefusal`); set only by the
     // main walk's "blocked-fixable" arm.
     extraDisposedFields: Record<string, unknown> | undefined = undefined,
-  ): void {
+  ): Promise<void> {
     const metadataWait = metadataOnlyRed(pr) !== undefined && !metadataRedRuledOut(ledgerLines, pr) &&
       extraDisposedFields?.metadata_repair_outcome !== "not-metadata";
     let reviewerWithheld = false;
@@ -12049,6 +12126,10 @@ export async function runSweep(
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
+    if (armOutcome !== "armed" && armOutcome !== "direct-merged") {
+      const repairStarted = acted && spent !== false && (disposition === "conflicted" || disposition === "blocked-fixable");
+      await reportStuckStage(pr, blockerRow, repairStarted, standDownReason);
+    }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
     // under --dry-run, where that row is skipped and they are the pass's sole trace.
@@ -12102,6 +12183,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
         ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
           ? { keep_head_branch: pr.headRefName }
@@ -13927,7 +14009,7 @@ export async function runSweep(
         contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
       contradictoryCheckpoint = state;
     }
-    finalizeDisposition(
+    await finalizeDisposition(
       prIndex,
       pr,
       disposition,
@@ -13999,7 +14081,7 @@ export async function runSweep(
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = await claimReview(job.reviewKey, job.pr);
     if (!claim.ok) {
-      finalizeDisposition(
+      await finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -14029,7 +14111,7 @@ export async function runSweep(
       observation_version: 1,
     });
     if (deps.detachReviewWait) {
-      finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
+      await finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
         true, false, undefined, undefined, undefined, undefined, undefined);
     }
     const repairCapacity = repairAdmissionTelemetry?.();
@@ -14112,7 +14194,7 @@ export async function runSweep(
         // failure the row just above establishes a bounded retry clock.
         claim.release();
       }
-      if (!deps.detachReviewWait) finalizeDisposition(
+      if (!deps.detachReviewWait) await finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -14152,7 +14234,7 @@ export async function runSweep(
   // pass may own it for a real active review. Ledger `acted:false` with no outcome key.
   const unstartedReviews = orderedReviews.slice(nextReviewIndex);
   for (const job of unstartedReviews) {
-    finalizeDisposition(
+    await finalizeDisposition(
       job.index,
       job.pr,
       "post-review",
@@ -14383,6 +14465,7 @@ export async function runSweepLightPass(
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
               ...deps,
+              stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
               repairAdmissionTelemetry: repairAdmission.snapshot,
@@ -14391,6 +14474,7 @@ export async function runSweepLightPass(
             }
           : {
               ...deps,
+              stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
               repairAdmissionTelemetry: repairAdmission.snapshot,
