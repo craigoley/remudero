@@ -3478,11 +3478,17 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
   // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
-  // command FAILED is left alone. TIERED: a first crossing is re-measured once, alone; only a
+  // command FAILED is left alone. TIERED: a first crossing is re-measured once; only a
   // SECOND crossing beyond a 10% confirmation margin refuses — a loaded runner crossed by 2%
   // on PR #6821, and current no-draft census crossed by 0.7–5.7%, with PASSing commands.
+  // W1-T5676: the re-measure is judged against the median-cost entry RE-TIMED back to back with
+  // it, never pass one's median — a reference fixed at pass-one load refused a 4897ms re-measure
+  // against 4884ms on a loaded host (2026-10-04). The median POSITION never crosses: a crossing
+  // entry costs over 4x the median, the entry there at most 2x it.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
+    const byCost = [...censusCosts].sort((a, b) => a[1] - b[1]);
+    const referenceIndex = byCost[Math.floor(byCost.length / 2)]![0];
     for (const [i, firstMs] of censusCosts) {
       if (firstMs <= threshold || !steps[i].ok) continue;
       const { job, script } = gateSteps[i];
@@ -3496,11 +3502,16 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
         continue;
       }
-      const confirmationThreshold = Math.ceil(threshold * FAST_GATE_CENSUS_REMEASURE_MARGIN);
+      const reference = gateSteps[referenceIndex];
+      const refAgainMs = timedCensus(reference.script).elapsedMs;
+      const refAgain = `${reference.job} re-timed back to back at ${refAgainMs}ms`;
+      const confirmationThreshold = Math.ceil(
+        Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE * FAST_GATE_CENSUS_REMEASURE_MARGIN,
+      );
       if (againMs <= confirmationThreshold) {
         steps[i] = {
           ...steps[i],
-          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, within the ${confirmationThreshold}ms confirmation margin (passed)`,
+          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, against ${refAgain}, within the ${confirmationThreshold}ms confirmation margin (passed)`,
         };
         continue;
       }
@@ -3510,8 +3521,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         ok: false,
         detail:
           `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, the re-measure over ${confirmationThreshold}ms ` +
-          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
-          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x the median-cost entry ${refAgain}, floored at ` +
+          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       };
     }
