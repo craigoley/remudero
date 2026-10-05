@@ -72,6 +72,9 @@ test("a six minute view build neither stalls projection nor silences the read-mo
   const stateDir = scratch(t, "slowview-state");
   const ledgerDir = scratch(t, "slowview-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "boot"));
+  // W1-T5896: a view with no switch is not built.
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { slow: "shadow" } }));
   const marks = join(scratch(t, "slowview-marks"), "marks.txt");
   // The watchdog's clock runs 30 times real time, so a 12 s build is 6 minutes to it.
   const scale = 30;
@@ -257,7 +260,7 @@ test("the view thread body builds the extra views it loads and answers shadow an
   const ledgerDir = scratch(t, "slowview-body-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "r1"));
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow" } }));
+  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow", extra: "shadow" } }));
   const projector = projectorOf(stateDir, [{ name: "core", ledgerDir }], { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
   t.after(() => projector.ticker.release());
   const viewsModule = moduleFile(t, "slowview-extra", `export default [{ name: "extra", version: 1, materialize: () => [{ key: "", data: { extra: true }, sources: [] }] }];\n`).href;

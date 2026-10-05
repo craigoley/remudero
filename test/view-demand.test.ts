@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { openReadModel } from "../src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { createReadModelTicker, createReadModelWorker, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   VIEW_DEMAND_EVICT_MS,
@@ -92,7 +92,14 @@ function fakeMain(wantTicker: () => { want(view: string, key: string): boolean }
   };
 }
 
+/** W1-T5896: a view with no switch is not built, so the task view is switched to serve, as its route needs. */
+function serveTask(stateDir: string): void {
+  mkdirSync(dirname(readModelSwitchesPath(stateDir)), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { task: "serve" } }));
+}
+
 function ticker(t: TestCtx, opts: { clock: Clock; stateDir: string; ledgerDir: string; book: ReturnType<typeof createDemandBook>; builds: string[][]; post: (m: ReadModelWorkerMessage) => void }) {
+  serveTask(opts.stateDir);
   const made = createReadModelTicker({
     stateDir: opts.stateDir, instances: [{ name: "core", ledgerDir: opts.ledgerDir }], clock: opts.clock, holder: "view-demand", oracle: "off",
     demand: opts.book, views: [demandView(opts.book, opts.builds)], post: opts.post,
@@ -423,6 +430,7 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
   const stateDir = scratch(t, "vdw-state");
   const ledgerDir = seeded(t, "vdw-ledger");
   const instances = [{ name: "core", ledgerDir }];
+  serveTask(stateDir);
   // The projector thread's side: it holds the lease and posts the instance state the view thread waits for.
   const posted: ReadModelWorkerMessage[] = [];
   const projector = createReadModelTicker({ stateDir, instances, oracle: "off", holder: "vdw-projector", views: [], post: (m) => void posted.push(m) });
