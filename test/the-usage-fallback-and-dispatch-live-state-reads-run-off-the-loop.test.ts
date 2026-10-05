@@ -7,6 +7,7 @@ import type { Config } from "../src/lib/config.js";
 import { prefetchLiveStates, runDrain, type DrainDeps, type MergedSet } from "../src/lib/drain.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import {
+  defaultAsyncUsageProbeRunner,
   ghLiveStateByNumberAsync,
   readUsageSnapshotAsync,
   readUsageSnapshotPreferSdk,
@@ -92,6 +93,29 @@ test("the async usage runner still parses a good read and keeps parse failures d
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("the default async usage runner runs a real child off the loop, returns its stdout as text, and rejects on a failing or timed-out child", async () => {
+  const opts = { encoding: "utf8" as const, env: { ...process.env } as Record<string, string>, maxBuffer: 1 << 20, timeout: 5000 };
+  let timerFiredAt = Number.POSITIVE_INFINITY;
+  const started = Date.now();
+  setTimeout(() => {
+    timerFiredAt = Date.now() - started;
+  }, 10);
+  const out = await defaultAsyncUsageProbeRunner(
+    process.execPath,
+    ["-e", "setTimeout(() => process.stdout.write('probe-ok'), 150)"],
+    opts,
+  );
+  const settledAt = Date.now() - started;
+  assert.equal(out, "probe-ok");
+  assert.equal(typeof out, "string");
+  assert.ok(timerFiredAt < settledAt, `timer fired at ${timerFiredAt}ms before the child settled at ${settledAt}ms`);
+
+  await assert.rejects(defaultAsyncUsageProbeRunner(process.execPath, ["-e", "process.exit(3)"], opts));
+  await assert.rejects(
+    defaultAsyncUsageProbeRunner(process.execPath, ["-e", "setTimeout(() => undefined, 10000)"], { ...opts, timeout: 100 }),
+  );
 });
 
 test("readUsageSnapshotPreferSdk awaits an asynchronous CLI fallback while a timer scheduled before it fires", async () => {

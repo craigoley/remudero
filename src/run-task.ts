@@ -31691,7 +31691,7 @@ export type AsyncUsageProbeRunner = (
 export const USAGE_PROBE_TIMEOUT_MS = 30_000;
 
 const usageProbeExecFile = promisify(execFile);
-const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, argv, opts) => {
+export const defaultAsyncUsageProbeRunner: AsyncUsageProbeRunner = async (bin, argv, opts) => {
   const { stdout } = await usageProbeExecFile(bin, argv, opts);
   return String(stdout);
 };
