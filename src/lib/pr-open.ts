@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
+import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
@@ -242,4 +243,93 @@ export function openPullRequestChecked(
     }
   }
   return checkedBody;
+}
+
+/** W1-T5520: an open PR for this task that is NOT the run's own branch. `trailer` means only the body's
+ *  `Remudero-Task:` trailer named the task, the head being a non-run branch. */
+export interface OtherOpenPr {
+  number: number;
+  url: string;
+  head_ref: string;
+  matched_by: "branch" | "trailer";
+}
+
+/** Every open row other than `ownBranch` that belongs to `taskId`, lowest number first. PURE. The `unfiled` sentinel and
+ *  a phantom `run-<id>-build-<epoch>` id never reach TASK_ID_SHAPE, so neither can match (W1-T3535, W1-T3042). */
+export function otherOpenPrCandidates(rows: readonly RestPullRow[], taskId: string, ownBranch: string): OtherOpenPr[] {
+  if (!TASK_ID_SHAPE.test(taskId)) return [];
+  const found: OtherOpenPr[] = [];
+  for (const row of rows) {
+    const headRef = row.head?.ref ?? "";
+    if (headRef === ownBranch) continue;
+    if (typeof row.number !== "number" || typeof row.html_url !== "string") continue;
+    if (row.state !== undefined && row.state !== "open") continue;
+    if (filedTaskIdFromRunBranch(headRef) === taskId) {
+      found.push({ number: row.number, url: row.html_url, head_ref: headRef, matched_by: "branch" });
+    } else if (extractTaskTrailerId(row.body ?? "") === taskId) {
+      found.push({ number: row.number, url: row.html_url, head_ref: headRef, matched_by: "trailer" });
+    }
+  }
+  return found.sort((a, b) => a.number - b.number);
+}
+
+/** The LOWEST-numbered open PR other than `ownBranch` that belongs to `taskId`, or undefined. PURE. A trailer-only
+ *  match is returned here unfiltered; {@link readOtherOpenPrForTask} drops one that changes nothing outside plan/. */
+export function findOtherOpenPrForTask(rows: readonly RestPullRow[], taskId: string, ownBranch: string): OtherOpenPr | undefined {
+  return otherOpenPrCandidates(rows, taskId, ownBranch)[0];
+}
+
+export type OtherOpenPrReading =
+  | { state: "none" }
+  | ({ state: "found" } & OtherOpenPr)
+  | { state: "unreadable"; error: string };
+
+/** One injected async REST JSON read — the daemon passes `ghJsonAsync`, so no sync call lands on its loop. */
+export type OpenPrJsonReader = (args: string[]) => Promise<unknown>;
+
+const errorText = (err: unknown): string => String((err as Error)?.message ?? err);
+
+/** One PR's changed paths, or the reason they could not be read — the failure rides in the return shape. */
+async function readChangedPaths(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  read: OpenPrJsonReader,
+): Promise<{ paths: string[] } | { error: string }> {
+  try {
+    const files = await read(prFilesRestArgs(owner, repo, prNumber));
+    if (!Array.isArray(files)) return { error: `pulls/${prNumber}/files was not an array` };
+    return { paths: (files as Array<{ filename?: unknown }>).map((file) => String(file?.filename ?? "")) };
+  } catch (err) {
+    return { error: errorText(err) };
+  }
+}
+
+/**
+ * W1-T5520: is there ANOTHER open PR for this task? ONE list call, plus a `pulls/<n>/files` read only for a
+ * trailer-only match, which counts only if it changes a path outside `plan/` — a plan amendment carrying the trailer
+ * never blocks the build it describes. Any failed read is `unreadable`, never a guess at `none`.
+ */
+export async function readOtherOpenPrForTask(
+  owner: string,
+  repo: string,
+  taskId: string,
+  ownBranch: string,
+  read: OpenPrJsonReader,
+): Promise<OtherOpenPrReading> {
+  let rows: unknown;
+  try {
+    rows = await read(openPrsRestArgs(owner, repo));
+  } catch (err) {
+    return { state: "unreadable", error: errorText(err) };
+  }
+  if (!Array.isArray(rows)) return { state: "unreadable", error: "the open-PR list was not an array" };
+  let filesError: string | undefined;
+  for (const candidate of otherOpenPrCandidates(rows as RestPullRow[], taskId, ownBranch)) {
+    if (candidate.matched_by === "branch") return { state: "found", ...candidate };
+    const changed = await readChangedPaths(owner, repo, candidate.number, read);
+    if ("error" in changed) filesError ??= changed.error;
+    else if (changed.paths.some((path) => !path.startsWith("plan/"))) return { state: "found", ...candidate };
+  }
+  return filesError === undefined ? { state: "none" } : { state: "unreadable", error: filesError };
 }

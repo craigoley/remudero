@@ -1,0 +1,76 @@
+- id: W1-T5921
+  title: "A CI-GATE THAT TIMED OUT ON A NEVER-STARTED CHECK GETS A NEW HEAD — ci-gate's wait cap fails with 'TIMED OUT waiting for required check(s) … a NEW sha is the only remedy', and the aggregates report 'SHARD HANG — the matrix was cancelled', yet the sweep answers with a same-sha ci-gate re-drive, same-sha job requeues and a paid ci-log fix worker, none of which can produce the new sha the gate names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a red that is exactly the timed-out / never-started shape is remedied by a bounded base refresh to a new head, never a same-sha requeue or a worker strike
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
+  plan_refs: [W1-T312, W1-T1223, W1-T2671, W1-T2789, W1-T5654, W1-T5694, W1-T5864, W1-T5920]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-ci-gate-timed-out-on-a-never-started-check-gets-a-new-head.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05, during a GitHub Actions outage. On #9388 (W1-T5885) head befbe485, ci-gate
+    failed at about 21:30Z with its own error: "ci-gate: TIMED OUT waiting for required check(s) to
+    complete (this is NOT a check failure -- a NEW sha is the only remedy, re-running this same sha
+    will not help): - rule-checks". The `ci` and `coverage-ratchet` aggregates reported
+    "SHARD HANG — the matrix was cancelled while the PR head … was unchanged … THE TESTS DID NOT
+    RUN". The sweep then did three things that cannot produce a new sha:
+    - At 21:35:32 it disposed `blocked-fixable` "required checks red — ci-log fix, strike 1/2"
+      and dispatched a paid worker. Its push was refused at 21:39:10
+      (`sweep.post_fix_redrive_failed`) because the operator session had merged main by hand
+      (69975ac9, 21:40).
+    - At 21:40:38 it re-drove ci-gate on the SAME sha (`sweep.ci_gate_reaggregated`).
+    - On the new head, the matrix hung again. At 21:47 it re-queued 16 jobs, all refused 403
+      "already running" (W1-T5920). At 21:48:55 it spent another ci-log strike, and that worker
+      committed nothing (`fix.commit_refused`, 21:52:09).
+    The operator merged main into the branch by hand again at 22:07 (dd4738a5).
+
+    WHERE THE TEXT COMES FROM. .github/workflows/ci-gate.yml writes the timeout in its wait loop
+    (W1-T312: "::error::ci-gate: TIMED OUT waiting for required check(s) to complete", then one
+    "  - <check>" line per not-ready check). .github/workflows/ci.yml writes "::error::ci: SHARD
+    HANG", "::error::test-slow: SHARD HANG" and "::error::coverage-ratchet: SHARD HANG" when the
+    shard matrix was cancelled with the head unchanged. Both are `::error::` annotations, so a
+    failure's log tail or annotation fallback carries them. Nothing in src/lib/sweep.ts reads
+    either string. `classifyCiInfrastructureFailure` (W1-T3194) recognises only the
+    artifact-finalize 403. The base-refresh lanes (W1-T2671 in the fix rung, W1-T2789's
+    `staleBaseReleaseTarget` in runSweep) require `decideRedBaseRefresh`'s exact-path match
+    between failing test/source files and newer main changes. A run whose tests never ran names
+    no failing file, so it never qualifies. W1-T5694 leaves "a genuine hang with no newer run"
+    red by design. This task is the remedy for that red.
+  design: |
+    (1) Add a pure classifier over the red required set. A PR whose ci-gate failure tail carries
+    the W1-T312 "TIMED OUT waiting for required check(s)" line, and whose every other red
+    required check is either named in that line's not-ready list or is an aggregate carrying a
+    "SHARD HANG — the matrix was cancelled" line, is `ci-timeout-no-verdict`. Any genuine
+    failure (a test failure, a TS error, a diff-coverage report) disqualifies it, and today's
+    fix rung handles it.
+    (2) In runSweep's blocked-fixable arm, before the cancelled-check requeue and `dispatchFix`,
+    remedy a `ci-timeout-no-verdict` PR with ONE base refresh per (PR, head) through the existing
+    `deps.updateBranch` effect. That is GitHub's update-branch, a real two-parent merge of main
+    into the head, the same new-head remedy W1-T2789 uses. First re-read live state and refuse a
+    moved head, as W1-T2789 does. Ledger `sweep.ci_timeout_refresh.attempted` before the call and
+    the outcome after it. Set `acted = false` with a stand-down reason naming the never-started
+    checks, so nothing seeds `prior.fixed`, no job is re-queued on that sha, and no strike is
+    spent. Keep W1-T5654's fresh-rollup filter first: a timed-out check green or in flight on
+    the fresh read is not red. Keep the stale-ci-gate re-drive when its transition proves the
+    not-ready check has since COMPLETED (re-aggregation then has a verdict to read).
+    (3) A head not behind main (update-branch has nothing to merge), a conflict (left to the
+    existing `conflicted` / W1-T5864 merge-conflict path), or an update error does not loop.
+    Count consecutive timeout refreshes per PR across heads with a constant
+    `CI_TIMEOUT_REFRESH_BACKSTOP`, tagged BACKSTOP in its doc comment. At the bound, or when no
+    refresh is possible, escalate needs-human once per (PR, head) naming the never-started
+    checks. Retain the refresh step in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts, bare
+    entry) because the bound reads it.
+  acceptance:
+    - claim: "a PR whose only red is ci-gate's TIMED OUT waiting for required checks plus SHARD HANG aggregates gets one update-branch base refresh per head with no job requeue and no fix strike, a head with a genuine test failure still dispatches the fix rung, and after the BACKSTOP number of timeout refreshes on one PR, or when the head cannot be refreshed, the sweep escalates once naming the never-started checks"
+      proof: "unit test: test/a-ci-gate-timed-out-on-a-never-started-check-gets-a-new-head.test.ts"
+  falsifier: |
+    Remove the `ci-timeout-no-verdict` classification: the #9388 shape (ci-gate TIMED OUT on
+    rule-checks, ci and coverage-ratchet SHARD HANG) falls through to the cancelled-check requeue
+    and `dispatchFix` on the same sha, `updateBranch` is never called, and the test fails.

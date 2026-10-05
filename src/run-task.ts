@@ -914,7 +914,9 @@ import {
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   PrOpenRefusedError,
+  readOtherOpenPrForTask,
   recordRefusedPrOpen,
+  type OpenPrJsonReader,
   type OpenPullRequestProofRunner,
 } from "./lib/pr-open.js";
 import {
@@ -15000,6 +15002,9 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   coveragePrecheckPorts?: CoveragePrecheckPorts;
   /** Where a stale-proof PR-open refusal or managed-checkout install failure escalates; production files the task repo's own issue. */
   prOpenRefusalIssues?: IssueGateway;
+  /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
+  otherOpenPrReader?: OpenPrJsonReader;
+  prCreateExec?: Parameters<typeof runGhPrCreate>[4];
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -15925,6 +15930,9 @@ async function runTask(
     managedCheckoutInstall?: (repoDir: string) => void;
     /** Test gateway for checkout install escalation; production uses the task repo's issue gateway. */
     prOpenRefusalIssues?: IssueGateway;
+    /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
+    otherOpenPrReader?: OpenPrJsonReader;
+    prCreateExec?: Parameters<typeof runGhPrCreate>[4];
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -16386,6 +16394,51 @@ export function endThrownRun(
     cause: runErrorCause(err),
     cost_usd: costUsd,
   }));
+}
+
+/**
+ * W1-T5520: the last moment that can see a sibling PR for this task — admission ran an hour before the open, and
+ * #8797 was created beside a still-open #8782. A found sibling settles `blocked_inflight` (a scheduling deferral,
+ * no strike) with the branch left on origin as the only evidence of the build (W1-T434); it is never written as
+ * `pr_url` or `pr.opened`, because this run does not own that PR. An unreadable list is ledgered and the open
+ * proceeds as today: refusing would strand a finished build to prevent a duplicate the sweep already closes.
+ */
+async function deferOpenToSiblingPr(
+  ctx: RunTaskContext,
+  run: { impl: WorkerResult; branch: string; worktreePath: string; repoDir: string; costUsd: number },
+): Promise<RunResult | undefined> {
+  const { log, say, opts, owner, task, taskId, runId } = ctx;
+  const { impl, branch, worktreePath, repoDir, costUsd } = run;
+  const sibling = await readOtherOpenPrForTask(owner, task.repo, taskId, branch, opts.otherOpenPrReader ?? ((args) => ghJsonAsync(args)));
+  if (sibling.state === "unreadable") {
+    log("pr.open_existing_check_unreadable", { branch, error: boundedVerdictReason(sibling.error) });
+    return undefined;
+  }
+  if (sibling.state === "none") return undefined;
+  const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  log("pr.open_deferred_to_existing", {
+    existing_pr_number: sibling.number,
+    existing_pr_url: sibling.url,
+    existing_head_ref: sibling.head_ref,
+    matched_by: sibling.matched_by,
+    branch,
+    head_sha: headSha,
+    cost_usd: costUsd,
+  });
+  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log);
+  log("verdict", {
+    verdict: "blocked_inflight",
+    reason: `${taskId} already has open PR #${sibling.number} (${sibling.head_ref}); not opening a second`,
+    stage: "pr_open.deferred_to_existing",
+    branch,
+    head_sha: headSha,
+    cost_usd: costUsd,
+    billing_mode: billingMode(impl.childEnvKeys),
+    account_label: impl.accountLabel,
+    ...terminalVerdictFields(impl),
+  });
+  say(`verdict: blocked_inflight — ${taskId} already has open PR #${sibling.number}; branch ${branch} kept on origin at ${headSha}`);
+  return { taskId, runId, merged: false, costUsd, verdict: "blocked_inflight" };
 }
 
 /** Best-effort worktree reclaim for a run that is ending: a failed remove is ledgered, never thrown over the verdict. */
@@ -18675,7 +18728,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
-      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+      // After the local open checks: a refused open never reads GitHub, and a sibling still stops the create.
+      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
+      if (deferred) return deferred;
+      prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
       // Reuse that same body repair before review so the adopted worker prose cannot fail the

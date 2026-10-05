@@ -1,0 +1,42 @@
+- id: W1-T5925
+  title: "THE SELECTOR SHADOW CAN NEVER REACH `ready` INSIDE ITS 60-RUN WINDOW — the live narrow coverage selection (RMD_AFFECTED_SUITE_LIVE, W1-T5705; a measured 55.6% median saving) is gated on a shadow verdict that needs 30 narrow-observed failures across 40 complete runs with zero incomplete, but the gardener re-reads only the last SELECTOR_SHADOW_RUN_LIMIT = 60 runs, so the gate needs a ~50% failure rate to ever pass; keep every observation durably and replay the CI history so the verdict measures recall, not luck"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: span — the shadow gardener's fold plus one registered ledger step; one concern, the evidence the flip gate reads
+  band_meaning: span
+  origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
+  plan_refs: [W1-T5705, W1-T5704, W1-T5697]
+  files: [src/lib/selector-shadow-gardener.ts, src/lib/ledger.ts, test/the-selector-shadow-can-never-reach-ready-inside-a-60-run-window.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 22:23Z, the latest `selector-shadow.report` ledger row: runsRequested 60,
+    runsComplete 32, runsSkipped 21, runsIncomplete 7; narrow: failures 10, selected 10, missed 0,
+    missRate 0, medianSize 1157.5 of fullSuiteSize 2605, medianSavingPercent 55.6; verdict
+    "insufficient", reason "need 30 narrow-observed failures across 40 complete runs, zero incomplete
+    runs and a measured narrow size". src/lib/selector-shadow-gardener.ts reads the last
+    SELECTOR_SHADOW_RUN_LIMIT = 60 runs on every report, and 53 reports have been written. Inside 60 runs,
+    30 failures means a failure rate near 50%, and a single incomplete run in the window resets it, so the
+    verdict that would let the operator switch on the 55% coverage saving is structurally unreachable on a
+    healthy repo. The doctrine names this shape: a bound that fires on a healthy condition.
+  design: |
+    (1) Each complete shadow observation (run id, head, narrow selection, failed suites, selected or
+    missed) is appended once to a durable, deduplicated store (a ledger step registered in
+    DECISION_RELEVANT_LEDGER_STEPS), and the report folds the whole store, not the last 60 runs, so the
+    evidence accumulates. An incomplete run is excluded and counted, never resetting the verdict. (2) A
+    replay mode reconstructs observations from history: for each past pull_request CI run with a failing
+    test, recompute the narrow selection for that run's diff at its base and record whether the failing
+    suite was selected. That turns weeks of waiting into one bounded backfill, marked `source: replay` so
+    live and replayed recall are reported separately. (3) The thresholds (30 failures, zero misses) and
+    the flag are unchanged; the operator still flips RMD_AFFECTED_SUITE_LIVE.
+  acceptance:
+    - claim: "shadow observations accumulate durably across reports and the verdict folds all of them, an incomplete run is excluded without resetting the count, and replayed historical failures are recorded with source replay and reported separately from live ones"
+      proof: "unit test: test/the-selector-shadow-can-never-reach-ready-inside-a-60-run-window.test.ts"
+  falsifier: |
+    Keep the report re-reading only the last 60 runs: the accumulated observations beyond the window
+    are not counted and the test fails.

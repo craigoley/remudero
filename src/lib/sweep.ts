@@ -1619,6 +1619,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "postReview",
   "repushAbsent",
   "updateBranch",
+  "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
   "captureRepairFeedback",
   "disarmAutoMerge",
   "stackPrerequisite",
@@ -1680,6 +1681,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "mergeQueue"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -3539,6 +3541,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+
+    // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
+    mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
 
     readyDraft: (pr) => readyDraftImpl(pr),
 
@@ -8514,10 +8519,13 @@ export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  queuedPrNumbers: ReadonlySet<number> = new Set(),
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
   for (const pr of prs) {
+    // W1-T5903: the base requires a merge queue, which validates the merged result itself.
+    if (queuedPrNumbers.has(pr.prNumber)) continue;
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
@@ -8624,6 +8632,18 @@ export function codeqlBlockerCiFailure(alert: ScannerAlertIdentity): CiFailure {
   };
 }
 
+/** W1-T5903 — the behind-main candidates a merge queue stands down. The queue tests the group
+ *  commit, so refreshing the branch against main only spends a CI cycle and a re-review. `queued`
+ *  is the injected per-PR queue fact; this stays pure. */
+export function queuedBehindMainSkips(
+  prs: readonly OpenPrView[],
+  behindMainByPr: ReadonlyMap<number, number>,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  queued: (pr: ArmedStalledPr) => boolean,
+): ArmedStalledPr[] {
+  return openPrsBehindMain(prs, behindMainByPr, policy).filter(queued);
+}
+
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
  *  set, never a second predicate recomputing the same two facts. ONE PER PASS, OLDEST HEAD FIRST —
  *  updating mints a NEW head and a verdict is input-pinned, so updating the whole stalled set each
@@ -8636,6 +8656,7 @@ export function selectUpdateBranchTarget(
   updatedForWorkflow: ReadonlySet<string> = new Set(),
   behindMainByPr: ReadonlyMap<number, number> = new Map(),
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> = DEFAULT_SWEEP_POLICY,
+  queuedPrNumbers: ReadonlySet<number> = new Set(),
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -8644,7 +8665,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -9705,6 +9726,10 @@ export interface SweepDeps {
    *  {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass. A
    *  `"conflict"` outcome is REPORTED and never retried by this call. */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
+   *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
+   *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
+  mergeQueue?: (prUrl: string) => boolean;
   /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
    *  one safe mechanical repair: rebase that head onto current main and push it back with an
    *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
@@ -14303,14 +14328,47 @@ export async function runSweep(
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
   if (!deps.dryRun && deps.updateBranch) {
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
+    const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
+    // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
+    // reads as "no queue", so the pre-queue refresh is unchanged.
+    const queuedPrNumbers = new Set<number>();
+    const mergeQueue = deps.mergeQueue;
+    if (mergeQueue) {
+      const skipped = queuedBehindMainSkips(refreshPrs, behindMainByPr, policy, (c) => {
+        try {
+          return mergeQueue(c.prUrl) === true;
+        } catch {
+          return false; // a queue read that fails is "no queue": the refresh below is unchanged
+        }
+      });
+      for (const c of skipped) {
+        queuedPrNumbers.add(c.prNumber);
+        const already = ledgerLines.some(
+          (l) => l.step === "sweep.update_branch.skipped_queue" && l.pr_number === c.prNumber && l.head_sha === c.headSha,
+        );
+        if (already) continue;
+        // No `pr_url`: the row is keyed by pr_number + head_sha, and a priced-row census would claim it.
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId,
+          task_id: c.taskId ?? "SWEEP",
+          step: "sweep.update_branch.skipped_queue",
+          pr_number: c.prNumber,
+          head_sha: c.headSha,
+          ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }),
+        });
+      }
+    }
     const target = selectUpdateBranchTarget(
-      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber)),
+      refreshPrs,
       now,
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),
       deps.updatedForWorkflow ?? new Set(),
-      deps.behindMainByPr ?? new Map(),
+      behindMainByPr,
       policy,
+      queuedPrNumbers,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
