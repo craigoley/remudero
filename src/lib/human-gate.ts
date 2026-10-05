@@ -210,3 +210,86 @@ export function projectHumanGates(input: readonly HumanGateSource[]): HumanGateP
     sources,
   };
 }
+
+/** Every gate kind in wire order; a surface names the ones no supplied source covers. */
+const HUMAN_GATE_KINDS: readonly HumanGateKind[] = [
+  "escalation", "manual_approval", "task_question", "feedback_grill", "feedback_proposal", "feedback_new",
+  "proposal", "dependency_review", "held_root", "verify_human", "pin_drift", "stale_reviewer",
+  "blocked_pr", "merge_held", "operator_item",
+];
+
+/** The kinds each production adapter's source reads, so an empty complete source still covers them. */
+const SOURCE_KINDS: Readonly<Record<string, readonly HumanGateKind[]>> = {
+  escalations: ["escalation", "manual_approval"],
+  "feedback-grills": ["feedback_grill"],
+  "task-questions": ["task_question"],
+  "now-decisions": ["escalation", "manual_approval", "task_question", "feedback_grill"],
+  "change-management": ["blocked_pr", "merge_held"],
+  "ratification-pins": ["pin_drift"],
+  "reviewer-freshness": ["stale_reviewer"],
+  proposals: ["proposal"],
+};
+
+/** One surface's needs-you number, read from the shared projection and never recounted. */
+export interface HumanGateCountSummary {
+  /** Distinct Inbox-owned decisions over every supplied gate, before any display cap. */
+  inbox: HumanGateCount;
+  byKind: HumanGateProjection["count"]["byKind"];
+  /** Change-management gates: labelled separately and never added to `inbox`. */
+  changeManagement: HumanGateCount;
+  /** Present when the surface displays a page: how many Inbox decisions it shows and leaves out. */
+  display?: { shown: number; more: HumanGateCount };
+  /** Kinds some readable source covers, and the kinds no supplied source reads yet. */
+  kinds: { covered: HumanGateKind[]; missing: HumanGateKind[] };
+  /** Each instance's own Inbox count; exact only when all of that instance's sources are complete. */
+  instances: Array<{ instance: string; inbox: HumanGateCount }>;
+  /** Every source that did not attest complete coverage, with its reason. */
+  uncertain: Array<{ name: string; instance: string | null; state: "partial" | "unavailable"; reason: string }>;
+}
+
+/** W1-T5373: the one adapter every needs-you surface reports through; `shown` is its displayed page. */
+export function consumeHumanGateCounts(projection: HumanGateProjection, display?: { shown: number }): HumanGateCountSummary {
+  const inboxGates = projection.gates.filter((gate) => gate.ownerSurface === "inbox");
+  const exact = (count: HumanGateCount, n: number): HumanGateCount => count.count !== undefined ? { count: n } : { atLeast: n };
+  const covered = new Set<HumanGateKind>(projection.gates.map((gate) => gate.kind));
+  const instanceOf = (gate: HumanGate): string => decodeURIComponent(gate.key.split(":")[1] ?? "");
+  const names = new Set<string>(projection.gates.map(instanceOf));
+  for (const source of projection.sources) {
+    if (source.instance !== null) names.add(source.instance);
+    if (source.state !== "unavailable") for (const kind of SOURCE_KINDS[source.name] ?? []) covered.add(kind);
+  }
+  const uncertain = projection.sources.flatMap((source) => source.state === "complete" ? [] : [{
+    name: source.name, instance: source.instance, state: source.state,
+    reason: source.reason ?? "source completeness was not established",
+  }]);
+  const inbox = projection.count.inbox;
+  const total = inbox.count ?? inbox.atLeast;
+  return {
+    inbox, byKind: projection.count.byKind, changeManagement: projection.count.changeManagement,
+    ...(display ? { display: { shown: display.shown, more: exact(inbox, Math.max(0, total - display.shown)) } } : {}),
+    kinds: { covered: HUMAN_GATE_KINDS.filter((kind) => covered.has(kind)), missing: HUMAN_GATE_KINDS.filter((kind) => !covered.has(kind)) },
+    instances: [...names].sort(compareText).map((instance) => {
+      const n = inboxGates.filter((gate) => instanceOf(gate) === instance).length;
+      const known = projection.sources.every((source) => source.instance !== instance || source.state === "complete") &&
+        projection.sources.every((source) => source.instance !== null || source.state === "complete");
+      return { instance, inbox: known ? { count: n } : { atLeast: n } };
+    }),
+    uncertain,
+  };
+}
+
+/** The summary a surface reports when it cannot read the shared projection at all: a lower bound, never zero. */
+export function unavailableHumanGateCounts(name: string, reason: string): HumanGateCountSummary {
+  return consumeHumanGateCounts(projectHumanGates([{ name, instance: "core", state: "unavailable", reason, gates: [] }]));
+}
+
+/** How many distinct Inbox gates a displayed page covers, matched on instance and source condition. */
+export function shownHumanGates(projection: HumanGateProjection, shown: ReadonlyArray<{ instance: string; kind: HumanGateKind; subject: string }>): number {
+  const condition = (kind: HumanGateKind, instance: string, subject: string): string =>
+    JSON.stringify([kind === "manual_approval" ? "escalation" : kind, instance, subject]);
+  const displayed = new Set(shown.map((row) => condition(row.kind, row.instance, row.subject)));
+  return projection.gates.filter((gate) => {
+    const [, instance = "", subject = ""] = gate.key.split(":");
+    return gate.ownerSurface === "inbox" && displayed.has(condition(gate.kind, decodeURIComponent(instance), decodeURIComponent(subject)));
+  }).length;
+}
