@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import type { Escalation } from "./escalate.js";
+import { existsSync, readFileSync } from "node:fs";
+import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
+import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
 
 /**
@@ -703,7 +704,32 @@ export function buildDepReviewEscalation(args: {
   title: string;
   body: string;
   semverLevel: SemverLevel;
+  hold?: { headSha: string; redChecks: string[] };
 }): Escalation {
+  if (args.hold) {
+    return {
+      class: "BLOCKED",
+      taskId: `dep-review-hold-PR${args.prNumber}`,
+      headSha: args.hold.headSha,
+      cause: "ci",
+      summary: `Aged dependency review hold: ${args.title}`,
+      detail: [
+        `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
+        `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
+        `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
+        `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
+        `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
+        `this issue does not require routine human approval of the dependency bump.`,
+      ].join("\n"),
+      options: [{
+        label: "repair checks",
+        detail: "repository operator: investigate and rerun transient failed checks, or repair the failure and request a Dependabot rebase/recreate",
+        kind: { type: "operator-only" },
+      }],
+      recommendation: "repair checks",
+      consequence: "The dependency PR remains held while its checks are red.",
+    };
+  }
   return {
     class: "MANUAL",
     taskId: `dep-review-PR${args.prNumber}`,
@@ -728,4 +754,68 @@ export function buildDepReviewEscalation(args: {
     ],
     recommendation: "merge",
   };
+}
+
+/** BACKSTOP: allow a full day for transient CI failures before asking the repository operator. */
+export const DEP_REVIEW_HOLD_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface DepReviewHoldState {
+  headSha: string;
+  heldSinceMs: number | null;
+  asks: Array<{ headSha: string; issueUrl: string; retired: boolean }>;
+}
+
+/** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
+export function reconcileDepReviewHold(args: {
+  statePath: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  result: DepReviewResult;
+  nowMs: number;
+  escalationDeps: () => EscalateDeps;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): void {
+  if (args.result.decision !== "hold" && !existsSync(args.statePath)) return;
+  const state: DepReviewHoldState = existsSync(args.statePath)
+    ? JSON.parse(readFileSync(args.statePath, "utf8"))
+    : { headSha: args.headSha, heldSinceMs: null, asks: [] };
+  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
+      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
+      !Array.isArray(state.asks) || state.asks.some((ask) =>
+        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
+    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
+  }
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  for (const ask of state.asks) {
+    if (ask.retired || (ask.headSha === args.headSha && args.result.decision === "hold")) continue;
+    const issues = args.escalationDeps().issues;
+    if (!issues.closeWithComment) throw new Error("dependency hold issue gateway cannot retire issues");
+    const reason = ask.headSha !== args.headSha
+      ? `Dependency hold head changed from ${ask.headSha} to ${args.headSha}.`
+      : args.result.redChecks.length === 0
+        ? "Dependency hold checks recovered."
+        : `Dependency review no longer holds this head (${args.result.decision}).`;
+    issues.closeWithComment(ask.issueUrl, `${reason} Retiring the old operator ask for ${args.prUrl}.`);
+    ask.retired = true;
+    save();
+    args.log("dep-review.hold_retired", { issue_url: ask.issueUrl, head_sha: ask.headSha, reason });
+  }
+  if (state.headSha !== args.headSha || args.result.decision !== "hold") state.heldSinceMs = null;
+  state.headSha = args.headSha;
+  if (args.result.decision === "hold") state.heldSinceMs ??= args.nowMs;
+  save();
+  if (state.heldSinceMs === null || args.nowMs - state.heldSinceMs < DEP_REVIEW_HOLD_AGE_MS ||
+      state.asks.some((ask) => ask.headSha === args.headSha)) return;
+  const issueUrl = escalate(buildDepReviewEscalation({
+    ...args,
+    semverLevel: args.result.semverLevel,
+    hold: { headSha: args.headSha, redChecks: args.result.redChecks },
+  }), args.escalationDeps());
+  if (!issueUrl) throw new Error("dependency hold escalation not delivered; retry after the issue read recovers");
+  state.asks.push({ headSha: args.headSha, issueUrl, retired: false });
+  save();
+  args.log("dep-review.hold_escalated", { issue_url: issueUrl, head_sha: args.headSha, red_checks: args.result.redChecks });
 }

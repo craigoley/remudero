@@ -741,10 +741,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `escalatePostReviewStall` (run-task.ts) counts these back for its episode key. `escalate()`
   // skips its dedup when no PR is named, so archiving this marker pages PER SWEEP TICK.
   "sweep.post_review.stalled.escalated",
-  // `detectPostReviewStall` (sweep.ts) counts the run of `.failed` lines and RESETS on a `.done`,
-  // so both decide. Without them a rotation mid-stall resets the run and the stall goes unnoticed.
+  // `detectPostReviewStall` counts `.failed` and resets on `.done`; rotation must not reset its streak.
   "sweep.post_review.done",
   "sweep.post_review.failed",
+  // Exact-input delay joins retain the per-step bound; missing source receipts remain unmeasured.
+  "sweep.review_eligible",
+  "sweep.review_admitted",
   // W1-T393 (MASTER-PLAN §11 D-10): retro.ts's `mutationGateLifetime` folds this into
   // `mutation-ratchet`'s LIFETIME record, so archiving it resets that figure on every rotation.
   "mutation.ratchet_verdict",

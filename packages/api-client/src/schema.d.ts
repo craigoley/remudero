@@ -171,6 +171,8 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
+      needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
@@ -2735,6 +2737,8 @@ export interface components {
           needsYou?: number;
           fleet?: number;
           reason?: string;
+          /** W1-T5373: the Inbox decision count, the needs-you composite's read through the shared consumer; `needsYou` above stays the proposal-lane count it always was. */
+          decisions?: HumanGateCountSummary;
         };
       };
     };
@@ -2978,6 +2982,8 @@ export interface components {
       data: {
         /** W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier, with each unavailable or partial source named rather than counted as zero. */
         humanGates?: HumanGateProjection;
+        /** W1-T5373, the composite's header count, read from `humanGates` through the shared consumer. */
+        needsYou?: HumanGateCountSummary;
         /** Every present instance's open decisions, newest `askedAt` first (undated last). */
         decisions: (NowDecision)[];
         /** The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`. */
@@ -3092,6 +3098,8 @@ export interface components {
         decisionsMore?: number;
         /** Optional, uncapped source-qualified decision projection; preserves version-3 consumers. */
         humanGates?: HumanGateProjection;
+        /** W1-T5373, optional; this instance's count read through the shared consumer, with its display page. */
+        needsYou?: HumanGateCountSummary;
         /** Why a decision source was not read for this instance, by kind (`grill`, `task_question`): both live in core, so another instance names why. Its decisions are absent, never zero. */
         decisionsReasons?: {
           grill?: string;
@@ -3146,6 +3154,51 @@ export interface components {
         instance: string | null;
         state: "complete" | "partial" | "unavailable";
         reason?: string;
+      })[];
+    };
+    /** W1-T5373: one surface's needs-you number, from src/lib/human-gate.ts's `consumeHumanGateCounts`. Counted over every gate before any display cap; exact only under complete source coverage. */
+    HumanGateCountSummary: {
+      inbox: HumanGateCount;
+      /** Observed Inbox kinds; the enclosing count supplies completeness. */
+      byKind: {
+        escalation?: number;
+        manual_approval?: number;
+        task_question?: number;
+        feedback_grill?: number;
+        feedback_proposal?: number;
+        feedback_new?: number;
+        proposal?: number;
+        dependency_review?: number;
+        held_root?: number;
+        verify_human?: number;
+        pin_drift?: number;
+        stale_reviewer?: number;
+        blocked_pr?: number;
+        merge_held?: number;
+        operator_item?: number;
+      };
+      /** Change-management gates, labelled separately and never added to `inbox`. */
+      changeManagement: HumanGateCount;
+      /** Present when the surface displays a page; `more` is what the page leaves out. */
+      display?: {
+        shown: number;
+        more: HumanGateCount;
+      };
+      /** Kinds some readable source covers, and kinds no supplied source reads yet. */
+      kinds: {
+        covered: ("escalation" | "manual_approval" | "task_question" | "feedback_grill" | "feedback_proposal" | "feedback_new" | "proposal" | "dependency_review" | "held_root" | "verify_human" | "pin_drift" | "stale_reviewer" | "blocked_pr" | "merge_held" | "operator_item")[];
+        missing: ("escalation" | "manual_approval" | "task_question" | "feedback_grill" | "feedback_proposal" | "feedback_new" | "proposal" | "dependency_review" | "held_root" | "verify_human" | "pin_drift" | "stale_reviewer" | "blocked_pr" | "merge_held" | "operator_item")[];
+      };
+      instances: ({
+        instance: string;
+        inbox: HumanGateCount;
+      })[];
+      /** Every source that did not attest complete coverage, with its reason. */
+      uncertain: ({
+        name: string;
+        instance: string | null;
+        state: "partial" | "unavailable";
+        reason: string;
       })[];
     };
     /** One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback, `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`. */
