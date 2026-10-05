@@ -14,6 +14,7 @@ import type { ReadModelDb } from "../src/lib/read-model-db.js";
 import { createTaskView, readRunTail, taskViewKey, type ReadModelInstanceState, type TaskViewData, type TaskViewOptions } from "../src/lib/task-view.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const ID = "W1-T1";
@@ -86,6 +87,7 @@ function build(t: TestCtx, f: Fixture, overrides: Partial<TaskViewOptions> = {},
   const messages: ReadModelWorkerMessage[] = [];
   const instance = { name: "core", ledgerDir: f.ledgerDir, repo: "o/r" };
   const view = createTaskView({ instances: [instance], ledgerSource, demand, clock, readTask: () => ({ task: PLANNED, source: { asOf: clock.iso(), state: "fresh" } }), ...overrides });
+  switchViewsOn(f.stateDir, [TASK_VIEW_NAME]);
   const ticker = createReadModelTicker({
     stateDir: f.stateDir, instances: [instance], clock, holder: "task-view", oracle: "off", demand, views: [view], post: (m) => void messages.push(m),
   });
