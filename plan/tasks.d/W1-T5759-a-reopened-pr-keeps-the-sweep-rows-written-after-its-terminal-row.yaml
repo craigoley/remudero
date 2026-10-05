@@ -1,0 +1,37 @@
+- id: W1-T5759
+  title: "A REOPENED PR KEEPS THE SWEEP ROWS WRITTEN AFTER ITS TERMINAL ROW — `pruneCarriedRows` drops every `sweep.disposed` and `review.posted` row of a PR that has any `pr.terminal` row, in any file position, so a PR closed and then reopened loses its live sweep history at the next rotation while it is open again, and is never given a second terminal row when it closes"
+  repo: remudero
+  depends_on: [W1-T5318]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one defect — a PR's terminal fact covers only the rows before it
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 22:55Z, W1-T5318 (#9179) follow-up (b)"
+  plan_refs: [W1-T5318, W1-T5517]
+  files: [src/lib/ledger-carry.ts, src/lib/sweep.ts, test/a-reopened-pr-keeps-the-sweep-rows-written-after-its-terminal-row.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/ledger-carry.ts `pruneCarriedRows` builds a
+    `merged` set from every `recordedMergeKey` row (verdict.merged, a merged verdict, or
+    `pr.terminal` with state merged OR closed) and then drops every sweep.disposed/review.posted row
+    of that PR key regardless of order, keeping only `keptAfterMerge` dispositions. A PR closed
+    unmerged gets `pr.terminal state: closed`; when it is reopened, `closedPrFacts` stops reporting
+    it (its number is in the open read), but the old terminal row still makes the next rotation drop
+    the rows the sweep writes while it is open, and `runPrTerminalReconcile` skips any key that
+    already has a terminal row, so its second close records nothing. Not yet observed live (the rung
+    shipped 23:25Z on 10-04); reopening a closed fleet PR is rare but happens on operator recovery.
+  design: |
+    A terminal fact covers only the PR's rows that precede it in file order: rows after a PR's last
+    `pr.terminal` row are carried. The rung treats a PR as needing a new terminal row when its newest
+    named row is later than its last terminal row and GitHub reports it closed again; the dedup
+    (live, then archives) compares positions, not mere presence.
+  acceptance:
+    - claim: "a closed-then-reopened PR keeps the sweep rows written after its terminal row through a rotation, and when it closes again the rung appends exactly one new pr.terminal row"
+      proof: "unit test: test/a-reopened-pr-keeps-the-sweep-rows-written-after-its-terminal-row.test.ts"
+  falsifier: |
+    Keep the order-blind merged set: the reopened PR's post-terminal rows are pruned and the test
+    fails.

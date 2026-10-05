@@ -22,7 +22,7 @@ const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 const CI_YAML_PATH = join(WORKFLOWS_DIR, "ci.yml");
 const CI_GATE_YAML_PATH = join(WORKFLOWS_DIR, "ci-gate.yml");
 
-type WorkflowStep = { uses?: string; with?: Record<string, unknown> };
+type WorkflowStep = { uses?: string; with?: Record<string, unknown>; id?: string; if?: string; run?: string };
 type WorkflowJob = {
   "timeout-minutes"?: number;
   uses?: string; // a job whose body IS a reusable-workflow call — no timeout-minutes is valid there
@@ -45,26 +45,64 @@ async function loadWorkflowFiles(): Promise<Array<{ file: string; doc: WorkflowD
   return out;
 }
 
-// ── acceptance 1: every actions/setup-node use, across every workflow file, caches npm ─────
+function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], index: number): void {
+  const step = steps[index]!;
+  if (step.with?.cache === "npm") return;
+  const context = `${file}: job '${jobId}'s uncached setup-node`;
+  assert.equal(file, "ci.yml", `${context} must not permit cold installs in other workflows`);
+  assert.equal(jobId, "ci", `${context} must only bootstrap the guarded ci admission`);
+  assert.equal(step.with?.cache, undefined, `${context} must not replace npm caching with another cache`);
+  assert.equal(steps[index + 1]?.id, "admission", `${context} must immediately precede admission`);
+  assert.match(steps[index + 1]?.run ?? "", /node scripts\/ci-shard-admission\.mjs/);
+  assert.doesNotMatch(steps[index + 1]?.run ?? "", /(^|\s)(?:npm|npx)\s/,
+    `${context} must keep admission dependency-free`);
+  const restore = steps[index + 2];
+  assert.equal(restore?.uses, step.uses, `${context} must restore the same pinned setup action`);
+  assert.equal(restore?.with?.cache, "npm", `${context} must retain cache: npm for admitted work`);
+  assert.equal(restore?.if, "${{ steps.admission.outputs.setup != 'false' }}",
+    `${context} must restore the cache for every admitted or uncertain shard`);
+  assert.ok(!steps.slice(0, index + 3).some(candidate => /\bnpm\s+ci\b/.test(candidate.run ?? "")),
+    `${context} must not install before the cached setup`);
+  const install = steps.slice(index + 3).find(candidate => /\bnpm\s+ci\b/.test(candidate.run ?? ""));
+  assert.ok(install?.run?.includes('"${{ steps.admission.outputs.setup }}" != "false"'),
+    `${context} must guard the actual npm installation with the same admission`);
+}
 
-test("R-50: every actions/setup-node use across the whole workflow fleet declares cache: npm", async () => {
+test("R-50: setup caches npm unless it only bootstraps guarded dependency-free admission", async () => {
   const files = await loadWorkflowFiles();
   let setupNodeUses = 0;
   for (const { file, doc } of files) {
     for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
-      for (const step of job.steps ?? []) {
+      const steps = job.steps ?? [];
+      for (const [index, step] of steps.entries()) {
         if (!step.uses?.startsWith("actions/setup-node@")) continue;
         setupNodeUses += 1;
-        assert.equal(
-          step.with?.cache,
-          "npm",
-          `${file}: job '${jobId}'s actions/setup-node step has no cache: npm — every PR pays for a cold ` +
-            "npm ci with no lockfile-keyed cache to warm it from",
-        );
+        assertSetupCache(file, jobId, steps, index);
       }
     }
   }
   assert.ok(setupNodeUses >= 20, `expected at least the 24 actions/setup-node uses on record, got ${setupNodeUses}`);
+});
+
+test("npm cache census refuses a missing cache, mismatched guard or installer before admission", async () => {
+  const doc = parseYaml(await readFile(CI_YAML_PATH, "utf8")) as WorkflowDoc;
+  const steps = doc.jobs.ci!.steps!;
+  const index = steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
+  assert.ok(index >= 0);
+  assertSetupCache("ci.yml", "ci", steps, index);
+  const missingCache = structuredClone(steps);
+  delete missingCache[index + 2]!.with!.cache;
+  assert.throws(() => assertSetupCache("ci.yml", "ci", missingCache, index), /retain cache: npm/);
+  const wrongGuard = structuredClone(steps);
+  wrongGuard[index + 2]!.if = "${{ false }}";
+  assert.throws(() => assertSetupCache("ci.yml", "ci", wrongGuard, index), /every admitted or uncertain/);
+  const earlyInstall = structuredClone(steps);
+  earlyInstall.unshift({ run: "npm ci" });
+  assert.throws(() => assertSetupCache("ci.yml", "ci", earlyInstall, index + 1), /install before/);
+  const dependentAdmission = structuredClone(steps);
+  dependentAdmission[index + 1]!.run += "\nnpx install-something";
+  assert.throws(() => assertSetupCache("ci.yml", "ci", dependentAdmission, index), /dependency-free/);
+  assert.throws(() => assertSetupCache("other.yml", "ci", steps, index), /other workflows/);
 });
 
 // ── acceptance 2: ci.yml declares a concurrency group that cancels only PR runs ─────────────
