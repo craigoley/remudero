@@ -43464,8 +43464,7 @@ export function buildSweepHook(
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
-  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` above is:
+  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here once per daemon start, as `draftHook` below is:
   // this function runs once per daemon start, the closure it returns runs once per poll.
   //
   // THE DELTA WAS ALREADY BUILT AND A CONSTRUCTOR'S LIFETIME WAS DEFEATING IT. `buildBatchedGithub`
@@ -43499,6 +43498,8 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  // W1-T5650: the draft rung's readiness rides this SAME gateway (built after it, so it can).
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const openPrReads = createGhReadWarmer(ghJsonAsync);
@@ -46412,7 +46413,13 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
+  // W1-T5650: the sweep's daemon-lifetime BATCHED gateway. The readiness block below used to build
+  // an unbatched gateway every pass, and `buildDepsReadinessAccessors` then ran one synchronous
+  // trailer search per plan task. Omitted ⇒ ONE batched gateway for this hook's life.
+  github?: GitHub,
 ): (tickRead?: TickReadFacts) => Promise<void> {
+  let lazyGithub: GitHub | undefined;
+  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
@@ -46472,7 +46479,7 @@ export function buildInboxDraftHook(
       let draftReadiness: ReadinessContext | undefined;
       try {
         const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
         const { isMerged, depsUnobservable } = tickRead
           ? projectionReadinessAccessors(new Map(tickRead.projection))
           : buildDepsReadinessAccessors(plan, deriveDeps);
@@ -46785,7 +46792,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  // W1-T5650: BATCHED, not `ghGateway`. The daemon's intake `inbox` rung runs this very function
+  // (buildIntakeRungsDaemonHooks), so it is a loop path: the unbatched gateway cost one synchronous
+  // trailer search per plan task `buildDepsReadinessAccessors` derives.
+  const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
