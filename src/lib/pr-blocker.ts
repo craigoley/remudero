@@ -78,7 +78,8 @@ export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefine
 export const BLOCKER_SLO_MS = 45 * 60_000;
 export const SLO_RUNGS = ["refresh", "rebuild", "digest"] as const;
 export type SloRung = typeof SLO_RUNGS[number];
-/** The ladder's lifetime rebuild cap (strike-ladder.ts `rebuildsSoFar < 2`), restated for the SLO. */
+/** BACKSTOP: the ladder's lifetime rebuild cap (strike-ladder.ts `rebuildsSoFar < 2`), restated for
+ *  the SLO. It fires only after two rebuilds have already failed; the per-UTC-day cap is the gate. */
 export const MAX_SLO_REBUILDS = 2;
 const MS_PER_UTC_DAY = 86_400_000;
 
