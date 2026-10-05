@@ -1400,6 +1400,7 @@ import {
   DEPENDABOT_IGNORE_MAJOR_COMMAND,
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
+  reconcileDepReviewHold,
   decideDepReview,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
@@ -1532,6 +1533,7 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
+  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -21025,6 +21027,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  * `which claude`, which does not exist on a CI runner.
  */
 export interface DepReviewDeps {
+  clock?: Clock;
   gh?: (args: string[]) => unknown;
   prDiff?: (prUrl: string) => string;
   config?: Config;
@@ -21102,7 +21105,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const runId = `dep-review-PR${view.number}-${Date.now()}`;
+  const clock = deps.clock ?? systemClock;
+  const runId = `dep-review-PR${view.number}-${clock.now()}`;
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
@@ -21114,8 +21118,32 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     diff,
     checks: view.statusCheckRollup ?? [],
   });
-  log("dep-review.decided", { ...result, pr_url: view.url });
+  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
+
+  try {
+    reconcileDepReviewHold({
+      statePath: join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`),
+      prUrl: view.url,
+      prNumber: view.number,
+      title: view.title ?? "",
+      body: view.body ?? "",
+      headSha: view.headRefOid,
+      result,
+      nowMs: clock.now(),
+      escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      log,
+    });
+  } catch (error) {
+    log("dep-review.decided", {
+      ...result, decision: "hold", review_decision: result.decision,
+      reason: `dependency hold reconciliation incomplete: ${String(error)}`,
+      pr_url: view.url, head_sha: view.headRefOid,
+    });
+    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+    return 1;
+  }
 
   if (result.decision === "refuse") {
     console.log(`no remudero-review posted (refused): ${view.url}`);
@@ -26419,7 +26447,7 @@ export interface PlanReconcileDeps {
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
   readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
-  creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -26486,6 +26514,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   }
 
   let credited: Set<string>;
+  let boardFloor: string | undefined;
+  let unreadPrIds: Set<string> | undefined;
   try {
     const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
     const read = projection();
@@ -26495,6 +26525,9 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
       (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
       return 2;
     }
+    boardFloor = read.boardFloor;
+    unreadPrIds = read.unreadPrIds;
+    if (read.unreadPrIds) credited = new Set([...credited].filter((id) => !read.unreadPrIds!.has(id)));
   } catch (e) {
     console.error(
       `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
@@ -26527,6 +26560,13 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
+  if (boardFloor !== undefined) {
+    const withheld = unreadPrIds ? [...unreadPrIds] : [];
+    const names = withheld.slice(0, 20).join(", ") + (withheld.length > 20 ? ` (+${withheld.length - 20} more)` : "");
+    const suffix = withheld.length ? `; ${withheld.length} flip(s) withheld because their merged PR was not read and its body could not be checked: ${names} — flip them by hand after reading the PR` : "";
+    console.error(`### rmd plan-reconcile: CAVEAT — the closed-PR board read stopped at its page cap: PRs last updated before ${boardFloor} were not read, so the count above is exact for every shard credited by a commit trailer or by a PR read since then and a LOWER BOUND for any shard credited only by an older PR's body or branch${suffix}`);
+    (deps.log ?? (() => {}))("plan.reconcile.board_floor", { floor: boardFloor, withheld: withheld.length });
+  }
   return 0;
 }
 
@@ -26563,7 +26603,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
-): { ids: Set<string>; unknownReason?: string } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -26572,10 +26612,19 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const ids = new Set(creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable).map((c) => c.taskId));
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable);
+  const ids = new Set(candidates.map((c) => c.taskId));
   const state = gateway.readState?.();
-  const unknownReason = state === "failed" ? (gateway.readFailureReason?.() ?? "unknown") : state === "ok" && gateway.readTruncated?.() ? "truncated" : undefined;
-  return unknownReason === undefined ? { ids } : { ids, unknownReason };
+  if (state === "failed") return { ids, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
+  if (state === "ok" && gateway.readTruncated?.()) {
+    const coverage = gateway.readBoardCoverage?.();
+    if (coverage?.openTruncated === false && coverage.closedFloor) {
+      const unreadPrIds = new Set(candidates.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
+      return { ids, boardFloor: coverage.closedFloor, unreadPrIds };
+    }
+    return { ids, unknownReason: "truncated" };
+  }
+  return { ids };
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
@@ -43540,6 +43589,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
+          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
           ledgerPath,
           runId,
           log,

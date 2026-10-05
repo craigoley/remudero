@@ -87,11 +87,12 @@ import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOpti
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
-import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
-import { NEEDS_YOU_VIEW_NAME, withNeedsYouView } from "./needs-you-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
+import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
@@ -863,6 +864,22 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
  * A non-JSON or non-object body passes through untouched.
  */
 export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLadderState): Route {
+  return spliceJsonField(route, "repairLadder", read);
+}
+
+/**
+ * W1-T5373: `GET /v1/status` gains `needsYou`, the needs-you composite's decision count read through the
+ * shared consumer -- the same number the badge, the composite and each instance's now view report. No
+ * composite (no read model, or none composed yet) is a named lower bound, never a zero.
+ */
+export function withStatusNeedsYou(route: Route, read: () => HumanGateProjection | undefined): Route {
+  return spliceJsonField(route, "needsYou", () => {
+    const projection = read();
+    return projection ? consumeHumanGateCounts(projection) : unavailableHumanGateCounts("needs-you", NAV_BADGE_NO_COMPOSITE);
+  });
+}
+
+function spliceJsonField(route: Route, field: string, read: (nowMs: number) => unknown): Route {
   return {
     ...route,
     handler: async (req, res, ctx) => {
@@ -888,7 +905,7 @@ export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLa
       }
       delete headers["content-length"];
       res.writeHead(buffered.status, headers);
-      res.end(JSON.stringify({ ...(body as Record<string, unknown>), repairLadder: read(nowMs) }));
+      res.end(JSON.stringify({ ...(body as Record<string, unknown>), [field]: read(nowMs) }));
     },
   };
 }
@@ -2778,8 +2795,15 @@ function assembleServeRoutes(
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
+  const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
+  const navBadge = navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes });
+  // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
+  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
+    legacy: [navBadge, inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] });
+  const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
-    withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder),
+    withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),
     ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
@@ -2790,9 +2814,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
-      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
+    ...buildReadModelViewRoutes(served),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
