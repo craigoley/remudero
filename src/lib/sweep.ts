@@ -3973,6 +3973,75 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
  * escalates ONCE at {@link SweepPolicy.repeatDispositionBound}; every effect is injected.
  */
 
+/** W1-T5863 — BACKSTOP: how many times the sweep may admit one exact review input before a
+ *  completed post that it still cannot count turns the next demand into an escalation. Two is the
+ *  first admission plus one retry; a loop is only provable after the retry also completed. */
+export const REVIEW_INPUT_ADMISSION_BACKSTOP = 2;
+
+/** W1-T5863 — the sweep's admissions and the completed posts for ONE exact review input. */
+export interface ReviewInputLoopFacts {
+  /** `sweep.review_admitted` rows for this PR url + head + digest. */
+  admissions: number;
+  /** `review.posted` rows for this PR url stamped at or after the LAST admission of this input. */
+  postsSinceLastAdmission: number;
+  /** `review.posted` rows for this PR url stamped at or after the FIRST admission of this input. */
+  posts: number;
+  /** The task key the attempt count looked up — named so a key mismatch is legible. */
+  lookedUpKey: string;
+}
+
+/** W1-T5863 — count the exact input's admissions, and the completed posts that landed for the PR
+ *  while that input was being admitted, by `pr_url` alone. Posts are deliberately NOT matched on
+ *  head or digest: the task-keyed attempt count already is, and a post it cannot match (any
+ *  identity or digest disagreement) is exactly the one this must still see. A new head or body
+ *  digest names a different input, whose admissions start from zero. */
+export function reviewInputLoopFacts(
+  ledger: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+  lookedUpKey: string,
+): ReviewInputLoopFacts {
+  const at = (row: Record<string, unknown>): number => (typeof row.ts === "string" ? Date.parse(row.ts) : NaN);
+  let admissions = 0;
+  let firstAdmission = Infinity;
+  let lastAdmission = -Infinity;
+  const postStamps: number[] = [];
+  for (const row of ledger) {
+    if (row.pr_url !== prUrl) continue;
+    if (row.step === "sweep.review_admitted" && row.head_sha === headSha && row.review_input_digest === inputDigest) {
+      admissions++;
+      const t = at(row);
+      if (!Number.isNaN(t)) {
+        if (t < firstAdmission) firstAdmission = t;
+        if (t > lastAdmission) lastAdmission = t;
+      }
+    } else if (row.step === "review.posted") {
+      postStamps.push(at(row));
+    }
+  }
+  // An unparseable stamp cannot prove the post came after an admission, so it is not counted.
+  const posts = postStamps.filter((t) => !Number.isNaN(t) && t >= firstAdmission).length;
+  const postsSinceLastAdmission = postStamps.filter((t) => !Number.isNaN(t) && t >= lastAdmission).length;
+  return { admissions, postsSinceLastAdmission, posts, lookedUpKey };
+}
+
+/** W1-T5863 — true when a post-review demand would re-admit an input the sweep has already admitted
+ *  {@link REVIEW_INPUT_ADMISSION_BACKSTOP} times, with a completed post since, that the task-keyed
+ *  attempt count still reads as zero. */
+function reviewDemandLooping(pr: OpenPrView): boolean {
+  const loop = pr.reviewInputLoop;
+  return loop !== undefined &&
+    pr.reviewInputDigest !== undefined &&
+    pr.priorReviewAttemptsForInput === 0 &&
+    pr.requiredContextsUnreadable !== true &&
+    pr.reviewPostRefused !== true &&
+    (pr.checksState === "green" || pr.checksState === "pending") &&
+    (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none") &&
+    loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP &&
+    loop.postsSinceLastAdmission >= 1;
+}
+
 /** One of the dispositions every open PR is reconciled into. */
 export type Disposition =
   | "mergeable"
@@ -4962,6 +5031,12 @@ export interface OpenPrView {
    *  from a GitHub FAILURE with no matching judgment additionally requires an explicit zero and
    *  {@link reviewInputDigest}, so an unwired caller is never mistaken for evidence. */
   priorReviewAttemptsForInput?: number;
+  /** W1-T5863 — the sweep's OWN admission history for the exact current input (`pr_url`, head sha,
+   *  body digest; no task id), read by {@link reviewInputLoopFacts}. It exists because
+   *  `priorReviewAttemptsForInput` is keyed by task identity: a completed post the key cannot match
+   *  leaves that count at zero and the post-review demand would re-admit the input every pass.
+   *  Undefined means unwired — the bound then never fires, as before this field existed. */
+  reviewInputLoop?: ReviewInputLoopFacts;
   /** Most recent completed `review.posted` timestamp for the same exact input counted above.
    *  Refusals never move this clock, having judged no content. Undefined means no completed
    *  attempt is known, and {@link reviewInputBackoffElapsed} then fails toward escalation. */
@@ -7636,6 +7711,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
+  },
+  {
+    // W1-T5863 — A REVIEW DEMAND CANNOT RE-ADMIT THE SAME INPUT WITHOUT BOUND. The post-review rows
+    // below demand a review while the task-keyed attempt count reads zero; their only brake is a
+    // post REFUSAL. A completed post that count cannot see (a key or identity mismatch) never trips
+    // it, so the same head was re-reviewed every pass. ORDERED BEFORE all of them, this row counts
+    // the sweep's own admissions by pr_url and escalates instead. A new head or digest is a new
+    // input with a fresh count, so it never matches. The disposition is `blocked-ambiguous`, whose
+    // escalation is already deduped per PR+head; the reason leads with `post-review-loop`.
+    disposition: "blocked-ambiguous",
+    blocker: "escalated",
+    when: reviewDemandLooping,
+    reason: (pr) => {
+      const loop = pr.reviewInputLoop;
+      return `post-review-loop: #${pr.prNumber} has been admitted for review ${loop?.admissions ?? 0} time(s) ` +
+        `(backstop ${REVIEW_INPUT_ADMISSION_BACKSTOP}) on the same input (head ${pr.headSha.slice(0, 7)}, ` +
+        `digest ${pr.reviewInputDigest}) and ${loop?.posts ?? 0} review.posted row(s) exist for it ` +
+        `(${loop?.postsSinceLastAdmission ?? 0} since the last admission), yet the attempt count under key ` +
+        `${loop?.lookedUpKey ?? "unknown"} reads 0 — not admitting it again; escalating for a human`;
+    },
   },
   {
     // W1-T2299 — A CORRECTED INPUT CAN REACH THE REVIEWER THAT JUDGED THE OLD ONE. Rows 4/6/7 claim

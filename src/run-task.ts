@@ -1625,6 +1625,7 @@ import {
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
   riskJudgeHandedOffHead,
+  reviewInputLoopFacts,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -40399,6 +40400,7 @@ export function buildOpenPrViews(
       currentOwnDiffDigest: reviewReuseCurrent.get(pr.number)?.ownDiffDigest,
       currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,
+      reviewInputLoop: reviewInputLoopFacts(ledger, pr.url, pr.headRefOid, inputDigest, reviewLedgerKey),
       // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
       reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,
       reviewInputDigest: inputDigest,
