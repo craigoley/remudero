@@ -490,6 +490,8 @@ export const PRECHECK_PARITY = {
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
+  "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
   // W1-T5617: CENSUS_ADMITTED_MEMBERS, run through each one's own npm script's suite.
   "test/bound-kind-declared.test.ts": { run: "census:bound-kind" },
   "test/ledger-literal-census.test.ts": { run: "census:ledger-literal" },
