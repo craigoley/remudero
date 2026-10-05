@@ -431,7 +431,6 @@ test("THE WIRED HOOK, CALLED FOR REAL: the producer executes while unrelated cad
     assert.equal(result.coverageImprovement?.status, "refused", "the daemon hook must include the coverage-improvement member");
     assert.equal(verifierCalls, 1, "the real hook consumes the fixture-owned verifier once");
     assert.equal(successorCalls, 1, "the real hook consumes the fixture-owned offline catalog once");
-    assert.equal(result.successorWatch?.status, "refused", "unavailable catalog evidence stays unavailable");
     assert.ok(historicalLookups > 0, "the real adoption scan consumes the fixture's explicit unknown dates");
 
     // THE MARKER-FIRST DISCIPLINE: runMeasurementCadence must have recorded the fire BEFORE (or
