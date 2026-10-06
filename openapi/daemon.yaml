@@ -1609,7 +1609,8 @@ components:
           description: >
             W1-T5626: `queued` when this write's feedback record was staged under the state root
             for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
-            the record was not staged.
+            staging or its queue confirmation fails, with `landing_error` recorded in the
+            `panel.feedback_submitted` ledger row (W1-T5731).
 
     OperatorActivityItem:
       type: object
@@ -11240,8 +11241,9 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           description: >
-            A `submissionKey` or `replyTo` check could not read the landing queue (W1-T5628), where a
-            console capture lives until it lands, so nothing is filed, queued or ledgered.
+            The landing queue could not be read before capture (W1-T5731), so the response is
+            `landing_queue_unreadable` and nothing is captured or staged. Logs
+            `serve.feedback_landing_queue_unreadable` with route `/v1/feedback` and the reason.
           content:
             application/json:
               schema:
