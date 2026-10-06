@@ -106,7 +106,7 @@ test("an absent view's input is dropped once its only reader is switched off, an
 
 test("the declared readers keep now, the status view and the operator-agent rows built with an empty switch file, and nothing else", () => {
   const empty: ReadModelSwitches = { projector: "on", views: {} };
-  const built = ["nav-badge", "repositories", READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, "instances", "task", "inbox-thread", "workstreams", "agent", OPERATOR_AGENT_ROWS_VIEW, "analytics", "host"]
+  const built = ["nav-badge", "repositories", READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, "instances", "task", "inbox-thread", "workstreams", "actions", "agent", OPERATOR_AGENT_ROWS_VIEW, "analytics", "host"]
     .filter((view) => readModelViewBuilt(view, empty));
   assert.deepEqual(built, [READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, OPERATOR_AGENT_ROWS_VIEW]);
   assert.ok(READ_MODEL_VIEW_READERS[NEEDS_YOU_VIEW_NAME], "needs-you's readers are declared under its real name");
