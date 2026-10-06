@@ -124,6 +124,9 @@ for (const exit of ["stop", "freshness"] as const) {
 }
 
 test("W1-T5491: the dispatch ticker refills a freed review lane and STOP drains reviews", async () => {
+  // The subject is the REFILL, not the shipped width: three lanes and four PRs, pinned here so a
+  // plan/policy.yaml width change moves no assertion below.
+  const threeLanes = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 3, reviewLaneMin: 1, reviewLaneMax: 3 };
   const work = gate();
   const holds = Array.from({ length: 4 }, gate);
   const started: number[] = [];
@@ -149,7 +152,7 @@ test("W1-T5491: the dispatch ticker refills a freed review lane and STOP drains 
     sleep: settle,
     checkStop: () => stopping ? "STOP" : undefined,
     sweepLight: async () => {
-      await runSweepLightPass([1, 2, 3, 4].filter((n) => !finished.includes(n)).map(pr), sweepDeps);
+      await runSweepLightPass([1, 2, 3, 4].filter((n) => !finished.includes(n)).map(pr), sweepDeps, threeLanes);
     },
     log: (step) => { if (step === "daemon.stop") stopObserved = true; },
   }, { pollIntervalMs: 1, sweepWallClockBoundMs: 1000 });
