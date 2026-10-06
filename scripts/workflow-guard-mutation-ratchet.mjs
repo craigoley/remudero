@@ -149,7 +149,7 @@ export function suiteVerdictFrom(out) {
 function suiteFails(suite) {
   const res = spawnSync(
     process.execPath,
-    ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite],
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite],
     { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;

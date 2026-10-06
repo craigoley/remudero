@@ -1881,7 +1881,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
               spawn,
               "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
               process.execPath,
-              ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
+              ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
               { cwd: repoRoot },
             ),
           ),
@@ -2418,6 +2418,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       },
     },
   },
+  refusedForPredicate(
+    "test/node-24-runtime-compatibility.test.ts",
+    "c",
+    "W1-T5882's Node 24 suite. It walks tracked src/, scripts/ and bin/ via git ls-files and asserts every nested `node --test` " +
+      "argv names a reporter and no Worker is handed process.execArgv, but it carries no baseline or exemption table: an exempt " +
+      "spawn says so inline at its own call site (`node-test-reporter: exempt`), so every violation bites, not only new ones",
+  ),
   refusedForPredicate(
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts",
     "a",

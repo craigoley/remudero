@@ -124,7 +124,7 @@ test("W1-T5625: a clean run of the healthy-path worktree suite leaves its TMPDIR
   delete env.RMD_SELF_SYNC_DONE;
   const run = spawnSync(
     process.execPath,
-    ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/worktree-base-currency-healthy.test.ts"],
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/worktree-base-currency-healthy.test.ts"],
     { cwd: REPO_ROOT, env, encoding: "utf8" },
   );
   assert.equal(run.status, 0, `the suite must pass for its leftovers to mean anything:\n${run.stdout}\n${run.stderr}`);

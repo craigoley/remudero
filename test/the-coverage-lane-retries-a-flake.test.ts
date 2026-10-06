@@ -196,10 +196,11 @@ test("W1-T4398: a retry never changes the coverage figures", () => {
   assert.ok(functions.some((s) => s.url.endsWith("/src.mjs")), "the source module must appear in pass one's raw coverage");
   assert.ok(!functions.some((s) => s.url.endsWith("/test-with-retry.mjs")), "the wrapper must not write its own raw report");
 
-  // The retry command itself: narrowed to the failed file, every coverage and reporter flag gone.
+  // The retry command itself: narrowed to the failed file, every coverage and reporter flag gone, and
+  // TAP named again so its failures still parse on Node 24 (which no longer defaults a pipe to TAP).
   const args = ["--enable-source-maps", "--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test-reporter", "lcov", "--test-reporter-destination=coverage/lcov.info", "--test", "--import", "tsx", "test/a.test.ts", "test/b.test.ts"];
   const retry = coverageRetryInvocation("node", args, ["test/b.test.ts"], { NODE_V8_COVERAGE: "coverage/raw", KEEP: "1" });
-  assert.deepEqual(retry?.args, ["--enable-source-maps", "--test", "--import", "tsx", "test/b.test.ts"]);
+  assert.deepEqual(retry?.args, ["--enable-source-maps", "--test", "--test-reporter=tap", "--import", "tsx", "test/b.test.ts"]);
   assert.deepEqual(retry?.env, { KEEP: "1", NODE_V8_COVERAGE: "" });
   // Nothing to name, or not a Node test run: no retry, and pass one's verdict stands.
   assert.equal(coverageRetryInvocation("node", args, []), null);

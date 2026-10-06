@@ -47,7 +47,7 @@ function assertHygienePair(args: readonly string[], label: string): number {
 test("proof executor: the dialect path form ('unit test: test/<file>') builds its argv with the tmp-hygiene import", () => {
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts");
   assert.ok(wp);
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", HYGIENE, "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, "test/foo.test.ts"]);
   assertHygienePair(wp!.args, "dialect path form");
 });
 
@@ -57,6 +57,7 @@ test("proof executor: the dialect name-filtered form ('unit test: <title>') buil
   assert.ok(wp!.nameFiltered);
   assert.deepEqual(wp!.args, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--import",
@@ -72,7 +73,7 @@ test("proof executor: the dialect name-filtered form ('unit test: <title>') buil
 test("proof executor: the legacy bare-path shape (W1-T65, a test path inside prose) builds its argv with the tmp-hygiene import", () => {
   const wp = parseWhitelistedProof("run `test/foo.test.ts` and see it pass");
   assert.ok(wp);
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", HYGIENE, "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, "test/foo.test.ts"]);
   assertHygienePair(wp!.args, "legacy bare-path shape");
 });
 

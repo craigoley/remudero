@@ -126,7 +126,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // receipt and selected floor, but don't spend another full run on known-doomed tests.
         if (staticOk) {
           // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-          const tests = run(process.execPath, ['--test', `--test-concurrency=${Math.min(4, availableParallelism())}`,
+          const tests = run(process.execPath, ['--test', '--test-reporter=tap', `--test-concurrency=${Math.min(4, availableParallelism())}`,
             '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
           report('affected-tests', tests, completeTestResult(tests));
         } else {

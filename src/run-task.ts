@@ -28198,7 +28198,7 @@ const PREFLIGHT_CI_CHECKS: readonly {
       "the fast gate's own step table deliberately excludes it as a cost decision",
     argv: (repoRoot) => ({
       file: process.execPath,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "help-renders-a-summary-not-a-paragraph.test.ts")],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "help-renders-a-summary-not-a-paragraph.test.ts")],
     }),
   },
   {
@@ -28206,7 +28206,7 @@ const PREFLIGHT_CI_CHECKS: readonly {
     predictsCiJob: '"ci" job\'s test:ci suite (test/deps-interface-census.test.ts) — not in any census registry yet',
     argv: (repoRoot) => ({
       file: process.execPath,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "deps-interface-census.test.ts")],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "deps-interface-census.test.ts")],
     }),
   },
 ];

@@ -74,6 +74,32 @@ function loadTestCoverage() {
   }
 }
 
+/**
+ * Construct Node's internal `TestCoverage` for either supported runtime. Node 22 takes seven
+ * positional arguments `(dir, origDir, cwd, excludeGlobs, includeGlobs, sourceMaps, thresholds)`;
+ * Node 24 takes `(dir, origDir, options)` with `{ cwd, coverageExcludeGlobs, coverageIncludeGlobs,
+ * sourceMaps, lineCoverage, branchCoverage, functionCoverage }`. Passing the old shape to the new
+ * constructor silently drops the globs and source maps, so the shape is chosen from the
+ * constructor's own arity, and any other arity is refused rather than guessed.
+ */
+export function newTestCoverage(TestCoverage, { cwd, excludeGlobs, includeGlobs, sourceMaps }) {
+  if (TestCoverage.length === 7) {
+    return new TestCoverage('', undefined, cwd, excludeGlobs, includeGlobs, sourceMaps, { line: 0, branch: 0, function: 0 });
+  }
+  if (TestCoverage.length === 3) {
+    return new TestCoverage('', undefined, {
+      cwd,
+      coverageExcludeGlobs: excludeGlobs,
+      coverageIncludeGlobs: includeGlobs,
+      sourceMaps,
+      lineCoverage: 0,
+      branchCoverage: 0,
+      functionCoverage: 0,
+    });
+  }
+  throw new Error(`Node ${process.versions.node}'s TestCoverage takes ${TestCoverage.length} arguments; this merger knows the 7-argument (Node 22) and 3-argument (Node 24) shapes`);
+}
+
 export function stageRawCoverageFile(file, staged, { link = linkSync, copy = copyFileSync } = {}) {
   try {
     link(file, staged);
@@ -85,7 +111,7 @@ export function stageRawCoverageFile(file, staged, { link = linkSync, copy = cop
   }
 }
 
-/** Render the same LCOV fields as Node 22.22.3's built-in reporter after raw-range merging. */
+/** Render the same LCOV fields as Node's built-in lcov reporter (identical in 22.22.3 and 24.21.0) after raw-range merging. */
 export function renderCoverageSummary(summary) {
   const output = ['TN:'];
   for (const file of summary.files) {
@@ -226,15 +252,7 @@ function collectCompactReports(directories, onMap, onReport) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
-  const collector = new TestCoverage(
-    '',
-    undefined,
-    process.cwd(),
-    ['test/**'],
-    undefined,
-    false,
-    { line: 0, branch: 0, function: 0 },
-  );
+  const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: false });
   const sourceMapIndexes = new Map();
   let rawFileCount = 0;
   let reportCount = 0;
@@ -334,8 +352,7 @@ export function mergeRawCoverageDirectories(directories) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
-  const collector = new TestCoverage('', undefined, process.cwd(), ['test/**'], undefined, true,
-    { line: 0, branch: 0, function: 0 });
+  const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
   const bytes = { rawFileCount: 0, inputBytes: 0 };
   collector.getCoverageFromDirectory = () => {
     const merged = new Map();
