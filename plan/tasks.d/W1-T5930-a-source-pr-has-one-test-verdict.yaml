@@ -32,7 +32,8 @@
     the live flag at 0: promotion and baseline qualification remain separate governed work.
     Align setup admission with this same test ownership: ordinary SOURCE shards 2-8 have no
     duplicate work at either flag, so neither npm dependencies nor Chromium should be installed.
-    Keep shard 1 setup for typecheck, workflow/helper/test diffs and uncertain inputs admitted.
+    Keep shard 1 setup for typecheck and workflow guard-mutation tests; keep helper/test diffs
+    and uncertain inputs admitted. A workflow SOURCE diff retains its existing shard-1 owner.
     Exercise the actual dependency-free admission CLI at both flag values; a dormant flag reader
     must not retain seven idle installs after the test-floor consumer is removed.
     Update W1-T4406's historical CI-floor assertion to follow its new coverage owner; retain
