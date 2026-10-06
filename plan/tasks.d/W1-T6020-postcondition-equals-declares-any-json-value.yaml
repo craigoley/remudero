@@ -1,0 +1,84 @@
+- id: W1-T6020
+  title: "THE SPEC DECLARES A POSTCONDITION'S equals AN OBJECT, BUT THE DAEMON WRITES SCALARS — declare it as any JSON value, so a strict validation of a real external-effect body passes"
+  repo: remudero
+  depends_on: [W1-T5052]
+  priority: 5
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the declared type of a postcondition's equals
+  band_meaning: span
+  plan_refs: [W1-T5052, W1-T5739]
+  origin: "2026-10-06 found while building the actions view (W1-T5052, PR #9579): its strict schema test needed an object fixture for equals"
+  files:
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/a-postcondition-equals-accepts-any-json-value.test.ts
+    - test/every-view-body-matches-its-schema.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main d94e6c193. openapi/daemon.yaml declares equals as
+    `type: object, additionalProperties: true` in TWO places: the inline item schema under
+    ExternalActionResult.expectedPostconditions, and components.schemas.ExternalEffectPostcondition.
+    The daemon writes ANY JSON value there. src/lib/action-reconciliation.ts types it
+    `equals: unknown` and matches it with isDeepStrictEqual. src/lib/action-results.ts sanitizeResult
+    keeps it through boundedRedactedValue, which drops only undefined and oversize values, so
+    scalars and null pass through. Every daemon test writes scalars (`equals: "ready"`, "confirmed",
+    "event-7"), and contracts/automation-flow-v1-fixtures.json carries "queued" and true.
+    test/helpers/openapi-strict.ts violations() rejects a string against `type: object`, so a strict
+    validation of a real body fails. That is why PR #9579 had to give its actions-view fixture in
+    test/every-view-body-matches-its-schema.test.ts an object (`equals: { state: "ready" }`).
+    The generated client renders both declarations as `equals: Record<string, never>`, a type no
+    real value fits. The ExternalActionResult description already admits the mismatch ("scalar
+    values are preserved by the daemon even though the generated client represents this open
+    object conservatively").
+    The obvious fix, `type: [string, number, boolean, object, "null"]`, is REFUSED by
+    scripts/generate-api-client.mjs renderType ("expected exactly one non-null type").
+    OVERLAP: W1-T5739 shares openapi/daemon.yaml, schema.d.ts and the every-view test, but it
+    declares the inbox lane items' classification. It never touches the external-effect schemas.
+    The two edit different hunks, so neither supersedes the other.
+  design: |
+    In BOTH declarations, replace equals' `type: object` and `additionalProperties: true` with a
+    typeless schema `{}` plus a description: "Any JSON value (string, number, boolean, null, object
+    or array) the connector path must equal; the daemon compares it with deep equality."
+    No generator change is needed. renderType already renders a schema with no
+    type/enum/properties/items as `unknown`, and openapi-strict violations() accepts any value
+    against it. Do NOT use oneOf. The strict validator demands exactly ONE matching branch, so an
+    integer matches both an integer and a number branch. renderObject also renders
+    `additionalProperties: true` as Record<string, never>. Run `npm run api-client:generate`, so
+    both schema.d.ts sites read `equals: unknown;`, and keep `npm run api-client:check` green.
+    NEW test file test/a-postcondition-equals-accepts-any-json-value.test.ts uses violations() from
+    test/helpers/openapi-strict.ts. Validate {path, equals} for equals in "ready", true, 3, null and
+    { state: "ready" } against BOTH ExternalEffectPostcondition AND
+    resolve(ExternalActionResult).properties.expectedPostconditions.items. Expect zero violations
+    for each. The scalar cases fail at base.
+    The falsifier lives in test/every-view-body-matches-its-schema.test.ts. Change the
+    external_effect.reconciled fixture's `equals: { state: "ready" }` (added by W1-T5052, PR #9579,
+    hence depends_on) to the scalar `equals: "ready"`. That is what the daemon writes. The test
+    goes red until the spec changes.
+    CONSOLE: no console task. remudero-console origin/main 7c87f69 reads equals in
+    app/api/console/action-results/route.ts through its OWN local type (`equals: unknown`, rendered
+    via displayValue). It does not import packages/api-client, so the generated type change breaks
+    no console compile. Its pinned snapshot fixtures/core-read-schemas.json (core ca9be1f7) still
+    carries `type: object`, and the next routine re-pin picks up the new declaration. Nothing in
+    the console fails before then.
+  acceptance:
+    - claim: "a scalar postcondition value validates against both declared equals schemas"
+      proof: 'grep: test("W1-T6020: a scalar postcondition value validates against both declared equals schemas" in test/a-postcondition-equals-accepts-any-json-value.test.ts'
+    - claim: "the generated client types equals as unknown, not Record<string, never>"
+      proof: "grep: equals: unknown; in packages/api-client/src/schema.d.ts"
+    - claim: "the every-view strict test validates the actions body with a scalar equals"
+      proof: 'grep: path: "status", equals: "ready" } in test/every-view-body-matches-its-schema.test.ts'
+  falsifier: |
+    Leave openapi/daemon.yaml declaring equals `type: object`. The scalar fixture in
+    test/every-view-body-matches-its-schema.test.ts then fails with an
+    "...expectedPostconditions[0].equals: is string, declared object" violation. The new test fails
+    for "ready", true and 3.
+  note: |
+    Scope-time checks 2026-10-06: no run-W1-T6020-* branch on origin; no origin/main commit names
+    the id. Subject sweep for ExternalEffectPostcondition|expectedPostconditions and for
+    equals-as-object|scalar in plan/tasks.d found 0 hits on origin/main and 0 across 2327 fetched
+    heads. Positive control: 'external-effect' hit 1501 of those heads plus W1-T3899 and W1-T4044
+    on main. Reserved from the operator checkout for this filing branch.
