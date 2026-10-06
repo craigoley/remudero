@@ -80,6 +80,11 @@
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
 #   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
 #   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 720)
+#   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
+#                               symlinks) for `rmd-c-<12 hex>` coverage scratch at ANY depth
+#                               (W1-T5708). Default: the tmp roots, scratch roots and parents, plus
+#                               /mnt/rmd on a `/` pass. Reaped when idle and no lock holds it.
+#   RMD_CLEANUP_COVERAGE_LOCK_DIR  where `rmd-c-<hash>.lock` lives (default /tmp)
 #   RMD_CLEANUP_DOCKER          command for the running-container mount snapshot
 #   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
 #                               both the root and the user cron run, so one path serves both)
@@ -122,6 +127,12 @@ else
   SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-}"
 fi
 RUNUSER_CMD="${RMD_CLEANUP_RUNUSER:-runuser}"
+if [ -n "${RMD_CLEANUP_NESTED_COVERAGE_ROOTS+x}" ]; then NESTED_COVERAGE_ROOTS="$RMD_CLEANUP_NESTED_COVERAGE_ROOTS"
+else
+  NESTED_COVERAGE_ROOTS="$TMP_ROOTS:$SCRATCH_ROOTS:$SCRATCH_PARENTS"
+  [ "$ROOT_FS" = / ] && NESTED_COVERAGE_ROOTS="$NESTED_COVERAGE_ROOTS:/mnt/rmd"
+fi
+COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
 SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-720}"
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
@@ -697,6 +708,51 @@ sweep_scratch_root() {
     sweep_scratch_unit "$unit"
   done
 }
+# ── W1-T5708: coverage scratch nested at any depth ──
+# `coverageScratchDir` is `<tmpdir>/rmd-c-<12 hex>` and its gate lock is `/tmp/rmd-c-<hash>.lock`
+# (a directory whose holder.json records pid and host). A SIGKILLed run leaves the scratch behind,
+# and one nested in an ad-hoc checkout's tmp is never reclaimed by a later run of the same repo.
+# Returns 0 when nothing holds the scratch; otherwise 1 with LOCK_REASON saying why.
+coverage_lock_free() {
+  local lock="$COVERAGE_LOCK_DIR/${1##*/}.lock" holder pid host
+  LOCK_REASON=""
+  [ -e "$lock" ] || [ -L "$lock" ] || return 0
+  holder="$lock/holder.json"
+  if [ -L "$lock" ] || [ ! -f "$holder" ]; then LOCK_REASON="its lock $lock is present with no holder record"; return 1; fi
+  pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$holder" 2>/dev/null | head -n 1)"
+  host="$(sed -n 's/.*"host":"\([^"]*\)".*/\1/p' "$holder" 2>/dev/null | head -n 1)"
+  if [ -z "$pid" ] || [ -z "$host" ]; then LOCK_REASON="its lock $lock has an unattributed holder"; return 1; fi
+  if [ "$host" != "$(hostname 2>/dev/null)" ]; then LOCK_REASON="its lock $lock is held from host $host"; return 1; fi
+  if kill -0 "$pid" 2>/dev/null || [ -e "/proc/$pid" ] || ps -p "$pid" >/dev/null 2>&1; then
+    LOCK_REASON="its lock $lock is held by live pid $pid"; return 1
+  fi
+  return 0
+}
+NESTED_COVERAGE_SEEN=""
+sweep_nested_coverage() {
+  local root="${1%/}" p idle_status bytes LOCK_REASON
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES"
+  [ -d "$root" ] && [ ! -L "$root" ] || return
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [[ "${p##*/}" =~ ^rmd-c-[0-9a-f]{12}$ ]] || continue
+    case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
+    NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
+    [ -d "$p" ] && [ ! -L "$p" ] || continue
+    is_idle "$p"; idle_status=$?
+    case "$idle_status" in
+      0) ;;
+      1) log "KEEP $p: written within ${IDLE_MINUTES} min"; continue ;;
+      *) log "KEEP $p: activity probe failed (unknown)"; continue ;;
+    esac
+    if ! coverage_lock_free "$p"; then log "KEEP $p: $LOCK_REASON"; continue; fi
+    if is_open "$p"; then log "KEEP $p: held open by a process"; continue; fi
+    bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
+    log "REMOVE $p: nested coverage scratch with no lock, ${bytes:-unknown} bytes"
+    act rm -rf -- "$p"
+  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules \) -prune -o \
+             -type d -name 'rmd-c-*' -print -prune 2>/dev/null)
+}
 ARCHIVE_OK=0
 check_archive_root() {
   local a b probe="$ARCHIVE_ROOT"
@@ -794,6 +850,10 @@ for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
     [ -e "$f" ] && sweep_path "$f"
   done
 done
+
+while IFS= read -r root; do
+  [ -n "$root" ] && sweep_nested_coverage "$root"
+done < <(printf '%s\n' "$NESTED_COVERAGE_ROOTS" | tr ':' '\n')
 
 while IFS= read -r coverage; do
   [ -n "$coverage" ] && [ -e "$coverage" ] && sweep_path "$coverage"

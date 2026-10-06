@@ -703,6 +703,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.resolved",
   "sweep.check_requeued", // W1-T5935: requeuedCheckKeysFromLedger (sweep.ts) bounds one requeue per head and check.
   "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
+  "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
+  "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
+  "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
+  "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
+  "plan_repair.dispatch", // priorPlanRepairStrikesFromLedger: lost, the plan-repair strike budget resets.
+  "sweep.missing_task_trailer_repaired", // priorActionsFromLedger: one body edit per PR, head and task.
+  "sweep.codeql_blocker.dispatch", // codeqlBlockerDispatched: one CodeQL repair per PR, head and alert.
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",
