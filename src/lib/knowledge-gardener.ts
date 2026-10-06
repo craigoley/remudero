@@ -972,8 +972,9 @@ function filesUnder(dir: string, root = dir): string[] {
 }
 
 /** Rewrite the knowledge-retire golden case from this pass itself and return every path it touched,
- *  stale `checkout/` files included (their removal must be staged too). golden.yaml is left alone:
- *  its verdict facts hold for any correct retirement. */
+ *  stale `checkout/` files included (their removal must be staged too). golden.yaml keeps its verdict
+ *  facts, which hold for any correct retirement, but its criteria list is re-pinned to this pass's
+ *  claims: #9542's two-retirement case left three rows that a one-retirement pass contradicts. */
 function writePassGolden(root: string, before: PassBefore, changedShards: string[], actions: GardenAction[], located: Record<string, string>, heading: string, body: string): string[] {
   const dir = join(root, KNOWLEDGE_RETIRE_GOLDEN);
   const stale = filesUnder(join(dir, "checkout")).map((f) => `${KNOWLEDGE_RETIRE_GOLDEN}/checkout/${f}`);
@@ -994,7 +995,12 @@ function writePassGolden(root: string, before: PassBefore, changedShards: string
   const section = log.slice(log.lastIndexOf(`\n${heading}\n`) + 1);
   files.set(`checkout/${GARDEN_LOG}`, `${log.slice(0, log.indexOf("\n## ") + 1)}\n${section}`);
   files.set("diff.patch", patch.join(""));
-  files.set("criteria.yaml", stringifyYaml(passClaims(actions, located, heading), { lineWidth: 0 }));
+  const claims = passClaims(actions, located, heading);
+  files.set("criteria.yaml", stringifyYaml(claims, { lineWidth: 0 }));
+  const golden = existsSync(join(dir, "golden.yaml")) ? readFileSync(join(dir, "golden.yaml"), "utf8") : "";
+  const criteriaAt = golden.search(/^criteria:[ \t]*$/m);
+  const repinned = criteriaAt < 0 ? golden : `${golden.slice(0, criteriaAt)}criteria:\n${claims.map(() => "  - met: true\n    proof_exec: executed_pass\n").join("")}`;
+  if (repinned !== golden) files.set("golden.yaml", repinned);
   files.set("report.md", body.endsWith("\n") ? body : `${body}\n`);
   for (const [rel, text] of files) {
     mkdirSync(dirname(join(dir, rel)), { recursive: true });
