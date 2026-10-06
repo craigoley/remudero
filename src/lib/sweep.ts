@@ -2467,8 +2467,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         log("sweep.check_requeue.dispatched", { pr_number: pr.prNumber, check_name: check.name, job_id: check.jobId });
         return true;
       } catch (e) {
-        log("sweep.check_requeue.error", { pr_number: pr.prNumber, check_name: check.name, error: String((e as Error)?.message ?? e) });
-        return false;
+        const error = String((e as Error)?.message ?? e);
+        log("sweep.check_requeue.error", { pr_number: pr.prNumber, check_name: check.name, error });
+        const refusal = jobRerunRefusal(error);
+        return refusal ? { kind: "deferred", refusal, error } : false;
       }
     },
 
@@ -5824,17 +5826,116 @@ export function cancelledRunCheckOutcome(
 export const CHECK_REQUEUE_STEP = "sweep.check_requeued";
 
 /** W1-T1223 — every `${headSha}@${checkName}` pair the ledger already records a
- *  {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes the row BEFORE calling
- *  `deps.requeueCheck`, so a pass crashing between the write and the GitHub call still bounds the
- *  next pass toward escalating — the safer direction for an unattended CI mutation. */
+ *  {@link CHECK_REQUEUE_STEP} row for, less those a later deferral voided. `runSweep` writes the
+ *  row BEFORE calling `deps.requeueCheck`, so a pass crashing between the write and the GitHub call
+ *  still bounds the next pass toward escalating — the safer direction for an unattended CI mutation. */
 export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
   const out = new Set<string>();
   for (const l of lines) {
-    if (l.step === CHECK_REQUEUE_STEP && typeof l.head_sha === "string" && typeof l.check_name === "string") {
-      out.add(`${l.head_sha}@${l.check_name}`);
-    }
+    if (typeof l.head_sha !== "string" || typeof l.check_name !== "string") continue;
+    if (l.step === CHECK_REQUEUE_STEP) out.add(`${l.head_sha}@${l.check_name}`);
+    // W1-T5920: GitHub refused the POST because the run is in flight — that attempt spent nothing.
+    else if (l.step === CHECK_REQUEUE_DEFERRED_STEP && l.outcome === "deferred") out.delete(`${l.head_sha}@${l.check_name}`);
   }
   return out;
+}
+
+/** W1-T5920 — a job rerun GitHub refused because its run is in flight; voids its bounding row. */
+export const CHECK_REQUEUE_DEFERRED_STEP = "sweep.check_requeue.deferred";
+
+/** W1-T5920 — BACKSTOP: in-flight refusals of one (head, check) requeue before escalating once. */
+export const CHECK_REQUEUE_DEFERRAL_BACKSTOP = 5;
+
+export type JobRerunRefusal = "already_running" | "not_current_attempt";
+export type JobRequeueOutcome =
+  | { kind: "dispatched" }
+  | { kind: "failed"; error?: string }
+  | { kind: "deferred"; refusal: JobRerunRefusal; error: string };
+
+/** W1-T5920 — the two HTTP 403 job-rerun refusals that mean "the run is in flight", not "failed". */
+export function jobRerunRefusal(message: string): JobRerunRefusal | undefined {
+  if (!/\(HTTP 403\)/.test(message)) return undefined;
+  if (/already running/i.test(message)) return "already_running";
+  if (/only jobs from the current attempt/i.test(message)) return "not_current_attempt";
+  return undefined;
+}
+
+/** A legacy boolean/void requeue answer as a typed outcome: only `false` is a failure. */
+export function jobRequeueOutcome(result: boolean | void | JobRequeueOutcome): JobRequeueOutcome {
+  if (typeof result === "object") return result;
+  return result === false ? { kind: "failed" } : { kind: "dispatched" };
+}
+
+export interface CheckRequeueDeferral {
+  count: number;
+  escalated: boolean;
+  refusal: string;
+}
+
+/** W1-T5920 — per `${headSha}@${checkName}`: deferred attempts, and whether the bound escalated. */
+export function checkRequeueDeferralsFromLedger(lines: Array<Record<string, unknown>>): Map<string, CheckRequeueDeferral> {
+  const out = new Map<string, CheckRequeueDeferral>();
+  for (const l of lines) {
+    if (l.step !== CHECK_REQUEUE_DEFERRED_STEP || typeof l.head_sha !== "string" || typeof l.check_name !== "string") continue;
+    const key = `${l.head_sha}@${l.check_name}`;
+    const d = out.get(key) ?? { count: 0, escalated: false, refusal: String(l.refusal) };
+    if (l.outcome === "escalated") d.escalated = true;
+    else d.count += 1;
+    out.set(key, d);
+  }
+  return out;
+}
+
+const rollupRunId = (c: RollupCheckEntry): number | undefined =>
+  c.workflowRunId ?? (Number(c.detailsUrl?.match(/\/actions\/runs\/(\d+)\//)?.[1]) || undefined);
+
+/** W1-T5920 — the fresh rollup's CURRENT job id for `name`, and whether another job of its run is
+ *  still in flight. No run identity proves nothing in flight. */
+export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } {
+  const entry = dedupeRollupByLatestAttempt(rollup ?? []).find((c) => (c.name ?? c.context) === name);
+  if (!entry) return { runInFlight: false };
+  const run = rollupRunId(entry);
+  return {
+    jobId: entry.jobId ?? checkJobId(entry),
+    runInFlight: run !== undefined && (rollup ?? []).some((c) => rollupRunId(c) === run && (c.status ?? "COMPLETED") !== "COMPLETED"),
+  };
+}
+
+type CheckJobRequeue = { kind: JobRequeueOutcome["kind"] | "held"; note?: string; escalate?: string };
+
+/** W1-T5920 — one job requeue for runSweep. A previously deferred one waits for its run, re-resolves
+ *  the current attempt's job, and at the BACKSTOP escalates once instead. The bounding row is
+ *  written BEFORE the POST (W1-T1223); a deferral row after it voids it. */
+async function requeueCheckJob(
+  deps: SweepDeps,
+  pr: OpenPrView,
+  check: CancelledRequiredCheck | CiFailure,
+  deferral: CheckRequeueDeferral | undefined,
+  rollup: RollupCheckEntry[] | undefined,
+  fields: Record<string, unknown> = {},
+): Promise<CheckJobRequeue> {
+  const append = deps.appendLine ?? appendLedger;
+  const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
+    head_sha: pr.headSha, check_name: check.name };
+  if (deferral) {
+    const name = `"${check.name}"`;
+    if (deferral.escalated) return { kind: "held", note: `${name} requeue deferred ${deferral.count} times, already escalated` };
+    if (deferral.count >= CHECK_REQUEUE_DEFERRAL_BACKSTOP) {
+      append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_DEFERRED_STEP, refusal: deferral.refusal, outcome: "escalated" });
+      const escalate = `GitHub refused the job rerun of ${name} ${deferral.count} times while its run was in flight ` +
+        `(${deferral.refusal}), the BACKSTOP of ${CHECK_REQUEUE_DEFERRAL_BACKSTOP}`;
+      return { kind: "held", note: `${name} requeue deferred ${deferral.count} times — escalated`, escalate };
+    }
+    const target = deferredRequeueTarget(rollup, check.name);
+    if (target.runInFlight) return { kind: "held", note: `${name} deferred requeue waits: its run is still in flight` };
+    check = { ...check, jobId: target.jobId ?? check.jobId };
+  }
+  append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_STEP, ...fields, ...(check.jobId ? { job_id: check.jobId } : {}) });
+  const outcome = jobRequeueOutcome(deps.requeueCheck ? await deps.requeueCheck(pr, check) : false);
+  if (outcome.kind !== "deferred") return { kind: outcome.kind };
+  append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_DEFERRED_STEP, job_id: check.jobId, refusal: outcome.refusal,
+    outcome: "deferred", error: outcome.error });
+  return { kind: "deferred", note: `"${check.name}" requeue deferred (${outcome.refusal})` };
 }
 
 // ── W1-T2204 — MAIN'S OWN CHECK ROLLUP HAS NO READER ─────────────────────────────────────────
@@ -10047,7 +10148,7 @@ export interface SweepDeps {
   requeueCheck?: (
     pr: OpenPrView,
     check: CancelledRequiredCheck | CiFailure,
-  ) => boolean | void | Promise<boolean | void>;
+  ) => boolean | void | JobRequeueOutcome | Promise<boolean | void | JobRequeueOutcome>;
   /** W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
    *  spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
    *  candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
@@ -10943,6 +11044,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = line.state !== "success";
     } else if (line.step === "fix.resolved") {
       stalled = false;
+    } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
+      stalled = true; // W1-T5920: the FLAKE round's requeue never landed — nothing will move this head
     }
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
@@ -11906,6 +12009,7 @@ export async function runSweep(
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
+  const checkDeferrals = checkRequeueDeferralsFromLedger(ledgerLines); // W1-T5920
   // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
   // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
   const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
@@ -13731,8 +13835,9 @@ export async function runSweep(
                 for (const { failure, signature } of infrastructureFailures) {
                   handledNames.add(failure.name);
                   const key = `${pr.headSha}@${failure.name}`;
-                  let outcome: "dispatched" | "failed" | "repeated" | "missing-job-id";
+                  let outcome: CheckJobRequeue["kind"] | "repeated" | "missing-job-id";
                   let reason: string | undefined;
+                  let note: string | undefined;
                   if (requeuedCheckKeys.has(key)) {
                     outcome = "repeated";
                     reason = "the same infrastructure signature remained after its one bounded job retry";
@@ -13740,25 +13845,10 @@ export async function runSweep(
                     outcome = "missing-job-id";
                     reason = "the positively classified failure had no resolvable Actions job id";
                   } else {
-                    // Durable BEFORE mutation: a crash between these two lines cannot turn one
-                    // bounded retry into an unbounded loop.
-                    appendLine(deps.ledgerPath, {
-                      run_id: deps.runId,
-                      task_id: pr.taskId ?? "SWEEP",
-                      step: CHECK_REQUEUE_STEP,
-                      surface: "pr",
-                      pr_number: pr.prNumber,
-                      pr_url: pr.prUrl,
-                      head_sha: pr.headSha,
-                      check_name: failure.name,
-                      signature,
-                      job_id: failure.jobId,
-                      outcome: "attempting",
-                      worker_strike_avoided: true,
-                    });
-                    requeuedCheckKeys.add(key);
-                    const result = deps.requeueCheck ? await deps.requeueCheck(pr, failure) : false;
-                    outcome = result === false ? "failed" : "dispatched";
+                    const result = await requeueCheckJob(deps, pr, failure, checkDeferrals.get(key), ciGateRollup,
+                      { surface: "pr", signature, outcome: "attempting", worker_strike_avoided: true });
+                    ({ kind: outcome, note, escalate: reason } = result);
+                    if (outcome === "dispatched" || outcome === "failed") requeuedCheckKeys.add(key);
                     if (outcome === "failed") reason = "the single-job rerun API call failed";
                   }
                   appendLine(deps.ledgerPath, {
@@ -13774,7 +13864,7 @@ export async function runSweep(
                     outcome,
                     worker_strike_avoided: true,
                   });
-                  outcomes.push(`${outcome} "${failure.name}"`);
+                  outcomes.push(note ?? `${outcome} "${failure.name}"`);
                   if (reason && deps.escalateInfrastructureCheck) {
                     await deps.escalateInfrastructureCheck(pr, failure, reason, signature);
                   }
@@ -13790,7 +13880,6 @@ export async function runSweep(
               // worker to read. Fires BEFORE `dispatchFix` so a PR whose ENTIRE red verdict is
               // cancellations never spends a strike on nothing.
               if (cancelledChecks.length > 0) {
-                let requeuedAny = false;
                 const outcomes: string[] = [];
                 for (const check of cancelledChecks) {
                   const key = `${pr.headSha}@${check.name}`;
@@ -13801,24 +13890,12 @@ export async function runSweep(
                     requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt),
                   );
                   if (decision.requeue) {
-                    // LEDGERED BEFORE THE CALL, so a crash between this write and the real GitHub
-                    // call still bounds the NEXT pass toward escalating. Not dry-run-guarded:
+                    // LEDGERED BEFORE THE CALL (inside `requeueCheckJob`). Not dry-run-guarded:
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
-                    appendLine(deps.ledgerPath, {
-                      run_id: deps.runId,
-                      task_id: pr.taskId ?? "SWEEP",
-                      step: CHECK_REQUEUE_STEP,
-                      pr_number: pr.prNumber,
-                      pr_url: pr.prUrl,
-                      head_sha: pr.headSha,
-                      check_name: check.name,
-                    });
-                    requeuedCheckKeys.add(key);
-                    if (deps.requeueCheck) {
-                      await deps.requeueCheck(pr, check);
-                      requeuedAny = true;
-                    }
-                    outcomes.push(`re-queued "${check.name}"`);
+                    const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), ciGateRollup);
+                    if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+                    if (result.escalate && deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, result.escalate);
+                    outcomes.push(result.note ?? `re-queued "${check.name}"`);
                   } else {
                     if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason);
                     outcomes.push(`escalated "${check.name}" (${decision.reason})`);
@@ -13832,6 +13909,26 @@ export async function runSweep(
                 if (genuineFailures.length === 0) {
                   acted = false;
                   standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  break;
+                }
+              }
+              // W1-T5920 — a red check whose job requeue GitHub DEFERRED (a FLAKE round's rerun refused
+              // while its run was in flight) is retried before any strike, bounded by the BACKSTOP.
+              const deferredFailures = ciFailuresForFix.filter((f) => !cancelledChecks.some((c) => c.name === f.name) &&
+                !requeuedCheckKeys.has(`${pr.headSha}@${f.name}`) && checkDeferrals.has(`${pr.headSha}@${f.name}`));
+              if (deferredFailures.length > 0) {
+                const notes: string[] = [];
+                for (const failure of deferredFailures) {
+                  const key = `${pr.headSha}@${failure.name}`;
+                  const result = await requeueCheckJob(deps, pr, failure, checkDeferrals.get(key), ciGateRollup);
+                  if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+                  if (result.escalate) await deps.escalate(pr, result.escalate, renderClarificationQuestion(pr, result.escalate, pr.strikeHistory ?? []));
+                  notes.push(result.note ?? `${result.kind === "dispatched" ? "re-queued" : "requeue failed for"} "${failure.name}"`);
+                }
+                ciFailuresForFix = ciFailuresForFix.filter((f) => !deferredFailures.includes(f));
+                if (ciFailuresForFix.length === 0) {
+                  acted = false;
+                  standDownReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   break;
                 }
               }

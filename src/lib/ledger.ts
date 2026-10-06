@@ -699,6 +699,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
+  "sweep.check_requeue.deferred",
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",
