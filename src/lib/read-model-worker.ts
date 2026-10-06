@@ -23,6 +23,7 @@ import { createAnalyticsView } from "./analytics-view.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
 import { createHostView, hostViewConfig, type HostViewConfig } from "./host-view.js";
+import { createIncidentsView } from "./incidents-view.js";
 import { createInboxThreadView } from "./inbox-thread-view.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -1400,12 +1401,13 @@ export function runReadModelViewWorker(
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
-    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, clock, log });
     const actions = createActionsView({ instances: data.instances, ledgerSource });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
+    const incidents = createIncidentsView({ instances: data.instances, ledgerSource });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, actions, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, actions, host, agent, incidents, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);

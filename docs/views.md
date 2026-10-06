@@ -408,6 +408,24 @@ a first analytics refresh or for an instance with no repository, never an empty 
 - Shadow side: the routes' computation over the ledger union read the routes' way, up to the fold's newest row.
 - Not yet a part: `capabilities` (core serves no such route). `/context` stays a direct keyed GET.
 
+## `incidents` (version 1)
+
+`GET /v1/views/incidents`: the /incidents page, one body across instances (arch Phase 4 §1.1, P4-T15, W1-T5054,
+`src/lib/incidents-view.ts`). Schema: `IncidentsView`. Dark until `switches.json` sets `incidents` to `serve`;
+until then the console reads `/v1/incidents`, each instance's emergency status and daemon health as before.
+
+`data`: `{ store, instances[] }`.
+- `store`: `{ state: "ok", incidents }`, exactly `GET /v1/incidents`' list (`incidentsNewestFirst`), or
+  `{ state: "unavailable", reason }` where that route answers 503. Re-read only when the store file's fingerprint
+  (size, mtime, inode) moves. Source: `incidents-store:<home>`, as of the file's mtime.
+- `instances[].emergency.active`: `GET /v1/operator-agent/emergency/status`'s `active`, by the same
+  `activeEmergencyStopsAt`, over the agent view's persisted `panel.*` fold (no ledger read). Source: `ledger:<i>`.
+- `instances[].liveness`: a band over the newest projected `daemon.*` row (`instanceLiveness`, as `instances`
+  carries it). The raw heartbeat time is never carried, so a beat inside the band does not move the ETag.
+- Shadow side: `GET /v1/incidents` over a fresh store read (paired with the body's store as-of, so a write in
+  between is `timing`), and each emergency status route over the ledger union read the routes' way, up to the
+  fold's newest row at the build. Liveness is the body's own reading: no route bands a heartbeat.
+
 ## `instances` (version 1)
 
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,

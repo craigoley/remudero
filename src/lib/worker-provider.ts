@@ -92,6 +92,11 @@ interface CodexSpawnArgs {
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
 }
 
+/** W1-T6027: how a worker's process ended. `exit` carries a code (0 included) and `signal` the signal's name, each as the
+ * runner OBSERVED it. `unobserved` is for a runner that saw no process end: the cash HTTP runner, or a claude envelope with
+ * no SDK throw. It is never read as exit 0. Re-exported by worker.ts beside `WorkerResult.exit`. */
+export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; signal: string } | { kind: "unobserved" };
+
 interface CodexWorkerResult {
   provider: "codex";
   sessionId: string;
@@ -105,6 +110,8 @@ interface CodexWorkerResult {
   stderr: string;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
+  exit: WorkerExit;
   apiError: boolean;
   usageRefusal?: UsageLimitRefusal;
   permissionDenials: unknown[];
@@ -3235,6 +3242,8 @@ export interface OpenWeightWorkerResult {
   stderr: string;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: always `unobserved` — an HTTP runner has no process whose end it could see. */
+  exit: WorkerExit;
   apiError: boolean;
   permissionDenials: unknown[];
   /** This adapter runs in the daemon, not a child worker process. The Azure key is absent. */
@@ -3788,6 +3797,7 @@ function openWeightResult(input: {
     stderr: error ?? "",
     subtype: error ? "openweight_error" : "success",
     isError: error !== undefined,
+    exit: { kind: "unobserved" },
     apiError: error !== undefined,
     permissionDenials: [],
     childEnvKeys: [],
@@ -4382,6 +4392,14 @@ async function brokerCashWebSearch(input: {
   return { text: result.text, sources: result.citations };
 }
 
+/** W1-T6027: Node's `exit` event hands a child `(code, signal)`, exactly one non-null. The signal is kept by name; an event
+ * carrying neither is `unobserved`, never exit 0. */
+function codexWorkerExit(code: number | null, signal: NodeJS.Signals | null | undefined): WorkerExit {
+  if (signal) return { kind: "signal", signal };
+  if (typeof code === "number") return { kind: "exit", code };
+  return { kind: "unobserved" };
+}
+
 async function spawnCodexWorkerInPrivateTemp(
   args: CodexSpawnArgs,
   config: Config,
@@ -4436,8 +4454,8 @@ async function spawnCodexWorkerInPrivateTemp(
     stdin: NodeJS.WritableStream;
     stdout: NodeJS.ReadableStream;
   };
-  const exitPromise = new Promise<number | null>((resolve, reject) => {
-    process.once("exit", (code: number | null) => resolve(code));
+  const exitPromise = new Promise<WorkerExit>((resolve, reject) => {
+    process.once("exit", (code: number | null, signal?: NodeJS.Signals | null) => resolve(codexWorkerExit(code, signal)));
     process.once("error", reject);
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -4474,10 +4492,12 @@ async function spawnCodexWorkerInPrivateTemp(
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
-    const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
     const parsed = stdout.finish();
+    // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
+    const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = codexNotionalCostUsd(model, parsed.tokens);
@@ -4493,6 +4513,7 @@ async function spawnCodexWorkerInPrivateTemp(
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
+      exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
       ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
       permissionDenials: parsed.errors.filter((error) => /permission|sandbox|denied/i.test(error)),

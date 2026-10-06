@@ -352,7 +352,7 @@ test("an emitted view event is ledgered at most once per minute per key", async 
     ["instance=core", new Date(T0 + 60_000).toISOString()],
     ["instance=site", new Date(T0 + 60_001).toISOString()],
   ]);
-  assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1, sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: 0 });
+  assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), judgedRowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1, sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: 0 });
 });
 
 test("a sampled view.emitted row names its sampling interval and counts the events it skipped", async (t) => {
