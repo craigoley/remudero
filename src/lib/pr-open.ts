@@ -89,7 +89,7 @@ export type AsyncOpenPullRequestProofRunner = (
   target?: SuiteRegistryTarget,
 ) => Promise<OpenPullRequestProofResult>;
 
-/** A proof run's wall-clock bound. The longest measured on the daemon loop was 248 s (2026-10-06). */
+/** BACKSTOP: a proof run's wall-clock bound; the longest measured on the loop was 248 s (2026-10-06). */
 export const PR_OPEN_PROOF_TIMEOUT_MS = 15 * 60_000;
 
 export interface AsyncProofRunOptions {

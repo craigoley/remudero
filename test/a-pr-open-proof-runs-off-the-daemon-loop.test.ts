@@ -3,7 +3,6 @@
 // daemon loop 1039 s across 36 daemon.loop_lag rows, up to 248 s at once. These tests pin the
 // awaited runner, its bound, its result parity with the sync one, and the pre-run the opener reads.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,12 +15,7 @@ import {
   PrOpenRefusedError,
   type AsyncOpenPullRequestProofRunner,
 } from "../src/lib/pr-open.js";
-
-const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.invalid" };
-
-function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: { ...process.env, ...IDENTITY } });
-}
+import { gitRepo } from "./helpers/git-repo.js";
 
 /** A fake `rmd`: echoes its argv, writes to stderr, sleeps `RMD_FAKE_SLEEP_MS`, and exits 3 when
  *  the proof names FAIL. With RMD_FAKE_IGNORE_TERM it survives SIGTERM, so only SIGKILL ends it. */
@@ -56,10 +50,9 @@ function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise
 }
 
 /** A checkout with a filed plan and an origin/main a commit behind HEAD. */
-function filedCheckout(proofs: string[]): { dir: string; base: string } {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-proof-off-loop-"));
-  git(dir, "init", "--quiet", "-b", "main");
-  mkdirSync(join(dir, "plan"));
+function filedPlanFixture(proofs: string[]): { dir: string; base: string } {
+  const repo = gitRepo({ kind: "proof-off-loop" });
+  mkdirSync(join(repo.dir, "plan"));
   const plan = [
     "- id: W1-T9",
     "  title: fixture",
@@ -68,15 +61,15 @@ function filedCheckout(proofs: string[]): { dir: string; base: string } {
     "  acceptance:",
     ...proofs.flatMap((proof, i) => [`    - claim: claim ${i}`, `      proof: ${JSON.stringify(proof)}`]),
   ].join("\n");
-  writeFileSync(join(dir, "plan", "tasks.yaml"), `${plan}\n`);
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "chore: seed");
-  const base = git(dir, "rev-parse", "HEAD").trim();
-  git(dir, "update-ref", "refs/remotes/origin/main", base);
-  writeFileSync(join(dir, "note.md"), "change\n");
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "feat: change");
-  return { dir, base };
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), `${plan}\n`);
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "chore: seed");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", base);
+  writeFileSync(join(repo.dir, "note.md"), "change\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "feat: change");
+  return { dir: repo.dir, base };
 }
 
 test("an awaited proof run leaves the event loop free to service a timer while it is pending", async () => {
@@ -97,7 +90,7 @@ test("an awaited proof run leaves the event loop free to service a timer while i
 });
 
 test("a proof run past its bound is killed and the PR open is refused naming the timeout", async () => {
-  const { dir } = filedCheckout(["grep: SLOW in note.md"]);
+  const { dir } = filedPlanFixture(["grep: SLOW in note.md"]);
   try {
     const bin = fakeRmd(dir);
     const started = Date.now();
@@ -158,7 +151,7 @@ test("the awaited proof runner returns what the sync runner returns on the same 
 
 test("the proof pre-run stops at the first failing proof exactly where the sync open stops", async () => {
   const proofs = ["grep: ONE in note.md", "grep: FAIL in note.md", "grep: THREE in note.md"];
-  const { dir, base } = filedCheckout(proofs);
+  const { dir, base } = filedPlanFixture(proofs);
   try {
     const ran: string[] = [];
     const recorder: AsyncOpenPullRequestProofRunner = async (proof, mergeBase) => {
@@ -188,7 +181,7 @@ test("the proof pre-run stops at the first failing proof exactly where the sync 
 });
 
 test("the proof pre-run runs every proof of a passing branch and the open then passes", async () => {
-  const { dir } = filedCheckout(["grep: ONE in note.md", "grep: TWO in note.md"]);
+  const { dir } = filedPlanFixture(["grep: ONE in note.md", "grep: TWO in note.md"]);
   try {
     const ran: string[] = [];
     const runner = await prerunPullRequestProofs("run-W1-T9-1", dir, "origin/main", undefined, async (proof) => {
@@ -203,7 +196,7 @@ test("the proof pre-run runs every proof of a passing branch and the open then p
 });
 
 test("the proof pre-run stops at an unrunnable proof and leaves the sync open to refuse it", async () => {
-  const { dir } = filedCheckout(["grep: ONE in note.md", "a bare prose title", "grep: THREE in note.md"]);
+  const { dir } = filedPlanFixture(["grep: ONE in note.md", "a bare prose title", "grep: THREE in note.md"]);
   try {
     const ran: string[] = [];
     const runner = await prerunPullRequestProofs("run-W1-T9-1", dir, "origin/main", undefined, async (proof) => {
@@ -218,7 +211,7 @@ test("the proof pre-run stops at an unrunnable proof and leaves the sync open to
 });
 
 test("a proof the pre-run never ran is refused by name rather than run on the loop", async () => {
-  const { dir } = filedCheckout(["grep: ONE in note.md"]);
+  const { dir } = filedPlanFixture(["grep: ONE in note.md"]);
   try {
     const runner = await prerunPullRequestProofs("not-a-run-branch", dir, "origin/main", undefined, async () => {
       throw new Error("a non-run branch must run no proofs");
@@ -233,7 +226,7 @@ test("a proof the pre-run never ran is refused by name rather than run on the lo
 });
 
 test("a plan refusal during the proof pre-run is left to the sync open and any other error propagates", async () => {
-  const { dir } = filedCheckout(["grep: ONE in note.md"]);
+  const { dir } = filedPlanFixture(["grep: ONE in note.md"]);
   try {
     const never: AsyncOpenPullRequestProofRunner = async () => {
       throw new Error("no proof may run for an absent task");
