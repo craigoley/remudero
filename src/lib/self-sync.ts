@@ -45,7 +45,9 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 
-function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
+/** The real {@link AsyncGitRunner}: `git -C <repoDir>` off the loop, killed (SIGTERM, then SIGKILL
+ *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read. */
+export function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
   return (args, signal, env) =>
     new Promise((resolve, reject) => {
       const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal, env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));

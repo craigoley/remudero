@@ -1265,7 +1265,7 @@ export interface DaemonDeps {
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
-  checkRetroTrigger?: () => RetroTriggerDecision | undefined;
+  checkRetroTrigger?: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   /** Run the automated retro once the trigger fires. The real wiring threads the fired decision's
    *  merge count into the retro command, so the integrity gate can compare it against the real
    *  gather's credited count and abort loudly on a mismatch. Best-effort (W1-T160). */
@@ -4281,7 +4281,7 @@ export async function runDaemon(
     } else if (deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
-        decision = deps.checkRetroTrigger();
+        decision = await deps.checkRetroTrigger();
       } catch (e) {
         log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
       }
