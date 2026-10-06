@@ -100,6 +100,10 @@ test("both censuses share the existing child, propagate failures, and keep unrea
 });
 
 test("the two triggered censuses have executable scripts, parity entries and CI population membership", () => {
+  assert.deepEqual(
+    precheck.PRECHECK_PARITY["test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts"],
+    { modeled: precheck.evaluateAdmittedCensusSuites },
+  );
   const scripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
   const ciOnly = JSON.parse(readFileSync(new URL("../scripts/census-precheck-parity-baseline.json", import.meta.url), "utf8")).ciOnly;
   for (const [testFile, script] of [[PRICED, "census:every-priced-ledger-step"], [HOST, "census:host-capability-fixtures"]]) {
