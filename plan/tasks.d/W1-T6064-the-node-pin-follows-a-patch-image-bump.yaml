@@ -1,0 +1,35 @@
+- id: W1-T6064
+  title: "THE NODE PIN FOLLOWS A PATCH IMAGE BUMP — a Dependabot PR moving deploy/Dockerfile's FROM node:24.x tag cannot pass, because test/merge-lcov-node-drift-cluster-and-image-pin.test.ts requires FROM to equal .nvmrc and Dependabot does not edit .nvmrc; Node security patches then have no automated path"
+  repo: remudero
+  depends_on: [W1-T5883, W1-T6063]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-06: Node 24 upgrade follow-up"
+  plan_refs: [W1-T2770, W1-T5883]
+  files: [.github/workflows/node-pin-follows-the-image.yml, scripts/node-pin-follows-the-image.mjs, test/the-node-pin-follows-a-patch-image-bump.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06: the exact-pin rule (ADR 0002, W1-T2770) moves .nvmrc and deploy/Dockerfile's FROM
+    tag together, and the image-pin test enforces it. Dependabot's /deploy docker lane updates FROM
+    (tag and digest) but never .nvmrc, so its 24.21.0 -> 24.22.0 PR is red by construction and every
+    Node security release needs a hand edit. Digest-only renewals are unaffected (W1-T5883's test
+    asserts the digest's form, not its value).
+  design: |
+    scripts/node-pin-follows-the-image.mjs reads the FROM tag's version and, when it differs from .nvmrc within
+    the same major, rewrites .nvmrc to match (refusing a major, which W1-T6063 keeps out). A workflow
+    on Dependabot pull requests that touch deploy/Dockerfile runs it and pushes the .nvmrc commit to
+    the PR branch with the remudero-fleet App installation token, because a push made with
+    GITHUB_TOKEN starts no new workflow run and CI would never re-check the synced pin.
+  acceptance:
+    - claim: "a same-major FROM bump rewrites .nvmrc to the image's version and a major is refused"
+      proof: 'grep: test("W1-T6064: a same-major image bump moves the pin and a major is refused" in test/the-node-pin-follows-a-patch-image-bump.test.ts'
+  falsifier: |
+    Skip the rewrite: a fixture Dockerfile at 24.22.0 leaves .nvmrc at 24.21.0 and the test fails.
+  note: |
+    OPERATOR BUILD: a .github/workflows path routes this task to operator-build. Build after W1-T5883
+    merges, since it syncs a Node 24 pin.
