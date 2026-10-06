@@ -27,3 +27,11 @@
     - PR #9342: 0.01 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9342
     - PR #9617: 0.00 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9617
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearance of a remudero-review withholding condition, placing the proposed remedy at a review-control boundary.; on the change's description/files alone, no diff was read — The supplied record does not specify how reviewer death is established or what action clears the withholding; its grep proof checks for test text, so preservation of review policy cannot be verified from what is shown."
+    judged_at: "2026-10-06T22:30:52.592Z"
+    pin: "38f07aaa45419ffd90079869b458a0c4e0db8ceac5162eb9ee12be37c22e5784"
