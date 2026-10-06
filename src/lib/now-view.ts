@@ -630,6 +630,8 @@ export interface NowViewOptions {
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
   readPinPolicy?: (instance: NowInstance) => PolicyValues;
+  /** Fact rows one `board` step ingests at most (W1-T6014); the projection's default when omitted. */
+  boardIngestChunkRows?: number;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
@@ -1034,8 +1036,9 @@ export function createNowView(opts: NowViewOptions): {
   const depsOf = (instance: NowInstance, b: NowBuild) => ({
     plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
   });
-  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. */
-  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void]> = [
+  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. A stage
+   *  returning false is not done: the next step resumes it (a cold `board` ingests one chunk per step). */
+  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void | false]> = [
     ["plan", (instance, b) => {
       const cachedPlan = planCache.get(instance.name);
       b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
@@ -1057,12 +1060,13 @@ export function createNowView(opts: NowViewOptions): {
           get github() { return held.get(name)!.gateway.github; },
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
+          ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
-      h.board.update({ force: true });
+      if (!h.board.update({ force: true }).caughtUp) return false;
       b.h = h;
       b.rows = h.board.rows();
     }],
@@ -1119,11 +1123,12 @@ export function createNowView(opts: NowViewOptions): {
       if (!more()) return false;
       const [stage, run] = STAGES[b.stage]!;
       const started = clock.now();
-      run(instance, b);
+      const done = run(instance, b) !== false;
       const ms = clock.now() - started;
-      (ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!)[stage] = ms;
+      const timed = ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!;
+      timed[stage] = (timed[stage] ?? 0) + ms;
       if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
-      b.stage++;
+      if (done) b.stage++;
     }
     return true;
   }
