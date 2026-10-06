@@ -18,6 +18,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { reclaimStaleGitLocks, type StaleLockReclaimOptions } from "./git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
 
@@ -115,11 +116,19 @@ async function slotUnfit(dir: string, repoDir: string, run: RunCommand): Promise
   return listed.includes(realpathSync(dir)) ? undefined : { reason: "foreign_worktree", detail: `not in ${repoDir}'s worktree list` };
 }
 
-/** Prepares the slot that is not `activeDir` at origin's newest main; ledgers whether the slot was reused or (re)created, and why. */
-export function createSlotPreparer(opts: { repoDir: string; gensDir: string; run?: RunCommand; log?: ServeSupervisorOptions["log"] }): (activeDir: string) => Promise<PreparedSlot> {
+/**
+ * Prepares the slot that is not `activeDir` at origin's newest main; ledgers whether the slot was reused or (re)created, and why.
+ * Before the fetch, stale maintenance leftovers of a killed gc are removed (src/lib/git-lock-reclaim.ts): left in place they
+ * make every fetch's automatic maintenance a silent no-op (2026-10-06: 40,208 loose objects, 1.54 GiB, in a week).
+ */
+export function createSlotPreparer(opts: { repoDir: string; gensDir: string; run?: RunCommand; log?: ServeSupervisorOptions["log"]; lockReclaim?: StaleLockReclaimOptions }): (activeDir: string) => Promise<PreparedSlot> {
   const run = opts.run ?? runCommand;
   const log = opts.log ?? (() => undefined);
   return async (activeDir) => {
+    const gitDir = resolve(opts.repoDir, (await run("git", ["-C", opts.repoDir, "rev-parse", "--git-common-dir"], opts.repoDir)).trim());
+    const reclaim = await reclaimStaleGitLocks(gitDir, opts.lockReclaim);
+    if (reclaim.removed.length > 0 || reclaim.failed !== undefined) log("serve.slot_git_lock_reclaimed", { git_dir: gitDir, removed: reclaim.removed, failed: reclaim.failed });
+    if (reclaim.refused !== undefined) log("serve.slot_git_lock_reclaim_refused", { git_dir: gitDir, ...reclaim.refused });
     await run("git", ["-C", opts.repoDir, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"], opts.repoDir);
     const sha = (await run("git", ["-C", opts.repoDir, "rev-parse", "refs/remotes/origin/main"], opts.repoDir)).trim();
     const dir = SLOT_NAMES.map((name) => join(opts.gensDir, name)).find((candidate) => resolve(candidate) !== resolve(activeDir)) as string;
