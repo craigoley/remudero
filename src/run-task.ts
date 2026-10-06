@@ -663,6 +663,8 @@ import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
 import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
+import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
+import { planFilesIdentity } from "./lib/thread-plan.js";
 import {
   buildReadyServeServer,
   currentBranch,
@@ -38742,13 +38744,18 @@ export async function serveCommand(
   const ledgerPath = ledgerPathFor(config);
   let plan: Plan;
   let boardPlanReadFailure: string | undefined;
+  // W1-T5639: the read's QUALIFIED outcome travels with the plan. A failed read is not a successfully read empty plan, so
+  // the placeholder below is bound beside an `unavailable` outcome that every plan-derived reader checks before it counts.
+  let planSource: PlanSourceHolder["planSource"];
   try {
     plan = (deps.loadBoardPlan ?? loadPlan)(planPath);
+    planSource = planSourceLoaded(undefined, planFilesIdentity(planPath));
   } catch (error) {
     boardPlanReadFailure = String((error as Error)?.message ?? error);
     // The worker reads the real path and publishes an unavailable board. The assembly still
     // needs a Plan shape to bind cheap routes and auth while that failure is visible.
     plan = { tasks: [], byId: new Map() };
+    planSource = planSourceFailed(undefined, error);
   }
   const tokens = resolveServiceTokens(config.root);
   // W1-T2568: the signed GitHub-event wake's config — resolved here (never inside lib/serve.ts,
@@ -38888,8 +38895,9 @@ export async function serveCommand(
   // the SAME deps back both the real board route below AND the one-shot background precompute
   // that this task adds — one `boardGithub`/`plan`/`ledgerPath` triple, never two independently
   // constructed ones that could drift.
-  const boardDeps: BoardDeps = {
+  const boardDeps: BoardDeps & PlanSourceHolder = {
     plan,
+    planSource,
     ledgerPath,
     github: boardGithub,
     inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId),
@@ -38902,7 +38910,15 @@ export async function serveCommand(
     planPath,
     ledgerPath,
     inflightDir: join(config.root, "state", "inflight"),
-  }, deps.boardProjectionOptions);
+  }, {
+    ...deps.boardProjectionOptions,
+    // The projection thread re-reads the plan every pass and can recover on its own. When the thread publishes a snapshot
+    // while serve is still bound to the placeholder, serve adopts what the thread read, so the two never disagree.
+    onSnapshot: (planIdentity) => {
+      deps.boardProjectionOptions?.onSnapshot?.(planIdentity);
+      adoptPlanSource(boardDeps, () => ({ plan: (deps.loadBoardPlan ?? loadPlan)(planPath), identity: planIdentity }), { log });
+    },
+  });
 
   // W1-T2838: do not bind until Serve's OWN first App-token mint settles. The refresher's
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
