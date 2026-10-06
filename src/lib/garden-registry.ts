@@ -251,8 +251,13 @@ export function childGardenPassSpawn(
         stdio: ["ignore", "ignore", "pipe"],
       });
       let stderr = "";
+      let heapExhaustedSeen = false;
       child.stderr?.on("data", (chunk: Buffer | string) => {
-        stderr = `${stderr}${String(chunk)}`.slice(-STDERR_TAIL_CHARS);
+        const captured = `${stderr}${String(chunk)}`;
+        // Classify the stream before bounding its diagnostic tail: a long native backtrace
+        // can displace the fatal signature, including when a single chunk exceeds the cap.
+        heapExhaustedSeen ||= HEAP_EXHAUSTED_STDERR.test(captured);
+        stderr = captured.slice(-STDERR_TAIL_CHARS);
       });
       let lowered: Promise<void> = Promise.resolve();
       const pid = child.pid;
@@ -275,7 +280,7 @@ export function childGardenPassSpawn(
       child.once("error", reject);
       child.once("close", (code, signal) => {
         void lowered.then(() => {
-          if (signal !== null && HEAP_EXHAUSTED_STDERR.test(stderr)) {
+          if (signal !== null && heapExhaustedSeen) {
             reject(new Error(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`));
           } else {
             resolve(code);
