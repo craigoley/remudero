@@ -618,7 +618,7 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
-      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when staging or its queue confirmation fails, with `landing_error` recorded in the `panel.feedback_submitted` ledger row (W1-T5731). */
       landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */

@@ -463,7 +463,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
-      const queued = input.submissionKey || input.replyTo !== undefined ? readQueueForCheck(deps, "/v1/feedback", res) : new Map<string, QueuedFeedbackRecord>();
+      const queued = readQueueForCheck(deps, "/v1/feedback", res);
       if (!queued) return;
       if (input.submissionKey) {
         const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey, deps.inboxRoot);
@@ -491,19 +491,26 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         submissionKey: input.submissionKey,
         land,
       });
-      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
-      const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
-      if (input.replyTo !== undefined) {
-        setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+      let landingError: string | undefined;
+      try {
+        const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+        const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
+        if (input.replyTo !== undefined) {
+          setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+        }
+        const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
+        const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
+        if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
+      } catch (error) {
+        const reason = String((error as Error)?.message ?? error);
+        landingError = reason;
       }
-      const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
-      const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
-        ...(unqueued.length === 0 ? { landing: "queued" } : { landing_error: staged.error ?? `not queued: ${unqueued.join(", ")}` }),
+        ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }),
       });
-      sendJson(res, 200, { ok: true, entry, ...(unqueued.length === 0 ? { landing: "queued" } : {}) });
+      sendJson(res, 200, { ok: true, entry, ...(landingError === undefined ? { landing: "queued" } : {}) });
     }),
   };
 }
