@@ -15,7 +15,11 @@
     - src/lib/capability-grant.ts
     - src/lib/capability-inspection.ts
     - src/run-task.ts
-    - test/capability-inspection.test.ts
+    - test/capability-inspection-verifier.test.ts
+    - test/capability-inspection-outcomes.test.ts
+    - test/capability-inspection-source.test.ts
+    - test/capability-inspection-redaction.test.ts
+    - test/capability-inspection-cli.test.ts
     - docs/cli-reference.md
   status: queued
   attempts: 0
@@ -49,15 +53,15 @@
     second credential store, new ordinary-PR gate or automatic policy mutation.
   acceptance:
     - claim: "inspection and replay use the canonical verifier and preserve all store state"
-      proof: "unit test: test/capability-inspection.test.ts"
+      proof: "unit test: test/capability-inspection-verifier.test.ts"
     - claim: "allow and refusal controls agree with actual verification at an explicit clock"
-      proof: "unit test: test/capability-inspection.test.ts"
+      proof: "unit test: test/capability-inspection-outcomes.test.ts"
     - claim: "unknown input is distinct from refusal and unverified context is not certified"
-      proof: "unit test: test/capability-inspection.test.ts"
+      proof: "unit test: test/capability-inspection-source.test.ts"
     - claim: "output is bounded and does not echo sensitive or attacker-controlled payloads"
-      proof: "unit test: test/capability-inspection.test.ts"
+      proof: "unit test: test/capability-inspection-redaction.test.ts"
     - claim: "the real local command is read-only and never permits execution from a replay receipt"
-      proof: "unit test: test/capability-inspection.test.ts"
+      proof: "unit test: test/capability-inspection-cli.test.ts"
     - claim: "the real command calls the inspection module, not a test-only implementation"
       proof: "grep: inspectCapabilityDecision( in src/run-task.ts"
   falsifier: |
