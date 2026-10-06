@@ -41,7 +41,7 @@ function fakeRmd(dir: string): string {
 function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
   Object.assign(process.env, vars);
-  return fn().finally(() => {
+  return Promise.resolve().then(fn).finally(() => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -78,9 +78,14 @@ test("an awaited proof run leaves the event loop free to service a timer while i
     const bin = fakeRmd(dir);
     let ticks = 0;
     const timer = setInterval(() => ticks++, 20);
-    const result = await withEnv({ RMD_FAKE_SLEEP_MS: "600" }, () =>
-      defaultProofRunnerAsync("grep: X in a.ts", "abc123", dir, undefined, { bin }),
-    ).finally(() => clearInterval(timer));
+    let result: Awaited<ReturnType<typeof defaultProofRunnerAsync>>;
+    try {
+      result = await withEnv({ RMD_FAKE_SLEEP_MS: "600" }, () =>
+        defaultProofRunnerAsync("grep: X in a.ts", "abc123", dir, undefined, { bin }),
+      );
+    } finally {
+      clearInterval(timer);
+    }
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.ok(ticks >= 10, `the loop serviced only ${ticks} timer ticks during a 600 ms proof run`);
   } finally {
