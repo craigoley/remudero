@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { createAgentView } from "./agent-view.js";
 import { createAnalyticsView } from "./analytics-view.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
@@ -1390,9 +1391,10 @@ export function runReadModelViewWorker(
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
     const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, host, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
