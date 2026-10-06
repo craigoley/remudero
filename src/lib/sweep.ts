@@ -14674,7 +14674,7 @@ export async function runSweep(
                 if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
                   acted = false;
                   const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
-                  if (!baseRedHistory.stoodDown.has(key)) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: check, main_sha: mainTipSha, step: BASE_RED_STOOD_DOWN_STEP });
+                  if (!baseRedHistory.stoodDown.has(key)) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, check_name: check, main_sha: mainTipSha, step: BASE_RED_STOOD_DOWN_STEP });
                   standDownReason = `base red: ${reproductionFiles.join(", ")} failed on main since it was last green, and this ${verdict} probe at ${mainTipSha} does not clear them — no fix dispatched, the branch refreshes once main is green`;
                   baseRedStandDownPrs.add(pr.prNumber);
                   break;
