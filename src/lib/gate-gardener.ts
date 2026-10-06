@@ -46,6 +46,31 @@ export interface GateDefuseSources {
   mintTaskId?: (branch: string) => string;
   admissionViolations?: typeof machineFilingAdmissionViolations;
   execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
+  /** Runs one test file with the clock shifted `shiftDays` ahead: true when it passes. Throws when
+   *  the run reaches no verdict. Default {@link runSuiteShifted} in the repo checkout. */
+  runSuite?: (file: string, shiftDays: number) => boolean;
+}
+
+/** W1-T6036: the control shift, nonzero so the control loads the same clock preload as the shifted run. */
+export const DEFUSE_CONTROL_SHIFT_DAYS = 0.001;
+export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
+const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
+type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
+
+/** Run `file` under the repo's own test invocation plus scripts/clock-shift.mjs. A nonzero exit is
+ *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red. */
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number): boolean {
+  const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays) };
+  delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
+  delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
+  const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+  try {
+    execFileSync(process.execPath, args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
+    return true;
+  } catch (e) {
+    if (typeof (e as { status?: unknown }).status === "number") return false;
+    throw e;
+  }
 }
 
 export type GateEdit =
@@ -120,16 +145,46 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
   const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((t) => t.status === "queued" && !t.retirement).map((t) => t.origin) : [];
   const open = sources.openOrigins ? sources.openOrigins() : (JSON.parse(run("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>).flatMap((pr) => [...pr.body.matchAll(/expiring-fixture:test\/[^\s"'`]+\.test\.ts/g)].map((m) => m[0]));
   const covered = new Set([...queued, ...open]);
+  const runSuite = sources.runSuite ?? ((file: string, days: number) => runSuiteShifted(deps.repoRoot, file, days));
   return [...byFile.values()].flatMap((finding): GateGardenAction[] => {
     const target = `expiring-fixture:${finding.file}`;
     if (covered.has(target)) {
       deps.log("gate_garden.defuse_deferred", defuseEvidence(finding, leadDays));
       return [];
     }
+    if (!confirmDefuse(deps, finding, run, runSuite)) return [];
     return [{ class: "defuse", target, file: finding.file,
       edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS },
       reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${fixedClock(finding.expiresAt).iso()} (${leadDays}-day lead).` }];
   });
+}
+
+/**
+ * W1-T6036: a field-name census is a CANDIDATE generator. Measured 2026-10-06, the widened census
+ * named 22 `updated_at`/`updatedAt` rows that no threshold ages, so a finding is filed only when its
+ * file passes at the control shift and fails shifted one day past the crossing. Anything else is
+ * ledgered `gate_garden.defuse_unconfirmed`. A verdict is remembered per blob and crossing day; a
+ * run with no verdict is ledgered `run_error` and retried next pass, never read as red.
+ */
+function confirmDefuse(deps: GardenerDeps, f: ExpiringFixture, run: (cmd: string, args: string[]) => string, runSuite: (file: string, days: number) => boolean): boolean {
+  const crossingDate = fixedClock(f.expiresAt).iso();
+  const evidence = { file: f.file, line: f.line, crossingDate };
+  const path = join(deps.stateDir, DEFUSE_VERDICTS_FILE);
+  const memo = (existsSync(path) ? readJson(path) : {}) as Record<string, DefuseVerdict>;
+  const key = `${run("git", ["hash-object", "--", f.file]).trim()}:${crossingDate.slice(0, 10)}`;
+  let verdict = memo[key];
+  if (!verdict) {
+    try {
+      verdict = !runSuite(f.file, DEFUSE_CONTROL_SHIFT_DAYS) ? "control_failed"
+        : runSuite(f.file, Math.ceil(f.daysLeft) + 1) ? "shifted_passed" : "confirmed";
+    } catch (e) {
+      deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: "run_error", error: String(e) });
+      return false;
+    }
+    writeAtomic(path, JSON.stringify({ ...memo, [key]: verdict }, null, 2) + "\n");
+    if (verdict !== "confirmed") deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: verdict });
+  }
+  return verdict === "confirmed";
 }
 
 function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, unknown> {
