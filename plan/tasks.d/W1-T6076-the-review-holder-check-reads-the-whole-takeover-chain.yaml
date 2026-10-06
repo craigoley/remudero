@@ -1,0 +1,80 @@
+- id: W1-T6076
+  title: "THE REVIEW HOLDER CHECK READS THE WHOLE TAKEOVER CHAIN, AND SO DOES task-id-existence — review.ts judgeTaskIdOwnership reads only the reservation's head (`log -1`), so on the real W1-T5997 chain it refuses the rightful codex filer ('reserved by file-followups2-…, not this PR — renumber') and passes the reclaimer, the opposite of W1-T6025's CI verdict; and W1-T6025's adjudicateReservationHolder reads one parent, so an A->B->C chain inside the grace makes CI name B, review name C, and neither name A"
+  repo: remudero
+  depends_on: [W1-T6025, W1-T6075]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the rightful holder of a reservation chain, decided once and read by both gates
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up of #9645"
+  plan_refs: [W1-T6025, W1-T6026, W1-T4414, W1-T5279, W1-T3674, W1-T3648]
+  files: [scripts/task-id-existence-check.mjs, src/lib/task-id-reservation.ts, src/lib/review.ts, test/the-review-holder-check-reads-the-whole-takeover-chain.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a76291b3 (after #9645 242562ab and #9704).
+    REVIEW READS ONE COMMIT. src/lib/task-id-reservation.ts readReservationAnchors and readReservationAnchorsAsync
+    read each id's body with `anchorLogArgs = (sha) => ["log", "-1", "--format=%B", sha]`. In src/lib/review.ts,
+    judgeTaskIdOwnership then takes `const holder = reservationHolderBranch(r.message) ?? "unknown"` and pushes
+    `kind: "foreign"` whenever `holder !== headRef && !recordsHandoff(...)`. It never reads `source=reclaimed`,
+    `taken_over_from` or the parent. The doc on recordsHandoff says it mirrors task-id-existence "so the two gates
+    never disagree". Since #9645 they do.
+    REPLAYED with origin/main's src and scripts exported into a scratch tree, using the two real commit bodies of
+    refs/rmd-id/W1-T5997 (876d5390, codex at 11:36:25.567Z, source=automatic; ec2cf986, file-followups2 at
+    11:36:40.316Z, source=reclaimed). taskIdOwnershipFindings was given an injected read, and the CI side was
+    readReservationHolderRecord + adjudicateReservationHolder with a scripted runGit:
+      A->B (W1-T5997, real): task-id-existence rightful holder = codex/portable-fixture-plan-1791286800000
+        review.ts filer codex (A): foreign holder=file-followups2-1791286555509
+        review.ts filer file-followups2 (B): PASS
+    So after W1-T6025 the rightful filer is green at task-id-existence and red at remudero-review, and the race's
+    loser is the reverse. Neither PR can merge on both gates, which is the both-renumber outcome W1-T6025 was filed
+    to end. The hand-off escape cannot rescue A, because its left side must be the head (the reclaimer), and the
+    reclaimer's minter is the one that prints that line.
+      A->B->C (a synthetic third link, C reclaimed from B 30s later, all inside RESERVATION_PUSH_GRACE_MS):
+        task-id-existence rightful holder = file-followups2-1791286555509 (B)
+        review.ts: A foreign, B foreign, C PASS
+    adjudicateReservationHolder reads only `FETCH_HEAD^`. It weighs C against B and hands the id to B, but B's own
+    takeover of A was 14.75s in, which the same rule refuses. Rightful is A. CI names B, review names C, and A is
+    red on both.
+    CHAINS ARE WRITTEN. Census of all 3770 refs/rmd-id/* (scratch bare fetch, every first-parent link): 18
+    source=reclaimed links. 12 form one chain on the above-ceiling sentinel W1-T100001, including the
+    sub-chains 2026-09-25 18:38:12 -> 18:38:29 -> 18:38:57 and 20:05:50 -> 20:06:17 -> 20:06:48, each link inside
+    the grace of the one before. The 6 on allocatable ids are all single links today. So the 1-link disagreement
+    is the live defect, and the chain walk is needed so the fix is correct by construction rather than for
+    one link only.
+  design: |
+    (1) scripts/task-id-existence-check.mjs: export `adjudicateReservationChain(links, graceMs = RESERVATION_PUSH_GRACE_MS)`
+    over head-first links, each `{ holder, fields }` as parseReservationHolderLine and parseReservationHolderFields
+    return them. Walk from the oldest link. The rightful holder starts at the root. A later source=reclaimed link
+    whose `taken_over_from` equals its immediate parent's branch replaces the rightful holder only when its
+    started_at minus the RIGHTFUL holder's started_at is at least the grace. Return the same
+    `{ holder, fields, takeover }` shape adjudicateReservationHolder returns, with `takeover.reclaimer` set to the
+    head when the head lost. Anything W1-T6025 calls unweighable falls back to the head, as today: a non-reclaimed
+    link above the root, a main or unknown link (W1-T3674), a mismatched taken_over_from, or an unparsable
+    started_at. adjudicateReservationHolder becomes a call to it, so its 10 W1-T6025 cases still pin the 1-link
+    behaviour. readReservationHolderRecord reads the chain with ONE
+    `git log --first-parent -n 16 --format=%B%x00 FETCH_HEAD`, bounded, instead of the head plus `FETCH_HEAD^`.
+    (2) src/lib/task-id-reservation.ts: anchorLogArgs reads the same bounded first-parent log, and the `present`
+    ReservationAnchorRead carries `chain: string[]` (head first) beside `message`, which is unchanged for every
+    existing reader. Both the sync and the async readers change. Keep #9644/#9704's bounded async runner.
+    (3) src/lib/review.ts judgeTaskIdOwnership imports adjudicateReservationChain from the script (src already
+    imports scripts/*.mjs, as in plan-index.ts) and judges `headRef` against the adjudicated holder. A headRef equal
+    to the losing reclaimer is foreign even beside a hand-off line, mirroring evaluateReservationHolderConflicts'
+    `lostRace`. The refusal keeps its 140-character status shape and names the rightful holder.
+    Not in scope: who may reclaim (W1-T6026 and its daemon-lane follow-up) and the open-PR collision half.
+  acceptance:
+    - claim: "for the real W1-T5997 chain, review's ownership check passes the codex filer and refuses the reclaimer, as task-id-existence does; for an A->B->C chain inside the grace both gates pass A and refuse B and C; and a link reclaimed past the grace hands the id to its reclaimer in both gates"
+      proof: "unit test: test/the-review-holder-check-reads-the-whole-takeover-chain.test.ts"
+    - claim: "the review holder check uses the chain adjudicator"
+      proof: "grep: adjudicateReservationChain in src/lib/review.ts"
+    - claim: "task-id-existence exports the chain adjudicator its holder read uses"
+      proof: "grep: export function adjudicateReservationChain in scripts/task-id-existence-check.mjs"
+  falsifier: |
+    Restore `reservationHolderBranch(r.message)` in judgeTaskIdOwnership: the W1-T5997 case reports the codex
+    filer as foreign and passes file-followups2, so the first assertion fails. Make the chain walker weigh each
+    link only against its immediate parent, which is today's one-parent rule: the A->B->C case names B as
+    rightful, and the both-gates-pass-A assertion fails. Drop the grace comparison: the past-the-grace case keeps
+    the original holder, and the reclaimer-wins assertion fails.
