@@ -8,7 +8,7 @@
  * equal a fold of the same ledger from scratch.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,4 +123,18 @@ test("unit test: a live-ledger position an analytics resume cannot reconcile is 
   assert.equal(await outcome((prior) => {
     assert.equal(anchor(prior).prefixBytes, prior.source.liveOffset, "positive control: the fold stopped at the end of the prefix");
   }, replaced(core + rows("echo", 70, 700)), onlyCore), "resumed:resume", "a fold that read only the carried prefix lost nothing to it");
+});
+
+test("unit test: a live anchor is taken only from the live file the fold read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-analytics-live-anchor-"));
+  try {
+    assert.equal(analytics.liveAnchor(dir, 1, 0), undefined, "no live file, no anchor");
+    writeFileSync(join(dir, "ledger.ndjson"), rows("alpha", 2, 1));
+    const ino = statSync(join(dir, "ledger.ndjson")).ino;
+    assert.equal(analytics.liveAnchor(dir, ino, 10_000_000)?.tailBytes, undefined, "an offset past the end anchors nothing");
+    assert.equal(analytics.liveAnchor(dir, ino + 1, 10), undefined, "another inode is another file");
+    assert.equal(analytics.liveAnchor(dir, ino, 10)?.tailBytes, 10, "positive control: the file read anchors");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

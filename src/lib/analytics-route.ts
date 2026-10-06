@@ -689,7 +689,7 @@ type AnalyticsCheckpointSource = {
 };
 
 /** The live file read: inode, carried prefix, and digest of the bytes before `liveOffset` past that prefix. */
-type LiveAnchor = { ino: number; prefixBytes: number; prefixSha256: string; tailBytes: number; tailSha256: string };
+export type LiveAnchor = { ino: number; prefixBytes: number; prefixSha256: string; tailBytes: number; tailSha256: string };
 
 type LivePosition = { liveStartOffset: number; rotationStart?: { name: string; offset: number } };
 
@@ -1921,7 +1921,7 @@ function carriedPrefixClaim(livePath: string): { bytes: number; sha256: string }
   }
 }
 
-function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor | undefined {
+export function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor | undefined {
   const livePath = join(stateDir, LEDGER_FILENAME);
   let fd: number;
   try {
