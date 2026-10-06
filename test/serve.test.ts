@@ -308,7 +308,7 @@ const READY_FRAGMENT = `
       proof: "unit test: fixture X -> observable Y"
 `;
 
-test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve on a genuinely READY proposal hands off to a REAL detached bin/rmd spawn — the default is not merely constructed but actually wired all the way to the write route (W1-T193)", async () => {
+test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve on a genuinely READY proposal hands off to a REAL detached bin/rmd spawn — the default is not merely constructed but actually wired all the way to the write route (W1-T193)", async (t) => {
   const root = tmpRoot();
   gitInit(root);
   const deps = depsFor(root, planOf([]));
@@ -316,7 +316,13 @@ test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve o
 
   mkdirSync(join(root, "bin"), { recursive: true });
   const markerPath = join(root, "marker.txt");
-  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\n`, { mode: 0o755 });
+  const stagedPath = join(root, "marker.pending");
+  const readyPath = join(root, "marker.ready");
+  const releasePath = join(root, "marker.release");
+  t.after(() => writeFileSync(releasePath, "release\n"));
+  // Redirection creates an empty file before printf writes it. Publish the complete
+  // fixture receipt by rename, and hold the child so the unpublished state is observed.
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > "${stagedPath}"\n: > "${readyPath}"\nwhile [ ! -f "${releasePath}" ]; do sleep 0.01; done\nmv -- "${stagedPath}" "${markerPath}"\n`, { mode: 0o755 });
 
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P900", summary: "a ready proposal", evidenceAnchors: [] }] }));
@@ -333,10 +339,11 @@ test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve o
     assert.equal(res.status, 200, `expected the READY proposal to be approvable: ${await res.text()}`);
   });
 
-  const deadline = Date.now() + 5000;
-  while (!existsSync(markerPath) && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await waitFor(() => existsSync(readyPath), 5000, 50);
+  assert.ok(!existsSync(markerPath), "the detached child must not publish a partial receipt");
+  assert.match(readFileSync(stagedPath, "utf8"), /^approve P900/);
+  writeFileSync(releasePath, "release\n");
+  await waitFor(() => existsSync(markerPath), 5000, 50);
   assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned by the DEFAULTED gateway");
   assert.match(readFileSync(markerPath, "utf8"), /^approve P900/);
 });
