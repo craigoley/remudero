@@ -2509,13 +2509,13 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
   let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
-  let progress: AnalyticsResumePoint | undefined;
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
   let started = false;
   let stopped = false;
   let shedPending = false;
+  let progress: AnalyticsResumePoint | undefined;
 
   const cancelTimer = (): void => {
     timer?.cancel();
