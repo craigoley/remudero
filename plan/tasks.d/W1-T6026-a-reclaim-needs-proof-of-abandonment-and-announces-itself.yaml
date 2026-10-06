@@ -1,0 +1,45 @@
+- id: W1-T6026
+  title: "A RECLAIM NEEDS PROOF OF ABANDONMENT AND ANNOUNCES ITSELF — a fresh branch=unknown holder is taken over at any age, a takeover prints only a hand-off line that `| grep RESERVED` drops, and a reclaim runs from code whose reservation policy is behind origin/main (the W1-T5997 takeover ran 687 commits stale under RMD_SELF_SYNC_DONE=1)"
+  repo: remudero
+  depends_on: [W1-T5279]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — when the allocator may take over a held id, and that a takeover is never silent
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5997 reclaimed 15s after reservation from a stale checkout; both filers renumbered"
+  plan_refs: [W1-T5279, W1-T3674, W1-T3640, W1-T3742, W1-T6025]
+  files: [src/lib/task-id-reservation.ts, src/run-task.ts, test/a-reclaim-needs-proof-of-abandonment-and-announces-itself.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: (a) reservationHolderDrift (src/lib/task-id-reservation.ts) returns `unattributable`
+    for a branch=unknown holder regardless of started_at, and reclaim then takes over (replayed: a 5s-old
+    `branch=unknown ... started_at` line gives `unattributable`). 152 of 3729 refs/rmd-id/* are headed by
+    branch=unknown today (the fleet daemon mints from a detached HEAD and amends via recordFilingBranch later),
+    so each is open to an instant takeover in that window. (b) The W1-T5997 takeover printed
+    `reservation hand-off: codex/... -> file-followups2-...` on its own line, and the operator session's
+    `| grep RESERVED` showed only "RESERVED W1-T5997 ... after 1 attempt(s)". The ledger has 0 MINT- rows,
+    because withIdReservationLogging logs only failures, so nothing durable records a takeover. (c) The
+    takeover ran from /home/craigoleyagent/rmd-work/core at 036f4d0a, which lacks 093cb95f (W1-T5279), under
+    RMD_SELF_SYNC_DONE=1, so self-sync's off-main/behind refusal never spoke. A hole costs nothing and a
+    collision costs two CI rounds plus an id (reserveTaskIdRemote's doc). Census: 5 of 7 historical reclaims
+    were races of 30s or less, and 4 of those ids were filed by nobody.
+  design: |
+    (1) Apply the grace to an unattributable holder too: carry started_at through parseReservationHolderLine's
+    missing-branch arm and treat a fresh unknown holder as `held`; keep the main-branch and no-started_at
+    readings unchanged (pinned by the W1-T3674/W1-T5279 tests). (2) A successful takeover is printed ON the
+    RESERVED line ("RESERVED <id> ... TAKEN OVER from <branch> (<pid>@<host>, reserved <started_at>, <age>
+    old)"), and next-task-id appends one ledger row `next_task_id.reclaimed` with taken_over_from, holder host
+    and age. (3) reclaim refuses to take over (it returns `taken`, so the scan advances) when the running
+    module's blob differs from origin/main:src/lib/task-id-reservation.ts. Reclaim is the one policy-bearing
+    write, and advancing is always safe. pid and host are never inputs: cross-host liveness is not decidable.
+  acceptance:
+    - claim: "a fresh branch=unknown reservation is not taken over, a takeover is named on the RESERVED line and in one ledger row, and a reclaim from a reservation module that differs from origin/main advances instead of taking over"
+      proof: "unit test: test/a-reclaim-needs-proof-of-abandonment-and-announces-itself.test.ts"
+  falsifier: |
+    Today a `branch=unknown started_at=<5s ago>` holder with a named filer is reclaimed (a push of a
+    source=reclaimed child); it must return `taken` with no push. Remove the RESERVED-line suffix and the
+    assertion that `grep RESERVED` output contains "TAKEN OVER from" fails.

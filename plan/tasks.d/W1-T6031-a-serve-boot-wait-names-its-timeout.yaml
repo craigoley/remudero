@@ -1,0 +1,51 @@
+- id: W1-T6031
+  title: "A SERVE CHILD THAT IS STILL BOOTING AT 45s FAILS AS 'THE CHILD MUST VISIBLY REACH THE REFUSAL' — install-symlink-refusal's behavioral pair and serve-service-boot wait a fixed real deadline for 'listening on' and then assert on log content, so a loaded host reads as a guard regression; measured boot 3.6–148s on the fleet host against 4.7s on CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — a serve-boot wait that runs out names itself as wall-clock dependent
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: local-only reds that pass on CI (research r-env)"
+  plan_refs: [W1-T2811, W1-T4226]
+  files: [test/helpers/serve-boot-banner.ts, test/install-symlink-refusal.test.ts, test/serve-service-boot.test.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/a-serve-boot-wait-names-its-timeout.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a6a28515 on the fleet host. Load average was 38–49 on 8 CPUs,
+    iowait 31–52%, /proc/pressure/io some avg60≈60 and full avg60≈33, with swap in use. The two
+    behavioral tests in test/install-symlink-refusal.test.ts passed 7/7 twice, then failed on later
+    runs: once 2/2 and once 1/2 (the guarded twin at 47.6s). Each failure had the same shape: the log
+    held only the .nvmrc warning line, and the assertions "the child must visibly reach the refusal"
+    and "the guarded child must boot normally" fired. With the deadline raised to 240s, the same
+    children booted after 148.7s and 115.8s, and later after 26.0s/7.0s and 34.7s/3.6s. Every boot
+    passed once it finished. CI's job log shows the unguarded test at 4.67s. An strace of the
+    unguarded child put 6.7s in the tsx CLI starting its loader child and 26.5s from there to the
+    first git exec, which is module load. User CPU stayed near 1–3s while real time ran 16s or more,
+    so the time goes to I/O and CPU contention, not the code under test. Test env does not matter:
+    `env -i` and TMPDIR=/mnt/scratch gave the same results. A symlinked node_modules (wt9505 style)
+    was not established as a cause because the A/B results were noisy in both directions. The test is
+    correct to need a real serve boot. The defect is that a boot that runs out of time is reported as
+    a guard regression. Neither file declares its deadline through
+    test/helpers/wall-clock-bound.ts, and the W1-T2811 census's BARE_BOUND_RE cannot see the shape
+    "deadline loop, then assert on content". serve-service-boot.test.ts has the same 45s wait.
+  design: |
+    Add one helper, test/helpers/serve-boot-banner.ts, with waitForServeBanner(logPath, child,
+    boundMs). It returns the log once "listening on" appears, fails at once if the child exits first
+    (as serve-service-boot does now), and when the deadline passes with the child still alive it calls
+    assertWallClockBound(elapsed, boundMs, "serve child did not print its banner"). Use it in both
+    files with a 120s bound: 148s was the worst observed, so a timeout now names itself rather than
+    being made impossible. Update RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES/SITES in
+    test/a-wall-clock-bound-declares-itself.test.ts to the measured counts.
+  acceptance:
+    - claim: "a serve-boot wait that runs out while the child is still alive fails with the declared WALL-CLOCK DEPENDENT message, a child that exits early fails as an exit, and a banner within the bound returns the log"
+      proof: "unit test: test/a-serve-boot-wait-names-its-timeout.test.ts"
+      kind: guard
+    - claim: "the install-symlink-refusal behavioral pair waits for its serve child through the declared helper"
+      proof: "grep: waitForServeBanner in test/install-symlink-refusal.test.ts"
+  falsifier: |
+    Revert install-symlink-refusal.test.ts to its inline 45s loop. The grep proof misses, and a
+    still-booting child again fails as "the child must visibly reach the refusal".
