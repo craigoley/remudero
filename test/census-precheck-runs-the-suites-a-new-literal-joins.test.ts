@@ -103,8 +103,15 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     assert.ok(scripts[member.script].endsWith(member.testFile));
     assert.ok(!ciOnly.includes(member.testFile));
   }
-  // W1-T5692's five literal-triggered suites, W1-T5693's three whole-tree structural ones, and W1-T5882's Node 24 runtime suite.
-  assert.equal(precheck.PRECHECK_TRIGGERED_SUITES.length, 9);
+  assert.deepEqual(precheck.PRECHECK_TRIGGERED_SUITES.map((member: { testFile: string }) => member.testFile), [
+    ...STEPS, ENV, ERROR,
+    "test/cycle-ratchet.test.ts",
+    "test/source-size-baseline-is-enforced.test.ts",
+    "test/citation-anchor-census.test.ts",
+    "test/node-24-runtime-compatibility.test.ts",
+    "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
+    "test/host-capability-fixtures.test.ts",
+  ]);
 });
 
 test("W1-T5692: the CLI supplies head and merge-base readers to the triggered suites", (t) => {
