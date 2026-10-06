@@ -12150,10 +12150,11 @@ export async function runFixRung(opts: {
       throw e;
     }
 
-    // W1-T5999: a worker KILLED BY A SIGNAL returned a truncated report, not a refusal. No commit is
-    // attempted, and no `fix.dispatch`/`fix.commit_refused` is written, so `fixRoundTally` counts it
-    // neither as a strike nor toward "refused twice" — the same ledger shape W1-T2402's thrown kill leaves.
-    if (fixWorkerEndedBySignal(fixResult)) {
+    // W1-T5999: a worker KILLED BY A SIGNAL that left NO work (no edits, no commits) is not a refusal: no
+    // `fix.dispatch`/`fix.commit_refused`, so `fixRoundTally` counts neither strike nor "refused twice", as
+    // W1-T2402's thrown kill. One that left work falls through and the harness commits it (W1-T4283, #8973).
+    if (fixWorkerEndedBySignal(fixResult) && !(deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath) &&
+      (roundStartSha === undefined || (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha) === 0)) {
       deps.log("fix.done", {
         ...fixReceipt.ledgerFields(fixResult),
         round_id: roundId,
