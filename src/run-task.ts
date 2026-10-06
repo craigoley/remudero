@@ -1379,7 +1379,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
-  reviewReservationOwnershipEvidence,
+  reviewReservationOwnershipEvidenceAsync,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -7455,7 +7455,7 @@ async function runReview(args: {
   const diff = diffOutcome.diff;
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
-  const ownership = reviewReservationOwnershipEvidence(diff, args.headRefName, args.headCheckoutDir);
+  const ownership = await reviewReservationOwnershipEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
   });

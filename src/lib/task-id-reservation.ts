@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -5,6 +6,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 import { systemClock, type Clock } from "./clock.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 
 /**
  * Atomic reservation of a minted task id — the piece {@link mintNextTaskIdWithHistory} skips. The
@@ -948,6 +950,26 @@ export type ReservationAnchorRead =
   | { status: "absent" }
   | { status: "unknown"; reason: string };
 
+type GitAnswer = { status: number; stdout: string; stderr: string };
+
+/** Every id UNKNOWN when the listing failed (a timed-out one included), else `undefined`. */
+function unreadAnchorListing(ids: readonly string[], listed: GitAnswer): Map<string, ReservationAnchorRead> | undefined {
+  if (listed.status === 0) return undefined;
+  return new Map(ids.map((id) => [id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` }]));
+}
+
+function anchorShaByRef(listed: GitAnswer): Map<string, string> {
+  return new Map(listed.stdout.split("\n").filter(Boolean).map((l) => [l.split("\t")[1], l.split("\t")[0]]));
+}
+
+const anchorListArgs = (ids: readonly string[]): string[] => ["ls-remote", "origin", ...ids.map(taskIdReservationRef)];
+const anchorFetchArgs = (id: string): string[] => ["fetch", "--quiet", "--no-tags", "origin", taskIdReservationRef(id)];
+const anchorLogArgs = (sha: string): string[] => ["log", "-1", "--format=%B", sha];
+
+function anchorReadFrom(body: GitAnswer): ReservationAnchorRead {
+  return body.status === 0 ? { status: "present", message: body.stdout } : { status: "unknown", reason: body.stderr.trim() };
+}
+
 /** Reads refs/rmd-id/<id> for each id from `run`'s origin. A failed listing makes EVERY id unknown:
  *  an unread namespace is not an empty one, so it can never be read as "not reserved". */
 export function readReservationAnchors(
@@ -956,21 +978,73 @@ export function readReservationAnchors(
 ): Map<string, ReservationAnchorRead> {
   const reads = new Map<string, ReservationAnchorRead>();
   if (ids.length === 0) return reads;
-  const listed = run(["ls-remote", "origin", ...ids.map(taskIdReservationRef)]);
-  if (listed.status !== 0) {
-    for (const id of ids) reads.set(id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` });
-    return reads;
-  }
-  const shaByRef = new Map(listed.stdout.split("\n").filter(Boolean).map((l) => [l.split("\t")[1], l.split("\t")[0]]));
+  const listed = run(anchorListArgs(ids));
+  const unread = unreadAnchorListing(ids, listed);
+  if (unread) return unread;
+  const shaByRef = anchorShaByRef(listed);
   for (const id of ids) {
     const sha = shaByRef.get(taskIdReservationRef(id));
     if (sha === undefined) {
       reads.set(id, { status: "absent" });
       continue;
     }
-    const fetched = run(["fetch", "--quiet", "--no-tags", "origin", taskIdReservationRef(id)]);
-    const body = fetched.status === 0 ? run(["log", "-1", "--format=%B", sha]) : fetched;
-    reads.set(id, body.status === 0 ? { status: "present", message: body.stdout } : { status: "unknown", reason: body.stderr.trim() });
+    const fetched = run(anchorFetchArgs(id));
+    reads.set(id, anchorReadFrom(fetched.status === 0 ? run(anchorLogArgs(sha)) : fetched));
   }
   return reads;
+}
+
+/** {@link readReservationAnchors}, awaited: its sync ls-remote/fetch held the daemon loop up to 322 s. */
+export async function readReservationAnchorsAsync(
+  ids: readonly string[],
+  run: (args: string[]) => Promise<GitAnswer>,
+): Promise<Map<string, ReservationAnchorRead>> {
+  const reads = new Map<string, ReservationAnchorRead>();
+  if (ids.length === 0) return reads;
+  const listed = await run(anchorListArgs(ids));
+  const unread = unreadAnchorListing(ids, listed);
+  if (unread) return unread;
+  const shaByRef = anchorShaByRef(listed);
+  for (const id of ids) {
+    const sha = shaByRef.get(taskIdReservationRef(id));
+    if (sha === undefined) {
+      reads.set(id, { status: "absent" });
+      continue;
+    }
+    const fetched = await run(anchorFetchArgs(id));
+    reads.set(id, anchorReadFrom(fetched.status === 0 ? await run(anchorLogArgs(sha)) : fetched));
+  }
+  return reads;
+}
+
+/** BACKSTOP per git call, above the slowest measured anchor spawn (322 s, 2026-10-06); past it the
+ *  id reads UNKNOWN, never absent. */
+export const RESERVATION_ANCHOR_GIT_TIMEOUT_MS = 600_000;
+
+/** Resolves on every outcome: exit N → N; killed at the bound → 1 with stderr NAMING the timeout;
+ *  signalled or never started → 1. SIGTERM, then SIGKILL after the grace. */
+export function gitReservationRunnerAsync(
+  repoDir: string,
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
+): (args: string[]) => Promise<GitAnswer> {
+  const timeoutMs = opts.timeoutMs ?? RESERVATION_ANCHOR_GIT_TIMEOUT_MS;
+  return (args) =>
+    new Promise((resolve) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve({ status: 0, stdout, stderr });
+        if (timedOut) {
+          const said = stderr.trim() ? ` git said: ${stderr.trim()}` : "";
+          return resolve({ status: 1, stdout, stderr: `git ${args[0]} timed out after ${timeoutMs}ms and was killed.${said}` });
+        }
+        const code = (err as { code?: unknown }).code;
+        return resolve({ status: typeof code === "number" ? code : 1, stdout, stderr: stderr || err.message });
+      });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
 }
