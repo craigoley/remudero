@@ -1,0 +1,37 @@
+- id: W1-T5953
+  title: "A LIGHT PASS NEVER RETRIES A DEFERRED REQUEUE BLIND TO ITS RUN — buildSweepLightHook's requeue-only batch (src/run-task.ts) passes readCiGateRollup: undefined, so W1-T5920's deferredRequeueTarget reads runInFlight false and requeueCheckJob POSTs the stale job id on every light pass; five light passes during one in-flight run reach CHECK_REQUEUE_DEFERRAL_BACKSTOP and escalate, stranding the PR until a new head"
+  repo: remudero
+  depends_on: [W1-T5920]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the light pass's deferred-requeue retry; it can strand a PR and spend escalations
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5941 queue-safety proof (the gate before re-enabling the merge queue) failed sequences (c) and (d) on main"
+  plan_refs: [W1-T5920, W1-T5941, W1-T2430, W1-T1223]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-light-pass-never-retries-a-deferred-requeue-blind-to-its-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    FOUND 2026-10-06 by W1-T5941's multi-pass scenario (sequence c; commit c7efdd4d on
+    run-W1-T5941-1791255115991, unpushed). Pass 2 (full) wrote sweep.check_requeued + a deferred row
+    (already_running, job 111989995761). Light passes 3-6, run still in flight, each re-POSTed the same
+    stale job and wrote a new deferred row; pass 7 (light) escalated ("requeue deferred 5 times —
+    escalated"); every later pass, including a full pass after the run concluded at job 222, read
+    "already escalated". Cause: buildSweepLightHook's requeue-only batch sets readCiGateRollup: undefined,
+    and deferredRequeueTarget(undefined, ...) returns runInFlight false. Live on main since W1-T5920 merged
+    (02:21Z).
+  design: |
+    A deferred requeue is retried only on a pass that can see its run: either wire the rollup read into
+    the light requeue batch, or have requeueCheckJob hold a deferred key (no POST, no count) when the
+    rollup is unavailable and leave it to the next pass that has one. Prefer the hold if the rollup read is
+    a per-PR GitHub call on a 60-second cadence. Either way an unavailable rollup never reads as "run
+    concluded".
+  acceptance:
+    - claim: "a light pass without the CI rollup neither POSTs nor counts a deferred requeue, and the requeue is retried at the current job once a pass that can see the run finds it concluded"
+      proof: "unit test: test/a-light-pass-never-retries-a-deferred-requeue-blind-to-its-run.test.ts"
+  falsifier: |
+    Keep runInFlight false for an undefined rollup: the light pass re-POSTs the stale job, the deferral
+    count reaches the BACKSTOP and the test fails.
