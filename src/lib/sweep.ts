@@ -24,7 +24,7 @@ import {
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
 import {
-  armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   decideArmReprobeFromFacts,
   armFailureAction,
@@ -35,7 +35,7 @@ import {
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
-  realArmDeps,
+  realArmDepsAsync,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
@@ -1066,15 +1066,16 @@ function prNumberFromRef(ref: string): number | undefined {
   return bareMatch ? Number(bareMatch[1]) : undefined;
 }
 
-function armAndLogOutcome(
+async function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = armAutoMergeDetailedAsync,
   lane: ArmLane = "operator",
   headSha?: string,
-): ArmOutcome {
-  const result = arm(prUrl, taskId);
+): Promise<ArmOutcome> {
+  // W1-T5781: awaited, so the production arm's plan merge-safety reads run off the daemon loop.
+  const result = await arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
@@ -1325,7 +1326,7 @@ export interface BuildSweepEffectsDeps {
     verdict: PostReviewStallVerdict,
     ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   ) => void;
-  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps, isDraft?: boolean) => ArmOutcome | ArmAttemptResult;
+  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps<true>, isDraft?: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
@@ -1774,7 +1775,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     pushEmptyCommit = gitPushEmptyCommit,
     issuesImpl,
     stallNotice = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["stallNotice"]>>("stallNotice"),
-    armImpl = armAutoMergeDetailed,
+    armImpl = armAutoMergeDetailedAsync,
     armSessionPrsOverride,
     updateBranchImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updateBranchImpl"]>>("updateBranchImpl"),
     readyDraftImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["readyDraftImpl"]>>("readyDraftImpl"),
@@ -1950,9 +1951,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
-    const armDeps = realArmDeps(() => config);
+    const armDeps = realArmDepsAsync(() => config);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
       { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl) });
   };
@@ -2191,7 +2192,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: (pr, mode) => {
+    arm: async (pr, mode) => {
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2201,8 +2202,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return "shadow-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
-      const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
-        ...realArmDeps(() => config),
+      const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
+        ...realArmDepsAsync(() => config),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
@@ -2220,14 +2221,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         },
       } : undefined;
       let attemptError: string | undefined;
-      const outcome = armAndLogOutcome(
+      const outcome = await armAndLogOutcome(
         pr.prUrl,
         pr.taskId,
         log,
-        (prUrl, taskId) => {
-          const result = idleDeps
+        async (prUrl, taskId) => {
+          const result = await (idleDeps
             ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
-            : sweepArmImpl(prUrl, taskId);
+            : sweepArmImpl(prUrl, taskId));
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
