@@ -53,7 +53,7 @@
   "scripts/generate-macro-skills.mjs": 45,
   "scripts/generate-plan-index.mjs": 30,
   "scripts/git-credential-socket-helper.mjs": 12,
-  "scripts/host-parity.ts": 86,
+  "scripts/host-parity.ts": 87,
   "scripts/knowledge-budget-baseline.json": 0,
   "scripts/learnings-assert-check.mjs": 57,
   "scripts/learnings-budget-baseline.json": 0,
