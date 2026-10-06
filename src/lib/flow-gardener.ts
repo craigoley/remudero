@@ -64,7 +64,10 @@ function readPlan(repoRoot: string): CiFrictionPlanState {
   });
   let degraded: string | undefined;
   try { git(["fetch", "--quiet", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/remotes/origin/main"]); }
-  catch (error) { degraded = `fetch failed (${String(error)}); read the last fetched origin/main`; }
+  catch (error) {
+    const reason = `fetch failed (${String(error)}); read the last fetched origin/main`;
+    degraded = reason;
+  }
   const shards = relative(repoRoot, join(resolveRepoLayout(repoRoot).planDir, "tasks.d"));
   let listed = "";
   try { listed = git(["grep", "-l", "-E", "^[[:space:]]*origin:[[:space:]]*[\"']?flow-blocker:", "origin/main", "--", shards]); }
@@ -83,7 +86,10 @@ function readPlan(repoRoot: string): CiFrictionPlanState {
         tasks.push({ id: task.id, origin: task.origin, status: task.status, retired: task.retirement !== undefined,
           files: [...(task.files ?? [])], path, mergedAt: merges.get(task.id) });
       }
-    } catch (error) { unreadable.push(`${path}: ${String(error)}`); }
+    } catch (error) {
+      const reason = `${path}: ${String(error)}`;
+      unreadable.push(reason);
+    }
   }
   return { tasks, degraded, unreadable };
 }
@@ -96,9 +102,12 @@ function readOutcomes(prs: readonly number[], sources: FlowGardenSources): Reado
     const query = `query { repository(owner:${JSON.stringify(sources.owner)}, name:${JSON.stringify(sources.repo)}) { ${batch.map(pr =>
       `p${pr}:pullRequest(number:${pr}) { state mergedAt closedAt mergedBy { login } }`).join(" ")} } }`;
     const body = JSON.parse(ghExec(["api", "graphql", "-f", `query=${query}`], { encoding: "utf8" }));
-    if (body.errors || !body.data?.repository) throw new Error("flow PR outcomes unreadable");
+    if (body.errors) throw new Error("flow PR outcomes unreadable: GraphQL errors");
+    if (body.data === undefined || body.data === null) throw new Error("flow PR outcomes unreadable: data missing");
+    const repository = body.data.repository;
+    if (repository === undefined || repository === null) throw new Error("flow PR outcomes unreadable: repository missing");
     for (const pr of batch) {
-      const row = body.data.repository[`p${pr}`];
+      const row = repository[`p${pr}`];
       if (!row || !["OPEN", "CLOSED", "MERGED"].includes(row.state)) throw new Error(`flow PR #${pr} outcome missing`);
       result.set(pr, { state: row.state.toLowerCase(), at: row.mergedAt ?? row.closedAt ?? undefined, mergedBy: row.mergedBy?.login });
     }

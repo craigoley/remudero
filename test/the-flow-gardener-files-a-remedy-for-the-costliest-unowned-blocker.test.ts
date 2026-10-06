@@ -292,7 +292,15 @@ test("flow production sources read all archive forms, main trailers and merge ac
   const landing = spec.apply(workspace(repo.dir), { actions: spec.candidates(inv, () => 0), acting: ["draft"] }, {})!;
   assert.equal(ciFrictionRecordVerdict(readFileSync(join(repo.dir, landing.paths[0]!), "utf8"), "default owner search").ok, true);
   shim.addRoute({ when: "api graphql", stdout: JSON.stringify({ errors: [{ message: "unavailable" }] }) });
-  assert.throws(() => spec.inventory(), /outcomes unreadable/);
+  assert.throws(() => spec.inventory(), /outcomes unreadable: GraphQL errors/);
+  for (const data of [undefined, null]) {
+    shim.addRoute({ when: "api graphql", stdout: JSON.stringify({ data }) });
+    assert.throws(() => spec.inventory(), /outcomes unreadable: data missing/);
+  }
+  for (const repository of [undefined, null]) {
+    shim.addRoute({ when: "api graphql", stdout: JSON.stringify({ data: { repository } }) });
+    assert.throws(() => spec.inventory(), /outcomes unreadable: repository missing/);
+  }
   shim.addRoute({ when: "api graphql", stdout: JSON.stringify({ data: { repository: {} } }) });
   assert.throws(() => spec.inventory(), /outcome missing/);
   writeFileSync(join(ledger.dir, "ledger.bad.ndjson.gz"), "not gzip");
