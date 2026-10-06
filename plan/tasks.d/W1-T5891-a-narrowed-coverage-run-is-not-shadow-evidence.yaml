@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — only a full-suite run is evidence about the selector's misses
   band_meaning: span
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 1, a precondition of the live flip"
-  plan_refs: [W1-T5705, W1-T4404, W1-T5703, W1-T5701]
+  plan_refs: [W1-T5705, W1-T4404, W1-T5703, W1-T5701, W1-T5930]
   files: [.github/workflows/ci.yml, src/lib/selector-shadow-gardener.ts, test/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts]
   status: queued
   priority: 2
