@@ -13,16 +13,9 @@ import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
 import type { GitLogCommit, ShippedGithub } from "../src/lib/retro.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { asyncGit } from "../src/lib/self-sync.js";
-import {
-  buildRetroDaemonHooks,
-  mergedCommitsSnapshotGateway,
-  parseGitLogCitationCommits,
-  readRetroMergedCommitsAsync,
-  recordRetroAttempt,
-  retroTriggerCheck,
-  retroTriggerCheckAsync,
-} from "../src/run-task.js";
+import * as selfSync from "../src/lib/self-sync.js";
+import * as runTask from "../src/run-task.js";
+import { buildRetroDaemonHooks, parseGitLogCitationCommits, recordRetroAttempt, retroTriggerCheck } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 // MEASURED 2026-10-06: the retro trigger full-history `git log` (retroShippedGithubGateway
@@ -32,6 +25,9 @@ import { gitRepo } from "./helpers/git-repo.js";
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 const POLICY: Policy = { ...SHIPPED_POLICY, values: { ...SHIPPED_POLICY.values, retro: { mergesThreshold: 1, daysThreshold: 99_999 } } };
+// Read through the namespace so this file loads on a tree without them: each test then fails alone.
+const { mergedCommitsSnapshotGateway, readRetroMergedCommitsAsync, retroTriggerCheckAsync } = runTask;
+const asyncGit = selfSync.asyncGit;
 const LOG_ARGS = ["log", "--format=%x1e%aI%x1f%s%x1f%b"];
 
 function fixtureConfig(): Config {
