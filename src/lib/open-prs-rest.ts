@@ -975,6 +975,96 @@ export function hydrateScannerBlockerObservations(
   return out;
 }
 
+export const CODEQL_CHECK_NAME = "CodeQL";
+export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
+export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
+
+export interface CodeqlHeadAlert {
+  alertNumber: number;
+  ruleId: string;
+  severity: string;
+  path: string;
+  line: number;
+  message: string; // bounded to SCANNER_DIAGNOSTIC_MAX_CHARS; untrusted scanner text
+}
+
+export interface CodeqlHeadObservation {
+  headSha: string;
+  alerts: CodeqlHeadAlert[];
+}
+
+export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined): boolean {
+  let latest: RestRollupEntry | undefined;
+  for (const entry of rollup ?? []) {
+    if ((entry.name ?? entry.context) !== CODEQL_CHECK_NAME) continue;
+    if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
+  }
+  return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
+}
+
+export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/head&state=open&per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+interface RestHeadAlert extends RestScannerAlert {
+  rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
+}
+
+export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
+  if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
+  const found: CodeqlHeadAlert[] = [];
+  for (const raw of alerts as RestHeadAlert[]) {
+    const instance = raw.most_recent_instance ?? undefined;
+    const location = instance?.location ?? undefined;
+    const severity = [raw.rule?.security_severity_level, raw.rule?.severity].find((v) =>
+      typeof v === "string" && CODEQL_HIGH_SEVERITIES.includes(v));
+    if (
+      (raw.tool ? raw.tool.name : undefined) !== "CodeQL" ||
+      typeof severity !== "string" ||
+      typeof raw.number !== "number" ||
+      typeof raw.rule?.id !== "string" ||
+      instance === undefined ||
+      instance.commit_sha !== headSha ||
+      typeof location?.path !== "string" ||
+      typeof location.start_line !== "number"
+    ) continue;
+    const text = instance.message ? instance.message.text : undefined;
+    found.push({
+      alertNumber: raw.number,
+      ruleId: raw.rule.id,
+      severity,
+      path: location.path,
+      line: location.start_line,
+      message: (typeof text === "string" ? text : "").slice(0, SCANNER_DIAGNOSTIC_MAX_CHARS),
+    });
+  }
+  return found.length === 0 ? undefined : { headSha, alerts: found };
+}
+
+export function hydrateCodeqlHeadAlerts(
+  owner: string,
+  repo: string,
+  candidates: readonly { number: number; headSha: string }[],
+  fetch: GhApiFetcher,
+  cap: number = CODEQL_HEAD_ALERT_HYDRATION_CAP,
+  onUnreadable: (prNumber: number, reason: string) => void = () => {},
+): Map<number, CodeqlHeadObservation> {
+  const out = new Map<number, CodeqlHeadObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    let listing: unknown;
+    try {
+      listing = fetch(codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
+    } catch (error) {
+      const reason = String((error as Error)?.message ?? error);
+      onUnreadable(candidate.number, reason);
+      continue;
+    }
+    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);
+    if (observed !== undefined) out.set(candidate.number, observed);
+  }
+  return out;
+}
+
 /* ────────────────────────────────────────────────────────────────────────────────────────────
  * Workflow run observations (W1-T2340) — the producer for `OpenPrView.workflowRuns`.
  *

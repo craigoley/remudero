@@ -520,6 +520,8 @@ import {
   hydrateMergeStateObservations,
   hydrateMergeStates,
   hydrateScannerBlockerObservations,
+  hydrateCodeqlHeadAlerts,
+  codeqlCheckFailed,
   isScannerBlockerCandidate,
   liveStateFromRest,
   mapRestPr,
@@ -591,11 +593,13 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
+  landCiLearningShardsAsync,
   landPlanReconcileShards,
   recordDecision,
   recordRuling,
   sweepFeedbackLanding,
   sweepFeedbackLandingAsync,
+  type LandCiLearningShardsOptions,
   type LandFeedbackResult,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
@@ -789,6 +793,7 @@ import {
   pruneOrphanedDrafts,
   parseProposalRegistry,
   parseSupersedesExpr,
+  deriveTaskReferent,
   approveRunBranch,
   approvedSkillRelPath,
   mostRecentApprovePr,
@@ -1639,6 +1644,8 @@ import {
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
   riskJudgeHandedOffHead,
+  riskJudgeCodeScanning,
+  codeScanningHeadSettled,
   reviewInputLoopFacts,
   hasCapturedMergeConflictEvidence,
   clearedConflictEscalationCause,
@@ -2424,6 +2431,7 @@ export function buildSweepEffects(
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
+      preserveStagedResidue: preserveStagedFixOwnerResidue,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -2479,6 +2487,69 @@ export function buildSweepEffects(
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
   // structural instead of something a future edit has to remember to mirror.
   return effects;
+}
+
+/**
+ * W1-T5633 — the sweep's code-scanning judge and its PR comment, wired beside
+ * {@link handedOffHeadRiskJudge} at every sweep entrypoint. The judge is the SAME mount, policy and
+ * spend collector, shown the alerts and the PR's own diff hunks (REST `patch`, bounded); its
+ * escalation is a no-op, because an escalating judge here means "fix it", never "ask a person".
+ */
+export function codeScanningJudgeDeps(
+  owner: string,
+  repo: string,
+  config: Config,
+  plan: Plan,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  spawn?: typeof spawnWorker,
+  fetchFiles: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Pick<SweepDeps, "judgeCodeScanningAlerts" | "postCodeScanningRuling"> {
+  return {
+    judgeCodeScanningAlerts: riskJudgeCodeScanning(async (pr, alerts) => {
+      const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
+      const spend = riskJudgeSpendCollector();
+      const patches = new Map<string, string>();
+      const target = prUrlTarget(pr.prUrl);
+      if (target) {
+        const rows = await fetchFiles(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`]);
+        for (const row of Array.isArray(rows) ? (rows as Array<{ filename?: unknown; patch?: unknown }>) : []) {
+          if (typeof row.filename === "string" && typeof row.patch === "string") patches.set(row.filename, row.patch.slice(0, 6000));
+        }
+      }
+      return {
+        input: {
+          change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
+          gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (code-scanning alert)" },
+          planContext: { taskId: pr.taskId, taskType: task?.type },
+          codeScanning: {
+            alerts: alerts.map((a) => ({
+              ruleId: a.ruleId, severity: a.severity, message: a.message, path: a.path, line: a.line,
+              ...(patches.has(a.path) ? { hunk: patches.get(a.path) } : {}),
+            })),
+          },
+        },
+        config: { confidenceThreshold: readRiskPolicy(policyPath(repoRoot)).confidenceThreshold },
+        orchestrator: {
+          spend,
+          log,
+          judge: async (input) => {
+            const settingsFile = renderWorkerSettings({
+              templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+              hooksDir: join(resolveInstallRoot(config), "hooks"),
+              outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
+            });
+            const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(input);
+          },
+          escalate: () => "",
+        },
+      };
+    }),
+    postCodeScanningRuling: (pr, body) => {
+      ghExec(["pr", "comment", pr.prUrl, "--repo", `${owner}/${repo}`, "--body", body], { stdio: "pipe" });
+    },
+  };
 }
 
 /**
@@ -34734,7 +34805,9 @@ export function buildCiLearningCadenceRunner(deps: {
   loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
   fileShards?: typeof fileCiLearningShards;
-  landShards?: typeof landCiLearningShards;
+  /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
+  landShards?: (...args: Parameters<typeof landCiLearningShards>) => ReturnType<typeof landCiLearningShards> | Promise<ReturnType<typeof landCiLearningShards>>;
+  gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
   mergedOrigins?: (checkoutRoot: string) => string[];
@@ -34785,12 +34858,13 @@ export function buildCiLearningCadenceRunner(deps: {
               mintTaskId,
               planOrigins: idempotencyOrigins,
             })
-          : (deps.landShards ?? landCiLearningShards)(result.drafts, deps.checkoutRoot, {
+          : await (deps.landShards ?? landCiLearningShardsAsync)(result.drafts, deps.checkoutRoot, {
               stateRoot: deps.root,
               mintTaskId,
               planOrigins: idempotencyOrigins,
               renderShard: ciLearningShardYaml,
               recordVerdict: ciLearningRecordVerdict,
+              gh: deps.gh,
             });
         filed = filing.filed.length;
         skipped = filing.skipped.length;
@@ -40493,6 +40567,18 @@ export function buildOpenPrViews(
     fetch,
   );
 
+  // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
+  // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
+  const codeqlHeadAlerts = hydrateCodeqlHeadAlerts(
+    owner,
+    repo,
+    raw
+      .filter((pr) => pr.isDraft !== true && codeqlCheckFailed(pr.statusCheckRollup) &&
+        !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
+      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
+    fetch,
+  );
+
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     // W1-T3505: thread the SAME classification this view stamps below into task-identity
@@ -40766,6 +40852,7 @@ export function buildOpenPrViews(
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       scannerBlocker: scannerBlockers.get(pr.number),
+      codeqlHeadAlerts: codeqlHeadAlerts.get(pr.number),
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
@@ -41940,6 +42027,26 @@ export function preserveOrDiscardFixOwnerResidue(
   return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
 }
 
+/** W1-T5974: a staged-only residue on a head the PR has moved past, preserved from the owner's
+ *  INDEX (`git diff --cached --binary <localSha>`) into the same immutable recovery-ref shape, the
+ *  ref's tree proven equal to the owner's own index tree before the caller resets anything. */
+export function preserveStagedFixOwnerResidue(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  readTrackedDirtyOwnerPatch(ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
+  const gitOut = (args: string[]) =>
+    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] });
+  const patch = gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
+  const ownerIndex = resolve(ownerPath, gitOut(["rev-parse", "--git-path", "index"]).trim());
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps, () =>
+    temporaryIndexTree(ownerPath, localSha, () => {}, ownerIndex),
+  );
+}
+
 const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
 const FIX_OWNER_OPERATION_MARKERS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] as const;
 
@@ -42007,11 +42114,12 @@ function preserveTrackedDirtyPatch(
   localSha: string,
   patch: string,
   deps: CaptureRegisteredFixOwnerDeps,
+  ownerTreeOf?: () => string,
 ): string {
   if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
-  const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
+  const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
     execFileSync("git", ["-C", ownerPath, "add", "-A"], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -43259,6 +43367,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       updatedForWorkflow,
       behindMainByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
     DEFAULT_SWEEP_POLICY,
   );
@@ -44528,6 +44637,7 @@ export function buildSweepHook(
           behindMainByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+          ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
           // receive the true defaults above.
@@ -44884,6 +44994,7 @@ export function buildSweepLightHook(
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+            ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
             // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
@@ -49038,6 +49149,11 @@ export async function approveCommand(
   // tip) and whether the result is pushed as a NEW branch or a new commit on an existing one.
   // Shared here so the mint/shard/stamp/advisory sequence can never drift between the two.
   const materializeAndCommitApproveFragment = (worktreePath: string, payload: RatificationPayload, purposeLabel: string): void => {
+    const subjectId = deriveTaskReferent(payload.proposalId);
+    const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
+    if (subject?.status === "blocked" && subject.retirement) {
+      throw new Error(`rmd approve: refusing to ratify ${payload.proposalId} — task ${subjectId} is ${subject.retirement} in the worktree plan`);
+    }
     // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
     // worktree's OWN plan, AFTER it is checked out and BEFORE anything is written — the same
     // ordering `rmd triage`/`rmd plan` already use (:11831,:12159), calling the ONE shared
