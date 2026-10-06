@@ -966,11 +966,26 @@ export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   return { ok, conflicting, discardable };
 }
 
+/** The ledger rows that show a boot's progress after a restart, in the order a boot writes them:
+ *  `daemon.paths` (before plan sync), `daemon.boot_held` (a recycle's PAUSE holding it), then
+ *  `daemon.boot` (booted). W1-T5722. */
+export const BOOT_PROGRESS_STEPS = ["daemon.paths", "daemon.boot_held", "daemon.boot"] as const;
+export type BootProgressStep = (typeof BOOT_PROGRESS_STEPS)[number];
+
+/** BACKSTOP (W1-T5722): once a boot is OBSERVED in progress — a `daemon.paths` or
+ *  `daemon.boot_held` row after the restart — the wait for `daemon.boot` extends to at least this.
+ *  A 45 s window declared 8 of 15 kickstarts `unhealthy_rollback` at ~46 s, at least 3 of them on
+ *  images that then booted (one boot held ~75 s). No progress row at all still fails at 45 s. */
+export const BOOT_IN_PROGRESS_WINDOW_MS = 180_000;
+
 export interface HealthInputs {
   /** A `daemon.boot` heartbeat was observed AFTER the kickstart instant. */
   bootObserved: boolean;
   /** Distinct non-zero daemon exits seen in the window (KeepAlive restart-storm). */
   crashCount: number;
+  /** Which boot-progress rows appeared after the kickstart instant, in {@link BOOT_PROGRESS_STEPS}
+   *  order — recorded on the verdict row. Optional: a fake that omits it reads as none seen. */
+  rowsSeen?: BootProgressStep[];
 }
 
 export interface HealthOpts {
@@ -999,6 +1014,26 @@ export function countLedgerBootsAfter(ledgerPath: string, sinceMs: number): numb
     /* no ledger yet — 0 boots observed */
   }
   return n;
+}
+
+/** Scan for boot-progress rows ({@link BOOT_PROGRESS_STEPS}) timestamped strictly after `sinceMs`:
+ *  the `daemon.boot` count (as {@link countLedgerBootsAfter}) and which of the three steps appeared
+ *  at all. Matches the `step` field exactly, so `daemon.boot_held` is never read as a boot. */
+export function readBootProgressAfter(ledgerPath: string, sinceMs: number): { boots: number; seen: BootProgressStep[] } {
+  let boots = 0;
+  const seen = new Set<BootProgressStep>();
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      const step = /"step":"(daemon\.(?:paths|boot_held|boot))"/.exec(line)?.[1] as BootProgressStep | undefined;
+      const ts = step ? /"ts":"([^"]+)"/.exec(line)?.[1] : undefined;
+      if (!step || !ts || !(Date.parse(ts) > sinceMs)) continue;
+      seen.add(step);
+      if (step === "daemon.boot") boots++;
+    }
+  } catch {
+    /* no ledger yet — nothing observed, the same reading as countLedgerBootsAfter */
+  }
+  return { boots, seen: BOOT_PROGRESS_STEPS.filter((s) => seen.has(s)) };
 }
 
 /** The `head_sha` on the MOST RECENT `daemon.boot` line — the sha the running daemon loaded at
@@ -1547,11 +1582,14 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
   deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
 
-  const health = assessBootHealth(deps.waitBootHealth(kickstartAt), opts.health);
+  const healthInputs = deps.waitBootHealth(kickstartAt);
+  const health = assessBootHealth(healthInputs, opts.health);
+  // W1-T5722: the verdict row names which boot-progress rows the window saw.
+  const observedRows = healthInputs.rowsSeen ?? [];
   if (health.healthy) {
     deps.clearMarker();
     deps.clearFailure?.();
-    deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
+    deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
     );
@@ -1582,6 +1620,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     failed: short(toHead),
     reason: health.reason,
     rolling_back_to: short(rollbackTo),
+    observed_rows: observedRows,
     // Distinguishes a rollback aimed by observed evidence from one that fell back to the install's
     // own head — the latter is the shape that silently did nothing, so it must be legible in the
     // ledger rather than inferred from two shas happening to match.
@@ -1657,7 +1696,8 @@ export interface RealDeployOpts {
   /** OPTIONAL since impl-EP — omitted ⇒ {@link buildDeployLogger} against `ledgerPath`, which writes
    *  to BOTH stdout and the ledger. Supplied only by tests that want to observe the calls. */
   log?: (step: string, data?: Record<string, unknown>) => void;
-  /** Health window: total ms to watch the daemon after kickstart (default 45s). */
+  /** Health window: total ms to watch the daemon after kickstart (default 45s; a boot observed in
+   *  progress extends it to at least {@link BOOT_IN_PROGRESS_WINDOW_MS}, W1-T5722). */
   healthWindowMs?: number;
   /** Poll pace within the window (default 3s). */
   healthPollMs?: number;
@@ -1790,7 +1830,6 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     }
   };
 
-  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(ledgerPath, sinceMs);
 
   // ── THE RESTART SEAM'S TWO REAL BACKENDS (W1-T3200) ── selected by PROBED capability, never by
   // `process.platform`: a host with launchctl uses it (today's only path, macOS); a host with only
@@ -2220,14 +2259,19 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     waitBootHealth: (sinceMs) => {
       let waited = 0;
       let boots = 0;
-      while (waited < windowMs) {
+      let seen: BootProgressStep[] = [];
+      // W1-T5722: a boot OBSERVED in progress (paths/boot_held, no boot yet) earns the backstop
+      // window; once it boots, or with no progress row at all, the ordinary window applies.
+      const limit = (): number =>
+        boots === 0 && seen.length > 0 ? Math.max(windowMs, BOOT_IN_PROGRESS_WINDOW_MS) : windowMs;
+      while (waited < limit()) {
         sleep(pollMs);
         waited += pollMs;
-        boots = countBootsAfter(sinceMs);
+        ({ boots, seen } = readBootProgressAfter(ledgerPath, sinceMs));
         // Keep watching for the whole window to catch a restart-storm; a single boot
         // that stays is confirmed only once the window has elapsed with boots === 1.
       }
-      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1) };
+      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1), rowsSeen: seen };
     },
     alert: (message, failedHead, kind) => {
       // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the
