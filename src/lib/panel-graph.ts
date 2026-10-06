@@ -1040,50 +1040,48 @@ function activitySummary(row: Record<string, unknown>, taskId?: string): string 
   return taskId ? `${step} (${taskId})` : step;
 }
 
+/** Newest first, a millisecond's rows by their text: a rotation split reorders a tie's reads (2026-10-06 console). */
+function rankedActivityRows(rows: ReadonlyArray<Record<string, unknown>>): Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown> }> {
+  const ranked: Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown>; text?: string }> = [];
+  rows.forEach((row, index) => {
+    const occurredAt = activityTimestamp(row.ts);
+    if (occurredAt && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(occurredAt), occurredAt, row });
+  });
+  const text = (r: (typeof ranked)[number]): string => (r.text ??= JSON.stringify(r.row));
+  return ranked.sort((a, b) => b.ms - a.ms || (text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0));
+}
+
 function activityRows(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   observedAt: string,
 ): OperatorActivityItem[] {
   const duplicates = new Map<string, number>();
-  return ledgerLines
-    .map((row): OperatorActivityItem | undefined => {
-      const occurredAt = activityTimestamp(row.ts);
-      const taskId = activityTaskId(row);
-      const summary = activitySummary(row, taskId);
-      if (!occurredAt || !summary) return undefined;
-      const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
-      const duplicate = duplicates.get(key) ?? 0;
-      duplicates.set(key, duplicate + 1);
-      return {
-        id: activityId(row, occurredAt, duplicate),
-        kind: "activity" as const,
-        summary,
-        source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
-        observedAt: occurredAt,
-        freshness: "verified" as const,
-        ...(taskId ? { taskId } : {}),
-        ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
-      } satisfies OperatorActivityItem;
-    })
-    .filter((item): item is OperatorActivityItem => Boolean(item))
-    .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))
-    .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+  return rankedActivityRows(ledgerLines).slice(0, OPERATOR_ACTIVITY_MAX_ITEMS).map(({ row, occurredAt }): OperatorActivityItem => {
+    const taskId = activityTaskId(row);
+    const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
+    const duplicate = duplicates.get(key) ?? 0;
+    duplicates.set(key, duplicate + 1);
+    return {
+      id: activityId(row, occurredAt, duplicate),
+      kind: "activity" as const,
+      summary: activitySummary(row, taskId)!,
+      source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
+      observedAt: occurredAt,
+      freshness: "verified" as const,
+      ...(taskId ? { taskId } : {}),
+      ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
+    } satisfies OperatorActivityItem;
+  });
 }
 
 /**
  * One rotation's rows reduced to those that could reach {@link activityRows}' bound: its newest
- * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities, ties to the earlier row, kept in file order. The union's
- * newest items are the newest of these, and every earlier row sharing an item's duplicate key ranks above
- * that item, so it is kept too and each id's duplicate count is unchanged.
+ * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities by {@link rankedActivityRows}' rank, kept in file order. The
+ * union's newest items are the newest of these, and every row of an item's duplicate key ranked before it
+ * is kept too, so each id's duplicate count is unchanged.
  */
 export function operatorActivityCandidates(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  const ranked: Array<{ index: number; ms: number }> = [];
-  rows.forEach((row, index) => {
-    const at = activityTimestamp(row.ts);
-    if (at && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(at) });
-  });
-  ranked.sort((a, b) => b.ms - a.ms || a.index - b.index);
-  return ranked
+  return rankedActivityRows(rows)
     .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS)
     .map((r) => r.index)
     .sort((a, b) => a - b)

@@ -125,8 +125,8 @@ const activityRingInserts = new WeakMap<ReadModelDb, ReadModelStatement>();
  * ring holds, which is all an order among held rows needs. A row whose `ts` is not its first key is
  * placed by its parsed `ts`, as the route ranks it, not at epoch 0 where `ledgerLineIdentity` puts it.
  * An exact duplicate line is applied once, as the route's union reader keeps it once (W1-T4820).
- * Residual: a tie split across a rotation boundary is applied archive-first, while the union reads the
- * live file first.
+ * The projection no longer ranks ties by the order it is handed them (`rankedActivityRows`), because a
+ * tie split by a rotation's retention reaches the route live row first and the ring in applied order.
  */
 export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
   name: "activity_ring",
