@@ -788,6 +788,10 @@ export interface IdleProbe {
    *  a probe that cannot see the daemon must not report it quiet. Optional — absent means every
    *  read succeeded, so an existing {@link IdleProbe} literal is unaffected. */
   unreadable?: readonly string[];
+  /** W1-T5764 — the running daemon booted recently and has not yet logged a `sweep.pass`: a
+   *  boot that is still warming up, whose first sweep (median ~8 min) a recycle would throw away.
+   *  Optional — absent means not settling, so an existing {@link IdleProbe} literal is unaffected. */
+  bootSettling?: boolean;
 }
 
 /**
@@ -800,7 +804,64 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   // unreadable signal can never wedge the fleet — the alternative, an in-place restart, costs a
   // SIGKILLed worker.
   if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
+  // A boot that has not swept yet is not an idle gap (W1-T5764): the ceiling bounds the deferral.
+  if (p.bootSettling === true) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
+}
+
+/** Names every reason {@link daemonIsIdle} reads the probe as busy — the `deploy.not_idle` row
+ *  carries this so a deferral says WHY (`boot-settling` among them). Empty ⇔ idle. */
+export function idleBlockers(p: IdleProbe): string[] {
+  const out: string[] = [];
+  if (p.unreadable !== undefined && p.unreadable.length > 0) out.push("unreadable");
+  if (p.bootSettling === true) out.push("boot-settling");
+  if (p.workers !== 0) out.push("workers");
+  if (p.inflightLocks !== 0) out.push("inflight-locks");
+  if (p.worktreeLocks !== 0) out.push("worktree-locks");
+  return out;
+}
+
+/**
+ * W1-T5764 — BACKSTOP on how long a boot with no `sweep.pass` yet counts as settling. A boot's
+ * first sweep takes a median ~8.1 min, so 15 minutes covers the slow tail; it is a backstop, not
+ * the normal exit (the first `sweep.pass` is) — and it sits well under
+ * {@link DEPLOY_IDLE_DEFER_CEILING_MS} so a daemon that never sweeps cannot hold a deploy past it.
+ */
+export const BOOT_SETTLING_BACKSTOP_MS = 15 * 60_000;
+
+/** Is the daemon's most recent `daemon.boot` younger than `backstopMs` with no `sweep.pass` logged
+ *  after it? `settling: false` for no boot row at all or an absent ledger (ENOENT — nothing to
+ *  protect); any OTHER read failure answers `unreadable: true`, never a quiet "not settling". */
+export function readBootSettling(
+  ledgerPath: string,
+  nowMs: number,
+  backstopMs: number = BOOT_SETTLING_BACKSTOP_MS,
+): { settling: boolean; unreadable: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    return { settling: false, unreadable: !lockReadFailureMeansZero(err) };
+  }
+  let bootMs: number | undefined;
+  let swept = false;
+  for (const line of text.split("\n")) {
+    const isBoot = line.includes('"step":"daemon.boot"');
+    if (!isBoot && !line.includes('"step":"sweep.pass"')) continue;
+    const ts = /"ts":"([^"]+)"/.exec(line)?.[1];
+    const ms = ts === undefined ? NaN : Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    if (isBoot) {
+      if (bootMs === undefined || ms >= bootMs) {
+        bootMs = ms;
+        swept = false;
+      }
+    } else if (bootMs !== undefined && ms >= bootMs) {
+      swept = true;
+    }
+  }
+  if (bootMs === undefined || swept) return { settling: false, unreadable: false };
+  return { settling: nowMs - bootMs < backstopMs, unreadable: false };
 }
 
 /** Does this `pgrep` failure mean a TRUE zero (exit 1, no processes matched) rather than a read
@@ -1472,6 +1533,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe1.inflightLocks,
     worktree_locks: probe1.worktreeLocks,
     unreadable: probe1.unreadable,
+    boot_settling: probe1.bootSettling === true,
+    blockers: idleBlockers(probe1),
   };
   if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
@@ -1502,6 +1565,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe2.inflightLocks,
     worktree_locks: probe2.worktreeLocks,
     unreadable: probe2.unreadable,
+    boot_settling: probe2.bootSettling === true,
+    blockers: idleBlockers(probe2),
   };
   if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
@@ -2192,11 +2257,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
           return 0;
         }
       };
+      const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
+      const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
+      // W1-T5764: a boot that has not swept yet is not an idle gap. The key is set only when true.
+      const boot = readBootSettling(ledgerPath, Date.now());
+      if (boot.unreadable) unreadable.push("bootSettling");
       return {
         workers,
-        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks"),
-        worktreeLocks: countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks"),
+        inflightLocks,
+        worktreeLocks,
         unreadable,
+        ...(boot.settling ? { bootSettling: true } : {}),
       };
     },
     kickstartConsole: () => {
