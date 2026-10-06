@@ -23,13 +23,14 @@
  * PRUNE ONLY, NEVER `gc`: gc repacks and can rewrite refs and reflogs, and the finding is about
  * UNREACHABLE objects, which prune alone removes. Never `git worktree prune` either.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { type Clock, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 
 /** How old an unreachable object must be before it is eligible. The SECOND of the two barriers:
  *  it is what makes a wrong quiet verdict survivable, so it is never omitted and never zero. */
@@ -39,6 +40,38 @@ export const OBJECT_PRUNE_EXPIRY = "24.hours.ago";
 export const LOOSE_OBJECT_FLOOR = 5000;
 
 const UNREADABLE_WORKTREE = "<unreadable>";
+
+/** BACKSTOP on the awaited prune (and its `-n` survey, the same walk). MEASURED 2026-10-06: one armed
+ *  prune held the daemon loop 161 s on a store of ~141k loose objects; prune time grows with the store,
+ *  so this sits near 4x that. Past it the prune is killed and the decision row says `timed_out`. */
+export const OBJECT_PRUNE_TIMEOUT_MS = 600_000;
+
+/** BACKSTOP on the awaited read probes (`worktree list`, `count-objects`): seconds even on that store. */
+export const OBJECT_PROBE_TIMEOUT_MS = 120_000;
+
+/** The argv every reaper git call runs, shared by the sync and the awaited paths so they cannot drift. */
+const WORKTREE_LIST_ARGS = ["worktree", "list", "--porcelain"] as const;
+const COUNT_OBJECTS_ARGS = ["count-objects", "-v"] as const;
+const PRUNE_ARGS = ["prune", `--expire=${OBJECT_PRUNE_EXPIRY}`] as const;
+const SURVEY_ARGS = ["prune", "-n", `--expire=${OBJECT_PRUNE_EXPIRY}`] as const;
+
+/** `worktree <path>` lines; the FIRST is the repo itself and is never a reason to refuse. */
+function worktreesFromPorcelain(out: string): string[] {
+  return out
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .map((l) => l.slice("worktree ".length).trim())
+    .slice(1);
+}
+
+function looseCountFrom(out: string): number {
+  const m = /^count: (\d+)$/m.exec(out);
+  return m ? Number(m[1]) : 0;
+}
+
+function nonEmptyLines(out: string): number {
+  return out.split("\n").filter((l) => l.trim().length > 0).length;
+}
 
 export interface ObjectReapDeps {
   /** Registered worktrees for the repo. Non-empty means the expiry, not quiet, carries the prune. */
@@ -76,6 +109,13 @@ export interface ObjectReapDeps {
   listProcesses?: () => readonly ProcessEntry[];
   /** This host's name, matched against the one `gc.pid` records. */
   hostname?: () => string;
+  /** {@link reapGitObjectsAsync} only: the default prune's bound, {@link OBJECT_PRUNE_TIMEOUT_MS} when absent. */
+  pruneTimeoutMs?: number;
+}
+
+/** What an awaited prune reports. `timedOutAfterMs` is set iff it was killed at its bound. */
+export interface PruneOutcome {
+  timedOutAfterMs?: number;
 }
 
 /** One `ps` row. */
@@ -125,21 +165,19 @@ export interface ObjectReapResult {
   quietShortfall?: string;
   /** Armed pass only: the stale maintenance locks reclaimed before the prune, and any kept. */
   locks?: StaleLockReclaim;
+  /** Awaited armed pass only: the prune was killed at this bound, so `pruned` is a partial count. */
+  pruneTimedOutAfterMs?: number;
 }
 
 /** Registered worktrees, excluding the main one. `git worktree list --porcelain` emits a
  *  `worktree <path>` line per entry; the FIRST is the repo itself and is never a reason to refuse. */
 export function defaultListWorktrees(repoDir: string): readonly string[] {
   try {
-    const out = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+    const out = execFileSync("git", ["-C", repoDir, ...WORKTREE_LIST_ARGS], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const paths = out
-      .split("\n")
-      .filter((l) => l.startsWith("worktree "))
-      .map((l) => l.slice("worktree ".length).trim());
-    return paths.slice(1);
+    return worktreesFromPorcelain(out);
   } catch {
     return [UNREADABLE_WORKTREE]; // fail closed — an unreadable list is not an empty one
   }
@@ -159,12 +197,11 @@ export function defaultListInflightLocks(inflightDir: string): readonly string[]
  *  ever causes a SKIP (below the floor), never a prune — the safe direction for this input. */
 export function defaultLooseObjectCount(repoDir: string): number {
   try {
-    const out = execFileSync("git", ["-C", repoDir, "count-objects", "-v"], {
+    const out = execFileSync("git", ["-C", repoDir, ...COUNT_OBJECTS_ARGS], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const m = /^count: (\d+)$/m.exec(out);
-    return m ? Number(m[1]) : 0;
+    return looseCountFrom(out);
   } catch {
     // Unreadable reads as 0, and 0 is BELOW the floor, so an unreadable count can only ever cause
     // a SKIP — never a prune. That is the safe direction for this input, unlike the probes above,
@@ -216,10 +253,17 @@ function openHandleRefusal(repoDir: string, deps: ObjectReapDeps): string | unde
  * worktree and inflight-lock arms also read clear, `expiry` when only the always-passed
  * {@link OBJECT_PRUNE_EXPIRY} stands between a busy fleet and its objects.
  */
-export function objectReapDecision(repoDir: string, inflightDir: string, deps: ObjectReapDeps = {}): ObjectReapDecision {
+export function objectReapDecision(
+  repoDir: string,
+  inflightDir: string,
+  deps: ObjectReapDeps = {},
+): ObjectReapDecision {
   const refusedBecause = openHandleRefusal(repoDir, deps);
   if (refusedBecause !== undefined) return { refusedBecause };
-  const shortfall = quietShortfall(repoDir, inflightDir, deps);
+  return carriedDecision(quietShortfall(repoDir, inflightDir, deps));
+}
+
+function carriedDecision(shortfall: string | undefined): ObjectReapDecision {
   return shortfall === undefined ? { carriedBy: "quiet" } : { carriedBy: "expiry", quietShortfall: shortfall };
 }
 
@@ -396,7 +440,7 @@ export function defaultCountPrunable(repoDir: string, args: readonly string[]): 
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: 64 * 1024 * 1024,
     });
-    return out.split("\n").filter((l) => l.trim().length > 0).length;
+    return nonEmptyLines(out);
   } catch {
     // A survey that cannot measure reports nothing. Reporting nothing is never mistaken for
     // authorising something: this value is ledgered, never compared against a threshold.
@@ -427,7 +471,7 @@ export function reapGitObjects(
     // Below the floor is "not worth a subprocess", a different condition from "the fleet is
     // busy" — it never touches the refusal streak (see recordRefusalStreak's own doc), so a run
     // of small-but-quiet ticks cannot masquerade as a long busy streak, or vice versa.
-    return { pruned: 0, looseBefore, refusedBecause: `only ${looseBefore} loose object(s), below the ${LOOSE_OBJECT_FLOOR} floor` };
+    return belowFloor(looseBefore);
   }
   const first = objectReapDecision(repoDir, inflightDir, deps);
   if (first.refusedBecause !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: first.refusedBecause });
@@ -438,7 +482,7 @@ export function reapGitObjects(
     const count = deps.countPrunable ?? defaultCountPrunable;
     return withStreak(deps, false, {
       pruned: 0,
-      wouldPrune: count(repoDir, ["prune", "-n", `--expire=${OBJECT_PRUNE_EXPIRY}`]),
+      wouldPrune: count(repoDir, [...SURVEY_ARGS]),
       looseBefore,
       ...barrierFields(first),
     });
@@ -448,26 +492,124 @@ export function reapGitObjects(
   // leave the auto-gc suppressor exactly where the first refusal above would have left it.
   const second = objectReapDecision(repoDir, inflightDir, deps);
   if (second.refusedBecause !== undefined) {
-    return withStreak(deps, true, {
-      pruned: 0,
-      looseBefore,
-      refusedBecause: `quiesced window closed before the prune: ${second.refusedBecause}`,
-    });
+    return withStreak(deps, true, closedWindow(looseBefore, second.refusedBecause));
   }
 
+  const locks = commitToPrune(repoDir, deps);
+  const run = deps.runPrune ?? ((dir, args) => {
+    execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "ignore", "ignore"] });
+  });
+  run(repoDir, [...PRUNE_ARGS]);
+  const looseAfter = (deps.looseObjectCount ?? defaultLooseObjectCount)(repoDir);
+  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore, ...barrierFields(second), locks });
+}
+
+function belowFloor(looseBefore: number): ObjectReapResult {
+  return { pruned: 0, looseBefore, refusedBecause: `only ${looseBefore} loose object(s), below the ${LOOSE_OBJECT_FLOOR} floor` };
+}
+
+function closedWindow(looseBefore: number, refusedBecause: string): ObjectReapResult {
+  return { pruned: 0, looseBefore, refusedBecause: `quiesced window closed before the prune: ${refusedBecause}` };
+}
+
+/** Reclaim stale maintenance locks, then take off the auto-gc suppressor: only with the prune committed to. */
+function commitToPrune(repoDir: string, deps: ObjectReapDeps): StaleLockReclaim {
   const locks = reclaimStaleMaintenanceLocks(join(repoDir, ".git"), deps);
-  // Only now, with the prune committed to, does the auto-gc suppressor come off.
   try {
     rmSync(join(repoDir, ".git", "gc.log"), { force: true });
   } catch {
     // best-effort: a gc.log we cannot remove costs a warning, never the prune
   }
-  const run = deps.runPrune ?? ((dir, args) => {
-    execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "ignore", "ignore"] });
+  return locks;
+}
+
+type BoundedGit = { ok: true; stdout: string } | { ok: false; timedOut: boolean; error: string };
+
+/** One awaited git call, off the event loop: SIGTERM at `timeoutMs`, SIGKILL after the grace. Never rejects. */
+function runGitBounded(repoDir: string, args: readonly string[], timeoutMs: number): Promise<BoundedGit> {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      clearTimeout(timer);
+      if (!err) return resolve({ ok: true, stdout });
+      return resolve({ ok: false, timedOut, error: (stderr || err.message).trim() });
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killAfterGrace(child);
+    }, timeoutMs);
   });
-  run(repoDir, ["prune", `--expire=${OBJECT_PRUNE_EXPIRY}`]);
-  const looseAfter = (deps.looseObjectCount ?? defaultLooseObjectCount)(repoDir);
-  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore, ...barrierFields(second), locks });
+}
+
+/** {@link defaultListWorktrees}, awaited. Unreadable or timed out fails closed, as the sync read does. */
+export async function defaultListWorktreesAsync(repoDir: string): Promise<readonly string[]> {
+  const r = await runGitBounded(repoDir, WORKTREE_LIST_ARGS, OBJECT_PROBE_TIMEOUT_MS);
+  return r.ok ? worktreesFromPorcelain(r.stdout) : [UNREADABLE_WORKTREE];
+}
+
+/** {@link defaultLooseObjectCount}, awaited. Unreadable or timed out reads 0: a SKIP, never a prune. */
+export async function defaultLooseObjectCountAsync(repoDir: string): Promise<number> {
+  const r = await runGitBounded(repoDir, COUNT_OBJECTS_ARGS, OBJECT_PROBE_TIMEOUT_MS);
+  return r.ok ? looseCountFrom(r.stdout) : 0;
+}
+
+/** {@link defaultCountPrunable}, awaited, under the prune's bound (it is the same walk). Unreadable reads 0. */
+export async function defaultCountPrunableAsync(repoDir: string, args: readonly string[]): Promise<number> {
+  const r = await runGitBounded(repoDir, args, OBJECT_PRUNE_TIMEOUT_MS);
+  return r.ok ? nonEmptyLines(r.stdout) : 0;
+}
+
+/** The armed prune, awaited. Killed at its bound it resolves `timedOutAfterMs`; any other failure
+ *  throws, exactly as the sync prune's `execFileSync` does. */
+export async function defaultRunPruneAsync(
+  repoDir: string,
+  args: readonly string[],
+  timeoutMs = OBJECT_PRUNE_TIMEOUT_MS,
+): Promise<PruneOutcome> {
+  const r = await runGitBounded(repoDir, args, timeoutMs);
+  if (r.ok) return {};
+  if (r.timedOut) return { timedOutAfterMs: timeoutMs };
+  throw new Error(`git ${args.join(" ")} failed: ${r.error}`);
+}
+
+/** The awaited decision. The worktree list is read FIRST so the open-handle sample, the one that
+ *  refuses, stays the last probe before the prune; the verdict is {@link objectReapDecision}'s. */
+async function objectReapDecisionAsync(repoDir: string, inflightDir: string, deps: ObjectReapDeps): Promise<ObjectReapDecision> {
+  const worktrees = await (deps.listWorktrees ?? defaultListWorktreesAsync)(repoDir);
+  return objectReapDecision(repoDir, inflightDir, { ...deps, listWorktrees: () => worktrees });
+}
+
+/**
+ * {@link reapGitObjects} OFF THE DAEMON LOOP: the same contract, step for step — floor, decision,
+ * survey, second decision, lock reclaim, gc.log, prune — with every git call awaited and bounded.
+ * MEASURED 2026-10-06: the sync prune held the daemon loop 161 s (235 s of lag) during one pass.
+ * A prune killed at its bound is NOT a success: the result carries `pruneTimedOutAfterMs`.
+ */
+export async function reapGitObjectsAsync(
+  repoDir: string,
+  inflightDir: string,
+  deps: ObjectReapDeps = {},
+): Promise<ObjectReapResult> {
+  const looseCount = deps.looseObjectCount ?? defaultLooseObjectCountAsync;
+  const looseBefore = await looseCount(repoDir);
+  if (looseBefore < LOOSE_OBJECT_FLOOR) return belowFloor(looseBefore);
+  const first = await objectReapDecisionAsync(repoDir, inflightDir, deps);
+  if (first.refusedBecause !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: first.refusedBecause });
+  if (deps.dryRun === true) {
+    const wouldPrune = await (deps.countPrunable ?? defaultCountPrunableAsync)(repoDir, [...SURVEY_ARGS]);
+    return withStreak(deps, false, { pruned: 0, wouldPrune, looseBefore, ...barrierFields(first) });
+  }
+  const second = await objectReapDecisionAsync(repoDir, inflightDir, deps);
+  if (second.refusedBecause !== undefined) return withStreak(deps, true, closedWindow(looseBefore, second.refusedBecause));
+  const locks = commitToPrune(repoDir, deps);
+  // An injected runPrune (tests) answers no outcome; only the default prune can be killed at its bound.
+  let outcome: PruneOutcome = {};
+  if (deps.runPrune) await deps.runPrune(repoDir, [...PRUNE_ARGS]);
+  else outcome = await defaultRunPruneAsync(repoDir, [...PRUNE_ARGS], deps.pruneTimeoutMs);
+  const looseAfter = await looseCount(repoDir);
+  const timedOut = outcome.timedOutAfterMs !== undefined ? { pruneTimedOutAfterMs: outcome.timedOutAfterMs } : {};
+  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore, ...barrierFields(second), locks, ...timedOut });
 }
 
 function barrierFields(d: ObjectReapDecision): Pick<ObjectReapResult, "carriedBy" | "quietShortfall"> {

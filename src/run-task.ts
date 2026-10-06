@@ -1246,7 +1246,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
+import { activeWorkerProbes, type ObjectReapDeps, type ObjectReapResult, reapGitObjectsAsync } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -17778,7 +17778,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
   // worktree reaper above, all three already run ARMED wherever they run today, so this needs
   // no dry-run flag of its own — see logDiskReclaimRung.
-  logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
+  await logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -34619,7 +34619,7 @@ export function logWorktreeReapBootSurvey(
  * Deps are injectable and appended LAST so no positional caller shifts; the default path calls
  * the real sweeps against their real roots/policy.
  */
-export function logDiskReclaimRung(
+export async function logDiskReclaimRung(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: {
@@ -34630,7 +34630,7 @@ export function logDiskReclaimRung(
     workerHomeRoot?: () => string;
     /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
      *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
-    reapObjects?: typeof reapGitObjects;
+    reapObjects?: (repoDir: string, inflightDir: string, deps: ObjectReapDeps) => ObjectReapResult | Promise<ObjectReapResult>;
     objectRepoDir?: () => string;
     objectInflightDir?: () => string;
     objectPolicy?: () => { enabled: boolean };
@@ -34645,14 +34645,14 @@ export function logDiskReclaimRung(
     /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
     objectDaemonCheckoutDir?: () => string;
   } = {},
-): {
+): Promise<{
   tempDirsRemoved: number;
   clonesReaped: number;
   cloneBytesReclaimed: number;
   workerHomesRemoved: number;
   objectsPruned: number;
   objectsWouldPrune: number;
-} {
+}> {
   const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
   const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
   const sweepWorkerHomes = deps.sweepWorkerHomes ?? sweepStaleWorkerHomes;
@@ -34738,7 +34738,8 @@ export function logDiskReclaimRung(
         : []),
     ];
     for (const { repo, dir, streakPath } of repos) {
-      const r = (deps.reapObjects ?? reapGitObjects)(dir, inflight, {
+      // AWAITED (2026-10-06): the sync prune held the daemon loop 161 s; this one is bounded and off it.
+      const r = await (deps.reapObjects ?? reapGitObjectsAsync)(dir, inflight, {
         dryRun: !enabled,
         // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
         // falls back to when nothing supplies a counter.
@@ -34772,6 +34773,9 @@ export function logDiskReclaimRung(
           locks_reclaimed: r.locks?.reclaimed,
           locks_kept: r.locks?.kept,
           locks_failed: r.locks?.failed,
+          // Armed rows only: a prune killed at its bound is named, never read as a completed one.
+          ...(enabled ? { prune_outcome: r.pruneTimedOutAfterMs !== undefined ? "timed_out" : "completed" } : {}),
+          prune_timed_out_after_ms: r.pruneTimedOutAfterMs,
         }]);
       }
     }

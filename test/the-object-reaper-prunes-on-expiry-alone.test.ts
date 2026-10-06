@@ -55,7 +55,7 @@ const busy: ObjectReapDeps = {
   listProcesses: () => [],
 };
 
-test("registered worktrees and inflight locks with no open git handle still prune, and the row says expiry carried it", () => {
+test("registered worktrees and inflight locks with no open git handle still prune, and the row says expiry carried it", async () => {
   // Through the REAL rung and the REAL worktree listing and active-worker probes: a registered worktree
   // whose run lock names this live process, and another task's live inflight lock.
   const fixture = gitRepo();
@@ -67,7 +67,7 @@ test("registered worktrees and inflight locks with no open git handle still prun
 
   const argv: string[][] = [];
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = logDiskReclaimRung({ root: scratch("expiry-root") } as never, (s, f) => rows.push([s, f]), {
+  const out = await logDiskReclaimRung({ root: scratch("expiry-root") } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
     objectRepoDir: () => fixture.dir,
     objectInflightDir: () => inflight,
@@ -114,12 +114,12 @@ test("an open handle under the git dir still refuses the prune even with the fle
   assert.match(objectReapDecision("/r", "/i", noCounter).refusedBecause ?? "", /open handle/);
 });
 
-test("the disk reclaim rung reaps the daemon checkout as a second repo with its own decision row", () => {
+test("the disk reclaim rung reaps the daemon checkout as a second repo with its own decision row", async () => {
   const root = scratch("expiry-root2");
   mkdirSync(join(root, "remudero", ".git"), { recursive: true });
   const calls: Array<{ dir: string; streakPath?: string }> = [];
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = logDiskReclaimRung({ root } as never, (s, f) => rows.push([s, f]), {
+  const out = await logDiskReclaimRung({ root } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
     reapObjects: ((dir: string, _i: string, d: ObjectReapDeps) => {
       calls.push({ dir, streakPath: d.streakPath });
