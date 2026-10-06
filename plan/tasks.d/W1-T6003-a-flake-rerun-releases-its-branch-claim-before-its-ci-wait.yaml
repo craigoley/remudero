@@ -1,4 +1,4 @@
-- id: W1-T5997
+- id: W1-T6003
   title: "A FLAKE RERUN RELEASES ITS BRANCH CLAIM BEFORE ITS CI WAIT — W1-T5955 made a fix round release its branch claim at fix.done so the CI wait holds none, but runFixRung's rerun-once (FLAKE) path calls waitForCiGreen before logFixDone, so a flake verification holds the claim through the whole CI wait (up to the 60-min ceiling) and every other fix round on that branch is declined as live_branch_claim meanwhile"
   repo: remudero
   depends_on: [W1-T5955]
