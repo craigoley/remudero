@@ -64,3 +64,9 @@ Learnings used when offered: 13%. Dangling Why pointers: 1.
 - retire strikes-exhausted-counts-rows: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 15%. Dangling Why pointers: 1.
+
+## Pass 2026-10-06T09:21:02.674Z
+
+- retire a-board-wide-plan-red-is-main: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 18%. Dangling Why pointers: 1.
