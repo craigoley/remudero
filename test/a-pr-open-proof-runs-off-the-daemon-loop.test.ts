@@ -16,6 +16,7 @@ import type { AsyncOpenPullRequestProofRunner } from "../src/lib/pr-open.js";
 const defaultProofRunnerAsync: typeof prOpen.defaultProofRunnerAsync = (...args) => prOpen.defaultProofRunnerAsync(...args);
 const prerunPullRequestProofs: typeof prOpen.prerunPullRequestProofs = (...args) => prOpen.prerunPullRequestProofs(...args);
 import { gitRepo } from "./helpers/git-repo.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 /** A fake `rmd`: echoes its argv, writes to stderr, sleeps `RMD_FAKE_SLEEP_MS`, and exits 3 when
  *  the proof names FAIL. With RMD_FAKE_IGNORE_TERM it survives SIGTERM, so only SIGKILL ends it. */
@@ -103,7 +104,7 @@ test("a proof run past its bound is killed and the PR open is refused naming the
         defaultProofRunnerAsync(proof, base, root, target, { bin, timeoutMs: 200, graceMs: 100 }),
       ),
     );
-    assert.ok(Date.now() - started < 5000, "the bound ended the run, not the child");
+    assertWallClockBound(Date.now() - started, 5000, "the bound ended the run, not the child");
     assert.throws(
       () => openPullRequestChecked("", "run-W1-T9-1", dir, "origin/main", runner),
       (err: unknown) =>
