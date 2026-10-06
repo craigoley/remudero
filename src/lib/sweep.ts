@@ -4320,7 +4320,8 @@ export function ciTimeoutRefreshDecision(
     }
   }
   if (escalated) return { kind: "escalated" };
-  if (attempted) {
+  // W1-T5933: a moved head or nothing to merge is no verdict on the refresh; retry under the BACKSTOP.
+  if (attempted && outcome !== "head-moved" && outcome !== "up-to-date") {
     return outcome === "updated"
       ? { kind: "await" }
       : { kind: "escalate", why: `its refresh at this head returned ${String(outcome ?? "no outcome")}` };
@@ -4370,6 +4371,8 @@ async function applyCiTimeoutRefresh(
     result = { outcome: "error", error: String((e as Error)?.message ?? e) };
   }
   appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", ...result });
+  if (result.outcome === "head-moved") return `${head}; update-branch says the head moved — re-read next pass, no requeue or fix strike`;
+  if (result.outcome === "up-to-date") return `${head}; update-branch had nothing to merge — no refresh needed, no requeue or fix strike`;
   if (result.outcome !== "updated") return escalate(`update-branch returned ${result.outcome}${result.error ? ` (${result.error})` : ""}`);
   return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
 }
@@ -8781,11 +8784,12 @@ export interface ArmedStalledPr {
   updateReason?: "armed-stalled" | "stale-gate" | "distance" | "stale-blocked";
 }
 
-/** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request; only these three are
- *  established without a live call against a real PR. `"updated"`: GitHub ACCEPTED the request, and
- *  the update completes asynchronously. `"conflict"`: GitHub refused — a real conflict, or a
- *  diverged head — reported and never retried by this call. `"error"`: any other failure. */
-export type UpdateBranchOutcome = "updated" | "conflict" | "error";
+/** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. `"updated"`: GitHub ACCEPTED
+ *  the request, and the update completes asynchronously. `"conflict"`: GitHub refused — a real
+ *  conflict, or a diverged head — reported and never retried by this call. W1-T5933: `"head-moved"`
+ *  (the expected_head_sha lease no longer matches — re-read next pass) and `"up-to-date"` (nothing to
+ *  merge — no refresh needed) are 422s that are NOT conflicts. `"error"`: any other failure. */
+export type UpdateBranchOutcome = "updated" | "conflict" | "head-moved" | "up-to-date" | "error";
 
 /** W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED. Separately unremarkable; together they
  *  describe a PR that has done everything it can and stopped. WHY THE DETECTOR AND NOT THE FIX:
@@ -14273,6 +14277,11 @@ export async function runSweep(
                       standDownReason =
                         `base refresh requested before strike-cap escalation: head was ${decision.behindBy} commit(s) behind ` +
                         `and newer main changed ${decision.matchingBaseFiles.join(", ")}; no strike spent`;
+                      break;
+                    }
+                    if (outcome === "head-moved") {
+                      acted = false;
+                      standDownReason = "stale-base release refused: update-branch says the head moved — re-read next pass";
                       break;
                     }
                   } catch (error) {

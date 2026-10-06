@@ -4517,10 +4517,11 @@ test("W1-T528: a failing update-branch is classified from its own stderr, never 
 });
 
 test("W1-T528: the failure classifier separates a conflict from an ordinary error", () => {
-  for (const s of ["merge conflict", "branch has diverged", "divergent histories", "HTTP 422"]) {
+  for (const s of ["merge conflict", "branch has diverged", "divergent histories"]) {
     assert.equal(classifyUpdateBranchFailure(s), "conflict", `"${s}" names a conflict`);
   }
-  for (const s of ["gh: command not found", "HTTP 500", "network unreachable", ""]) {
+  // W1-T5933: a bare 422 names no conflict — GitHub also answers 422 for a moved head.
+  for (const s of ["gh: command not found", "HTTP 500", "HTTP 422", "network unreachable", ""]) {
     assert.equal(classifyUpdateBranchFailure(s), "error", `"${s}" is an ordinary error`);
   }
 });
