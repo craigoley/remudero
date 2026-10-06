@@ -15,7 +15,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown }) => number;
 };
 
-function fixture() {
+function fixture(baseline: Record<string, string> = {}) {
   const repo = gitRepo({ kind: 'author-preflight', seedCommit: false });
   const root = repo.dir;
   for (const path of ['test/setup', 'src', 'scripts']) mkdirSync(join(root, path), { recursive: true });
@@ -29,6 +29,7 @@ function fixture() {
   writeFileSync(join(root, 'src/leaf.ts'), 'export const value = 1;\n');
   writeFileSync(join(root, 'test/leaf.test.ts'), "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { value } from '../src/leaf.js'; test('leaf', () => assert.equal(value, 1));\n");
   writeFileSync(join(root, 'test/other.test.ts'), "import { test } from 'node:test'; test('unrelated', () => {});\n");
+  for (const [path, content] of Object.entries(baseline)) writeFileSync(join(root, path), content);
   const git = (...args: string[]) => repo.git(...args);
   git('add', '.');
   git('commit', '-m', 'test: baseline');
@@ -51,7 +52,7 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.hostedFullSuiteAndCoverage, 'required-pending');
   assert.equal(receipt.headSha, f.git('rev-parse', 'HEAD'));
   assert.equal(receipt.baseSha, f.git('rev-parse', 'main'));
-  assert.equal(receipt.selection, 'affected-floor');
+  assert.equal(receipt.selection, 'affected-narrow');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
 });
@@ -333,4 +334,36 @@ test('author preflight cannot publish a passed progress receipt when the authori
   assert.notEqual(progress.verdict, 'passed', 'native success is not successful authoritative receipt publication');
   assert.equal(progress.verdict, 'refused');
   assert.match(progress.error, /receipt could not be written/);
+});
+
+test('preflight-author runs the narrow selection and its receipt records both the floor size and the narrow size', () => {
+  // hub.ts imports leaf.ts but uses only `unchanged`; the branch changes only `value`. The floor's
+  // import graph reaches hub.test.ts; the narrow arm (symbol reach) does not, so it is smaller.
+  const f = fixture({
+    'src/hub.ts': "import { value } from './leaf.js';\nexport const hub = 'hub';\nexport const unused = typeof value;\n",
+    'test/hub.test.ts': "import { test } from 'node:test'; import { hub } from '../src/hub.js'; test('hub', () => { if (hub !== 'hub') throw Error(); });\n",
+    'test/reads-leaf.test.ts': "import { test } from 'node:test'; test('reads', () => { void 'src/leaf.ts'; });\n",
+  });
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'not-run');
+  assert.deepEqual(receipt.steps, [], 'a dry run spawns no suite');
+  assert.equal(receipt.selection, 'affected-narrow');
+  assert.equal(receipt.floorSize, 3, 'floor: the changed test, the import-graph reach, the path namer');
+  assert.equal(receipt.narrowSize, 2, 'narrow: the changed test and the suite naming the changed file by path');
+  assert.deepEqual(receipt.suites, ['test/leaf.test.ts', 'test/reads-leaf.test.ts']);
+  // An import-only edit names no symbol, so the narrow arm cannot reach the module: the floor runs.
+  writeFileSync(join(f.root, 'src/hub.ts'), "import { value } from './leaf.js';\nimport './leaf.js';\nexport const hub = 'hub';\nexport const unused = typeof value;\n");
+  f.git('add', '.'); f.git('commit', '-m', 'test: an import-only edit');
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  assert.equal(f.receipt().selection, 'affected-floor');
+  assert.equal(f.receipt().narrowSize, null);
+  assert.equal(f.receipt().floorSize, f.receipt().suites.length);
+  // A full-run trigger still selects every suite, with no floor or narrow size.
+  writeFileSync(join(f.root, 'package.json'), '{}\n');
+  f.git('add', '.'); f.git('commit', '-m', 'test: unmodelled input');
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  assert.equal(f.receipt().selection, 'full-fallback');
+  assert.deepEqual([f.receipt().floorSize, f.receipt().narrowSize], [null, null]);
+  assert.equal(f.receipt().suites.length, 4);
 });
