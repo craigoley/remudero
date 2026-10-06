@@ -10240,7 +10240,7 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * auction weighs headroom alone, as before. The ledger read is async and cached; an unreadable ledger is named on
  * its own row and the round routes by headroom, never blocks.
  */
-async function fixLearnedArmsFor(
+export async function fixLearnedArmsFor(
   ledger: { ledgerPath: string; log: (step: string, extra?: Record<string, unknown>) => void;
     readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>> },
   strike: { strike: number; round: string },

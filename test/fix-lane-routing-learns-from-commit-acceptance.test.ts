@@ -395,3 +395,21 @@ test("W1-T5535: a decision sink that throws is logged and never changes routing"
   }
 });
 
+test("W1-T5535: an unreadable routing ledger is named on its own row and the round routes by headroom", async () => {
+  const { fixLearnedArmsFor } = await import("../src/run-task.js");
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => { rows.push([step, extra]); };
+  const strike = { strike: 1, round: "ci-log" };
+  const none = await fixLearnedArmsFor(
+    { ledgerPath: "/state/ledger.ndjson", log, readFixRoutingRows: async () => { throw new Error("ledger unreadable"); } }, strike);
+  assert.equal(none, undefined, "no learned arms: the auction weighs headroom alone");
+  assert.deepEqual(rows.map(([step]) => step), ["fix.routing_learner_unavailable"]);
+  assert.equal(rows[0]![1]?.reason, "ledger-read-failed");
+  assert.match(String(rows[0]![1]?.error), /ledger unreadable/);
+  const learned = await fixLearnedArmsFor(
+    { ledgerPath: "/state/ledger.ndjson", log, readFixRoutingRows: async () => armRounds("codex", "gpt-6.1-sol", 1, 3) }, strike);
+  assert.ok(learned, "a readable ledger yields learned arms");
+  learned!.onDecision?.({ applied: true });
+  assert.deepEqual(rows.at(-1), ["fix.routing_decision", { strike: 1, round: "ci-log", applied: true }]);
+});
+
