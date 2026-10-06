@@ -1901,17 +1901,11 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
-/**
- * The two stores {@link inboxLanes} reads beside a classification: the fleet lane's decisions and the plain messages,
- * each kept only for the pass's proposals. The slow lane persists them WITH its pass, so every reader of that pass
- * pages one snapshot of them: a store read at render instead named the pass's as-of over a later decision.
- */
 export interface InboxStores {
   fleetDecisions: DecisionStore;
   plainMessages: PlainStore;
 }
 
-/** The stores as they are now, narrowed to `proposals`' ids. */
 export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>): InboxStores {
   const stateDir = join(inboxRoot, "state");
   const ids = new Set(proposals.map((p) => p.id));
@@ -1919,11 +1913,7 @@ export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id
   return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))) };
 }
 
-/**
- * GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts).
- * A pass that carries its `stores` is paged with them; one without (an inline pass, a file persisted before they were
- * carried) reads the stores as they are now.
- */
+/** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
 export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { stores?: InboxStores }, inboxRoot: string) {
   const { proposals, classifications, ledgerLines } = classified;
   const stores = classified.stores ?? readInboxStores(inboxRoot, proposals);
