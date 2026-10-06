@@ -1,0 +1,35 @@
+- id: W1-T5933
+  title: "AN UPDATE-BRANCH 422 IS NOT ALWAYS A CONFLICT — classifyUpdateBranchFailure (src/lib/fix-rung-classify.ts) returns `conflict` for any stderr matching /conflict|divergent|diverged|422/, so a 422 that means the head moved (expected_head_sha mismatch) or that there is nothing to merge is routed to the merge-conflict path, and the W1-T5921 ci-gate-timeout lane escalates a PR whose only problem was a stale read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — one pure classifier; its callers keep their own handling
+  band_meaning: span
+  origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
+  plan_refs: [W1-T5921, W1-T5864]
+  files: [src/lib/fix-rung-classify.ts, test/an-update-branch-422-is-not-always-a-conflict.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5921 (#9434, merged). fix-rung-classify.ts line 28 reads
+    `return /conflict|divergent|diverged|422/i.test(stderrText) ? "conflict" : "error";`. GitHub's
+    PUT pulls/{n}/update-branch answers 422 for more than a merge conflict: an expected_head_sha that no
+    longer matches (the head moved under the read) and a branch with nothing to merge both come back as
+    422. Each is then treated as a conflict: W1-T5921's lane escalates it once, and other callers send
+    it to the merge-conflict worker, which finds nothing to resolve.
+  design: |
+    Split the verdict: `conflict` only for a message naming a merge conflict; `head-moved` for the
+    expected_head_sha mismatch; `up-to-date` for nothing-to-merge; `error` for anything else. Callers
+    map head-moved to "re-read next pass" and up-to-date to "no refresh needed", without escalating.
+    Keep every unknown 422 as `error`, never `conflict`, so an unrecognised message is named rather than
+    misrouted.
+  acceptance:
+    - claim: "an update-branch failure is classified conflict only when GitHub names a merge conflict, a head-sha mismatch reads head-moved, nothing to merge reads up-to-date, and any other 422 reads error"
+      proof: "unit test: test/an-update-branch-422-is-not-always-a-conflict.test.ts"
+  falsifier: |
+    Keep the bare 422 alternative in the conflict regex: the head-moved and up-to-date cases read
+    conflict and the test fails.

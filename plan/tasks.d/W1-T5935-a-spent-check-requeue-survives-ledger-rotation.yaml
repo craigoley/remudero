@@ -1,0 +1,33 @@
+- id: W1-T5935
+  title: "A SPENT CHECK REQUEUE SURVIVES LEDGER ROTATION — requeuedCheckKeysFromLedger (src/lib/sweep.ts) enforces W1-T1223's one requeue per (head, check) by reading `sweep.check_requeued` rows back, but that step is not in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts), so a rotation that drops it lets the same cancelled check on the same head be requeued again, and the bound silently resets"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — retention of the row a bound reads back
+  band_meaning: span
+  origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
+  plan_refs: [W1-T1223, W1-T5920, W1-T5534]
+  files: [src/lib/ledger.ts, test/a-spent-check-requeue-survives-ledger-rotation.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5920 (#9438). CHECK_REQUEUE_STEP = "sweep.check_requeued"
+    (src/lib/sweep.ts) is read by requeuedCheckKeysFromLedger to bound the cancelled-check requeue at one
+    per head and check, but grep finds no check_requeue entry in src/lib/ledger.ts. W1-T5534 (#9391) fixed
+    the same shape for fix.scope_amendment, and test/ledger-rotation.test.ts already fails when a READ
+    step is missing; this step evidently escapes that census, so the census's coverage of read-back steps
+    is itself worth checking.
+  design: |
+    Register sweep.check_requeued in DECISION_RELEVANT_LEDGER_STEPS, and make the rotation census name
+    any step whose constant is read back by a *FromLedger fold but is not retained, so the next one
+    fails CI instead of resetting a bound in production.
+  acceptance:
+    - claim: "a sweep.check_requeued row survives ledger rotation, so requeuedCheckKeysFromLedger still bounds the requeue after a rotation, and the rotation census fails on a read-back step that is not retained"
+      proof: "unit test: test/a-spent-check-requeue-survives-ledger-rotation.test.ts"
+  falsifier: |
+    Leave the step out of DECISION_RELEVANT_LEDGER_STEPS: after a rotation the requeue key is gone and
+    the test fails.
