@@ -48,7 +48,6 @@
     "test/followup-dedup-census.test.ts",
     "test/gh-transport-census.test.ts",
     "test/hand-run-census.test.ts",
-    "test/host-capability-fixtures.test.ts",
     "test/host-parity-azure-pole.test.ts",
     "test/learnings-budget-ratchet.test.ts",
     "test/learnings-ratchet-candidates.test.ts",

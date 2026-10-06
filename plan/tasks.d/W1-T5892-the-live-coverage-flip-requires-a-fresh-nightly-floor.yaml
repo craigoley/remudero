@@ -9,8 +9,8 @@
   risk: high  # Rule 19: one concern — the live flag cannot take effect without a readable floor
   band_meaning: blast-radius
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 2; workflow edit is an operator build (W1-T5351)"
-  plan_refs: [W1-T5705, W1-T5704, W1-T5811]
-  files: [.github/workflows/ci.yml, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts]
+  plan_refs: [W1-T5705, W1-T5704, W1-T5811, W1-T5891, W1-T5930]
+  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts]
   status: queued
   priority: 3
   attempts: 0
@@ -23,13 +23,36 @@
     stop the live flag. So a nightly outage while the flag is on blocks every narrowed source PR
     on an infrastructure fault unrelated to the PR.
   design: |
-    A narrowed shard runs only when a readable floor exists: the shard's selection step checks for
-    a coverage-nightly or coverage-merged artifact newer than a stated bound (tagged BACKSTOP) and
-    falls back to `--select-all` with a named reason when there is none, so the run is full and
-    measures its own floor. The ratchet's refusal stays for the case where a narrowed run still
-    finds no floor.
+    A narrowed shard runs only when a successful, complete, readable floor exists within a stated
+    24-hour bound (tagged BACKSTOP); otherwise the global decision falls back to full with a named
+    reason. Preserve flag-off behavior, the final full merge-group run and required gate names.
+    Select one floor for the entire workflow before narrow tests; all shard consumers and the
+    aggregate ratchet use that exact pinned artifact, never independently choose newest or silently
+    replace it after execution. Reuse the existing nightly/merged producers and bounded GitHub
+    ingestion; do not add another schedule or collector. No live flag/protection change in this task.
+    The dependency-free coverage-floor helper validates repository, successful run/attempt and
+    trusted main or merge-group producer, positive complete LCOV, artifact/source identity, recorded
+    zero shard exits, Node/runtime and loader/dependency/coverage-policy identity, age and digest.
+    Add the missing provenance to both current producers before relying on it; legacy/unverifiable,
+    failed, partial, expired, future-dated, incompatible Node22/24 or digest-mismatched artifacts
+    cannot authorize narrowing. A failed nightly can upload its measurement before its test-exit
+    gate: completed is not success. Bound candidate/artifact reads and leave refusal evidence.
+    Report the historical-baseline absolute floor separately from current-head added-line coverage
+    and final full integration assurance. A valid narrow run whose pinned input later becomes
+    unreadable still refuses; never relabel its partial current-head LCOV as an absolute floor.
+    Exercise the real workflow body and builtin helper with real local artifacts and subprocesses;
+    synthetic GitHub transport only. Controls include valid fresh success, completed-red upload,
+    missing/expired/partial/malformed artifacts, head/attempt/repository/digest disagreement,
+    boundary clock and Node22/24 separation, shared pinned choice and failure propagation.
   acceptance:
-    - claim: "with the live flag on and no coverage-nightly or coverage-merged artifact within the bound, the coverage shard falls back to the full suite naming the missing floor, with a fresh artifact it narrows, and with the flag off nothing changes"
+    - claim: "with the live flag on and no successful compatible pinned coverage-nightly or coverage-merged artifact within the 24-hour bound, every shard falls back to full with a named reason; a complete fresh success authorizes narrowing against one verified floor, failed or incompatible artifacts never do, and flag-off behavior is unchanged"
       proof: "unit test: test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
   falsifier: |
-    Narrow without checking the floor: the no-artifact fixture narrows and the test fails.
+    Narrow without checking the floor: the no-artifact fixture narrows and the test fails. Accept a
+    completed-red upload, different runtime/digest or independently select a replacement after the
+    tests: the corresponding real helper/workflow control fails.
+  note: |
+    Operator recon 2026-10-06 on main77317874: ci.yml lists --status completed and accepts the first
+    downloadable LCOV; coverage-nightly uploads before its final zero-test-exit gate. These bytes
+    prove a latent failed-run admission gap, not that a bad artifact was consumed. Live flag is0.
+    The added producer/helper files and provenance contract are declared before implementation.

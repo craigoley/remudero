@@ -332,6 +332,20 @@ function rollupFromJobs(response: WorkflowJobsResponse | undefined): RollupCheck
   }));
 }
 
+/** W1-T5843: the diagnosis the decision composed after `observation.reason` — the failing test titles
+ *  and the first red push run with the merged PR that produced it — as ` <line>. <line>.`, or "".
+ *  The `(<url>)` the decision prints after `PR #N` is dropped: a `/pull/` URL in an issue body is read
+ *  by the escalation reconciler as the issue's referent, and that PR is already merged. */
+function operatorDetailOf(observation: MainHealthObservation, decisionReason: string): string {
+  const marker = `: ${observation.reason}.`;
+  const at = decisionReason.indexOf(marker);
+  if (at < 0) return "";
+  return decisionReason
+    .slice(at + marker.length)
+    .replace(/ \(\S*\/pull\/\d+[^\s)]*\)/g, "")
+    .trimEnd();
+}
+
 /** W1-T5806: a met escalation names PRs as `PR #N`, never a `/pull/` URL — the escalation reconciler
  *  reads a URL as the issue's referent and would retire it as soon as it saw that PR merged. */
 export function escalationFor(observation: MainHealthObservation, branch: string, met?: MetPrs): Escalation {
@@ -339,6 +353,7 @@ export function escalationFor(observation: MainHealthObservation, branch: string
   if (!decision.escalate || !decision.class) {
     throw new Error(`refusing to build a main-health escalation for ${observation.state}`);
   }
+  const diagnosis = operatorDetailOf(observation, decision.reason);
   const metNames = met?.metPrs.map((n) => `PR #${n}`).join(", ");
   return {
     class: decision.class,
@@ -351,7 +366,7 @@ export function escalationFor(observation: MainHealthObservation, branch: string
         ? `PR #${met.redPr} merged as \`${met.mergeSha}\`; its CI ran on \`${met.ciBaseSha}\`, before ${metNames} ` +
           `merged, and they share ${met.sharedPaths.map((path) => `\`${path}\``).join(", ")}. Each passed CI alone. `
         : "") +
-      `The default branch \`${branch}\` at \`${observation.sha}\` is red. ${observation.reason}. ` +
+      `The default branch \`${branch}\` at \`${observation.sha}\` is red. ${observation.reason}.${diagnosis} ` +
       "This observer never auto-reverts or pauses unrelated dispatch; an explicit operator ruling " +
       "is required to hold the queue. The automatic PR repair and update paths remain active.",
     options: [
