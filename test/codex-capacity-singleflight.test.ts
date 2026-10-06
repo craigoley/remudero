@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -497,18 +499,24 @@ test("an overdue Codex deadline with no reply still fails closed after the stdou
   assert.equal(kills, 1);
 });
 
-test("a real Codex capacity exchange completes while the daemon event loop is blocked", async () => {
-  clearCodexCapacityCache();
-  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-capacity-"));
+function installIsolatedCapacityAppServer(root: string, initializeReplyDelayMs: number) {
   const bin = join(root, "fake-codex");
   const started = join(root, "started");
   const release = join(root, "release");
   const completed = join(root, "completed");
   writeFileSync(bin, `#!/usr/bin/env node
-const { existsSync, writeFileSync } = require("node:fs");
-writeFileSync(${JSON.stringify(started)}, "started");
+const { existsSync, renameSync, writeFileSync } = require("node:fs");
 let buffer = "";
-let replies = 0;
+const replies = [];
+function reply(request, result) {
+  replies.push({ id: request.id, method: request.method });
+  if (replies.length === 2) {
+    const pending = ${JSON.stringify(completed + ".pending")};
+    writeFileSync(pending, JSON.stringify(replies), { flag: "wx" });
+    renameSync(pending, ${JSON.stringify(completed)});
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + "\\n");
+}
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString("utf8");
   for (;;) {
@@ -518,43 +526,109 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     const request = JSON.parse(line);
     if (request.id === 1) {
+      writeFileSync(${JSON.stringify(started)}, "initialize-received");
       const timer = setInterval(() => {
         if (!existsSync(${JSON.stringify(release)})) return;
         clearInterval(timer);
-        process.stdout.write(JSON.stringify({ id: 1, result: {} }) + "\\n");
+        setTimeout(() => process.stdout.write(JSON.stringify({ id: 1, result: {} }) + "\\n"), ${initializeReplyDelayMs});
       }, 5);
     }
     if (request.id === 2) {
-      process.stdout.write(JSON.stringify({ id: 2, result: ${JSON.stringify(LIMITS)} }) + "\\n");
-      replies += 1;
+      reply(request, ${JSON.stringify(LIMITS)});
     }
     if (request.id === 3) {
-      process.stdout.write(JSON.stringify({ id: 3, result: { data: ${JSON.stringify(MODELS)}, nextCursor: null } }) + "\\n");
-      replies += 1;
+      reply(request, { data: ${JSON.stringify(MODELS)}, nextCursor: null });
     }
-    if (replies === 2) writeFileSync(${JSON.stringify(completed)}, "complete");
   }
 });
 `);
   chmodSync(bin, 0o755);
+  return { bin, started, release, completed };
+}
+
+test("isolated capacity fixture publishes a complete witness before its terminal reply can trigger teardown", { timeout: 10_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-capacity-witness-"));
+  const { bin, release, completed } = installIsolatedCapacityAppServer(root, 0);
+  writeFileSync(release, "go");
+  const child = spawn(process.execPath, [bin], { stdio: ["pipe", "pipe", "pipe"] });
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+    rmSync(root, { recursive: true, force: true });
+  });
+  let buffer = "";
+  const terminal = new Promise<{ id: number }>((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const end = buffer.indexOf("\n");
+        if (end < 0) break;
+        const row = JSON.parse(buffer.slice(0, end)) as { id: number };
+        buffer = buffer.slice(end + 1);
+        if (row.id === 3) {
+          child.kill("SIGKILL"); // The fixture consumer may tear down immediately after the final reply.
+          resolve(row);
+        }
+      }
+    });
+  });
+  assert.equal(existsSync(completed), false, "positive control: no exchange has published a witness");
+  for (const request of [{ id: 1, method: "initialize" }, { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" }]) {
+    child.stdin.write(JSON.stringify(request) + "\n");
+  }
+  assert.equal((await terminal).id, 3, "the terminal native protocol reply was actually observed");
+  await closed;
+  assert.deepEqual(JSON.parse(readFileSync(completed, "utf8")), [
+    { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" },
+  ], "a terminal reply must never expose an absent or partially written witness");
+});
+
+async function realCapacityExchangeDuringBlockedLoop(initializeReplyDelayMs: number) {
+  clearCodexCapacityCache();
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-capacity-"));
+  const { bin, started, release, completed } = installIsolatedCapacityAppServer(root, initializeReplyDelayMs);
   const cfg = config(root);
   cfg.workerProviders!.codexBin = bin;
   let pending: Promise<Awaited<ReturnType<typeof readCodexCapacity>>> | undefined;
   try {
-    pending = readCodexCapacity(cfg, { capabilities: CAPABILITIES, requestedModel: "sonnet", requestedEffort: "medium", timeoutMs: 3_000 });
-    const startDeadline = Date.now() + 5_000;
-    while (!existsSync(started) && Date.now() < startDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.ok(existsSync(started), "the app-server child must start before the parent is blocked");
+    assert.ok(!existsSync(completed), "positive control: no probe has run in this fresh fixture");
+    let parentTurnRan = false;
+    setImmediate(() => { parentTurnRan = true; });
+    // Release before starting the real probe, then block without yielding a parent turn.
+    // Waiting asynchronously for initialize spent the RPC deadline on fixture coordination;
+    // a delayed parent could observe its marker only after the real probe had timed out.
     writeFileSync(release, "go");
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000);
-    assert.ok(existsSync(completed), "the isolated exchange must finish both RPCs while the daemon cannot read stdout");
+    pending = readCodexCapacity(cfg, { capabilities: CAPABILITIES, requestedModel: "sonnet", requestedEffort: "medium", timeoutMs: 3_000 });
+    const blockedDeadline = performance.now() + 5_000;
+    const blocked = new Int32Array(new SharedArrayBuffer(4));
+    // Keep this agent synchronously blocked until a durable protocol witness, not for a latency SLO.
+    // The monotonic deadline bounds a broken isolation path; the probe's three-second budget is unchanged.
+    while (!existsSync(completed) && performance.now() < blockedDeadline) Atomics.wait(blocked, 0, 0, 10);
+    assert.equal(parentTurnRan, false, "the daemon event loop did not service a scheduled turn before completion");
+    const completedWhileBlocked = existsSync(completed);
     const result = await pending;
+    assert.ok(existsSync(started), "positive control: the real app-server received initialize");
+    assert.ok(completedWhileBlocked, `the isolated app-server must observe both RPC requests while the daemon loop is blocked: ${result.detail ?? 'native result returned'}`);
+    assert.deepEqual(JSON.parse(readFileSync(completed, "utf8")), [
+      { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" },
+    ], "the real child observed both protocol requests after release and before the parent resumed");
     assert.equal(result.readable, true, result.detail);
     assert.equal(result.model, "gpt-5.6-terra");
   } finally {
     await pending?.catch(() => undefined);
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("a real Codex capacity exchange completes while the daemon event loop is blocked", async () => {
+  await realCapacityExchangeDuringBlockedLoop(0);
+});
+
+test("a real Codex capacity exchange still completes during a blocked loop after delayed RPC replies", async () => {
+  // A valid reply within the unchanged three-second probe budget is not a one-second latency SLO.
+  await realCapacityExchangeDuringBlockedLoop(1_200);
 });
 
 test("an isolated Codex app-server that exits before its reply leaves headroom unreadable", async () => {

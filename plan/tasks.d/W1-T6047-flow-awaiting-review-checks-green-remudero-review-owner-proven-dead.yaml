@@ -1,0 +1,29 @@
+- id: W1-T6047
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — awaiting-review:checks green, remudero-review owner proven dead cost 8.90 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.14
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:awaiting-review:checks green, remudero-review owner proven dead"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-awaiting-review-checks-green-remudero-review-owner-proven-dead.test.ts
+  acceptance:
+    - claim: "awaiting-review:checks green, remudero-review owner proven dead is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6047: flow-awaiting-review-checks-green-remudero-review-owner-proven-dead clears without a person\" in test/flow-awaiting-review-checks-green-remudero-review-owner-proven-dead.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    awaiting-review:checks green, remudero-review owner proven dead cost 8.90 PR-hours; owner review-lane
+    Owner review-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9572: 2.17 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9572 — mergeability unread this pass; inherited last known "clean" observed 2026-10-06T17:08:14.750Z for this exact head 1fb5440 (W1-T4470)
+    - PR #9567: 1.34 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9567
+    - PR #9460: 1.12 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9460 — mergeability unread this pass; inherited last known "clean" observed 2026-10-06T05:04:27.551Z for this exact head 1b2c6a6 (W1-T4470)
+    - PR #9553: 1.03 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9553
+    - PR #9181: 0.76 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9181
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

@@ -538,6 +538,77 @@ if [ "$cov_scan" -eq 1 ]; then
   done < <(printf '%s\n' "$cmd" | cov_segments)
 fi
 
+# 15) A HAND-RUN `node --test` WITHOUT THE SETUP PRELOAD (W1-T6030). MEASURED 2026-10-06: without
+#    `--import ./test/setup/tmp-hygiene.ts` a suite has no gh refusal stub, live push URLs, the shell's real
+#    GH_TOKEN and no gc-disable; run-task failed 8/324 and git-fixture-gc-hygiene 3/6 as ordinary reds.
+#    Every scripted run passes the preload; a hand-typed one had no check. Parsed like rule 13 (segments,
+#    program position). Refused: a `node ... --test` naming a test/ path or glob with no `--import X` or
+#    `--import=X` (nor NODE_OPTIONS) ending in test/setup/tmp-hygiene.ts — only where that file exists in
+#    the payload cwd or a leading `cd <dir>` target, so other repos are never refused. One -f per run.
+pl_has_preload() { case "$1" in *test/setup/tmp-hygiene.ts) return 0 ;; esac; return 1; }
+case "$cmd" in *node*--test*) pl_scan=1 ;; *) pl_scan=0 ;; esac
+if [ "$pl_scan" -eq 1 ]; then
+  pl_dir="${hook_cwd%/}" pl_env=0
+  while IFS= read -r pl_seg; do
+    case "$pl_seg" in *NODE_OPTIONS=*test/setup/tmp-hygiene.ts*) pl_env=1 ;; esac
+    pl_state=pre pl_skip=0 pl_dur=0 pl_test=0 pl_names=0 pl_pre=0 pl_val=0 pl_cd=0
+    set -f
+    for pl_tok in $pl_seg; do
+      pl_t="${pl_tok//[\"\']/}"
+      if [ "$pl_state" = pre ]; then
+        if [ "$pl_skip" -gt 0 ]; then pl_skip=$((pl_skip - 1)); continue; fi
+        if [ "$pl_dur" -eq 1 ]; then
+          case "$pl_t" in -k|-s|--signal|--kill-after) pl_skip=1; continue ;; -*) continue ;; esac
+          pl_dur=0; continue
+        fi
+        case "$pl_t" in
+          [A-Za-z_]*=*|do|then|else|elif|if|while|until|"!"|"{"|time|nohup|exec|command|env|nice) continue ;;
+          timeout) pl_dur=1 ;;
+          -n|-u|-C|-S) pl_skip=1 ;;
+          -*) ;;
+          cd) pl_state=cd ;;
+          node|*/node|nodejs) pl_state=node ;;
+          *) break ;;
+        esac
+      elif [ "$pl_state" = cd ]; then
+        case "$pl_t" in -L|-P|-e|-@) continue ;; esac
+        pl_cd=1
+        case "$pl_t" in
+          /*) pl_dir="$pl_t" ;;
+          "~") pl_dir="$HOME" ;;
+          "~/"*) pl_dir="$HOME/${pl_t#\~/}" ;;
+          -) pl_dir="" ;;
+          *) [ -n "$pl_dir" ] && pl_dir="$pl_dir/$pl_t" ;;
+        esac
+        break
+      elif [ "$pl_val" -eq 1 ]; then
+        pl_val=0; pl_has_preload "$pl_t" && pl_pre=1
+      elif [ "$pl_skip" -gt 0 ]; then
+        pl_skip=0
+      else
+        case "$pl_t" in
+          -e|--eval|-p|--print|--eval=*|--print=*) pl_state=none; break ;;
+          --test) pl_test=1 ;;
+          --import) pl_val=1 ;;
+          --import=*) pl_has_preload "${pl_t#--import=}" && pl_pre=1 ;;
+          --require|-r|--loader|--experimental-loader|--test-reporter|--test-reporter-destination|\
+          --test-name-pattern|--test-skip-pattern|--test-concurrency|--test-shard|--test-timeout|\
+          --test-coverage-include|--test-coverage-exclude|--env-file|--conditions|-C) pl_skip=1 ;;
+          -*) ;;
+          *\>*|*\<*) ;;
+          test/*|./test/*|*/test/*) pl_names=1 ;;
+        esac
+      fi
+    done
+    set +f
+    [ "$pl_state" = cd ] && [ "$pl_cd" -eq 0 ] && pl_dir="$HOME"
+    [ "$pl_state" = node ] && [ "$pl_test" -eq 1 ] && [ "$pl_names" -eq 1 ] || continue
+    [ "$pl_pre" -eq 1 ] || [ "$pl_env" -eq 1 ] && continue
+    [ -n "$pl_dir" ] && [ -f "$pl_dir/test/setup/tmp-hygiene.ts" ] || continue
+    deny "a hand-run \`node --test\` without the setup preload (W1-T6030) — it runs uncontained (no gh refusal stub, live push URLs, the shell's real GH_TOKEN, no gc-disable) and its reds are not regressions. Add \`--import ./test/setup/tmp-hygiene.ts\` after \`--import tsx\`: node --test --import tsx --import ./test/setup/tmp-hygiene.ts <files>"
+  done < <(printf '%s\n' "$cmd" | cov_segments)
+fi
+
 # 14) WORKER FILE TOOLS STAY IN THE ASSIGNED WORKTREE (W1-T5016). OBSERVED at c94c2bf49: workers run
 #    under bypassPermissions, this hook read `file_path` and `cwd` and never compared them, and the worker
 #    matcher omitted Read — a scratch-hook test allowed an Edit in a sibling checkout. Worker-lane only

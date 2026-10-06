@@ -1857,10 +1857,10 @@ export interface components {
       clearPolicy: "expires" | "explicit-clear-required";
       /** Present only when `clearPolicy` is `expires`. */
       expiresAt?: string;
-      /** The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every capability. This document's OpenAPI subset (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here -- a consumer must accept the string "*" as well. */
-      affectedCapabilities: (string)[];
-      /** The delegation classes this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every class; as for `affectedCapabilities`, only the array arm is typed here and a consumer must accept "*" as well. */
-      affectedDelegationClasses: (string)[];
+      /** The capabilities this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every capability (the code's `string[] | "*"`). */
+      affectedCapabilities: ((string)[]) | ("*");
+      /** The delegation classes this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every class (the code's `string[] | "*"`). */
+      affectedDelegationClasses: ((string)[]) | ("*");
       /** The incident record this stop is accountable to; every receipt of its lifecycle links back to it. */
       incidentReceiptId: string;
     };
@@ -3066,6 +3066,21 @@ export interface components {
         };
       };
     };
+    /** GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for that instance, built by the same function in the read-model worker from the projector's `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until state/read-model/switches.json sets `actions` to `serve`. */
+    ActionsView: {
+      view: "actions";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          results: ExternalActionResultsEnvelope;
+        })[];
+      };
+    };
     /** GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers for that instance, computed by the route's own readers over the instance's `panel.*` facts in the read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass. `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics snapshot; without one it carries a `reason`, never an empty list. Dark until state/read-model/switches.json sets `agent` to `serve`. */
     AgentView: {
       view: "agent";
@@ -3083,6 +3098,36 @@ export interface components {
         body: (AgentProposals) | (OperatorAgentProposalList) | (OperatorAgentSettingsResult) | (OperatorAgentExperimentList) | (DelegationProfileList) | (FollowUpList) | (OperatorAgentPromotionList) | (OperatorAgentActionList) | (OperatorAgentPendingConsequenceRead) | (IntentPlanList);
         /** The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>. */
         scoped?: OperatorAgentSettingsResult;
+      };
+    };
+    /** GET /v1/views/incidents (docs/views.md, src/lib/incidents-view.ts; W1-T5054, P4-T15): the console's /incidents page as one body across instances. `store` is GET /v1/incidents' list (or the reason it answers 503), re-read when the store file's fingerprint moves. Each instance's `emergency.active` is GET /v1/operator-agent/emergency/status's `active`, computed by the same function over the agent view's persisted `panel.*` fold. `liveness` is a band over the newest projected `daemon.*` row, never the raw heartbeat time. Dark until state/read-model/switches.json sets `incidents` to `serve`. */
+    IncidentsView: {
+      view: "incidents";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        store: ({
+          state: "ok";
+          incidents: (IncidentRecord)[];
+        }) | ({
+          state: "unavailable";
+          /** `malformed` or `unreadable`, as GET /v1/incidents' 503 names it. */
+          reason: string;
+        });
+        instances: ({
+          instance: string;
+          emergency: {
+            active: (EmergencyStop)[];
+          };
+          /** A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any. */
+          liveness: {
+            state: "up" | "down" | "unknown";
+            since?: string;
+          };
+        })[];
       };
     };
     /** The agent view's `proposals` part (W1-T5051): the proposals core's engine generates for the instance from its committed analytics snapshot and its operator-agent history, not terminal in that history and at or above its repository's confidence threshold, highest confidence first. Either `proposals` or `reason`. */
@@ -5411,12 +5456,34 @@ export interface paths {
         };
     };
   };
+  "/v1/views/actions": {
+    get: {
+      responses: {
+          "200": ActionsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
   "/v1/views/agent": {
     get: {
       responses: {
           "200": AgentView;
           "304": undefined;
           "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/incidents": {
+    get: {
+      responses: {
+          "200": IncidentsView;
+          "304": undefined;
           "401": Error;
           "403": Error;
           "404": undefined;
