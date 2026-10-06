@@ -457,6 +457,50 @@ function node24RuntimeTrigger({ changed, readHead, readBase }) {
   return changed.filter((path) => NODE24_SCOPE_RE.test(path)).some((path) => count(readHead(path)) > count(readBase(path)));
 }
 
+const HOST_CAPABILITY_RE = /chmod|process\.platform|getuid|hostname|\/usr\/bin\//;
+const TEST_TS_SCOPE_RE = /^test\/.+\.ts$/;
+const PRICE_RE = /\b(?:pr_url|cost_usd)\b/;
+const PRICED_WRITE_RE = /\blog\w*\(\s*(?:(["'])[A-Za-z0-9_.:-]+\1|[A-Z][A-Z0-9_]*)\s*,|\bstep:\s*(?:(["'])[A-Za-z0-9_.:-]+\2|[A-Z][A-Z0-9_]*\b)/g;
+
+// Match the census's call/object boundaries, including nested and multiline payloads.
+function pricedWrites(text) {
+  return [...text.matchAll(PRICED_WRITE_RE)].flatMap((match) => {
+    const call = match[0].startsWith("log");
+    let open = call ? text.indexOf("(", match.index) : match.index;
+    let depth = 0;
+    if (!call) {
+      for (; open >= 0; open--) {
+        if (text[open] === "}") depth++;
+        else if (text[open] === "{" && depth-- === 0) break;
+      }
+      if (open < 0) return [];
+    }
+    const up = call ? "(" : "{";
+    const down = call ? ")" : "}";
+    depth = 0;
+    let end = open;
+    for (; end < text.length; end++) {
+      if (text[end] === up) depth++;
+      else if (text[end] === down && --depth === 0) break;
+    }
+    const payload = text.slice(open, end + 1);
+    return PRICE_RE.test(payload) ? [payload] : [];
+  });
+}
+
+function addsMatch({ changed, readHead, readBase }, scope, scan) {
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  return changed.filter((path) => scope.test(path)).some((path) => {
+    const remaining = new Map();
+    for (const match of scan(String(readBase(path) ?? ""))) remaining.set(match, (remaining.get(match) ?? 0) + 1);
+    return scan(String(readHead(path) ?? "")).some((match) => {
+      const count = remaining.get(match) ?? 0;
+      remaining.set(match, count - 1);
+      return count === 0;
+    });
+  });
+}
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
@@ -485,6 +529,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
   { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
+  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", script: "census:every-priced-ledger-step",
+    trigger: (input) => input.changed.includes("src/lib/config-gardener.ts") || addsMatch(input, CLOCK_SCOPE_RE, pricedWrites),
+    remedy: "register CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts or a reasoned exemption in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts" },
+  { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
+    trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
+    remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
 ];
 
 /**
@@ -569,6 +619,7 @@ export const PRECHECK_EXTRA_CI_CENSUSES = {
   "test/ledger-rotation.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
   "test/a-union-read-of-an-unretained-step-is-refused.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
   "test/host-capability-fixtures.test.ts": "host-capability-fixtures — #8994",
+  "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts": "CONFIG_GARDEN_LEDGER_STEPS — #9179 #9181",
 };
 
 /** CI's census population: the rule-check suites plus the extras, once each, sorted. */
