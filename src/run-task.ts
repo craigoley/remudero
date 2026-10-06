@@ -53742,7 +53742,9 @@ export async function main(
   realDeps();
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
-  await flushThenExit(await (deps.dispatch ?? dispatchCommand)(cmd, rest, REGISTRY, USAGE));
+  await flushThenExit(
+    deps.dispatch ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE),
+  );
 }
 
 // W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.
