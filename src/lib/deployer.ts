@@ -966,9 +966,7 @@ export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   return { ok, conflicting, discardable };
 }
 
-/** The ledger rows that show a boot's progress after a restart, in the order a boot writes them:
- *  `daemon.paths` (before plan sync), `daemon.boot_held` (a recycle's PAUSE holding it), then
- *  `daemon.boot` (booted). W1-T5722. */
+/** A boot's progress rows in write order: paths (before plan sync), boot_held (PAUSE), boot. */
 export const BOOT_PROGRESS_STEPS = ["daemon.paths", "daemon.boot_held", "daemon.boot"] as const;
 export type BootProgressStep = (typeof BOOT_PROGRESS_STEPS)[number];
 
@@ -983,8 +981,7 @@ export interface HealthInputs {
   bootObserved: boolean;
   /** Distinct non-zero daemon exits seen in the window (KeepAlive restart-storm). */
   crashCount: number;
-  /** Which boot-progress rows appeared after the kickstart instant, in {@link BOOT_PROGRESS_STEPS}
-   *  order — recorded on the verdict row. Optional: a fake that omits it reads as none seen. */
+  /** Boot-progress rows seen after the kickstart, for the verdict row. Omitted ⇒ none seen. */
   rowsSeen?: BootProgressStep[];
 }
 
@@ -2260,8 +2257,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       let waited = 0;
       let boots = 0;
       let seen: BootProgressStep[] = [];
-      // W1-T5722: a boot OBSERVED in progress (paths/boot_held, no boot yet) earns the backstop
-      // window; once it boots, or with no progress row at all, the ordinary window applies.
+      // W1-T5722: a boot in progress with no boot yet earns the backstop; else the ordinary window.
       const limit = (): number =>
         boots === 0 && seen.length > 0 ? Math.max(windowMs, BOOT_IN_PROGRESS_WINDOW_MS) : windowMs;
       while (waited < limit()) {
