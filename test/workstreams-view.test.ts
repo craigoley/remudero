@@ -231,7 +231,7 @@ test("unit test: same-millisecond rows of different steps and repositories, appe
   assert.deepEqual(withoutProjectionTime(activity), withoutProjectionTime(route));
 });
 
-test("unit test: a same-millisecond tie a rotation splits, the retained row carried live and its partner archived, gives the workstreams view the route's body", async (t) => {
+test("unit test: a same-millisecond tie split by a rotation gives the workstreams view the route's body", async (t) => {
   const f = fixture(t);
   // The 2026-10-06 console shadow diffs: `sweep.repair_filing_suppressed` then `sweep.summary` at one
   // millisecond; the rotation at 10:06:52.919Z archived both and carried only the summary into the new live
