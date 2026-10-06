@@ -1,0 +1,32 @@
+- id: W1-T5951
+  title: "THE CODEQL-BLOCKER REPAIR RECORDS A DETACHED DISPATCH THAT FAILS — W1-T5932 made a detached fix dispatch that rejects before fix.dispatch write sweep.fix.dispatch_failed and stop deduping, but the CodeQL-blocker arm (src/lib/sweep.ts, CODEQL_BLOCKER_DISPATCH_STEP) still detaches dispatchFix through a bare detachSweepAction, so its rejection is swallowed and the codeql dedupe key holds the PR"
+  repo: remudero
+  depends_on: [W1-T5932]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # one concern — the CodeQL arm's detached rejection; same mechanism as W1-T5932
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
+  plan_refs: [W1-T5932, W1-T3980, W1-T5919]
+  files: [src/lib/sweep.ts, test/the-codeql-blocker-repair-records-a-detached-dispatch-that-fails.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5932 (#9442, merged): sweep.ts's CodeQL-blocker arm calls
+    detachSweepAction(codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), ...) and dedups on
+    its own CODEQL_BLOCKER_DISPATCH_STEP row with a dedupe_key written before dispatch. A rejection before
+    fix.dispatch is swallowed, so the key holds the PR exactly as stall #7b did. The detachedSweepActions
+    doc still says "A DETACHED REJECTION IS SWALLOWED ON PURPOSE", which W1-T5932 made untrue for fix
+    dispatches.
+  design: |
+    Route the CodeQL arm through W1-T5932's detachFixDispatch (or the same .catch row), and make the
+    codeql dedupe honour a later dispatch_failed row for that key, bounded by the same BACKSTOP family.
+    Correct the detachedSweepActions doc in the same change.
+  acceptance:
+    - claim: "a CodeQL-blocker repair whose detached dispatch rejects before fix.dispatch records a dispatch-failed row and is retried by the next pass up to the bound, while a dispatch that started still dedups on its codeql key"
+      proof: "unit test: test/the-codeql-blocker-repair-records-a-detached-dispatch-that-fails.test.ts"
+  falsifier: |
+    Keep the bare detachSweepAction: the rejection writes no row and the next pass dedups the PR.
