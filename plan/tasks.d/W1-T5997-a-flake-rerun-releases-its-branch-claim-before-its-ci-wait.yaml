@@ -1,0 +1,33 @@
+- id: W1-T5997
+  title: "A FLAKE RERUN RELEASES ITS BRANCH CLAIM BEFORE ITS CI WAIT — W1-T5955 made a fix round release its branch claim at fix.done so the CI wait holds none, but runFixRung's rerun-once (FLAKE) path calls waitForCiGreen before logFixDone, so a flake verification holds the claim through the whole CI wait (up to the 60-min ceiling) and every other fix round on that branch is declined as live_branch_claim meanwhile"
+  repo: remudero
+  depends_on: [W1-T5955]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — where the flake path's claim ends
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: follow-up dropped from W1-T5955's build"
+  plan_refs: [W1-T5955, W1-T5920]
+  files: [src/run-task.ts, test/a-flake-rerun-releases-its-branch-claim-before-its-ci-wait.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main (src/run-task.ts, runFixRung, `fixAction.kind === "rerun-once"`): after the
+    requeue loop, `await deps.waitForCiGreen(...)` runs and only then `logFixDone()`, which since W1-T5955
+    calls deps.branchClaim?.release(). The ordinary path releases at fix.done before its CI wait (W1-T5955's
+    comment: "the round ends here, so its branch claim does too; the CI wait holds none"). The flake path is
+    the one exit that still holds the claim across a CI wait, the exact shape that made #9450's sweep decline
+    three fix rounds (live_branch_claim) on 2026-10-06 03:31-03:46Z.
+  design: |
+    Release the branch claim once the requeues are posted (before waitForCiGreen), as the ordinary path does;
+    keep fix.done after the wait so its row still carries the flake verdict. A strike that must act after the
+    wait re-takes the claim as W1-T5955's re-take does.
+  acceptance:
+    - claim: "a flake rerun releases its branch claim before waiting on CI, so a sweep pass during that wait can claim the branch"
+      proof: "unit test: test/a-flake-rerun-releases-its-branch-claim-before-its-ci-wait.test.ts"
+  falsifier: |
+    Keep waitForCiGreen before the release: the claim is still held when the fake CI wait observes it, and the
+    test fails.

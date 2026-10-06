@@ -1,0 +1,33 @@
+- id: W1-T5999
+  title: "A FIX WORKER KILLED BY A SIGNAL IS NOT A COMMIT REFUSAL — when a codex fix worker is killed mid-run, its truncated report has no COMMIT_MESSAGE line and the round is recorded fix.commit_refused (\"no anchored COMMIT_MESSAGE line in the report\"), so two kills read as \"fix rounds refused twice at this head\" and the strike ladder closes the PR; W1-T2402 exempts a signal-terminated spawn only when dispatchFix's catch sees an exception, not when the worker returns a report"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — how a signal-killed fix worker's round is classified
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (#9528 closed after two orphan kills)"
+  plan_refs: [W1-T2402, W1-T4052, W1-T5998]
+  files: [src/run-task.ts, test/a-signal-terminated-fix-worker-is-not-a-commit-refusal.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: #9528 (W1-T5682) fix rounds at 09:50:21 and 10:02:19 each logged fix.dispatch,
+    fix.commit_refused "no anchored COMMIT_MESSAGE line in the report" and fix.done commit_refused within 7 s of
+    a worker_orphan_killed row for the same run (W1-T5998). The sweep then read "fix rounds refused twice at this
+    head" (src/lib/sweep.ts) and the strike ladder closed the PR at 10:11. MISSING_COMMIT_MESSAGE_REASON
+    (src/run-task.ts, harnessCommitForShellLessWorker) is reached because the codex runner returns the partial
+    report rather than throwing, so W1-T2402's signal check in dispatchFix's catch never sees it. W1-T5998 removes
+    this day's trigger; any other kill (a deploy, an OOM) still turns into a refusal.
+  design: |
+    Carry the worker's termination signal (or exit-by-signal flag) from the codex/claude runner result into the
+    fix round; a round whose worker ended by signal is logged with its own outcome (killed, naming the signal) and
+    is excluded from the repeated-refusal count, exactly as W1-T2402 treats a thrown signal termination.
+  acceptance:
+    - claim: "a fix round whose worker ended by a signal records a signal-terminated outcome and never counts toward the repeated-refusal ladder, while a worker that exits normally without a COMMIT_MESSAGE line is still a refusal"
+      proof: "unit test: test/a-signal-terminated-fix-worker-is-not-a-commit-refusal.test.ts"
+  falsifier: |
+    Classify by report text alone: a signal-killed worker's round is fix.commit_refused and the test fails.
