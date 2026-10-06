@@ -12,8 +12,17 @@
   plan_refs: [W1-T5900, W1-T5901, W1-T5903, W1-T5825, W1-T4780]
   files: [src/lib/flow-gardener.ts, src/lib/garden-registry.ts, test/the-flow-gardener-files-a-stage-that-slows-down.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
+  note: |
+    AMENDED 2026-10-06 (operator: "why is this all taking so long?"): raised to p1 with measured
+    baselines. Over 80 PRs merged 2026-10-04..05, open-to-merge was p50 38 min, p90 120 min for code and
+    p50 29 min for plan-only; pre-outage pull_request CI wall clock was p50 22 min (coverage shards 625-871 s
+    plus a serial 280 s V8 merge); review admission waited 40-49 min on #9364/#9372/#9373/#9375 (the light
+    bound reads 0 while the review width is busy); green-to-merge was near zero except plan PRs waiting for
+    a full sweep. Since W1-T5922 an arm row carries arm_surface (light|absent=full), and review admissions
+    carry surface: report both splits so each throughput fix (W1-T5922, W1-T5923, W1-T5925, W1-T5931) is
+    measured against these baselines, not assumed.
   rationale: |
     2026-10-05: the operator asked why PRs "still take a while". The answer needed a hand-built
     measurement over the day's 120 merged PRs: plan PRs median 25 / p90 93 min (10-36 min of it

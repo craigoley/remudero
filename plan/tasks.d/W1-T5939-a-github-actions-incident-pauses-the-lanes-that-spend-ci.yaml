@@ -1,0 +1,45 @@
+- id: W1-T5939
+  title: "A GITHUB ACTIONS INCIDENT PAUSES THE LANES THAT SPEND CI — during the 2026-10-05 outage (19:15-21:45Z, githubstatus Actions degraded then major_outage) jobs that never got a runner were cancelled after ~15 min, and the sweep treated every cancellation as a red to act on: 200 job-requeue 403s, paid fix workers dispatched for FLAKE verdicts, queue ejections, and four PRs that needed the operator; nothing in src reads GitHub's status, so the daemon fought an outage it could not fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — an observed Actions incident gates the CI-spending lanes; it sits in front of fix dispatch, requeue and escalation
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
+  plan_refs: [W1-T5920, W1-T5921, W1-T5909, W1-T1223, W1-T3194]
+  files: [src/lib/actions-incident.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/a-github-actions-incident-pauses-the-lanes-that-spend-ci.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05. githubstatus.com listed "Incident with Actions" from 19:15Z (degraded, then
+    major_outage at ~20:50Z, operational by ~21:55Z). Required checks that waited ~15 min for a runner
+    were cancelled; ci-gate timed out ("a NEW sha is the only remedy"); merge-queue groups were ejected
+    (#9391, #9392, #9388, #9390). The sweep acted on every one as an ordinary red: 200
+    sweep.check_requeue.error rows ("workflow run ... already running (HTTP 403)"), fix workers
+    dispatched that returned fix_outcome FLAKE (#9396, #9382, #9415), and strikes and escalations spent
+    on infrastructure. `grep -i githubstatus src` finds nothing: the daemon cannot tell an outage from a
+    broken PR.
+  design: |
+    (1) A small reader (src/lib/actions-incident.ts, exporting the pure `classifyActionsIncident(` that
+    the sweep calls) polls githubstatus.com's summary API on the
+    existing cadence (cached, at most once per few minutes) and reports the Actions component status and
+    any open incident naming Actions; unreadable is its own named state, never "operational". (2) While
+    Actions is degraded or in outage, the sweep does not spend a fix strike, dispatch a fix worker or
+    escalate for a red whose evidence is cancelled/never-started checks; it records one
+    `sweep.actions_incident_hold` row per PR and head, and keeps arming green PRs and posting reviews. A
+    red with real test-failure evidence is unaffected. (3) When Actions returns to operational, the held
+    PRs get one fresh requeue (or W1-T5921's new head when ci-gate timed out). Bound the hold with a
+    BACKSTOP (an incident longer than N hours escalates once) so a stuck status read cannot freeze the
+    fleet.
+  acceptance:
+    - claim: "while GitHub reports an Actions incident, a PR red only from cancelled or never-started checks is held without a fix dispatch, strike or escalation and is requeued once Actions is operational again, while a PR with real test-failure evidence is handled as before and an unreadable status is named and never read as operational"
+      proof: "unit test: test/a-github-actions-incident-pauses-the-lanes-that-spend-ci.test.ts"
+    - claim: "the sweep consults the Actions incident classifier before spending CI"
+      proof: "grep: classifyActionsIncident( in src/lib/sweep.ts"
+  falsifier: |
+    Ignore the incident reader: the cancelled-check PR gets a fix dispatch during the incident and the
+    test fails.
