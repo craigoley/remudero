@@ -2497,7 +2497,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
     // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
     // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
-    escalateCancelledCheck: (pr, check, reason) => {
+    escalateCancelledCheck: (pr, check, reason, kind = "cancelled-twice") => {
       tryEscalate(
         {
           class: "BLOCKED",
@@ -2505,7 +2505,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
-          summary: `required check "${check.name}" cancelled twice on the same head — ${pr.prUrl}`,
+          summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
           detail:
             `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
             `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
@@ -5953,6 +5953,13 @@ export const CHECK_REQUEUE_DEFERRED_STEP = "sweep.check_requeue.deferred";
 
 /** W1-T5920 — BACKSTOP: in-flight refusals of one (head, check) requeue before escalating once. */
 export const CHECK_REQUEUE_DEFERRAL_BACKSTOP = 5;
+
+/** W1-T5942 — why `escalateCancelledCheck` fired; its issue title names it. */
+export type CancelledCheckEscalationKind = "cancelled-twice" | "requeue-deferral-backstop";
+const CANCELLED_CHECK_ESCALATION_SUMMARY: Record<CancelledCheckEscalationKind, string> = {
+  "cancelled-twice": "cancelled twice on the same head",
+  "requeue-deferral-backstop": `requeue refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times while its run was in flight`,
+};
 
 export type JobRerunRefusal = "already_running" | "not_current_attempt";
 export type JobRequeueOutcome =
@@ -10362,7 +10369,8 @@ export interface SweepDeps {
    *  spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
    *  candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
    *  reach. */
-  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
+  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string,
+    kind?: CancelledCheckEscalationKind) => void | Promise<void>;
   /** W1-T3194 — a positively identified infrastructure failure could not safely receive its one
    * bounded job retry, or recurred after that retry. It never becomes a source-code worker strike. */
   escalateInfrastructureCheck?: (
@@ -14122,10 +14130,11 @@ export async function runSweep(
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
                     const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), ciGateRollup);
                     if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
-                    if (result.escalate && deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, result.escalate);
+                    if (result.escalate && deps.escalateCancelledCheck)
+                      await deps.escalateCancelledCheck(pr, check, result.escalate, "requeue-deferral-backstop");
                     outcomes.push(result.note ?? `re-queued "${check.name}"`);
                   } else {
-                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason);
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason, "cancelled-twice");
                     outcomes.push(`escalated "${check.name}" (${decision.reason})`);
                   }
                 }
