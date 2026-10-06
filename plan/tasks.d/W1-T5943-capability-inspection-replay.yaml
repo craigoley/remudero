@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   priority: 2.5
   budget_usd: 35.00
-  risk: medium
+  risk: high
   band_meaning: span
   origin: "operator approved Merge platform research follow-ups, 2026-10-05"
   plan_refs: [W1-T3880, W1-T3853, W1-T5882]
@@ -49,15 +49,17 @@
     second credential store, new ordinary-PR gate or automatic policy mutation.
   acceptance:
     - claim: "inspection and replay use the canonical verifier and preserve all store state"
-      proof: "unit test: capability inspection uses the real verifier without consuming a grant or resolving a secret"
+      proof: "unit test: test/capability-inspection.test.ts"
     - claim: "allow and refusal controls agree with actual verification at an explicit clock"
-      proof: "unit test: capability replay matches actual allow expiry revocation audience target operation nonce and use-limit decisions"
+      proof: "unit test: test/capability-inspection.test.ts"
     - claim: "unknown input is distinct from refusal and unverified context is not certified"
-      proof: "unit test: capability inspection distinguishes unavailable store and unchecked repository scope from verified authorization"
+      proof: "unit test: test/capability-inspection.test.ts"
     - claim: "output is bounded and does not echo sensitive or attacker-controlled payloads"
-      proof: "unit test: capability inspection bounds cases and redacts secret-bearing inputs and upstream failures"
+      proof: "unit test: test/capability-inspection.test.ts"
     - claim: "the real local command is read-only and never permits execution from a replay receipt"
-      proof: "unit test: capability inspection CLI never executes or promotes and execution reverifies after a changed snapshot"
+      proof: "unit test: test/capability-inspection.test.ts"
+    - claim: "the real command calls the inspection module, not a test-only implementation"
+      proof: "grep: inspectCapabilityDecision( in src/run-task.ts"
   falsifier: |
     Substitute a caller-provided grant for the stored grant, call record or resolveSecret during
     inspection, guess that repo/instance scope was checked, treat an unreadable store as empty,
