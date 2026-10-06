@@ -4,18 +4,20 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  decideDispatchClaim,
-  dispatchClaimRef,
-  gitClaimRunnerAsync,
-  gitDispatchClaimReserver,
-  gitDispatchClaimReserverAsync,
-  releaseDispatchClaim,
-  releaseDispatchClaimAsync,
-  type DispatchClaimReserverAsync,
-} from "../src/lib/dispatch-claim.js";
-import { assertClaimRefPushAllowedAsync, LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { dispatchClaimReserverAsyncFor, dispatchClaimReserverFor } from "../src/run-task.js";
+// Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
+// fails there on its own assertion rather than on a missing export.
+import * as claimLib from "../src/lib/dispatch-claim.js";
+import type { DispatchClaimReserverAsync } from "../src/lib/dispatch-claim.js";
+import * as guard from "../src/lib/live-write-guard.js";
+import * as runTaskMod from "../src/run-task.js";
+const { decideDispatchClaim, dispatchClaimRef, gitDispatchClaimReserver, releaseDispatchClaim } = claimLib;
+const { LiveWriteBlockedError, withLiveWritesAllowed } = guard;
+const { dispatchClaimReserverFor } = runTaskMod;
+const gitClaimRunnerAsync: typeof claimLib.gitClaimRunnerAsync = (...a) => claimLib.gitClaimRunnerAsync(...a);
+const gitDispatchClaimReserverAsync: typeof claimLib.gitDispatchClaimReserverAsync = (...a) => claimLib.gitDispatchClaimReserverAsync(...a);
+const releaseDispatchClaimAsync: typeof claimLib.releaseDispatchClaimAsync = (...a) => claimLib.releaseDispatchClaimAsync(...a);
+const assertClaimRefPushAllowedAsync: typeof guard.assertClaimRefPushAllowedAsync = (...a) => guard.assertClaimRefPushAllowedAsync(...a);
+const dispatchClaimReserverAsyncFor: typeof runTaskMod.dispatchClaimReserverAsyncFor = (...a) => runTaskMod.dispatchClaimReserverAsyncFor(...a);
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 // MEASURED 2026-10-06: runTask's dispatch claim ran `spawnSync` git inside the daemon process —
