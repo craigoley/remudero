@@ -24,7 +24,8 @@ import { promisify } from "node:util";
 import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
-import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
+import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+  type JobRequeueOutcome } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -10322,7 +10323,7 @@ export async function runFixRung(opts: {
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     readMainTip?: () => string | Promise<string>;
     reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
-    requeueCheck?: (failure: CiFailure) => boolean | Promise<boolean>;
+    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
     /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
@@ -12314,14 +12315,22 @@ export async function runFixRung(opts: {
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
+      let deferred = false;
       for (const failure of failures) {
         const key = `${priorHeadSha}@${failure.name}`;
         if (!priorHeadSha || !failure.jobId || spent.has(key)) { requeued = false; continue; }
         spent.add(key);
-        deps.log(CHECK_REQUEUE_STEP, { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId });
+        const row = { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId };
+        deps.log(CHECK_REQUEUE_STEP, row);
         try {
-          const queued = await (deps.requeueCheck ?? ((f) => requeueActionsJob(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure);
-          requeued = queued && requeued;
+          const queued = jobRequeueOutcome(await (deps.requeueCheck ??
+            ((f) => requeueActionsJobOutcome(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure));
+          requeued = queued.kind === "dispatched" && requeued;
+          // W1-T5920: refused while its run is in flight — unspent, and the sweep retries it.
+          if (queued.kind === "deferred") {
+            deferred = true;
+            deps.log(CHECK_REQUEUE_DEFERRED_STEP, { ...row, refusal: queued.refusal, outcome: "deferred", error: queued.error });
+          }
         } catch (error) {
           requeued = false;
           deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
@@ -12339,7 +12348,7 @@ export async function runFixRung(opts: {
         }
       }
       if (green) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "flake-confirmed" });
-      fixClaimFields.flake_claim = green ? "confirmed" : "refuted";
+      fixClaimFields.flake_claim = green ? "confirmed" : deferred ? "requeue_deferred" : "refuted";
       logFixDone();
       return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
         reason: green ? "flake-confirmed" : "flake claim refuted" };
@@ -34732,7 +34741,7 @@ export function requeueActionsJob(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = ghExec,
 ): boolean {
-  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec, "main.health.ci_requeue.error")).kind === "dispatched";
 }
 
 function* requeueActionsJobSteps(
@@ -34741,29 +34750,40 @@ function* requeueActionsJobSteps(
   failure: { name: string; jobId?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown,
-): Steps<boolean> {
-  if (!failure.jobId) return false;
+  errorStep: string,
+): Steps<JobRequeueOutcome> {
+  if (!failure.jobId) return { kind: "failed", error: "no resolvable Actions job id" };
   try {
     yield* step(() => exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]));
-    return true;
-  } catch (error) {
-    log("main.health.ci_requeue.error", {
-      check_name: failure.name,
-      job_id: failure.jobId,
-      error: String((error as Error)?.message ?? error),
-    });
-    return false;
+    return { kind: "dispatched" };
+  } catch (e) {
+    const error = String((e as Error)?.message ?? e);
+    log(errorStep, { check_name: failure.name, job_id: failure.jobId, error });
+    const refusal = jobRerunRefusal(error);
+    return refusal ? { kind: "deferred", refusal, error } : { kind: "failed", error };
   }
 }
 
-export function requeueActionsJobAsync(
+/** W1-T5920 — the fix rung's FLAKE rerun: the same POST, a typed outcome (an in-flight HTTP 403
+ *  is `deferred`), and its refusal logged under a fix-lane step, never the main-health one. */
+export function requeueActionsJobOutcome(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = ghExec,
+): JobRequeueOutcome {
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec, "fix.flake_requeue.error"));
+}
+
+export async function requeueActionsJobAsync(
   owner: string,
   repo: string,
   failure: { name: string; jobId?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = (args) => ghTextAsync(args),
 ): Promise<boolean> {
-  return runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+  return (await runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec, "main.health.ci_requeue.error"))).kind === "dispatched";
 }
 
 /**
