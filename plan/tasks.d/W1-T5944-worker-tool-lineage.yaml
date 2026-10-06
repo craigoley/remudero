@@ -22,6 +22,9 @@
     - test/worker-tool-lineage-wiring.test.ts
   status: queued
   attempts: 0
+  note: |
+    Retain the original operator reservation and branch; the refreshed filing preserves its ID.
+    reservation hand-off: codex/merge-tool-lineage-plan-oct5 -> codex/merge-lineage-current-v3-oct6
   rationale: |
     OBSERVED: W1-T4580 owns model-call assignment coverage. worker.ts already observes tool_use
     and tool_result blocks for liveness, but its tool-executing event retains a tool name and
