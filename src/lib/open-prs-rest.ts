@@ -1047,6 +1047,7 @@ export function hydrateCodeqlHeadAlerts(
   candidates: readonly { number: number; headSha: string }[],
   fetch: GhApiFetcher,
   cap: number = CODEQL_HEAD_ALERT_HYDRATION_CAP,
+  onUnreadable: (prNumber: number, reason: string) => void = () => {},
 ): Map<number, CodeqlHeadObservation> {
   const out = new Map<number, CodeqlHeadObservation>();
   for (const candidate of candidates.slice(0, cap)) {
@@ -1054,7 +1055,8 @@ export function hydrateCodeqlHeadAlerts(
     try {
       listing = fetch(codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
     } catch (error) {
-      void error; // unobserved, so untouched
+      const reason = String((error as Error)?.message ?? error);
+      onUnreadable(candidate.number, reason);
       continue;
     }
     const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);

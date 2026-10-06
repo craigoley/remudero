@@ -11055,7 +11055,7 @@ async function codeScanningGateForHead(
   try {
     judge(pr, alerts).then(settle, threw);
   } catch (error) {
-    threw(error);
+    threw(error); // ruled unavailable and ledgered, exactly as a rejection is
   }
   await new Promise<void>((resolve) => setImmediate(resolve));
   if (settled === undefined) {
