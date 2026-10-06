@@ -225,7 +225,7 @@ function cancelledCheckRoutes(): GhShimRoute[] {
   const json = (value: unknown) => JSON.stringify(value);
   return [
     { when: "required_status_checks", stdout: json({ contexts: ["ci-gate", "remudero-review"] }) },
-    { when: "pulls?state=open", stdout: json([{ ...PR, body: "Remudero-Task: W1-T4053", updated_at: "2026-09-22T12:00:00Z", head: HEAD, auto_merge: null }]) },
+    { when: "pulls?state=open", stdout: json([{ ...PR, body: "Remudero-Task: W1-T4053", updated_at: new Date(Date.now() - 60_000).toISOString(), head: HEAD, auto_merge: null }]) },
     { when: "/pulls/4053/files", stdout: "[]" },
     { when: "/pulls/4053", stdout: json({ ...PR, merged_at: null, head: HEAD }) },
     {
