@@ -364,10 +364,13 @@ export interface MachineFilingAdmissionContext {
 
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
+/** W1-T5995: machine filers whose remedy shards name owning code plus the regression test their build writes. */
+const REMEDY_PROPOSAL_ORIGINS = ["ci-friction:", "flow-blocker:"] as const;
+
 function isCiFrictionRemedyProposal(task: Task): boolean {
   const files = task.files ?? [];
   return (
-    task.origin?.startsWith("ci-friction:") === true &&
+    REMEDY_PROPOSAL_ORIGINS.some((origin) => task.origin?.startsWith(origin) === true) &&
     files.some((f) => /^(src|scripts)\//.test(f)) &&
     files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
   );

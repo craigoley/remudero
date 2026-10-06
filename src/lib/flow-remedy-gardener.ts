@@ -10,7 +10,7 @@ import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type Garden
 import { ghExec } from "./github-transport.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml } from "./plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
 import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -318,6 +318,10 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
       const contents = sources.draftShard ? sources.draftShard(action, id) : draftShard(action, id, search);
       const verdict = ciFrictionRecordVerdict(contents, `flow:${id}`);
       if (!verdict.ok) throw new Error(`flow gardener: drafted record failed lint (${verdict.reason})`);
+      // W1-T5995: CI lints a machine filing with admission; check it here so a refusal never opens a red PR (#9505).
+      const drafted = loadPlanFromYaml(contents, `flow:${id}`);
+      const refused = machineFilingAdmissionViolations(drafted.tasks[0]!, { plan: drafted, releasedIds: new Set(), pathExists: search.fileExists });
+      if (refused.length) throw new Error(`flow gardener: drafted record refused (machine-filing-admission: ${refused.join("; ")})`);
       const dir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const path = join(dir, `${id}-flow-${slug(action.price.key, 80)}.yaml`);
       mkdirSync(dir, { recursive: true }); writeFileSync(path, contents);
