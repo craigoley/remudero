@@ -507,10 +507,10 @@ export async function checkServiceFreshnessAsync(
   return assessFetchedService(repoDir, serviceGit(repoDir, deps));
 }
 
+const DAEMON_POLL_INTERVAL_MS = 60_000;
 /** W1-T6033 BACKSTOP: the oldest origin/main update that may stand in for two stalled fetches. Derived from the
  *  daemon's freshness cadence: a healthy view is at most one poll interval (DEFAULT_POLL_INTERVAL_MS, inlined to keep
  *  the baked closure; the test pins parity) plus one fetch bound old, and this check has spent two more bounds. */
-const DAEMON_POLL_INTERVAL_MS = 60_000;
 export const RECENT_FETCH_MAX_AGE_MS = DAEMON_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS;
 
 function isStalledHandshake(error: unknown): boolean {
