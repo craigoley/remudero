@@ -16,15 +16,17 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
-import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
+import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
-import { sreLaneOffPath } from "./sre-lane.js";
+import { runSreLanePass, sreLaneOffPath, type SreLaneInput } from "./sre-lane.js";
 import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
-import type { GardenerDeps } from "./gardener.js";
-import { startKnowledgeGardener, type GardenWorkspace } from "./knowledge-gardener.js";
+import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
+import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
+
+
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -142,10 +144,34 @@ type HarnessCommitRefusalResult = RunResult & {
   harnessCommitRefusalReason?: string;
 };
 
+/** Await the daemon's merge-rate read before handing the SRE lane its synchronous input. */
+export function startDaemonSreLane(
+  input: (mergedLastDay: number) => SreLaneInput,
+  mergedLastDay: () => Promise<number>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (intervalMs: number) => { stop: () => void; settled: () => Promise<void> } {
+  return (intervalMs) => {
+    let inFlight: Promise<void> | undefined;
+    const tick = () => {
+      if (inFlight) return;
+      inFlight = Promise.resolve().then(mergedLastDay)
+        .then((rate) => runSreLanePass(input(rate)))
+        .then(() => undefined)
+        .catch((error: unknown) => log("sre_lane.failed", { error: String((error as Error)?.message ?? error) }))
+        .finally(() => { inFlight = undefined; });
+    };
+    tick();
+    const timer = setInterval(tick, intervalMs);
+    timer.unref?.();
+    return { stop: () => clearInterval(timer), settled: async () => inFlight };
+  };
+}
+
 /** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
  * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
+
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure" | "idle_starved";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
@@ -1117,7 +1143,7 @@ export interface DaemonDeps {
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
-  fleetLane?: FleetLaneDeps;
+  fleetLane?: FleetLaneDeps<number | Promise<number>>;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
    *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
    *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
@@ -1125,7 +1151,7 @@ export interface DaemonDeps {
   sreGovernor?: SreGovernorEnforcer;
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
-  knowledgeGardener?: GardenerDeps<GardenWorkspace>;
+  knowledgeGardener?: GardenerDeps<GardenWorkspace, PrState | Promise<PrState>>;
   /** W1-T4110/W1-T4941: registered gardens, including the backlog gardener, start off the loop
    * through `rmd garden run <name>` on independent timers. */
   gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;
@@ -2900,7 +2926,7 @@ export async function runDaemon(
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
   const fleetLaneDeps = deps.fleetLane;
-  const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLane(fleetLaneDeps), pollIntervalMs, log) : undefined;
+  const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLaneAsync(fleetLaneDeps), pollIntervalMs, log) : undefined;
   // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
   const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
@@ -2959,7 +2985,7 @@ export async function runDaemon(
   const deferBootCadence = (cadence: string): void =>
     log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
   const gardens = [
-    ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
+    ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
   gardenerRef.stop = () => gardens.forEach((g) => g.stop());
@@ -4215,7 +4241,7 @@ export async function runDaemon(
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
             try {
-              const outcomes = reconcileOpportunityOutcomes(deps.opportunityOutcomes ?? productionOpportunityOutcomePorts(deps.knowledgeGardener!));
+              const outcomes = reconcileOpportunityOutcomes(deps.opportunityOutcomes ?? productionOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
               log("opportunity_outcomes.reconciled", { outcomes });
             } catch (error) {
               log("opportunity_outcomes.failed", { reason: String(error) });
@@ -4223,7 +4249,7 @@ export async function runDaemon(
           }
           if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
             try {
-              const result = await runOpportunityIntake(deps.opportunityIntake ?? await openOpportunityIntakePorts(deps.knowledgeGardener!));
+              const result = await runOpportunityIntake(deps.opportunityIntake ?? await openOpportunityIntakePorts({ ...deps.knowledgeGardener!, prState: undefined }));
               log("opportunity_intake.ran", { ...result, rung: decision.rung });
             } catch (error) {
               log("opportunity_intake.failed", { reason: String(error) });
