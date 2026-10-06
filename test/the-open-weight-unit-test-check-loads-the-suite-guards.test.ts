@@ -12,7 +12,11 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { OPENWEIGHT_CHECKS, TEST_PROCESS_GUARD_IMPORTS } from "../src/lib/worker-provider.js";
+// A NAMESPACE import, so the file still LOADS on a tree without the shared constant and fails by
+// assertion there: a load error would read as an environment gap, not a red.
+import * as workerProvider from "../src/lib/worker-provider.js";
+
+const { OPENWEIGHT_CHECKS } = workerProvider;
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -41,8 +45,9 @@ test("the open-weight unit_test check loads every import the test:ci script load
   assert.deepEqual(scriptImports("test"), ci, "test and test:ci must load the same setup chain");
 
   assert.deepEqual(importsOf(OPENWEIGHT_CHECKS["unit_test"]!), ci);
-  assert.deepEqual(importsOf(TEST_PROCESS_GUARD_IMPORTS), ci);
-  assert.equal(TEST_PROCESS_GUARD_IMPORTS.length, 2 * ci.length, "the shared chain carries only --import pairs");
+  const shared = (workerProvider as { TEST_PROCESS_GUARD_IMPORTS?: readonly string[] }).TEST_PROCESS_GUARD_IMPORTS ?? [];
+  assert.deepEqual(importsOf(shared), ci);
+  assert.equal(shared.length, 2 * ci.length, "the shared chain carries only --import pairs");
 });
 
 test("every relative import the open-weight unit_test check loads resolves from the worktree root", () => {
