@@ -732,40 +732,23 @@ export async function readMergeQueueMembership(
   }
 }
 
-/** W1-T5911 — one arm or enqueue on a PR's timeline; `fleet` is whether the fleet's own login did it. */
+/** W1-T5911 — one arm or enqueue on a PR's timeline, by the login GraphQL names as its actor. */
 export interface ArmTimelineEvent {
   kind: "AutoMergeEnabledEvent" | "AddedToMergeQueueEvent";
   actor: string;
   at: string;
-  fleet: boolean;
 }
-export type ArmTimeline = { fleetLogin: string; events: ArmTimelineEvent[] } | { unreadable: true; reason: string };
+export type ArmTimeline = { events: ArmTimelineEvent[] } | { unreadable: true; reason: string };
 
-const VIEWER_LOGIN_QUERY = "query{viewer{login}}";
 const PR_ARM_EVENTS_QUERY =
   "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){" +
   "timelineItems(last:100,itemTypes:[AUTO_MERGE_ENABLED_EVENT,ADDED_TO_MERGE_QUEUE_EVENT]){nodes{__typename " +
   "...on AutoMergeEnabledEvent{createdAt actor{login}} ...on AddedToMergeQueueEvent{createdAt actor{login}}}}}}}";
 
-/** GraphQL spells the App `remudero-fleet`, REST `remudero-fleet[bot]`, `gh` `app/remudero-fleet`. */
-const loginKey = (login: string) => login.replace(/^app\//, "").replace(/\[bot\]$/, "").toLowerCase();
-
-/** W1-T5911 — the PR's arms and enqueues, each told apart from the fleet's own by the login this
- *  token resolves to (never a hard-coded name). Either read failing is unreadable, naming which. */
+/** W1-T5911 — the PR's arms and enqueues. A failed or malformed read is unreadable, never "none". */
 export async function readArmTimeline(prUrl: string, read: (args: string[]) => unknown): Promise<ArmTimeline> {
   const target = parsePrUrl(prUrl);
   if (!target) return { unreadable: true, reason: `cannot resolve owner/repo/number from ${prUrl}` };
-  let fleetLogin: unknown;
-  try {
-    const answer = (await read(["api", "graphql", "-f", `query=${VIEWER_LOGIN_QUERY}`])) as
-      { data?: { viewer?: { login?: unknown } | null } } | undefined;
-    fleetLogin = answer?.data?.viewer?.login;
-  } catch (e) {
-    return { unreadable: true, reason: `fleet login unreadable: ${String((e as Error)?.message ?? e)}` };
-  }
-  if (typeof fleetLogin !== "string" || !fleetLogin) {
-    return { unreadable: true, reason: "fleet login unreadable: the GraphQL answer carried no viewer login" };
-  }
   let nodes: unknown;
   try {
     const answer = (await read(["api", "graphql", "-f", `query=${PR_ARM_EVENTS_QUERY}`,
@@ -776,7 +759,6 @@ export async function readArmTimeline(prUrl: string, read: (args: string[]) => u
     return { unreadable: true, reason: `timeline unreadable: ${String((e as Error)?.message ?? e)}` };
   }
   if (!Array.isArray(nodes)) return { unreadable: true, reason: "timeline unreadable: the GraphQL answer carried no timelineItems nodes" };
-  const fleet = loginKey(fleetLogin);
   const events: ArmTimelineEvent[] = [];
   for (const node of nodes as Array<{ __typename?: unknown; createdAt?: unknown; actor?: { login?: unknown } | null } | null>) {
     const kind = node?.__typename;
@@ -784,9 +766,9 @@ export async function readArmTimeline(prUrl: string, read: (args: string[]) => u
     // An actorless event (a deleted account) cannot be attributed, so it releases nothing.
     if ((kind !== "AutoMergeEnabledEvent" && kind !== "AddedToMergeQueueEvent") || typeof actor !== "string" ||
         typeof node?.createdAt !== "string") continue;
-    events.push({ kind, actor, at: node.createdAt, fleet: loginKey(actor) === fleet });
+    events.push({ kind, actor, at: node.createdAt });
   }
-  return { fleetLogin, events };
+  return { events };
 }
 
 /** W1-T4405 — GitHub's refusal when the PR is ALREADY in the queue: it is armed, not stuck. */

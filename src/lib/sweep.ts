@@ -4114,10 +4114,10 @@ async function handArmAfterEscalation(deps: SweepDeps, lines: ReadonlyArray<Reco
     timeline = { unreadable: true, reason: String((e as Error)?.message ?? e) };
   }
   if ("unreadable" in timeline) return { stands: timeline.reason };
-  const hand = timeline.events.find((event) => !event.fleet && Date.parse(event.at) > escalatedAt);
+  const hand = timeline.events.find((event) => !isFleetAppAuthor(event.actor) && Date.parse(event.at) > escalatedAt);
   return hand
     ? { by: hand.actor, reason: `${hand.kind} by ${hand.actor} at ${hand.at}, after the risk judge escalated this head at ${since}` }
-    : { stands: `no arm or enqueue by anyone but ${timeline.fleetLogin} after the escalation at ${since}` };
+    : { stands: `no arm or enqueue by anyone but the fleet App after the escalation at ${since}` };
 }
 
 async function observedQueueMembership(deps: SweepDeps, pr: OpenPrView): Promise<MergeQueueMembership | undefined> {
@@ -7105,9 +7105,10 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
-/** The fleet App, as REST (`remudero-fleet[bot]`) and `gh` (`app/remudero-fleet`) spell it. */
+/** The fleet App, as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL timeline
+ *  actors (`remudero-fleet`, W1-T5911) spell it. */
 export function isFleetAppAuthor(login: string | undefined): boolean {
-  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet";
+  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet" || login === "remudero-fleet";
 }
 
 export interface PlanRepairFacts {

@@ -10,6 +10,7 @@ import type { Config } from "../src/lib/config.js";
 import { readArmTimeline, type ArmReprobeFacts, type ArmTimeline, type ArmTimelineEvent } from "../src/lib/arm-auto-merge.js";
 import {
   buildSweepEffects,
+  isFleetAppAuthor,
   RISK_OVERRIDE_OBSERVED_STEP,
   runSweep,
   type OpenPrView,
@@ -50,11 +51,11 @@ function priorSweepArm(ledgerPath: string): void {
     pr_url: PR_URL, disposition: "mergeable", acted: true, arm_outcome: "armed", head_sha: HEAD });
 }
 
-const fleetEnqueue: ArmTimelineEvent = { kind: "AddedToMergeQueueEvent", actor: "remudero-fleet", at: "2026-10-05T19:30:12Z", fleet: true };
-const operatorEnqueue: ArmTimelineEvent = { kind: "AddedToMergeQueueEvent", actor: "cao825", at: "2026-10-05T19:52:27Z", fleet: false };
+const fleetEnqueue: ArmTimelineEvent = { kind: "AddedToMergeQueueEvent", actor: "remudero-fleet", at: "2026-10-05T19:30:12Z" };
+const operatorEnqueue: ArmTimelineEvent = { kind: "AddedToMergeQueueEvent", actor: "cao825", at: "2026-10-05T19:52:27Z" };
 
 function timeline(...events: ArmTimelineEvent[]): ArmTimeline {
-  return { fleetLogin: "remudero-fleet", events };
+  return { events };
 }
 
 function harness(t: TestContext, read: () => ArmTimeline | Promise<ArmTimeline>) {
@@ -102,7 +103,7 @@ test("W1-T5911: an operator's enqueue after the escalation is recorded once as a
 });
 
 test("W1-T5911: a hand arm (AutoMergeEnabledEvent) releases the head with the merge queue off", async (t) => {
-  const h = harness(t, () => timeline({ kind: "AutoMergeEnabledEvent", actor: "cao825", at: "2026-10-05T20:01:00Z", fleet: false }));
+  const h = harness(t, () => timeline({ kind: "AutoMergeEnabledEvent", actor: "cao825", at: "2026-10-05T20:01:00Z" }));
   escalated(h.ledgerPath);
   await h.pass();
   assert.deepEqual(h.arms, [HEAD]);
@@ -117,7 +118,22 @@ test("W1-T5911: a fleet-actor event after the escalation leaves the refusal stan
   assert.equal(h.rows(RISK_OVERRIDE_OBSERVED_STEP).length, 0);
   assert.equal(h.lastDisposed().acted, false);
   assert.equal(h.lastDisposed().stand_down_reason,
-    `${REFUSED}; no hand arm taken: no arm or enqueue by anyone but remudero-fleet after the escalation at ${ESCALATED_AT}`);
+    `${REFUSED}; no hand arm taken: no arm or enqueue by anyone but the fleet App after the escalation at ${ESCALATED_AT}`);
+});
+
+test("W1-T5911: all three fleet spellings are the fleet — none releases the head", async (t) => {
+  for (const actor of ["remudero-fleet", "remudero-fleet[bot]", "app/remudero-fleet"]) {
+    await t.test(actor, async (st) => {
+      assert.equal(isFleetAppAuthor(actor), true);
+      const h = harness(st, () => timeline({ kind: "AutoMergeEnabledEvent", actor, at: "2026-10-05T19:50:00Z" }));
+      escalated(h.ledgerPath);
+      await h.pass();
+      assert.deepEqual(h.arms, []);
+      assert.equal(h.rows(RISK_OVERRIDE_OBSERVED_STEP).length, 0);
+      assert.match(String(h.lastDisposed().stand_down_reason), /no arm or enqueue by anyone but the fleet App/);
+    });
+  }
+  assert.equal(isFleetAppAuthor("cao825"), false);
 });
 
 test("W1-T5911: an operator event before the escalation leaves the refusal standing", async (t) => {
@@ -126,7 +142,7 @@ test("W1-T5911: an operator event before the escalation leaves the refusal stand
   await h.pass();
   assert.deepEqual(h.arms, []);
   assert.equal(h.rows(RISK_OVERRIDE_OBSERVED_STEP).length, 0);
-  assert.match(String(h.lastDisposed().stand_down_reason), /no arm or enqueue by anyone but remudero-fleet after the escalation/);
+  assert.match(String(h.lastDisposed().stand_down_reason), /no arm or enqueue by anyone but the fleet App after the escalation/);
 });
 
 test("W1-T5911: the override binds its head only — a new escalated head stays refused", async (t) => {
@@ -141,17 +157,14 @@ test("W1-T5911: the override binds its head only — a new escalated head stays 
   assert.match(String(h.lastDisposed().stand_down_reason), /^risk judge escalated this head, no operator override recorded/);
 });
 
-test("W1-T5911: an unreadable timeline or fleet login leaves the refusal standing with the read's reason", async (t) => {
-  for (const reason of ["timeline unreadable: HTTP 502", "fleet login unreadable: the GraphQL answer carried no viewer login"]) {
-    await t.test(reason, async (st) => {
-      const h = harness(st, () => ({ unreadable: true, reason }));
-      escalated(h.ledgerPath);
-      await h.pass();
-      assert.deepEqual(h.arms, []);
-      assert.equal(h.rows(RISK_OVERRIDE_OBSERVED_STEP).length, 0);
-      assert.equal(h.lastDisposed().stand_down_reason, `${REFUSED}; no hand arm taken: ${reason}`);
-    });
-  }
+test("W1-T5911: an unreadable timeline leaves the refusal standing with the read's reason", async (t) => {
+  const reason = "timeline unreadable: HTTP 502";
+  const h = harness(t, () => ({ unreadable: true, reason }));
+  escalated(h.ledgerPath);
+  await h.pass();
+  assert.deepEqual(h.arms, []);
+  assert.equal(h.rows(RISK_OVERRIDE_OBSERVED_STEP).length, 0);
+  assert.equal(h.lastDisposed().stand_down_reason, `${REFUSED}; no hand arm taken: ${reason}`);
 });
 
 test("W1-T5911: a timeline read that throws is unreadable, never a release", async (t) => {
@@ -256,7 +269,6 @@ function realEffects(t: TestContext, routes: Array<{ when: string; stdout?: stri
   return { effects, shim };
 }
 
-const VIEWER = { when: "viewer", stdout: '{"data":{"viewer":{"login":"remudero-fleet[bot]"}}}' };
 const TIMELINE_NODES = JSON.stringify({ data: { repository: { pullRequest: { timelineItems: { nodes: [
   { __typename: "AutoMergeEnabledEvent", createdAt: "2026-10-05T19:24:00Z", actor: { login: "remudero-fleet" } },
   { __typename: "AddedToMergeQueueEvent", createdAt: "2026-10-05T19:30:12Z", actor: { login: "remudero-fleet" } },
@@ -265,15 +277,16 @@ const TIMELINE_NODES = JSON.stringify({ data: { repository: { pullRequest: { tim
   { __typename: "SomethingElse", createdAt: "2026-10-05T20:01:00Z", actor: { login: "cao825" } },
 ] } } } } });
 
-test("W1-T5911: the real read resolves the fleet login and classifies each arm and enqueue by actor", async (t) => {
-  const { effects, shim } = realEffects(t, [{ when: "timelineItems", stdout: TIMELINE_NODES }, VIEWER]);
+test("W1-T5911: the real read asks only the timeline and returns each attributable arm and enqueue", async (t) => {
+  const { effects, shim } = realEffects(t, [{ when: "timelineItems", stdout: TIMELINE_NODES }]);
   const read = await effects.readArmTimeline!(pr());
-  assert.deepEqual(read, { fleetLogin: "remudero-fleet[bot]", events: [
-    { kind: "AutoMergeEnabledEvent", actor: "remudero-fleet", at: "2026-10-05T19:24:00Z", fleet: true },
-    { kind: "AddedToMergeQueueEvent", actor: "remudero-fleet", at: "2026-10-05T19:30:12Z", fleet: true },
-    { kind: "AddedToMergeQueueEvent", actor: "cao825", at: "2026-10-05T19:52:27Z", fleet: false },
+  assert.deepEqual(read, { events: [
+    { kind: "AutoMergeEnabledEvent", actor: "remudero-fleet", at: "2026-10-05T19:24:00Z" },
+    { kind: "AddedToMergeQueueEvent", actor: "remudero-fleet", at: "2026-10-05T19:30:12Z" },
+    { kind: "AddedToMergeQueueEvent", actor: "cao825", at: "2026-10-05T19:52:27Z" },
   ] });
-  const call = shim.calls().find((c) => c.includes("timelineItems"))!;
+  assert.equal(shim.calls().length, 1, "one GraphQL read, no identity lookup");
+  const call = shim.calls()[0];
   assert.match(call, /AUTO_MERGE_ENABLED_EVENT/);
   assert.match(call, /ADDED_TO_MERGE_QUEUE_EVENT/);
   assert.match(call, /number=9391/);
@@ -281,13 +294,10 @@ test("W1-T5911: the real read resolves the fleet login and classifies each arm a
   assert.match(call, /name=remudero/);
 });
 
-test("W1-T5911: the real read is unreadable, naming which half, for a failed or empty login or timeline", async (t) => {
+test("W1-T5911: the real read is unreadable for a failed gh or a timeline-less answer", async (t) => {
   const cases: Array<[string, Array<{ when: string; stdout?: string; exit?: number; stderr?: string }>, RegExp]> = [
-    ["login gh fails", [{ when: "viewer", exit: 1, stderr: "HTTP 403" }], /^fleet login unreadable: /],
-    ["login missing", [{ when: "viewer", stdout: '{"data":{"viewer":null}}' }],
-      /^fleet login unreadable: the GraphQL answer carried no viewer login$/],
-    ["timeline gh fails", [{ when: "timelineItems", exit: 1, stderr: "HTTP 502" }, VIEWER], /^timeline unreadable: /],
-    ["timeline missing", [{ when: "timelineItems", stdout: '{"data":{"repository":{"pullRequest":null}}}' }, VIEWER],
+    ["timeline gh fails", [{ when: "timelineItems", exit: 1, stderr: "HTTP 502" }], /^timeline unreadable: /],
+    ["timeline missing", [{ when: "timelineItems", stdout: '{"data":{"repository":{"pullRequest":null}}}' }],
       /^timeline unreadable: the GraphQL answer carried no timelineItems nodes$/],
   ];
   for (const [name, routes, reason] of cases) {
