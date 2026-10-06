@@ -1,0 +1,27 @@
+- id: W1-T5949
+  title: "THE UPDATE-BRANCH HEAD-MOVED AND UP-TO-DATE ROWS SURVIVE ROTATION — W1-T5933 added sweep.update_branch.head-moved and .up-to-date outcomes beside .conflict and .error, but neither is in DECISION_RELEVANT_LEDGER_STEPS or in run-task.ts's sweepUpdatedHeadsForTask, where the conflict and error siblings are kept as evidence, so a rotation can drop the only record of why a refresh stood down"
+  repo: remudero
+  depends_on: [W1-T5933]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: span — retention of two outcome rows
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
+  plan_refs: [W1-T5933, W1-T5935]
+  files: [src/lib/ledger.ts, src/run-task.ts, test/the-update-branch-head-moved-and-up-to-date-rows-survive-rotation.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5933 (#9447, merged): the new outcome steps are written but not
+    retained, unlike their conflict/error siblings.
+  design: |
+    Register both steps in DECISION_RELEVANT_LEDGER_STEPS and treat them as evidence in
+    sweepUpdatedHeadsForTask exactly as the conflict/error rows are.
+  acceptance:
+    - claim: "sweep.update_branch.head-moved and .up-to-date rows survive ledger rotation and are read as evidence where the conflict and error rows are"
+      proof: "unit test: test/the-update-branch-head-moved-and-up-to-date-rows-survive-rotation.test.ts"
+  falsifier: |
+    Leave the steps unregistered: after a rotation the rows are gone and the test fails.
