@@ -34038,6 +34038,8 @@ async function drainCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        checkQuietHours: () =>
+          isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
