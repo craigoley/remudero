@@ -64,8 +64,10 @@ test("a closed verify-human task leaves a history item, not a new decision", () 
   const c = classifyProposal(proposal("verify-human:W1-T1041"), undefined, ctxWith(plan, []));
   assert.equal(c.state, "retired");
   assert.match(c.retiredReason ?? "", /explicitly closed in the plan/);
-  assert.notEqual(classifyProposal(proposal("proof-debt:W1-T1041:0"), undefined, ctxWith(plan, [])).state, "retired",
-    "a closed implementation does not automatically erase a different finding");
+  // W1-T5652: an explicit task retirement resolves every task-referent ask on it, proof-debt included.
+  assert.equal(classifyProposal(proposal("proof-debt:W1-T1041:0"), undefined, ctxWith(plan, [])).state, "retired");
+  assert.notEqual(classifyProposal(proposal("proof-debt:W1-T1042:0"), undefined, ctxWith(plan, [])).state, "retired",
+    "a retirement on one task does not erase another task's finding");
 });
 
 test("a merely blocked or absent verify-human task is not silently retired", () => {

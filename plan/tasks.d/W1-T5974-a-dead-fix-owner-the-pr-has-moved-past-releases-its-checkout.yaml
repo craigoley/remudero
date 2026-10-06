@@ -1,0 +1,40 @@
+- id: W1-T5974
+  title: "A DEAD FIX OWNER THE PR HAS MOVED PAST RELEASES ITS CHECKOUT — a fix worker killed by a daemon restart left a staged-only edit in its sweep worktree at the PR's OLD head; W1-T5918's residue reader refuses a staged-only residue (owner_dirty_staged_only_refused), so every later fix round on fleet #9471 is declined against that dead worktree even after the sweep moved the PR to a new head, and the PR sits red with no fix lane"
+  repo: remudero
+  depends_on: [W1-T5918]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — whether a dead owner's residue on a superseded head may be preserved and reclaimed
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: fleet #9471 (W1-T5633) red with its fix lane declined"
+  plan_refs: [W1-T5918, W1-T5919, W1-T3822]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-dead-fix-owner-the-pr-has-moved-past-releases-its-checkout.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only). Fleet #9471 (task W1-T5633, branch run-W1-T5633-1791259610820): a fix
+    round's worktree /home/node/Remudero/worktrees/sweep-W1-T5633-1791263072316 (created 05:04Z) was at head
+    45736389 when the daemon restarted four times between 05:42 and 05:52Z (daemon.boot rows; baked-path merges).
+    At 05:37:22 the sweep, declined by that live claim, ran update_branch and moved the PR to dae02e24. dae02e24's
+    coverage-ratchet failed at 06:02 (diff-coverage: ~30 uncovered added lines), and at 06:07:15 the fix round was
+    declined: sweep.fix.checkout_claim_declined reason registered_worktree_owner, owner_recovery_reason
+    owner_dirty_staged_only_refused, local_sha_prefix 45736389808d, staged_paths
+    [test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts]. readFixOwnerResidue (run-task.ts) sets
+    that refusal whenever no operation marker is present and the index differs from HEAD, and runSweep returns
+    without dispatching, so every later pass declines the same way: the fix lane is permanently blocked until a
+    human clears a container worktree.
+  design: |
+    When the dead owner's residue is staged-only AND its HEAD is no longer the PR's head (the PR has moved past
+    it, i.e. the owner's work is superseded), preserve the staged diff the way a tracked-dirty patch is preserved
+    (`git diff --cached --binary <localSha>`), record where, then reset and reclaim the worktree. A staged-only
+    residue on the PR's CURRENT head keeps W1-T5918's refusal (it may be real unfinished work), and that refusal
+    then raises one escalation naming the worktree and paths instead of declining silently on every pass.
+  acceptance:
+    - claim: "a dead fix owner whose staged-only residue sits on a head the PR has moved past is preserved and reclaimed so the fix round proceeds, while one on the PR's current head is still refused and escalated once"
+      proof: "unit test: test/a-dead-fix-owner-the-pr-has-moved-past-releases-its-checkout.test.ts"
+  falsifier: |
+    Keep the unconditional staged-only refusal: the #9471 shape (owner at 45736389, PR at dae02e24) is declined
+    again and the test fails.

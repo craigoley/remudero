@@ -701,8 +701,23 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
+  "fix.exhausted", // W1-T5966: with fix.done/resolved, status.ts FIX_LANE_TERMINAL_STEPS ends a fix.dispatch
+  "fix.stood_down", // round on these; lost, a finished round reads in flight. autonomy.ts strikeCount reads
+  "fix.superseded", // fix.exhausted beside fix.resolved, and a fix.stood_down's issue_url as human evidence.
+  "fix.superseded_unknown",
+  "fix.spawn_abandoned",
+  "sweep.fix.error", // the same round's crashed-spawn outcome, with its cost.
+  "fix.base_refreshed", // ci-friction-gardener prices a round by it (CI_FRICTION_LEDGER_STEPS).
   "sweep.check_requeued", // W1-T5935: requeuedCheckKeysFromLedger (sweep.ts) bounds one requeue per head and check.
   "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
+  "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
+  "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
+  "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
+  "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
+  "plan_repair.dispatch", // priorPlanRepairStrikesFromLedger: lost, the plan-repair strike budget resets.
+  "sweep.missing_task_trailer_repaired", // priorActionsFromLedger: one body edit per PR, head and task.
+  "sweep.codeql_blocker.dispatch", // codeqlBlockerDispatched: one CodeQL repair per PR, head and alert.
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",

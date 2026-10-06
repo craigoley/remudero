@@ -2497,7 +2497,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
     // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
     // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
-    escalateCancelledCheck: (pr, check, reason) => {
+    escalateCancelledCheck: (pr, check, reason, kind = "cancelled-twice") => {
       tryEscalate(
         {
           class: "BLOCKED",
@@ -2505,7 +2505,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
-          summary: `required check "${check.name}" cancelled twice on the same head — ${pr.prUrl}`,
+          summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
           detail:
             `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
             `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
@@ -4125,6 +4125,23 @@ export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
 const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
   lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
 
+/** W1-T5956 — does a re-arm after an ejection spend the bound? Not while Actions reads degraded or
+ *  major_outage; an unreadable read is an incident only until the head's unreadable re-arm streak
+ *  is older than W1-T5939's hold BACKSTOP, so a stuck read cannot hide an ejection loop forever. */
+export function rearmSpendsBound(
+  incident: ActionsIncident,
+  rearmsAtHead: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+): boolean {
+  if (incident.state === "degraded" || incident.state === "major_outage") return false;
+  if (incident.state === "operational") return true;
+  let since = nowMs;
+  for (let i = rearmsAtHead.length - 1; i >= 0 && rearmsAtHead[i].actions_status === "unreadable"; i--) {
+    since = Number(rearmsAtHead[i].at_ms);
+  }
+  return nowMs - since >= ACTIONS_INCIDENT_HOLD_BACKSTOP_MS;
+}
+
 /** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
 export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
 
@@ -4370,6 +4387,33 @@ export function classifyCiTimeoutNoVerdict(
   return { notReady, hung };
 }
 
+/** W1-T5934: where a timeout's not-ready list came from. The annotation usually lacks it (the list
+ *  is in the job log), so the fresh rollup fills it; an unreadable or unread rollup is named, never "none". */
+export type CiTimeoutNotReadySource = "annotation" | "rollup" | "rollup-unreadable" | "rollup-unread";
+
+/** Checks whose latest attempt still waits for a runner. */
+const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
+
+export function ciTimeoutNotReadyChecks(
+  annotated: readonly string[],
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
+): { names: string[]; source: CiTimeoutNotReadySource } {
+  if (annotated.length > 0) return { names: [...annotated], source: "annotation" };
+  if (typeof rollup === "string") return { names: [], source: `rollup-${rollup}` };
+  const names = dedupeRollupByLatestAttempt(rollup)
+    .filter((c) => c.context !== REVIEW_CONTEXT && c.name !== REVIEW_CONTEXT && c.name !== CI_GATE_CHECK_NAME)
+    .filter((c) => CI_TIMEOUT_NOT_STARTED.has((c.state ?? c.status ?? "").toUpperCase()))
+    .map((c) => c.name ?? c.context ?? "unknown");
+  return { names, source: "rollup" };
+}
+
+const CI_TIMEOUT_SOURCE_TEXT: Record<CiTimeoutNotReadySource, string> = {
+  annotation: "the gate's annotation",
+  rollup: "queued on the fresh rollup",
+  "rollup-unreadable": "the gate's annotation lists none and the fresh rollup was unreadable",
+  "rollup-unread": "the gate's annotation lists none and this pass reads no fresh rollup",
+};
+
 /** W1-T5954: the `why` a pass without update-branch wrote before it deferred instead. */
 const CI_TIMEOUT_UNWIRED_WHY = "update-branch is not wired";
 
@@ -4418,13 +4462,18 @@ async function applyCiTimeoutRefresh(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView,
   timeout: CiTimeoutNoVerdict,
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
-  const named = (timeout.notReady.length > 0 ? timeout.notReady : timeout.hung).join(", ") || "(unnamed in the gate's annotation)";
-  const head = `ci-gate timed out on never-started check(s) ${named}`;
+  const notReady = ciTimeoutNotReadyChecks(timeout.notReady, rollup);
+  const named = (notReady.names.length > 0 ? notReady.names : timeout.hung).join(", ") || "(unnamed)";
+  const sourceText = notReady.source === "rollup" && notReady.names.length === 0
+    ? "the gate's annotation lists none and the fresh rollup shows none queued"
+    : CI_TIMEOUT_SOURCE_TEXT[notReady.source];
+  const head = `ci-gate timed out on never-started check(s) ${named} [not-ready list: ${sourceText}]`;
   const row = {
     run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
-    head_sha: pr.headSha, not_ready_checks: timeout.notReady, hung_checks: timeout.hung,
+    head_sha: pr.headSha, not_ready_checks: notReady.names, not_ready_source: notReady.source, hung_checks: timeout.hung,
   };
   const escalate = async (why: string): Promise<string> => {
     const reason = `${head}; no new head is possible: ${why}`;
@@ -5921,6 +5970,13 @@ export const CHECK_REQUEUE_DEFERRED_STEP = "sweep.check_requeue.deferred";
 
 /** W1-T5920 — BACKSTOP: in-flight refusals of one (head, check) requeue before escalating once. */
 export const CHECK_REQUEUE_DEFERRAL_BACKSTOP = 5;
+
+/** W1-T5942 — why `escalateCancelledCheck` fired; its issue title names it. */
+export type CancelledCheckEscalationKind = "cancelled-twice" | "requeue-deferral-backstop";
+const CANCELLED_CHECK_ESCALATION_SUMMARY: Record<CancelledCheckEscalationKind, string> = {
+  "cancelled-twice": "cancelled twice on the same head",
+  "requeue-deferral-backstop": `requeue refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times while its run was in flight`,
+};
 
 export type JobRerunRefusal = "already_running" | "not_current_attempt";
 export type JobRequeueOutcome =
@@ -10330,7 +10386,8 @@ export interface SweepDeps {
    *  spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
    *  candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
    *  reach. */
-  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
+  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string,
+    kind?: CancelledCheckEscalationKind) => void | Promise<void>;
   /** W1-T3194 — a positively identified infrastructure failure could not safely receive its one
    * bounded job retry, or recurred after that retry. It never becomes a source-code worker strike. */
   escalateInfrastructureCheck?: (
@@ -13279,6 +13336,7 @@ export async function runSweep(
     let dedupStandDownReason: string | undefined;
     let armedIdleDue = false;
     let rearmAfterDisarm: number | undefined;
+    let rearmIncidentFields: Record<string, unknown> = {};
     let queueMembership: MergeQueueMembership | undefined;
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
@@ -13328,9 +13386,18 @@ export async function runSweep(
         const priorArmAtHead = prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         const armedByPriorPass = !armedByGitHub && priorArmAtHead && typeof queueMembership !== "string";
         const disarmedByGitHub = priorArmAtHead && queueMembership === "not-queued";
-        const rearms = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr).length : 0;
-        const rearmExhausted = disarmedByGitHub && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
-        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + 1;
+        const rearmRows = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr) : [];
+        const rearms = rearmRows.filter((line) => line.counted !== false).length;
+        const rearmEscalated = rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true);
+        // W1-T5956: an ejection inside an Actions incident is the outage's, so its re-arm is free.
+        let rearmCounted = true;
+        if (disarmedByGitHub && !rearmEscalated && deps.readActionsStatusSummary) {
+          const incident = await readActionsIncident();
+          rearmCounted = rearmSpendsBound(incident, rearmRows, now);
+          rearmIncidentFields = { counted: rearmCounted, actions_status: incident.state, actions_detail: incident.detail, at_ms: now };
+        }
+        const rearmExhausted = disarmedByGitHub && rearmCounted && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + (rearmCounted ? 1 : 0);
         alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || refused || hold !== undefined;
         if (rearmExhausted && !deps.dryRun &&
             !rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true)) {
@@ -13665,7 +13732,8 @@ export async function runSweep(
               }
               if (rearmAfterDisarm !== undefined) {
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARMED_AFTER_DISARM_STEP,
-                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD });
+                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD,
+                  ...rearmIncidentFields });
               }
               armsInFlight.add(armKey);
               let armResult: Awaited<ReturnType<SweepDeps["arm"]>>;
@@ -14012,7 +14080,8 @@ export async function runSweep(
                 ciFailuresForFix, stillRedRequiredNames(pr.redRequiredChecks ?? [], ciGateRollup), cancelledChecks.map((c) => c.name));
               if (timeout) {
                 acted = false;
-                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout);
+                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout,
+                  deps.readCiGateRollup ? ciGateRollup ?? "unreadable" : "unread");
                 break;
               }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
@@ -14089,10 +14158,11 @@ export async function runSweep(
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
                     const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), ciGateRollup);
                     if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
-                    if (result.escalate && deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, result.escalate);
+                    if (result.escalate && deps.escalateCancelledCheck)
+                      await deps.escalateCancelledCheck(pr, check, result.escalate, "requeue-deferral-backstop");
                     outcomes.push(result.note ?? `re-queued "${check.name}"`);
                   } else {
-                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason);
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason, "cancelled-twice");
                     outcomes.push(`escalated "${check.name}" (${decision.reason})`);
                   }
                 }

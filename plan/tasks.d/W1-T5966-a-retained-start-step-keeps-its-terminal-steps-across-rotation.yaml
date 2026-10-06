@@ -1,0 +1,38 @@
+- id: W1-T5966
+  title: "A RETAINED START STEP KEEPS ITS TERMINAL STEPS ACROSS ROTATION — fix.dispatch, fix.done, fix.resolved and fix.ci_not_green survive a ledger rotation but fix.exhausted, fix.stood_down, fix.superseded, fix.superseded_unknown and fix.spawn_abandoned do not, so after a rotation a finished fix round reads as still in flight (status.ts FIX_LANE_TERMINAL_STEPS), autonomy's strike count sees resolutions but not exhaustions, and an investigator sees a round's cause with no outcome"
+  repo: remudero
+  depends_on: [W1-T5958]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — retention of terminal steps paired with a retained start step
+  band_meaning: span
+  origin: "operator session 2026-10-06: found by W1-T5957's build (#9480)"
+  plan_refs: [W1-T5958, W1-T5935, W1-T5957]
+  files: [src/lib/ledger.ts, test/a-retained-start-step-keeps-its-terminal-steps-across-rotation.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 from the live ledger.ndjson.retained-steps.json (read-only): fix.dispatch, fix.done,
+    fix.resolved and fix.ci_not_green are retained; fix.exhausted, fix.stood_down, fix.superseded,
+    fix.superseded_unknown, fix.spawn_abandoned, sweep.fix.error and fix.base_refreshed are not.
+    Readers that pair them: status.ts clears activeFixRunId only on a FIX_LANE_TERMINAL_STEPS row, so a
+    retained fix.dispatch whose terminal row rotated away leaves the fix lane live; autonomy.ts strikeCount
+    reads fix.resolved and fix.exhausted together; autonomy.ts counts fix.stood_down rows with an issue_url as
+    human evidence; ci-friction-gardener lists fix.base_refreshed in CI_FRICTION_LEDGER_STEPS. W1-T5935's
+    census only sees *FromLedger folds, so none of these were flagged. Real cost on 2026-10-06: #9450's
+    03:47:21 fix.stood_down (merge state dirty) existed only in a rotated archive, so the live ledger showed
+    fix.ci_not_green with no outcome and a task (W1-T5957) was filed on a false "silent round" premise.
+  design: |
+    Register the fix-lane terminal steps (status.ts FIX_LANE_TERMINAL_STEPS) plus sweep.fix.error and
+    fix.base_refreshed in DECISION_RELEVANT_LEDGER_STEPS (reword comments in place; ledger.ts sits at its
+    comment ceiling). Add a pairing guard: every step in FIX_LANE_TERMINAL_STEPS is retained whenever
+    fix.dispatch is, and a real rotation keeps a dispatched round's terminal row.
+  acceptance:
+    - claim: "after a real ledger rotation a dispatched fix round keeps its terminal row, and every fix-lane terminal step is retained while fix.dispatch is"
+      proof: "unit test: test/a-retained-start-step-keeps-its-terminal-steps-across-rotation.test.ts"
+  falsifier: |
+    Leave fix.stood_down unregistered: a rotation keeps the round's fix.dispatch and drops its fix.stood_down,
+    and the test fails.

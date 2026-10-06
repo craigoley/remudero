@@ -23,9 +23,16 @@ export function killAfterGrace(child: Pick<ChildProcess, "exitCode" | "signalCod
   }, graceMs).unref();
 }
 
+/** W1-T5964: a bound timer this late was held by a blocked event loop, not by git. */
+export const LATE_TIMER_SLACK_MS = 1_000;
+/** W1-T5964: how long a late bound waits for a fetch whose exit may already be queued behind it. */
+export const LATE_TIMER_GRACE_MS = 2_000;
+
 /** One awaited git call ended at `timeoutMs` (W1-T5282): the signal aborts, and the call rejects whether or
- *  not the runner honours it, so a hung fetch reads as a failed one and never holds its awaiter forever. */
-export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutMs: number): Promise<string> {
+ *  not the runner honours it, so a hung fetch reads as a failed one and never holds its awaiter forever.
+ *  W1-T5964: a timer that fires late first waits `lateGraceMs`, since timers run before the poll phase
+ *  that would deliver a finished child's exit; #9460's review was withheld for a fetch that had finished. */
+export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutMs: number, lateGraceMs = LATE_TIMER_GRACE_MS): Promise<string> {
   const controller = new AbortController();
   const traceDir = mkdtempSync(join(tmpdir(), "rmd-fetch-trace-"));
   const tracePath = join(traceDir, "events.json");
@@ -33,11 +40,19 @@ export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutM
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await new Promise<string>((resolve, reject) => {
-      timer = setTimeout(() => {
+      const fail = (lateMs: number): void => {
+        const trace = readTrace(tracePath);
         reject(new Error(`git ${args.join(" ")} exceeded its ${timeoutMs}ms bound and was killed; ` +
-          `last trace2 region: ${lastTraceRegion(tracePath)}; ` +
-          `elapsed ${Math.round(performance.now() - started)}ms`));
+          `last trace2 region: ${trace.region}; ` +
+          `elapsed ${Math.round(performance.now() - started)}ms` +
+          (trace.running ? `; still running: ${trace.running}` : "") +
+          (lateMs > LATE_TIMER_SLACK_MS ? `; its timer fired ${Math.round(lateMs)}ms late (event loop blocked)` : "")));
         controller.abort();
+      };
+      timer = setTimeout(() => {
+        const lateMs = performance.now() - started - timeoutMs;
+        if (lateMs > LATE_TIMER_SLACK_MS) timer = setTimeout(() => fail(lateMs), lateGraceMs);
+        else fail(lateMs);
       }, timeoutMs);
       Promise.resolve().then(() => git(args, controller.signal, { ...process.env, GIT_TRACE2_EVENT: tracePath })).then(resolve, reject);
     });
@@ -47,29 +62,37 @@ export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutM
   }
 }
 
-function lastTraceRegion(path: string): string {
+/** The last region a fetch entered, and (W1-T5964) any child it started and never reaped: a fetch past its
+ *  final region is waiting on one, e.g. the `git maintenance run --auto` it starts at exit. */
+function readTrace(path: string): { region: string; running?: string } {
   let trace: string;
   try {
     trace = readFileSync(path, "utf8");
   } catch (error) {
     const reason = String(error);
-    return `unavailable (could not read trace: ${reason})`;
+    return { region: `unavailable (could not read trace: ${reason})` };
   }
   let last: string | undefined;
   let unavailable = "no region_enter event recorded";
+  const children = new Map<string, string>();
   for (const line of trace.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const event = JSON.parse(line) as { event?: string; category?: string; label?: string } | null;
+      const event = JSON.parse(line) as { event?: string; category?: string; label?: string; sid?: string; child_id?: number; argv?: unknown } | null;
       if (event?.event === "region_enter" && typeof event.label === "string") {
         last = event.category ? `${event.category}/${event.label}` : event.label;
       }
+      const child = `${event?.sid}#${event?.child_id}`;
+      if (event?.event === "child_start") {
+        children.set(child, Array.isArray(event.argv) ? event.argv.join(" ") : `(child ${event.child_id}, argv unrecorded)`);
+      } else if (event?.event === "child_exit") children.delete(child);
     } catch (error) {
       const reason = String(error);
       unavailable = `could not parse trace event: ${reason}`;
     }
   }
-  return last ?? `unavailable (${unavailable})`;
+  const running = [...children.values()].join(", ");
+  return { region: last ?? `unavailable (${unavailable})`, ...(running ? { running } : {}) };
 }
 
 function fetchArgs(scope: "all" | "main"): string[] {
