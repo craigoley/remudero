@@ -10,6 +10,13 @@
   status: queued
   # backlog gardener: band=4 evidence=becc088aa91aa00e
   attempts: 0
+  note: |
+    SUPERSEDED 2026-10-06 by W1-T5909 (#9428, merged). This record's premise was wrong for sweep-armed
+    PRs: on 2026-10-05 the sweep NEVER re-armed an ejected PR, because its prior-arm memory outvoted
+    GitHub's observed disarm (#9392, #9390, #9388 stranded). W1-T5909 now re-arms after a disarm and
+    caps it at MAX_REARMS_AFTER_DISARM_PER_HEAD per head, then escalates once, which is this record's
+    goal. RECOMMENDED: the operator retires this record (a retirement is an operator ruling), once the
+    merge queue is back on and the cap is observed live; until then do not build it.
   origin: "operator-approved merge-queue prerequisites 2026-09-29 (merge-queue plan item C); rehearsed on craigoley/remudero-sandbox"
   files: [src/lib/arm-auto-merge.ts, test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts]
   rationale: |

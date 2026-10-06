@@ -1,0 +1,35 @@
+- id: W1-T5931
+  title: "THE FULL PASS ADMITS REVIEWS PAST THE WIDTH THE LIGHT PASS RESPECTS — the light pass admits under effectiveReviewWidth minus lightPassSpawningReservations (W1-T4732), but runSweep's fullReviewLanes ignores those reservations, so a full pass can start up to the full review width on top of light reviews still in flight; the two admission sites disagree on the concurrency bound the paid review spend depends on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — one review-concurrency bound shared by both admission sites; it gates paid review spend
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
+  plan_refs: [W1-T4732, W1-T5922, W1-T473, W1-T2519]
+  files: [src/lib/sweep.ts, test/the-full-pass-admits-reviews-under-the-same-width-the-light-pass-respects.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5922 (#9430). On 2026-10-05, 349 of 408 sweep.review_admitted
+    rows read surface light. The light pass's bound is effectiveReviewWidth minus
+    lightPassSpawningReservations, so it read 0 whenever the width was busy (light stand-downs: bound 0
+    x63, 1 x51, 2 x35, 3 x56). The full pass's fullReviewLanes does not subtract in-flight light reviews,
+    so it admitted #9373 at 17:50:42Z over the same in-flight set that refused it on four light passes.
+    The two sites must share one bound: either both count in-flight reviews, or the documented width
+    is not the real ceiling.
+  design: |
+    Make fullReviewLanes subtract the in-flight light reservations exactly as the light admission
+    does, through one shared helper, so the number of concurrent paid reviews never exceeds
+    effectiveReviewWidth. Name the bound on the stand-down row (bound N, in-flight M) on both surfaces.
+    This changes no width; any wider review concurrency is an operator ruling on spend.
+  acceptance:
+    - claim: "a full pass admits reviews only up to the review width minus the light reviews still in flight, through the same helper the light pass uses, and its stand-down row names the bound and the in-flight count"
+      proof: "unit test: test/the-full-pass-admits-reviews-under-the-same-width-the-light-pass-respects.test.ts"
+  falsifier: |
+    Keep fullReviewLanes ignoring light reservations: with the width busy, the full pass admits
+    another review and the test fails.
