@@ -874,6 +874,7 @@ import {
   planStateTruthRung,
   type PlanCoherenceShardListing,
   probeGithubThrottle,
+  probeGithubThrottleAsync,
   recordFollowupHarvest,
   renderGather,
   renderNetStateUnwiredAdvisories,
@@ -1001,6 +1002,7 @@ import { gunzipSync } from "node:zlib";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
+  resolveLedgerUnionAsync,
   rotationStampIso,
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
@@ -29016,8 +29018,17 @@ export async function readRetroMergedCommitsAsync(
  */
 export async function retroTriggerCheckAsync(
   now: Date = new Date(),
-  deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & { readMergedCommits?: () => Promise<GitLogCommit[]> } = {},
+  deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & {
+    readMergedCommits?: () => Promise<GitLogCommit[]>;
+    /** The run ledger, read off the loop; production unions the rotations through `resolveLedgerUnionAsync`. */
+    readLedgerNdjson?: (config: Config) => Promise<string>;
+    /** The GitHub probe, awaited; production runs `probeGithubThrottleAsync`, an injected `github` its own. */
+    probeUnavailable?: () => Promise<string | undefined>;
+  } = {},
 ): Promise<RetroTriggerDecision | undefined> {
+  const config = deps.config ?? loadConfig();
+  if (retroMarkerIsCorrupt(config)) return undefined;
+  const ledgerNdjson = await (deps.readLedgerNdjson ?? readRetroTriggerLedgerAsync)(config);
   const github = deps.github ?? retroShippedGithubGateway();
   let read: MergedCommitsRead;
   try {
@@ -29026,7 +29037,11 @@ export async function retroTriggerCheckAsync(
     // Carried, not erased: mergedCommitsSnapshotGateway re-throws it where the sync read threw.
     read = { error };
   }
-  return retroTriggerCheck(now, { config: deps.config, policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) });
+  const pre = retroTriggerPrelude(now, config, { policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) }, ledgerNdjson);
+  if ("decided" in pre) return pre.decided;
+  // Probed only past the back-off, as the sync check does, so a backed-off tick still spends no GitHub call.
+  const probe = deps.probeUnavailable ?? (deps.github ? async () => github.unavailable?.() : () => probeGithubThrottleAsync());
+  return retroTriggerConclude(now, pre, await probe());
 }
 
 /** One awaited merged-commits read: its commits, or the error it failed with. */
@@ -29231,10 +29246,55 @@ export function retroTriggerCheck(
   deps: { config?: Config; github?: ShippedGithub; policy?: Policy } = {},
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
+  if (retroMarkerIsCorrupt(config)) return undefined;
+  const pre = retroTriggerPrelude(now, config, deps, readRetroTriggerLedger(config));
+  return "decided" in pre ? pre.decided : retroTriggerConclude(now, pre, pre.github.unavailable?.());
+}
+
+/** A torn marker is never replayed as "no marker" — fail closed exactly like `retroCommand`'s own guard. */
+function retroMarkerIsCorrupt(config: Config): boolean {
+  return resolveMarkerForGather(join(config.root, "state", "last-retro.json")).kind === "corrupt";
+}
+
+/** The trigger's run ledger: the archive∪live union, else the bare live file (W1-T2288, see above). */
+function readRetroTriggerLedger(config: Config): string {
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerPath = ledgerPathFor(config);
+  return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+}
+
+/** {@link readRetroTriggerLedger} off the event loop: the same union through `resolveLedgerUnionAsync`, the same fallback. */
+async function readRetroTriggerLedgerAsync(config: Config): Promise<string> {
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = await resolveLedgerUnionAsync(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerPath = ledgerPathFor(config);
+  return ledgerUnion.ok ? ledgerUnion.matches.join("\n") : existsSync(ledgerPath) ? await readFileAsync(ledgerPath, "utf8") : "";
+}
+
+/** What the trigger knows once its local reads are done and only the GitHub-backed pass remains. */
+interface RetroTriggerContext {
+  ledgerPath: string;
+  marker: Extract<ReturnType<typeof resolveMarkerForGather>, { kind: "ok" }>["marker"] | undefined;
+  policy: Policy;
+  records: ReturnType<typeof parseLedger>;
+  runs: ReturnType<typeof gatherRuns>;
+  taskIdsWithRuns: Set<string>;
+  github: ShippedGithub;
+}
+
+/** Every LOCAL step of {@link retroTriggerCheck} — marker, policy, ledger parse and the back-off — over an already-read
+ *  `ledgerNdjson`. Returns the decision when the back-off ends the tick, else the context the GitHub probe gates. */
+function retroTriggerPrelude(
+  now: Date,
+  config: Config,
+  deps: Pick<NonNullable<Parameters<typeof retroTriggerCheck>[1]>, "github" | "policy">,
+  ledgerNdjson: string,
+): { decided: RetroTriggerDecision | undefined } | RetroTriggerContext {
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
   const markerResolution = resolveMarkerForGather(markerPath);
-  if (markerResolution.kind === "corrupt") return undefined;
+  if (markerResolution.kind === "corrupt") return { decided: undefined };
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
   // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
@@ -29253,13 +29313,7 @@ export function retroTriggerCheck(
   // `headRefName` credit pass), and computing it exactly ONCE here, rather than a second time
   // inside the back-off branch, keeps this file's one ledger-file read call site exactly one
   // (acceptance 7, test/intake-triggers-read-their-own-depth.test.ts).
-  const stateDir = join(config.root, "state");
-  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
-  const ledgerNdjson = ledgerUnion.ok
-    ? ledgerUnion.matches.join("\n")
-    : existsSync(ledgerPath)
-      ? readFileSync(ledgerPath, "utf8")
-      : "";
+  // The read itself is the caller's (readRetroTriggerLedger, or its awaited twin): this parses it.
   // ONE parse feeds every read below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
   // signal this trigger already had, `mineFollowups` for the retro's OWN queue depth, and (W1-T4664)
   // the back-off's own merges-floor pre-check — never a second `readFileSync`/`parseLedger`.
@@ -29285,11 +29339,15 @@ export function retroTriggerCheck(
     const backoff = evaluateRetroBackoff(lastAttempt, mergesProxy, marker?.ts, now, backoffPolicy);
     if (!backoff.eligible) {
       reportRetroTriggerBackoff(ledgerPath, marker, backoff);
-      return undefined;
+      return { decided: undefined };
     }
   }
-  const github = deps.github ?? retroShippedGithubGateway();
-  const githubUnavailable = github.unavailable?.();
+  return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github: deps.github ?? retroShippedGithubGateway() };
+}
+
+/** The GitHub-backed rest of {@link retroTriggerCheck}, given the probe's answer (`undefined` when GitHub is usable). */
+function retroTriggerConclude(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): RetroTriggerDecision | undefined {
+  const { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github } = ctx;
   if (githubUnavailable) {
     reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
     return undefined;
