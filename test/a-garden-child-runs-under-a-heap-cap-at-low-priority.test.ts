@@ -147,7 +147,7 @@ test("a real heap-aborted garden child retains its verdict after a long native d
     execPath: process.execPath, execArgv: [], entry, cwd: dir, heapLimitMb: 32,
   });
   await assert.rejects(spawnPass("config", [], { stopped: false }),
-    new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`));
+    { message: new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`) });
 });
 
 test("a split heap signature survives tail trimming but text without a signal keeps its ordinary exit", async (t) => {
@@ -165,7 +165,7 @@ test("a split heap signature survives tail trimming but text without a signal ke
   const spawnPass = (entry: string) => registry.childGardenPassSpawn({
     execPath: process.execPath, execArgv: [], entry, cwd: dir, heapLimitMb: 32,
   })("config", [], { stopped: false });
-  await assert.rejects(spawnPass(split), new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`));
+  await assert.rejects(spawnPass(split), { message: new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`) });
   const ordinary = join(dir, "ordinary-heap-text.mjs");
   writeFileSync(ordinary, 'import { writeSync } from "node:fs"; writeSync(2, "heap out of memory"); process.exit(3);\n');
   assert.equal(await spawnPass(ordinary), 3, "positive text alone must not invent a heap-aborted verdict");
