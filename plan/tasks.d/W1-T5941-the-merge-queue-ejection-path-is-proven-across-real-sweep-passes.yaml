@@ -32,9 +32,13 @@
     (d) a ci-gate timeout gets a new head (W1-T5921);
     (e) an ejection on every attempt escalates once at the bound instead of looping.
     A failing sequence is a defect to file, not a test to loosen.
+    Every scenario test title starts with `W1-T5941:`.
   acceptance:
     - claim: "across consecutive sweep passes a merge-queue-ejected PR is re-armed and merged when green, a risk-held PR the operator enqueued by hand is released, a 403-refused requeue is retried after its run concludes, a ci-gate timeout gets a new head, and a PR ejected on every attempt escalates once at the bound"
       proof: "unit test: test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts"
+      kind: guard
+    - claim: "the scenario test exists and names its task, so the proof discriminates head from base"
+      proof: "grep: W1-T5941: in test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts"
   falsifier: |
     Revert W1-T5909's disarm re-arm: sequence (a) strands the PR deduped as already armed and the test
     fails.
