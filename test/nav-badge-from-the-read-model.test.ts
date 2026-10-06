@@ -392,6 +392,9 @@ test("a cold nav-badge fold takes one chunk per step and builds the body an unch
   const max = Number(db.prepare("SELECT max(seq) AS m FROM fact").get()?.m);
   assert.ok(max > 2, "the fixture's fact store spans several chunks");
   const instances = [{ state: { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW }, db }];
+  // W1-T5051: the worker's tick committed its fold; a view over that store resumes from it and takes no step.
+  assert.equal(createNavBadgeReadModelView(ledgerSource, 2).prepare({ instances }, () => assert.fail("a committed fold resumes caught up")), true);
+  db.exec("DELETE FROM agent_fold");
   const chunked = createNavBadgeReadModelView(ledgerSource, 2);
   let steps = 0;
   let calls = 0;

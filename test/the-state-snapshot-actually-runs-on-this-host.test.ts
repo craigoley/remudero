@@ -204,6 +204,20 @@ test("a verified snapshot expires only its own oldest snapshots beyond the keep 
   assert.equal(readFileSync(join(vol, "state", "ledger.ndjson"), "utf8"), LEDGER, "state/ itself is never touched");
 });
 
+test("with no RMD_STATE_BACKUP_KEEP the nightly rung keeps the newest 2 snapshots", () => {
+  // Operator ruling 2026-10-06: the default is 2 (it was 7). undefined drops the key from the child env.
+  const vol = stateVolume();
+  const backups = join(vol, "state-backups");
+  const seeded = [1, 2, 3, 4].map((d) => seedSnapshot(backups, new Date(Date.UTC(2026, 0, d)), 24 * (30 - d)));
+  const run = runRung("good", vol, ["--reclaim-only"], { RMD_STATE_BACKUP_KEEP: undefined });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /keeping the newest 2\)/, "the expiry names the default it applied");
+  const after = snapshotsIn(backups);
+  assert.equal(after.length, 2, `the default keeps exactly two: ${after.join(", ")}`);
+  assert.ok(after.includes(seeded[3]), "the newest seeded snapshot is kept beside tonight's");
+  assert.ok(seeded.slice(0, 3).every((s) => !after.includes(s)), "the three older ones are expired");
+});
+
 test("--dry-run --reclaim-only names the snapshot and takes none", () => {
   const vol = stateVolume();
   const run = runRung("good", vol, ["--reclaim-only", "--dry-run"]);

@@ -86,7 +86,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
-import { threadPlan, threadPlanPin } from "./thread-plan.js";
+import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
@@ -636,17 +636,21 @@ export interface NowViewOptions {
 export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
 
 /**
- * Compares a plan's checkout with its origin/main. The commit log is read only when the pair of
+ * Compares the plan this thread serves with its origin/main. The commit log is read only when the pair of
  * heads moved since `memo` last saw them, so a materialize costs one `git rev-parse` per instance.
+ * `base` is the commit the plan is pinned to when serve reloaded it in place (thread-plan.ts), else the
+ * checkout's HEAD: a generation's working tree never moves, so HEAD read every plan merge after its boot
+ * as behind while the pinned plan already held it (2026-10-06: 74 of 74 now reads stale over 8 reloads).
  */
 export function gitPlanBehind(
   planPath: string,
   memo: { heads?: string; result?: PlanBehind } = {},
   git: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  base: string = threadPlanPinnedRef(planPath) ?? "HEAD",
 ): PlanBehind {
   const dir = dirname(dirname(planPath));
   try {
-    const heads = git(["-C", dir, "rev-parse", "HEAD", "origin/main"]).trim();
+    const heads = git(["-C", dir, "rev-parse", base, "origin/main"]).trim();
     if (memo.heads === heads && memo.result) return memo.result;
     const [head, main] = heads.split("\n");
     const paths = [relative(dir, planPath), relative(dir, join(dirname(planPath), "tasks.d"))];

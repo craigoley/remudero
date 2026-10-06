@@ -364,6 +364,28 @@ instead of a request-time ledger union. The plan half reads what the route reads
 - Shadow side: the route's computation (its memoized ledger union, up to the ring's newest row) over the
   same build's plan half, so a diff is a ring row the union disagrees with.
 
+## `agent` (version 1)
+
+`GET /v1/views/agent?instance=&part=`: the agent pages' reads, one body per (instance, part) (arch Phase 4
+§1.1 and §7.1, P4-T12, W1-T5051, `src/lib/agent-view.ts`). Schema: `AgentView`. Both parameters are required.
+Dark until `switches.json` sets `agent` to `serve`; until then the console reads `/v1/operator-agent/*` as before.
+
+`data`: `{ instance, part, repository?, body, scoped? }`. `body` is exactly what the part's route answers for the
+instance: `history` = `GET /v1/operator-agent/proposals`, `settings` = `GET /v1/operator-agent/settings` (with
+`scoped` = its `?repository=` read), and `experiments`, `delegations`, `follow-ups`, `promotions`, `actions`,
+`consequences`, `intent-plans` = the GET of that name. Each is computed by the route's own readers over the
+instance's `panel.*` facts. `proposals` is core's one proposal engine (the nav badge's `operatorAgentCandidates`)
+over the instance's committed analytics `source_snapshot` and its history: `{ proposals }`, or `{ reason }` before
+a first analytics refresh or for an instance with no repository, never an empty list it cannot vouch for.
+- The fold is persisted per instance (`agent_fold(instance, last_seq, state_json)`): only facts past the committed
+  `seq` are read, one 5,000-`seq` chunk per pass step, and each chunk that moved the state commits it with that
+  `seq` in one fenced transaction. A restart resumes from the committed pair; a refused commit (lost lease) keeps
+  the in-memory fold and the last committed pair.
+- Rebuilt when the fold moves, the analytics snapshot's as-of moves, or a minute passes (expiries and staleness).
+- Sources: `ledger:<i>`; `proposals` adds `analytics:<i>`.
+- Shadow side: the routes' computation over the ledger union read the routes' way, up to the fold's newest row.
+- Not yet a part: `capabilities` (core serves no such route). `/context` stays a direct keyed GET.
+
 ## `instances` (version 1)
 
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
