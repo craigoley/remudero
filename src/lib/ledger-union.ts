@@ -633,6 +633,17 @@ function withinRotationWindow(entries: LedgerCorpusEntry[], windowMs: number, mi
   return entries.filter((entry) => newest.has(entry.path) || !(stampMsOf(entry) < start));
 }
 
+/**
+ * The newest stamp among the rotations a {@link LedgerUnionRawReadOptions.rotationWindowMs} read of `stateDir`
+ * leaves out, or -Infinity when it reads them all. A row of a step no rotation retains sits in one file, at or
+ * before that file's stamp, so the window's rows of such a step are exactly those stamped after this.
+ */
+export function rotationWindowExcludedThroughMs(stateDir: string, windowMs: number, minRotations: number, fsDeps: Pick<LedgerGrepFsDeps, "readdirSync"> = realLedgerFs): number {
+  const { rotations } = listedLedgerFiles(stateDir, fsDeps);
+  const read = new Set(withinRotationWindow(rotations, windowMs, minRotations).map((entry) => entry.path));
+  return Math.max(Number.NEGATIVE_INFINITY, ...rotations.filter((entry) => !read.has(entry.path)).map(stampMsOf));
+}
+
 export function readLedgerUnionRawLinesSync(
   stateDir: string,
   opts: LedgerUnionRawReadOptions = {},

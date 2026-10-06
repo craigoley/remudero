@@ -10,16 +10,22 @@
  * function the route answers with, unfiltered, over the instance's reconciled facts in the order the
  * projector applied them. A row the route would reject as malformed makes this entry unavailable too.
  *
- * Only a newly applied reconciled fact rebuilds the body: each tick reads the facts past the last `seq`
- * folded, on the fact table's primary key. Source: `ledger:<i>` per instance.
+ * THE ROUTE'S WINDOW: the route's union reads only the rotations within {@link STATUS_BOARD_WINDOW_MS} of
+ * the newest (at least {@link STATUS_BOARD_MIN_ROTATIONS}). No rotation retains a reconciled row, so each sits
+ * in one file at or before its stamp: the view keeps the facts stamped after the newest rotation that window
+ * leaves out, and the two read the same rows. A torn row is not seen here (the projector keeps no text of it),
+ * so where the route answers `ledger-partial` this answers what it holds, and the shadow shows the diff.
+ *
+ * A newly applied reconciled fact or a move of the window rebuilds the body: each tick reads the facts past
+ * the last `seq` folded, on the fact table's primary key. Source: `ledger:<i>` per instance.
  */
 import { join } from "node:path";
 import { buildActionResultsProjection, tornRowCouldBeExternalEffect, type ActionResultsEnvelope } from "./action-results.js";
 import { EXTERNAL_EFFECT_RECONCILED_STEP } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { createLedgerRotationMemo, type LedgerRotationMemo } from "./ledger-union.js";
+import { createLedgerRotationMemo, rotationWindowExcludedThroughMs, type LedgerRotationMemo } from "./ledger-union.js";
 import type { ReadModelDb } from "./read-model-db.js";
-import { readLedgerUnionBounded, type LedgerLines } from "./status.js";
+import { readLedgerUnionBounded, STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS, type LedgerLines } from "./status.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
 
@@ -78,11 +84,12 @@ export function createActionsView<S extends { instance: string; newestTs: string
       const slots = instances.filter(({ state }) => byName.has(state.instance));
       let moved = false;
       for (const { db } of slots) if (db && foldFacts(folds, db)) moved = true;
-      const key = slots.map(({ state, db }) => `${state.instance}=${db ? "db" : "-"}`).join(";");
+      const after = new Map(slots.map(({ state }) => [state.instance, rotationWindowExcludedThroughMs(byName.get(state.instance)!.ledgerDir, STATUS_BOARD_WINDOW_MS, STATUS_BOARD_MIN_ROTATIONS)]));
+      const key = slots.map(({ state, db }) => `${state.instance}=${db ? "db" : "-"}>${after.get(state.instance)}`).join(";");
       if (body === undefined || moved || key !== builtKey) {
         body = { instances: slots.map(({ state, db }) => {
           const fold = db ? folds.get(db) : undefined;
-          return { instance: state.instance, results: buildActionResultsProjection(withMeta([...(fold?.rows ?? [])], fold !== undefined), {}, () => now) };
+          return { instance: state.instance, results: buildActionResultsProjection(withMeta((fold?.rows ?? []).filter((row) => !(Date.parse(String(row.ts)) <= after.get(state.instance)!)), fold !== undefined), {}, () => now) };
         }) };
         shown.set(body, { builtMs: now, newestMs: new Map(slots.map(({ state }) => [state.instance, state.newestTs ? Date.parse(state.newestTs) : Number.NEGATIVE_INFINITY])) });
         builtKey = key;

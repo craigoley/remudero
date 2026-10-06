@@ -7,8 +7,9 @@ import { test } from "node:test";
 import { buildActionResultsRoute } from "../src/lib/action-results.js";
 import { ACTIONS_VIEW_NAME, createActionsView, type ActionsData } from "../src/lib/actions-view.js";
 import type { Clock } from "../src/lib/clock.js";
-import { isFactStep } from "../src/lib/ledger-projector.js";
+import { isFactStep, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewBodyEntry } from "../src/lib/views.js";
 import { writeLedger, type LedgerFixture } from "./helpers/ledger-fixture.js";
@@ -144,4 +145,35 @@ test("unit test: the actions shadow side reads the route's ledger union and an i
   assert.equal(data.instances[0]!.results.results?.length, 2, "control: the compared body has results");
   assert.deepEqual(legacy.data, data, "the route's union read, up to the projector's newest row, is the facts' body");
   assert.equal(view.legacy("", NOW, { instances: [] }), undefined, "a body this view did not build has no legacy side");
+});
+
+test("unit test: a reconciled row older than the route's window is in neither the actions view nor the route", async (t) => {
+  const root = makeTempDir("actions-view-window");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const HOUR = 3_600_000;
+  // The floor's newest rotations, one an hour, then one stamped past the window before them: the route leaves it out.
+  const recent = Array.from({ length: STATUS_BOARD_MIN_ROTATIONS }, (_, i) => ({ at: iso(NOW - (i + 1) * HOUR), rows: [{ ts: iso(NOW - (i + 1) * HOUR - 60_000), step: "daemon.tick" }] as Array<Record<string, unknown>> }));
+  recent[3]!.rows.push(reconciled("windowed-action", NOW - 4 * HOUR - 30_000));
+  const expiredAt = NOW - STATUS_BOARD_MIN_ROTATIONS * HOUR - STATUS_BOARD_WINDOW_MS - HOUR;
+  const rows = writeLedger([reconciled("live-action", NOW - 60_000)], {
+    dir: stateDir,
+    rotations: [...recent, { at: iso(expiredAt), rows: [reconciled("expired-action", expiredAt - 60_000)] }],
+  });
+  const instances = [{ name: "core", ledgerDir: stateDir }];
+  const view = createActionsView<ReadModelInstanceState>({ instances, ledgerSource });
+  const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(stateDir, [ACTIONS_VIEW_NAME]);
+  const ticker = createReadModelTicker({ stateDir, instances, views: [view], clock: movingClock(NOW), holder: "actions-test", oracle: "off", post: (m) => posted.push(m) });
+  ticker.start();
+  ticker.tick();
+  ticker.release();
+  // POSITIVE CONTROL: the projector holds the expired row as a fact, so only the window can keep it out.
+  const db = openProjectorReadModel(stateDir, "core");
+  t.after(() => db.close());
+  assert.equal(Number(db.prepare("SELECT count(*) AS n FROM fact WHERE step = ?").get(STEP)?.n), 3);
+  const data = bodiesOf(posted).at(-1)!.body.data as ActionsData;
+  const route = await routeBody(rows.path);
+  assert.deepEqual((route.results as Array<{ originatingActionId: string }>).map((r) => r.originatingActionId), ["live-action", "windowed-action"]);
+  assert.deepEqual(withoutGeneratedAt(data.instances[0]!.results), withoutGeneratedAt(route));
 });

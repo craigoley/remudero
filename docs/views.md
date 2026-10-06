@@ -379,8 +379,12 @@ projector applied) instead of a request-time ledger union. A filtered read (`tas
 - Sources: `ledger:<i>` per instance.
 - Shadow side: the route's computation (its memoized ledger union, torn rows classified as the route does)
   up to the projector's newest applied row at the build, so a diff is a reconciled row the two disagree on.
-- The facts reach back past the route's union window (`STATUS_BOARD_WINDOW_MS`, at least 24 rotations), so
-  a host holding reconciled rows older than that window shows them here and not on the route.
+- The route's window applies: its union reads only the rotations within `STATUS_BOARD_WINDOW_MS` of the newest
+  (at least `STATUS_BOARD_MIN_ROTATIONS`). No rotation retains a reconciled row, so each sits in one file at or
+  before its stamp, and the view keeps the facts stamped after the newest rotation the window leaves out
+  (`rotationWindowExcludedThroughMs`, the union's own selection). A window move rebuilds the body.
+- A torn row is not seen: the projector keeps no text of it to classify. Where the route answers
+  `ledger-partial`, the view answers the rows it holds, and the shadow shows that diff.
 
 ## `instances` (version 1)
 
