@@ -1,0 +1,34 @@
+- id: W1-T6018
+  title: "A TIME-FIELD DIFF IS TIMING ONLY WHEN THE SOURCE GAP EXPLAINS IT — view-shadow.ts classifies ANY diff whose leaf matches TIME_LEAF (At/_at/Ms/_ms/Age/_age) as `timing` whenever the two sources' as-of instants differ at all, so an `…At` value days wrong in the view reads as timing (never real) and cannot block readiness"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: medium  # Rule 19: one concern — when the shadow comparator may call a time-leaf diff timing
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E15 (shadow follow-up: the TIME_LEAF rule is weak)"
+  plan_refs: [W1-T6017]
+  files: [src/lib/view-shadow.ts, test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: view-shadow.ts declares
+    `const TIME_LEAF = /(At|_at|Ms|_ms|Age|_age)$/` and classifies
+    `if (agesDiffer && (TIME_LEAF.test(leaf) || any(ev.namedInGap))) return { classification: "timing", … }`, where
+    agesDiffer is only `legacyAsOfMs !== viewAsOfMs`. Sources are almost never read at the same millisecond, so
+    a time leaf is effectively never `real`, whatever its two values are. Readiness (#8309) promotes a view on
+    a day of zero real diffs, so a view that stamps the wrong time everywhere can still promote. Scope-time
+    checks: no plan record, run- branch or open PR head names TIME_LEAF.
+  design: |
+    A time-leaf diff is `timing` only when its two values are explained by the gap: both parse as instants (ISO
+    or epoch ms) and differ by no more than the sources' as-of gap, or a row in the gap names the diff's ids (the
+    existing namedInGap arm). An age/duration leaf (Age/_age/Ms/_ms that is not an instant) is timing when its
+    difference is within the gap. Otherwise the diff falls through to the remaining rules and can be `real`.
+  acceptance:
+    - claim: "an …At diff whose values are three days apart while the sources are two seconds apart, with no row in the gap, is classified real, and one whose values differ by less than the gap stays timing"
+      proof: "unit test: test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts"
+  falsifier: |
+    Keep the leaf-name rule: the three-day diff is classified timing and the test fails.

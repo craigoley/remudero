@@ -1,0 +1,54 @@
+- id: W1-T6027
+  title: "A WORKER RESULT NAMES HOW ITS PROCESS ENDED — the codex runner (spawnCodexWorkerInPrivateTemp) resolves its exit promise with the exit code alone, so a signal-ended worker reads `error_exit_null` with no signal name, and one whose stream already logged turn.failed, an error event or a torn last JSONL line reads `error_codex` and is still recorded fix.commit_refused; W1-T5999 detects the signal by comparing the subtype string, which sees neither the name nor that case"
+  repo: remudero
+  depends_on: [W1-T5999]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — where a worker's process end is recorded and how the fix rung reads it
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5999 (#9566) builder loose ends (a) and (c)"
+  plan_refs: [W1-T5999, W1-T2402, W1-T5998, W1-T5535]
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, src/run-task.ts, test/a-worker-result-names-how-its-process-ended.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 over the ledger union (396 .gz rotations, 0 plain rotations, live ledger.ndjson):
+    9 distinct fix.done rows in 7 days had a codex worker end with `error_exit_null` (7 recorded
+    commit_refused, 2 with subtype error_exit_null), and 23 review.reviewer rows did the same. 40
+    worker_orphan_killed rows fell in the same window, and the signal rows cluster at one instant per
+    host (11:21:27-29Z 3 workers, 06:03:06-07Z 3 workers, 2026-10-04 01:06:47/57Z 2), the shape of one
+    sender. No row names the signal, so a SIGKILL from the orphan sweep cannot be told from a SIGTERM
+    from a deploy. spawnCodexWorkerInPrivateTemp (src/lib/worker-provider.ts) does
+    `process.once("exit", (code) => resolve(code))` and builds
+    `subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success"`, so
+    the parsed subtype outranks the exit: any turn.failed or error event, or the unparseable half-line
+    CodexJsonlAccumulator.finish() consumes when the child dies mid-write, yields `error_codex`.
+    W1-T5999's fixWorkerEndedBySignal (src/run-task.ts) returns
+    `result.isError && result.subtype === "error_exit_null"`, so that worker is a refusal again.
+    The claude runner differs: the SDK (0.3.284, getProcessExitError) rejects with an Error carrying
+    `{signal, errorClass: "process_killed_by_signal"}`. Before a result envelope, collectWorkerResult
+    rethrows it and W1-T2402's fixDispatchSignalDeath (src/lib/sweep.ts) reads `.signal` structurally.
+    After an envelope, the swallow arm keeps only the message in stderr and leaves `subtype` untouched.
+  design: |
+    (1) src/lib/worker.ts: add `exit: WorkerExit` to WorkerResult, where
+    `WorkerExit = {kind: "exit"; code: number} | {kind: "signal"; signal: string} | {kind: "unobserved"}`.
+    "unobserved" is for a runner that saw no process end, such as the openweight HTTP runner or a claude
+    envelope with no SDK throw. It is never guessed as exit 0. Export `workerExitOfError(e)`, which reads
+    an SDK error's `.signal`/`.exitCode`, and set `exit` from it in collectWorkerResult's swallow arm.
+    (2) src/lib/worker-provider.ts: the codex exit promise resolves `(code, signal)`. A non-null signal
+    gives `exit: {kind: "signal", signal}` and `isError: true` whatever the stream parsed. Leave `subtype`
+    as it is today, so verdict rows and retro mappings do not move.
+    (3) src/run-task.ts: fixWorkerEndedBySignal reads `result.exit.kind === "signal"` and never the subtype.
+    The W1-T5999 fix.done row keeps `worker_exit: "signal"` (W1-T6028 keys on it) and adds
+    `worker_exit_signal: <name>`.
+    Out of scope (follow-ups): moving fixDispatchSignalDeath onto workerExitOfError, and the implement and
+    review lanes' reading of `exit`.
+  acceptance:
+    - claim: "a codex worker whose child ends by a signal returns exit kind signal naming that signal, also when its stream logged turn.failed or ended on a torn line, and the fix rung records that round signal_terminated with the signal name; a child that exits with a non-zero code returns exit kind exit with that code, and its missing COMMIT_MESSAGE line is still a refusal"
+      proof: "unit test: test/a-worker-result-names-how-its-process-ended.test.ts"
+  falsifier: |
+    Keep classifying by subtype: a fixture whose stream logs turn.failed and whose child then ends by SIGTERM
+    reads `error_codex`, is recorded fix.commit_refused with no signal name, and the test fails.

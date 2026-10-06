@@ -7,17 +7,25 @@
  *
  * TWO INDEPENDENT PROTECTIONS, which is the {@link file://./clone-reaper.ts} discipline — that
  * module records that an age test ALONE destroyed two working trees:
- *   (1) QUIET  — no registered worktree, no inflight lock, no open handle under `.git`. Any one
- *                failing REFUSES, and an absent or unreadable probe refuses rather than authorising.
+ *   (1) QUIET  — no active registered worktree, no inflight lock, no open handle under `.git`.
  *   (2) EXPIRY — {@link OBJECT_PRUNE_EXPIRY} is ALWAYS passed. Even if (1) were wrong, an object a
  *                live worker created inside the window is ineligible.
- * Both must fail to cause harm.
+ *
+ * OPERATOR RULING 2026-10-06 ("prune on expiry alone"): the armed reaper refused 58 ticks in a row
+ * while two stores held 51,865 and 141,536 loose objects, because a working fleet always has a
+ * worktree or an inflight lock. Those two quiet arms NO LONGER REFUSE BY THEMSELVES: the prune runs
+ * and its decision row says the EXPIRY barrier carried it ({@link ObjectReapDecision}). The
+ * open-handle arm STILL refuses, and an unreadable handle count still reads as held. Expiry is
+ * never optional, so (2) is now the protection the clone-reaper discipline asks to be independent:
+ * an age test is safe here where it was not there because prune only removes objects NO ref, index
+ * or reflog reaches — a whole working tree was never in that set.
  *
  * PRUNE ONLY, NEVER `gc`: gc repacks and can rewrite refs and reflogs, and the finding is about
- * UNREACHABLE objects, which prune alone removes.
+ * UNREACHABLE objects, which prune alone removes. Never `git worktree prune` either.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { type Clock, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -33,9 +41,9 @@ export const LOOSE_OBJECT_FLOOR = 5000;
 const UNREADABLE_WORKTREE = "<unreadable>";
 
 export interface ObjectReapDeps {
-  /** Registered worktrees for the repo. Non-empty REFUSES. */
+  /** Registered worktrees for the repo. Non-empty means the expiry, not quiet, carries the prune. */
   listWorktrees?: (repoDir: string) => readonly string[];
-  /** Inflight lock files. Non-empty REFUSES. */
+  /** Inflight lock files. Non-empty means the expiry, not quiet, carries the prune. */
   listInflightLocks?: () => readonly string[];
   /** Open-handle count under `.git`. Non-zero REFUSES; unreadable must return >0 (fail closed). */
   openFileCount?: (dir: string) => number;
@@ -62,8 +70,32 @@ export interface ObjectReapDeps {
    *  touches this file at all. Read+written on every call so a permanent block is distinguishable
    *  from a single busy tick across process restarts, not just within one. */
   streakPath?: string;
-  /** Injectable clock for the streak's `refusingSinceIso` timestamp. */
+  /** Injectable clock for the streak's `refusingSinceIso` timestamp and the stale-lock age. */
   clock?: Clock;
+  /** Every process on this host, for the stale-lock reclaim. A throw keeps every lock. */
+  listProcesses?: () => readonly ProcessEntry[];
+  /** This host's name, matched against the one `gc.pid` records. */
+  hostname?: () => string;
+}
+
+/** One `ps` row. */
+export interface ProcessEntry {
+  pid: number;
+  args: string;
+}
+
+/** Which barrier let a prune (or a survey's would-prune) through. `quiet`: no active worktree and
+ *  no inflight lock either, so both barriers held. `expiry`: the store was busy, and the 24h expiry
+ *  alone stands between a live worker and its objects — the 2026-10-06 operator ruling. */
+export type ObjectReapBarrier = "quiet" | "expiry";
+
+export interface ObjectReapDecision {
+  /** Present iff the reap must not run. Only an open handle under `.git` (or an unreadable count). */
+  refusedBecause?: string;
+  /** Present iff the reap may run. */
+  carriedBy?: ObjectReapBarrier;
+  /** The quiet condition that failed, when {@link carriedBy} is `expiry`. */
+  quietShortfall?: string;
 }
 
 /** Persisted at {@link ObjectReapDeps.streakPath}: how many CONSECUTIVE REFUSALS the quiet
@@ -87,6 +119,12 @@ export interface ObjectReapResult {
    *  call's own outcome is folded in. */
   consecutiveRefusals?: number;
   refusingSinceIso?: string;
+  /** Which barrier carried a prune or survey; absent on a refusal or a below-the-floor skip. */
+  carriedBy?: ObjectReapBarrier;
+  /** The failing quiet condition when {@link carriedBy} is `expiry`. */
+  quietShortfall?: string;
+  /** Armed pass only: the stale maintenance locks reclaimed before the prune, and any kept. */
+  locks?: StaleLockReclaim;
 }
 
 /** Registered worktrees, excluding the main one. `git worktree list --porcelain` emits a
@@ -136,23 +174,23 @@ export function defaultLooseObjectCount(repoDir: string): number {
 }
 
 /**
- * The QUIET predicate, as its own function so every arm is separately testable and each refusal
- * carries the cause a reader needs. Returns `undefined` when it is safe to proceed.
+ * The full QUIET predicate: the first of its three conditions that fails, or `undefined` when all
+ * three read clear. Each arm names its cause in the operator's own vocabulary.
  *
- * W1-T4022 never weakened any of the three conditions below to make the gate passable — that is
- * precisely the change the task exists to refuse (its own falsifier says so). What changed sits
- * entirely OUTSIDE this function: the DEFAULT open-file counter production actually wires (was a
- * fail-closed `() => 1` nothing ever replaced, so the third arm refused unconditionally) and the
- * DEFAULT policy load the rung reads (was `config.root`'s absent `plan/policy.yaml`, thrown and
- * silently swallowed, so the rung never reached this predicate at all). This predicate itself is
- * called TWICE per armed pass — once here, once more immediately before the destructive git call,
- * bracketing a quiesced window (see {@link reapGitObjects}) — never sampled less, never relaxed.
+ * SINCE THE 2026-10-06 OPERATOR RULING THIS IS NO LONGER THE GATE. {@link objectReapDecision} is:
+ * only the open-handle arm refuses there, and a failing worktree or inflight-lock arm becomes the
+ * decision's `quietShortfall` with `carriedBy: "expiry"`. The arms themselves are unchanged.
  */
 export function objectReapRefusal(
   repoDir: string,
   inflightDir: string,
   deps: ObjectReapDeps = {},
 ): string | undefined {
+  return quietShortfall(repoDir, inflightDir, deps) ?? openHandleRefusal(repoDir, deps);
+}
+
+/** The worktree and inflight-lock arms of the quiet predicate, the two that no longer refuse. */
+function quietShortfall(repoDir: string, inflightDir: string, deps: ObjectReapDeps): string | undefined {
   const worktrees = (deps.listWorktrees ?? defaultListWorktrees)(repoDir)
     .filter((w) => w === UNREADABLE_WORKTREE || (deps.isWorktreeActive?.(w) ?? true));
   if (worktrees.length > 0) {
@@ -163,11 +201,105 @@ export function objectReapRefusal(
   if (locks.length > 0) {
     return `${locks.length} inflight lock(s) held — the fleet is mid-dispatch`;
   }
-  const open = (deps.openFileCount ?? (() => 1))(join(repoDir, ".git"));
-  if (open > 0) {
-    return `${open} open handle(s) under .git — a live process holds the object store`;
-  }
   return undefined;
+}
+
+/** The arm that STILL refuses. An absent probe reads as held: fail closed. */
+function openHandleRefusal(repoDir: string, deps: ObjectReapDeps): string | undefined {
+  const open = (deps.openFileCount ?? (() => 1))(join(repoDir, ".git"));
+  return open > 0 ? `${open} open handle(s) under .git — a live process holds the object store` : undefined;
+}
+
+/**
+ * THE DECISION the reap acts on (operator ruling 2026-10-06). An open handle under `.git` refuses;
+ * otherwise the reap runs, and the decision names which barrier carried it: `quiet` when the
+ * worktree and inflight-lock arms also read clear, `expiry` when only the always-passed
+ * {@link OBJECT_PRUNE_EXPIRY} stands between a busy fleet and its objects.
+ */
+export function objectReapDecision(repoDir: string, inflightDir: string, deps: ObjectReapDeps = {}): ObjectReapDecision {
+  const refusedBecause = openHandleRefusal(repoDir, deps);
+  if (refusedBecause !== undefined) return { refusedBecause };
+  const shortfall = quietShortfall(repoDir, inflightDir, deps);
+  return shortfall === undefined ? { carriedBy: "quiet" } : { carriedBy: "expiry", quietShortfall: shortfall };
+}
+
+/** A maintenance leftover younger than this is presumed to belong to a live git command. A gc
+ *  takes seconds to minutes; the stranding leftovers measured 2026-10-06 were four weeks old. */
+export const STALE_MAINTENANCE_LOCK_AGE_MS = 60 * 60_000;
+
+/** Leftovers under a repo's git dir whose presence blocks git's own maintenance. A minimal subset
+ *  of PR #9555's `GIT_MAINTENANCE_LEFTOVERS` (unmerged when this landed): ref and index locks are
+ *  not maintenance and are never touched here. `gc.log` is handled by the reap itself. */
+export const MAINTENANCE_LEFTOVERS = ["objects/maintenance.lock", "gc.pid", "gc.log.lock"] as const;
+
+/** A git process that may own a maintenance lock. Matched against a whole `ps` args line. */
+const MAINTENANCE_PROCESS = /(^|[\s/])git\s(.*\s)?(gc|maintenance|repack|prune|pack-refs)(\s|$)/;
+
+export interface StaleLockReclaim {
+  /** Paths (relative to the git dir) removed. */
+  reclaimed: string[];
+  /** Stale leftovers deliberately kept, and why. */
+  kept?: { paths: string[]; reason: string };
+  /** Removals attempted that failed. A failure costs the lock, never the prune. */
+  failed?: Array<{ path: string; error: string }>;
+}
+
+/** Every process on this host, from `ps`, bounded by a timeout. Throws when unreadable. */
+export function defaultListProcesses(): ProcessEntry[] {
+  const out = execFileSync("ps", ["-eo", "pid=,args="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  return out
+    .split("\n")
+    .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ({ pid: Number(m[1]), args: m[2] }));
+}
+
+/**
+ * Remove maintenance leftovers older than {@link STALE_MAINTENANCE_LOCK_AGE_MS} from `gitDir`.
+ * Nothing is removed while a git gc/maintenance/repack/prune process is alive on this host, while
+ * `gc.pid` names a live git process on this host, or when the process list cannot be read —
+ * "could not look" is not "nobody is there".
+ */
+export function reclaimStaleMaintenanceLocks(gitDir: string, deps: ObjectReapDeps = {}): StaleLockReclaim {
+  const now = (deps.clock ?? systemClock).now();
+  const stale = MAINTENANCE_LEFTOVERS.filter((rel) => {
+    try {
+      return now - statSync(join(gitDir, rel)).mtimeMs >= STALE_MAINTENANCE_LOCK_AGE_MS;
+    } catch {
+      // absent (the usual case) or unstattable: either way it is not removed, so neither can take a live lock
+      return false;
+    }
+  });
+  if (stale.length === 0) return { reclaimed: [] };
+  const keep = (reason: string): StaleLockReclaim => ({ reclaimed: [], kept: { paths: [...stale], reason } });
+  let processes: readonly ProcessEntry[];
+  try {
+    processes = (deps.listProcesses ?? defaultListProcesses)();
+  } catch (err) {
+    // could not look is not "nobody is there": every stale lock is kept, and the reason says why
+    return keep(`process list unavailable, so a live gc cannot be ruled out: ${String((err as Error)?.message ?? err)}`);
+  }
+  const live = processes.find((p) => MAINTENANCE_PROCESS.test(p.args));
+  if (live !== undefined) return keep(`live git maintenance process ${live.pid}: ${live.args}`);
+  const [pidText = "", owner = ""] = (readFileIfExists(join(gitDir, "gc.pid")) ?? "").trim().split(/\s+/);
+  if (owner === (deps.hostname ?? hostname)() && processes.some((p) => p.pid === Number(pidText))) {
+    return keep(`gc.pid names live process ${pidText} on this host`);
+  }
+  const result: StaleLockReclaim = { reclaimed: [] };
+  for (const rel of stale) {
+    try {
+      rmSync(join(gitDir, rel), { force: true });
+      result.reclaimed.push(rel);
+    } catch (err) {
+      (result.failed ??= []).push({ path: rel, error: String((err as Error)?.message ?? err) });
+    }
+  }
+  return result;
 }
 
 /**
@@ -279,15 +411,11 @@ export function defaultCountPrunable(repoDir: string, args: readonly string[]): 
  * it on a refused pass would re-arm git's UNSUPERVISED automatic cleanup, which is precisely what
  * the operator's standing rule exists to prevent — the opposite of this function's purpose.
  *
- * THE QUIESCED WINDOW (design (ii), W1-T4022). `objectReapRefusal` above is a single sample at
- * one instant; a working fleet registers a worktree or an inflight lock on ITS OWN cadence, not
- * this rung's, so trusting one sample for the whole operation is "hoping to observe a quiet
- * moment that a working host never offers". Rather than wait for a longer or more frequent
- * sample of the SAME kind, this CREATES the window instead: past the first check, immediately
- * before the one subprocess that deletes anything, the identical three-condition predicate is
- * re-run. Both ends must read quiet — the object that gets removed is the state AT the moment of
- * deletion, never a stale sample from moments earlier. Neither check is weaker than the other;
- * neither ever counts as a substitute for the other.
+ * THE QUIESCED WINDOW (design (ii), W1-T4022). {@link objectReapDecision} is a single sample at
+ * one instant, so it is taken TWICE: once here, once more immediately before the one subprocess
+ * that deletes anything. An open handle at EITHER end refuses; the barrier recorded is the one
+ * read at the second end, the state at the moment of deletion. Stale maintenance locks are
+ * reclaimed between the second check and the prune ({@link reclaimStaleMaintenanceLocks}).
  */
 export function reapGitObjects(
   repoDir: string,
@@ -301,34 +429,34 @@ export function reapGitObjects(
     // of small-but-quiet ticks cannot masquerade as a long busy streak, or vice versa.
     return { pruned: 0, looseBefore, refusedBecause: `only ${looseBefore} loose object(s), below the ${LOOSE_OBJECT_FLOOR} floor` };
   }
-  const refusal = objectReapRefusal(repoDir, inflightDir, deps);
-  if (refusal !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: refusal });
+  const first = objectReapDecision(repoDir, inflightDir, deps);
+  if (first.refusedBecause !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: first.refusedBecause });
 
   // SURVEY: past every refusal above, so the disposition reported is the decision the armed path
-  // would have made. Returns BEFORE gc.log is touched and before anything is spawned.
+  // would have made. Returns BEFORE gc.log is touched and before anything is spawned or removed.
   if (deps.dryRun === true) {
     const count = deps.countPrunable ?? defaultCountPrunable;
     return withStreak(deps, false, {
       pruned: 0,
       wouldPrune: count(repoDir, ["prune", "-n", `--expire=${OBJECT_PRUNE_EXPIRY}`]),
       looseBefore,
+      ...barrierFields(first),
     });
   }
 
-  // THE SECOND END OF THE QUIESCED WINDOW — see this function's own doc comment above. Checked
-  // BEFORE gc.log is touched: a refusal here must leave the auto-gc suppressor exactly where the
-  // first refusal above would have left it.
-  const windowRefusal = objectReapRefusal(repoDir, inflightDir, deps);
-  if (windowRefusal !== undefined) {
+  // THE SECOND END OF THE QUIESCED WINDOW. Checked BEFORE gc.log is touched: a refusal here must
+  // leave the auto-gc suppressor exactly where the first refusal above would have left it.
+  const second = objectReapDecision(repoDir, inflightDir, deps);
+  if (second.refusedBecause !== undefined) {
     return withStreak(deps, true, {
       pruned: 0,
       looseBefore,
-      refusedBecause: `quiesced window closed before the prune: ${windowRefusal}`,
+      refusedBecause: `quiesced window closed before the prune: ${second.refusedBecause}`,
     });
   }
 
-  // Only now, with the prune committed to (both ends of the quiesced window read quiet), does the
-  // auto-gc suppressor come off.
+  const locks = reclaimStaleMaintenanceLocks(join(repoDir, ".git"), deps);
+  // Only now, with the prune committed to, does the auto-gc suppressor come off.
   try {
     rmSync(join(repoDir, ".git", "gc.log"), { force: true });
   } catch {
@@ -339,5 +467,9 @@ export function reapGitObjects(
   });
   run(repoDir, ["prune", `--expire=${OBJECT_PRUNE_EXPIRY}`]);
   const looseAfter = (deps.looseObjectCount ?? defaultLooseObjectCount)(repoDir);
-  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore });
+  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore, ...barrierFields(second), locks });
+}
+
+function barrierFields(d: ObjectReapDecision): Pick<ObjectReapResult, "carriedBy" | "quietShortfall"> {
+  return { carriedBy: d.carriedBy, ...(d.quietShortfall !== undefined ? { quietShortfall: d.quietShortfall } : {}) };
 }

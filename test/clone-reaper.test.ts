@@ -282,18 +282,30 @@ describe("clone-reaper", () => {
   });
 
   it("cloneReapRoots: darwin adds /private/tmp, absent roots are dropped, duplicates deduped", () => {
-    const seenRoots = new Set<string>();
-    const fsAllPresent = { ...fs, existsSync: ((p: string) => (seenRoots.add(p), true)) as never } as never;
+    const oldTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = "/fixture-clone-reap-root";
+    try {
+      const seenRoots = new Set<string>();
+      const fsAllPresent = { ...fs, existsSync: ((p: string) => (seenRoots.add(p), true)) as never } as never;
 
-    const darwin = cloneReapRoots({ platform: "darwin", fsImpl: fsAllPresent });
-    assert.ok(darwin.includes("/private/tmp"), "darwin must survey /private/tmp");
-    assert.equal(new Set(darwin).size, darwin.length, "roots must be deduped");
+      const darwin = cloneReapRoots({ platform: "darwin", fsImpl: fsAllPresent });
+      assert.ok(darwin.includes("/fixture-clone-reap-root"), "the explicit temporary root is always surveyed");
+      assert.ok(darwin.includes("/private/tmp"), "darwin must survey /private/tmp");
+      assert.equal(new Set(darwin).size, darwin.length, "roots must be deduped");
 
-    const linux = cloneReapRoots({ platform: "linux", fsImpl: fsAllPresent });
-    assert.equal(linux.includes("/private/tmp"), false, "non-darwin must not survey /private/tmp");
+      const linux = cloneReapRoots({ platform: "linux", fsImpl: fsAllPresent });
+      assert.equal(linux.includes("/private/tmp"), false, "non-darwin must not survey /private/tmp");
 
-    const none = cloneReapRoots({ platform: "darwin", fsImpl: { ...fs, existsSync: (() => false) as never } as never });
-    assert.deepEqual(none, [], "a root that does not exist is never surveyed");
+      assert.ok(linux.includes("/fixture-clone-reap-root"), "linux retains the explicit temporary root");
+      process.env.TMPDIR = "/private/tmp";
+      const aliased = cloneReapRoots({ platform: "darwin", fsImpl: fsAllPresent });
+      assert.equal(aliased.filter((p) => p === "/private/tmp").length, 1, "the Darwin alias and actual tmp root are one survey");
+      const none = cloneReapRoots({ platform: "darwin", fsImpl: { ...fs, existsSync: (() => false) as never } as never });
+      assert.deepEqual(none, [], "a root that does not exist is never surveyed");
+    } finally {
+      if (oldTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = oldTmpdir;
+    }
   });
 
   it("a failed removal is recorded, never thrown, and does not abort the sweep", () => {

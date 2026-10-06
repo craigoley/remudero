@@ -81,11 +81,11 @@ test("W1-T3090: a refused pass leaves gc.log in place, so auto-gc stays suppress
   const { repoDir, gcLog } = repoWithGcLog();
   const r = reapGitObjects(repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1,
     runPrune: () => assert.fail("a refused pass must not prune"),
   });
   assert.equal(r.pruned, 0);
-  assert.match(r.refusedBecause ?? "", /worktree/);
+  assert.match(r.refusedBecause ?? "", /open handle/);
   assert.equal(existsSync(gcLog), true, "removing it here would re-arm the unsupervised auto-gc");
 });
 
