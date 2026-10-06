@@ -72,9 +72,9 @@ function ringBuilt(db: ReadModelDb): boolean {
 }
 
 /**
- * The ring's rows, oldest first and same-millisecond rows in the order the projector applied them (the
- * file's order), which is the order the route hands {@link buildOperatorActivityProjection}; none for a
- * store that has not built the projection.
+ * The ring's rows, oldest first and same-millisecond rows in the order the projector applied them; none for
+ * a store that has not built the projection. {@link buildOperatorActivityProjection} ranks ties by their own
+ * text, so this order and the route's union order give the same body.
  */
 export function readActivityRing(db: ReadModelDb): Row[] {
   if (!ringBuilt(db)) return [];
