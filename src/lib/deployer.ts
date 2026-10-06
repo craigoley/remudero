@@ -1854,6 +1854,7 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
 
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
@@ -1969,7 +1970,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
 
   return {
     log,
-    now: () => Date.now(),
+    now: clock,
     fetch: () => {
       fetchWithRefLockRetry();
     },
@@ -2250,7 +2251,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
       const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
       // Key set only when true, so the probe's shape is unchanged otherwise.
-      const boot = readBootSettling(ledgerPath, Date.now());
+      const boot = readBootSettling(ledgerPath, clock());
       if (boot.unreadable) unreadable.push("bootSettling");
       return {
         workers,
