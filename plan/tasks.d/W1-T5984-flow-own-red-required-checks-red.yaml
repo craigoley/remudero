@@ -27,3 +27,11 @@
     - PR #9397: 0.13 PR-hours — required checks red — ci-log fix, strike 1/2
     - PR #9380: 0.13 PR-hours — required checks red — ci-log fix, strike 1/2
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required checks\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-06T17:29:22.161Z"
+    pin: "1a807ec9278ea80cdb60c2d329759f7336255af22c55b30393127f4500d6f27f"
