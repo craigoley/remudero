@@ -129,12 +129,12 @@ test("acceptance 1: an empty pin table fires, unopinionated, for EVERY gated run
   }
 });
 
-test("acceptance 1 (wired): autoTriageCheck's decision is byte-identical with an explicit empty pin table and with no ratifications option at all", () => {
+test("acceptance 1 (wired): autoTriageCheck's decision is byte-identical with an explicit empty pin table and with no ratifications option at all", async () => {
   const { config, cleanup } = fixtureConfig();
   try {
     const policy = loadDefaultPolicy();
-    const withExplicitEmpty = autoTriageCheck({ config, policy, ratifications: new Map() });
-    const withDefault = autoTriageCheck({ config, policy });
+    const withExplicitEmpty = await autoTriageCheck({ config, policy, ratifications: new Map() });
+    const withDefault = await autoTriageCheck({ config, policy });
     assert.deepEqual(withExplicitEmpty, withDefault);
   } finally {
     cleanup();
@@ -176,7 +176,7 @@ test("acceptance 2: a pin whose CONTRACT VERSION moved also refuses, naming the 
   }
 });
 
-test("acceptance 2 (wired, ledgered): autoTriageCheck refuses and ledgers rung.unratified when its pin has drifted", () => {
+test("acceptance 2 (wired, ledgered): autoTriageCheck refuses and ledgers rung.unratified when its pin has drifted", async () => {
   const { config, cleanup } = fixtureConfig();
   try {
     const policy = loadDefaultPolicy();
@@ -187,7 +187,7 @@ test("acceptance 2 (wired, ledgered): autoTriageCheck refuses and ledgers rung.u
       "operator",
       new Date("2026-09-01T00:00:00.000Z"),
     );
-    const decision = autoTriageCheck({ config, policy, ratifications: new Map([["autoTriage", staleRow]]) });
+    const decision = await autoTriageCheck({ config, policy, ratifications: new Map([["autoTriage", staleRow]]) });
     assert.equal(decision.fire, false);
     assert.match(decision.reason, /refused/);
 

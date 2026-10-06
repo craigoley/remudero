@@ -1277,7 +1277,7 @@ export interface DaemonDeps {
     deferralPending: boolean;
     dispatchCount: number;
     laneBudget: number;
-  }) => AutoTriageDecision;
+  }) => AutoTriageDecision | Promise<AutoTriageDecision>;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /** The auto-triage rung's own in-flight guard, symmetric with `isOpenPr` but keyed on feedback id. Why: a feedback
@@ -4603,7 +4603,7 @@ export async function runDaemon(
     if (deps.checkAutoTriage) {
       let decision: AutoTriageDecision | undefined;
       try {
-        decision = deps.checkAutoTriage({
+        decision = await deps.checkAutoTriage({
             deferralPending: deferredPairings > 0,
             dispatchCount: dispatchSet.length,
             laneBudget,
