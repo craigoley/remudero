@@ -45,6 +45,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "backlog",
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
   "flow",
+  "flow-remedy",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

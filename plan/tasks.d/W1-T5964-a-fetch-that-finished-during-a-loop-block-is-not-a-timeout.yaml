@@ -1,0 +1,40 @@
+- id: W1-T5964
+  title: "A FETCH THAT FINISHED DURING A DAEMON-LOOP BLOCK IS NOT A TIMEOUT — boundGitCall's 60 s timer fires late when the loop is blocked and rejects a fetch whose trace already reached its final region, so the reviewer-code freshness gate withholds a passing review as `unreadable`; on 2026-10-06 both #9460 refusals (04:07:33, 04:50:01) sat on daemon.loop_lag blocks of 158 s and 143 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — whether the fetch bound's verdict is true; it gates every terminal review verdict
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: #9460 sat 60+ min with two passing reviews withheld"
+  plan_refs: [W1-T5282, W1-T5771, W1-T5530, W1-T5689]
+  files: [src/lib/git-fetch-retry.ts, test/a-fetch-that-finished-during-a-loop-block-is-not-a-timeout.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only). review.post_refused "reviewer code freshness is unprovable ... git fetch
+    ... exceeded its 60000ms bound and was killed; last trace2 region: submodule/parallel/fetch; elapsed 174869ms" on
+    #9460 at 04:50:01.552, 1.5 s after daemon.loop_lag lag_ms 143167 (phase pulse, after ci_learning_cadence.ran);
+    the 04:07:33 refusal sat on a 158227 ms block (after garden.pass). submodule/parallel/fetch is the LAST region a
+    completed fetch enters (a local trace of the same argv ends there in 0.5 s), and `elapsed` is read inside the
+    timer callback, so the timer itself ran ~115 s late: the fetch had finished and its resolution was queued
+    behind the reject. 21 such refusals in the current ledger (2026-10-05 07:40 to 2026-10-06 04:50); loop_lag
+    rows are not retained across rotation, so only the window since 03:51Z can be checked: 2 of its 3 refusals
+    are loop blocks, 1 (#9461, 94 s, no lag row) is a genuinely slow fetch. Each refusal costs a review re-run and
+    ~35-40 min before re-admission (#9460: refused 04:07, re-admitted 04:44, refused again 04:50).
+  design: |
+    In boundGitCall, when the timer fires measurably late (elapsed well past timeoutMs), do not reject in that
+    callback: yield the event loop first (setImmediate) so an already-exited child's completion settles, and
+    reject only if it has not. A reject that does fire names the timer's lateness, so a loop block reads as one
+    and never as a slow remote. lastTraceRegion also names the last child process the trace records starting
+    (e.g. post-fetch auto-maintenance), so a fetch that lingers after its final region says where. The bound
+    for a genuinely hung fetch is unchanged.
+  acceptance:
+    - claim: "a fetch that completed while the loop was blocked past its bound resolves instead of rejecting, and a bound that does fire names how late its timer ran"
+      proof: "unit test: test/a-fetch-that-finished-during-a-loop-block-is-not-a-timeout.test.ts"
+  falsifier: |
+    Reject inside the late timer callback as today: a fake fetch that finished during a simulated 2-min block
+    is reported as exceeding its bound, and the test fails.

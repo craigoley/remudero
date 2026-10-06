@@ -190,12 +190,13 @@ import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommend
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
-import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
+import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -280,7 +281,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -9086,8 +9087,9 @@ async function fixRungStandDownReason(
     let facts: FixRebaseMergeFacts | undefined;
     try {
       facts = await mergeConflictCheck.readMergeFacts(mergeConflictCheck.prNumber);
-    } catch {
+    } catch (error) {
       facts = undefined; // fail open — an unreadable merge-facts read never manufactures a stand-down
+      log("fix.gate_read_error", { site, read: "merge_facts", error: String(error) });
     }
     if (facts?.mergeable === "CONFLICTING") {
       return {
@@ -9103,7 +9105,8 @@ async function fixRungStandDownReason(
     let rollup: RollupCheckEntry[] = [];
     try {
       rollup = await redCheckSupersession.readRollup(prUrl);
-    } catch {
+    } catch (error) {
+      log("fix.gate_read_error", { site, read: "ci_rollup", error: String(error) });
       rollup = []; // fail open — an unreadable rollup leaves every red name "still red" (see below)
     }
     const stillRed = stillRedRequiredNames(redCheckSupersession.redNames, rollup);
@@ -10673,7 +10676,11 @@ export async function runFixRung(opts: {
   const ciHandoff = (ci: CiGateOutcome | "green" | "red" | "timeout"): FixRungOutcome | undefined => {
     if (typeof ci === "string" || ci.state !== "freshness_handoff") return undefined;
     deps.log("fix.ci_not_green", { strike: strikes, ci: ci.state, sha: ci.sha });
-    return { outcome: "handed_off", review, strikes, retriggers, reason: ci.recycle ? "recycle_yield" : "freshness_yield" };
+    const reason = ci.recycle ? "recycle_yield" : "freshness_yield";
+    // W1-T5957: the round's one outcome row; the next sweep re-derives this PR.
+    deps.log("fix.stood_down", { site: "rung.ci_handoff", strike: strikes, outcome: "handed_off", owner: "sweep",
+      trigger: ci.recycle ? "recycle" : ci.trigger ?? "freshness", reason, sha: ci.sha });
+    return { outcome: "handed_off", review, strikes, retriggers, reason };
   };
   let sessionToResume: string | undefined = opts.initialSessionId;
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
@@ -10851,12 +10858,16 @@ export async function runFixRung(opts: {
     if (deps.captureWorktreeSnapshot) {
       try {
         currentTreeSnapshot = await deps.captureWorktreeSnapshot(opts.worktreePath);
-      } catch {
+      } catch (error) {
         currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
+        deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "worktree_snapshot", error: String(error) });
       }
     }
     const registeredWorktrees = opts.birthWorktreeSnapshot && deps.readRegisteredWorktrees
-        ? await Promise.resolve().then(deps.readRegisteredWorktrees).catch((_registryReadError: unknown): undefined => undefined)
+        ? await Promise.resolve().then(deps.readRegisteredWorktrees).catch((error: unknown): undefined => {
+          deps.log("fix.gate_read_error", { site: "rung.strike", strike: strikes + 1, read: "registered_worktrees", error: String(error) });
+          return undefined;
+        })
         : undefined;
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
@@ -35629,6 +35640,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         mintTaskId: ciLearningTaskIdMinter(repoRoot),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
+    }
+    case "flow-remedy": {
+      const d = deps("flow-remedy", raiseDuplicate);
+      return gardenPass(flowGardenSpec(d, {
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+      }), d);
     }
     // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
     // may narrow CI. A real miss opens a parked task naming the observed edge.
