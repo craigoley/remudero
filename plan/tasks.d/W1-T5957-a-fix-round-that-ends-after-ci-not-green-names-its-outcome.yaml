@@ -1,0 +1,35 @@
+- id: W1-T5957
+  title: "A FIX ROUND THAT ENDS AFTER CI-NOT-GREEN NAMES ITS OUTCOME AND SPENDS ITS NEXT STRIKE — fleet #9450's round logged fix.ci_not_green at 03:46:21Z and then ended with no outcome row (no fix.stood_down, fix.exhausted, fix.resolved or sweep.fix.error) and never spent its second strike; the claim was released ~03:47:22 and the PR sat red with nothing recording why the rung stopped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the rung's exit after a not-green CI wait; it decides whether a PR gets its next strike
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: found while building W1-T5955 and W1-T5935"
+  plan_refs: [W1-T5955, W1-T5919, W1-T5932, W1-T2788]
+  files: [src/run-task.ts, test/a-fix-round-that-ends-after-ci-not-green-names-its-outcome.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5955 (#9470), reading the live ledger for task W1-T5538 (#9450):
+    fix.dispatch 03:09:19, fix.done 03:12:52, run.awaiting_external waiting_on ci 03:15:11,
+    fix.ci_not_green 03:46:21 (run DAEMON-1791254466681), then nothing: no outcome row for the round and
+    no second strike, though the PR was still red. runFixRung (src/run-task.ts) logs fix.ci_not_green at two
+    sites (strike loop and the rerun-once path); after it the rung returns along a path that writes no
+    terminal row, so the sweep, the flow gardener and the operator cannot tell "gave up", "out of strikes"
+    and "handed off" apart.
+  design: |
+    Every exit of runFixRung after fix.ci_not_green writes exactly one terminal row naming the outcome:
+    next-strike (and then actually spends it while strikes remain), exhausted (strikes spent, with the
+    escalation it raises), or handed-off (with the owner). A catch on that path names its error. Read the
+    rung's return paths first and confirm which one the #9450 round took.
+  acceptance:
+    - claim: "after fix.ci_not_green a fix round either spends its next strike or writes exactly one terminal outcome row naming why it stopped, and never ends silently while strikes remain"
+      proof: "unit test: test/a-fix-round-that-ends-after-ci-not-green-names-its-outcome.test.ts"
+  falsifier: |
+    Keep the silent return after fix.ci_not_green: the round writes no outcome row and spends no strike,
+    and the test fails.
