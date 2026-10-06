@@ -9,7 +9,7 @@
   risk: medium  # Rule 19: one concern — which fix.done rows the fix-routing learner scores
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: W1-T5999 (#9566) builder loose end (b)"
-  plan_refs: [W1-T5535, W1-T5999, W1-T5998]
+  plan_refs: [W1-T5535, W1-T5999, W1-T5998, W1-T6032]
   files: [src/lib/fix-routing-learner.ts, test/a-signal-ended-fix-round-teaches-the-routing-learner-nothing.test.ts]
   status: queued
   priority: 2
@@ -27,6 +27,8 @@
     accepted_weight 6.49) agrees with the replay. The reward is
     `row.subtype === "commit_refused" ? refused : pushed red ? ciNotGreen : accepted`, so every subtype
     other than commit_refused falls through to accepted.
+    Differs from W1-T6032, which decides whether a signal-ended round COMMITS its leftover work; this task only
+    decides how such a round is SCORED by the routing learner.
   design: |
     In fixArmEvidence, after the attribution check, a fix.done row whose `worker_exit` is "signal"
     (W1-T5999's field) is added to no arm and not to the pooled prior. The same goes for a pre-W1-T5999
