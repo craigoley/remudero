@@ -37,7 +37,8 @@ const NORMAL_EXIT = { subtype: "success", isError: false };
 
 type Row = { step: string; task_id: string } & Record<string, unknown>;
 
-async function fixRound(t: TestContext, runId: string, exit: Pick<WorkerResult, "subtype" | "isError">) {
+async function fixRound(t: TestContext, runId: string, exit: Pick<WorkerResult, "subtype" | "isError">,
+  left: { edits?: boolean; ahead?: number } = {}) {
   t.mock.method(childProcess, "execFileSync", (_command: string, args: string[]) => {
     if (args.includes("rev-parse")) return HEAD;
     throw new Error("test: subprocess reads unavailable");
@@ -78,9 +79,9 @@ async function fixRound(t: TestContext, runId: string, exit: Pick<WorkerResult, 
       issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} } as IssueGateway,
       ledgerPath: join(root, "ledger.ndjson"), log: (step, extra) => rows.push({ step, task_id: TASK, ...(extra ?? {}) }),
       readHeadShaForProvenance: () => HEAD,
-      say: () => {}, account: (result) => result, commitsAhead: () => 0,
-      // The killed worker left nothing behind, as on #9528: no derived subject can rescue the round.
-      worktreeHasUncommittedChanges: () => false,
+      say: () => {}, account: (result) => result, commitsAhead: () => left.ahead ?? 0,
+      // By default the killed worker left nothing behind, as on #9528: no derived subject can rescue the round.
+      worktreeHasUncommittedChanges: () => left.edits ?? false,
       harnessCommitForShellLessWorker: (input) => harnessCommitForShellLessWorker(input, {
         commit: (_cwd, _paths, message) => {
           commits.push(message);
@@ -136,4 +137,21 @@ test("W1-T5999: a non-zero exit CODE is not a signal — the worker exited, so i
   const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_1", isError: true });
   assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
   assert.equal(rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
+});
+
+test("W1-T5999: a signal-ended fix worker that LEFT EDITS still has its work committed and pushed, never signal_terminated", async (t) => {
+  // W1-T4283 / #8973 (2026-10-04 01:06): a codex worker ended by signal had left edits; the harness derived
+  // the subject, committed and pushed a77eedf, and the PR merged. That round must keep landing its work.
+  const { rows, commits, pushes } = await fixRound(t, "DAEMON-1", SIGNAL_EXIT, { edits: true });
+  assert.equal(rows.some((row) => row.step === "fix.done" && row.subtype === "signal_terminated"), false);
+  assert.ok(rows.some((row) => row.step === "implement.harness_commit"), "the harness commits the work the worker left");
+  assert.match(commits[0] ?? "", /^fix: repair coverage-shard \(8\/8\) on #9528/);
+  assert.ok(pushes >= 1, "the committed round is pushed");
+  assert.equal(rows.some((row) => row.step === "fix.commit_refused"), false);
+});
+
+test("W1-T5999: a signal-ended fix worker that committed on its own is not signal_terminated either", async (t) => {
+  const { rows, pushes } = await fixRound(t, "DAEMON-1", SIGNAL_EXIT, { ahead: 1 });
+  assert.equal(rows.some((row) => row.step === "fix.done" && row.subtype === "signal_terminated"), false);
+  assert.ok(pushes >= 1, "the worker's own commit is pushed");
 });
