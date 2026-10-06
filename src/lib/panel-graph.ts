@@ -1040,15 +1040,7 @@ function activitySummary(row: Record<string, unknown>, taskId?: string): string 
   return taskId ? `${step} (${taskId})` : step;
 }
 
-/**
- * Activity rows ranked as {@link activityRows} shows them: newest first, and rows of one millisecond by their
- * own text, so the rank is a property of the rows, never of the order a reader met them. The route reads the
- * union live file first and the workstreams ring reads the projector's applied order; a rotation that retains
- * one row of a tie in the new live file and sheds the other to its archive puts the two in opposite orders
- * (console, 2026-10-06 09:54:41.879Z: `sweep.repair_filing_suppressed` then `sweep.summary` in
- * `ledger.2026-10-06T10-06-52-919Z`, only the summary carried live), so ranking ties by input order made the
- * two bodies differ at that tie: 649 shadow diffs.
- */
+/** Newest first, a millisecond's rows by their text: a rotation split reorders a tie's reads (2026-10-06 console). */
 function rankedActivityRows(rows: ReadonlyArray<Record<string, unknown>>): Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown> }> {
   const ranked: Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown>; text?: string }> = [];
   rows.forEach((row, index) => {
@@ -1064,7 +1056,6 @@ function activityRows(
   observedAt: string,
 ): OperatorActivityItem[] {
   const duplicates = new Map<string, number>();
-  // A row's number counts the rows of its key ranked before it, and every one of those is shown too.
   return rankedActivityRows(ledgerLines).slice(0, OPERATOR_ACTIVITY_MAX_ITEMS).map(({ row, occurredAt }): OperatorActivityItem => {
     const taskId = activityTaskId(row);
     const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
