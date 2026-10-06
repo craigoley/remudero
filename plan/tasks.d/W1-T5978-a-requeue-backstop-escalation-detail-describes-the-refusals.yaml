@@ -1,0 +1,32 @@
+- id: W1-T5978
+  title: "A REQUEUE-BACKSTOP ESCALATION'S DETAIL DESCRIBES THE REFUSALS, NOT A SECOND CANCELLATION — W1-T5942 made escalateCancelledCheck's title name its kind, but the issue body's detail is still the cancelled-twice text (\"re-queued ... once on head X, and it was reported CANCELLED again on that SAME head\"), which is false when the escalation fired at CHECK_REQUEUE_DEFERRAL_BACKSTOP after repeated 403 requeue refusals"
+  repo: remudero
+  depends_on: [W1-T5942]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low  # Rule 19: one string per escalation kind in one builder
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5942's build (#9487) follow-up"
+  plan_refs: [W1-T5942, W1-T5920]
+  files: [src/lib/sweep.ts, test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main: buildSweepEffects' escalateCancelledCheck (src/lib/sweep.ts) takes
+    kind = "cancelled-twice" | "requeue-deferral-backstop" and picks the summary from
+    CANCELLED_CHECK_ESCALATION_SUMMARY[kind], but its `detail` is one fixed string asserting a re-queue and a
+    second CANCELLED report on the same head. At the backstop neither happened: the requeue was refused (HTTP
+    403) CHECK_REQUEUE_DEFERRAL_BACKSTOP times while the run was in flight. The operator reading the issue is
+    told the wrong cause and the wrong remedy. No backstop escalation has fired yet (W1-T5942's ledger read:
+    zero sweep.check_requeue.deferred rows), so this is cheap to fix before the first one does.
+  design: |
+    Key the detail by kind beside the summary map: the backstop detail names the refusal count, that the run
+    was still in flight, and the `reason` passed in; the cancelled-twice detail is unchanged.
+  acceptance:
+    - claim: "a requeue-deferral-backstop escalation's detail names the refused requeues and never claims a second cancellation, while a cancelled-twice escalation's detail is unchanged"
+      proof: "unit test: test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts"
+  falsifier: |
+    Keep the single fixed detail: the backstop issue body still says "reported CANCELLED again" and the test fails.

@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=96846d7c305a5453
   attempts: 0
   files:
     - plan/tasks.yaml

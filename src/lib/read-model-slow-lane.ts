@@ -144,7 +144,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
       const github = githubSource();
       const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
       if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
-      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock), github) }] };
+      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot }, deps.statusGithub, clock), github) }] };
     },
   };
   return [inbox, feedback];

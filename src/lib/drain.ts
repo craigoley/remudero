@@ -800,7 +800,7 @@ export type StopReason =
   /** W1-T5404: host `MemAvailable` is below `policy.memoryFloorMib`. The single-lane loop returns it
    *  from its pass-level read; {@link runDrainLanes} when the memory gate held every lane (W1-T5482). */
   | "memory_governor_deferred"
-  /** W1-T5482: a quiet-hours hold refused every lane at admission. Only {@link runDrainLanes}. */
+  /** A quiet-hours hold stopped a single-lane pass or refused every lane at admission (W1-T5657). */
   | "quiet_hours_deferred";
 
 export interface DrainOpts {
@@ -1368,8 +1368,8 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
    *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
-  /** W1-T5529: the QUIET-HOURS hold, forwarded to `checkDispatchGovernors` per lane, where a throw
-   *  fails open. Before this field no drain caller could reach W1-T5482's `quiet_hours_deferred`. */
+  /** The QUIET-HOURS hold, read per single-lane pass and per lane through `checkDispatchGovernors`.
+   *  A throw fails open in both loops; the single-lane pass logs the error (W1-T5657). */
   checkQuietHours?: DispatchGovernorDeps["checkQuietHours"];
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
@@ -1633,6 +1633,20 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary(
         "memory_governor_deferred",
         `${memoryGoverned.observedAvailableMib} MiB available below the ${memoryGoverned.floorMib} MiB memory floor — new dispatch deferred`,
+      );
+    }
+
+    let quietHours: ReturnType<NonNullable<DrainDeps["checkQuietHours"]>>;
+    try {
+      quietHours = deps.checkQuietHours?.();
+    } catch (e) {
+      log("drain.quiet_hours.unreadable", { error: e instanceof Error ? e.message : String(e) });
+    }
+    if (quietHours) {
+      log("drain.quiet_hours", governorDeferPayload({ kind: "quiet_hours", result: quietHours }));
+      return summary(
+        "quiet_hours_deferred",
+        `quiet hours hold${quietHours.detail ? `: ${quietHours.detail}` : ""} — new dispatch deferred`,
       );
     }
 

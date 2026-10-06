@@ -17,8 +17,9 @@ import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } fro
 import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
+  BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures,
-  probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile,
+  probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
@@ -1107,6 +1108,8 @@ export interface RegisteredFixOwnerRecoveryDeps {
   publishAhead?: SweepRuntimeFn;
   preserveDiverged?: SweepRuntimeFn;
   preserveTrackedDirty?: SweepRuntimeFn;
+  /** W1-T5974: preserves a staged-only residue the PR's head has moved past; returns its recovery ref. */
+  preserveStagedResidue?: SweepRuntimeFn;
   resetTrackedDirty?: SweepRuntimeFn;
 }
 
@@ -3139,21 +3142,57 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
             }
+            // W1-T5974: staged-only residue on a head the PR has moved past is superseded work --
+            // preserved from the index, then reset and reclaimed. On the PR's CURRENT head it may be
+            // real unfinished work, so W1-T5918's refusal stands, as a head-stamped decline the
+            // FIX_CLAIM_DECLINE_BACKSTOP escalation counts instead of a silent acted:true return.
             if (residue?.refusal) {
-              log("sweep.fix.checkout_claim_declined", {
-                reason: "registered_worktree_owner",
-                owner_recovery_reason: residue.refusal,
+              const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
+              if (!superseded) {
+                return declineClaim({
+                  reason: "registered_worktree_owner",
+                  owner_recovery_reason: residue.refusal,
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  worktree_path: snapshot.path,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  staged_paths: residue.stagedPaths,
+                  staged_more: residue.stagedMore,
+                });
+              }
+              try {
+                preservedRecoveryRef = String((registeredOwnerRecovery.preserveStagedResidue ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStagedResidue"))(
+                  repoDir,
+                  registeredOwner,
+                  realBranch,
+                  localSha,
+                ));
+              } catch (e) {
+                return declineClaim({
+                  reason: "registered_worktree_owner",
+                  owner_recovery_reason: "owner_staged_residue_preserve_failed",
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  worktree_path: snapshot.path,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  staged_paths: residue.stagedPaths,
+                  error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+                });
+              }
+              log("sweep.fix.checkout_owner_dirty_preserved", {
                 pr_number: pr.prNumber,
                 task_id: task.id,
                 branch: realBranch,
-                worktree_path: snapshot.path,
                 local_sha_prefix: localSha.slice(0, 12),
+                remote_sha_prefix: snapshot.remoteSha?.slice(0, 12),
+                recovery_ref: preservedRecoveryRef.slice(0, 512),
+                staged_only: true,
                 staged_paths: residue.stagedPaths,
                 staged_more: residue.stagedMore,
               });
-              return;
-            }
-            if (residue) {
+            } else if (residue) {
               log("sweep.fix.checkout_owner_residue_discarded", {
                 pr_number: pr.prNumber,
                 task_id: task.id,
@@ -3305,7 +3344,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               owner_history_action: recovery.kind,
               local_contained_by_remote: snapshot.historyState === "contained",
               recovery_ref: preservedRecoveryRef?.slice(0, 512),
-              residue_discarded: residue !== undefined,
+              residue_discarded: residue !== undefined && residue.refusal === undefined,
               no_live_claim: snapshot.claimState === "clear",
               no_process_cwd: snapshot.processState === "clear",
             },
@@ -10180,9 +10219,13 @@ async function holdRepeatedFixClaimDecline(
   if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return holdRepeatedFixDispatchFailure(pr, lines, escalate);
   const last = declines[declines.length - 1];
   const why = String(last.owner_recovery_reason);
+  // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
+  const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
+    ? `, staged ${last.staged_paths.map(String).join(", ")}${Number(last.staged_more) > 0 ? ` (+${Number(last.staged_more)} more)` : ""}`
+    : "";
   const reason =
     `fix checkout claim declined ${declines.length} times on #${pr.prNumber} at head ${pr.headSha.slice(0, 7)} ` +
-    `(registered worktree owner ${String(last.worktree_path ?? "path unread")}, ${why}) — ` +
+    `(registered worktree owner ${String(last.worktree_path ?? "path unread")}, ${why}${staged}) — ` +
     `FIX_CLAIM_DECLINE_BACKSTOP ${FIX_CLAIM_DECLINE_BACKSTOP} reached, no further claim is attempted at this head`;
   const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
     l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
@@ -10230,7 +10273,7 @@ export interface SweepDeps {
   readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
-  ) => Promise<readonly BaseProbeFile[]>;
+  ) => Promise<BaseProbeResult>;
   strikeLadder?: StrikeLadderEffects;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
@@ -14437,21 +14480,28 @@ export async function runSweep(
               const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
                 const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainTipSha, file)));
-                let probed: readonly BaseProbeFile[] = [];
+                let probed: BaseProbeResult = [];
                 try {
-                  if (missing.length > 0) probed = await deps.reproduceFailingTestsOnMain(pr, missing, mainTipSha);
+                  if (reproductionFiles.length > BASE_REPRODUCTION_MAX_FILES) probed = Object.assign([], { reason: "too many test files" });
+                  else if (missing.length > 0) probed = await deps.reproduceFailingTestsOnMain(pr, missing, mainTipSha);
                 } catch (error) {
-                  probed = missing.map((file) => ({ file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: String(error) }));
+                  const reason = boundedBaseProbeReason(error);
+                  probed = baseProbeSetupFailure(missing, reason);
                 }
-                const files = reproductionFiles.map((file): BaseProbeFile => {
+                const files = probed.reason === undefined ? reproductionFiles.map((file): BaseProbeFile => {
                   const cached = reproductionCache.get(probeCacheKey(mainTipSha, file));
-                  return cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
+                  const result = cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
                     { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
-                });
+                  return probed.setup_error !== undefined && result.outcome === "unrunnable" ?
+                    { file, outcome: "unrunnable", duration_ms: result.duration_ms, cached: result.cached } :
+                    { ...result, ...(result.reason === undefined ? {} : { reason: boundedBaseProbeReason(result.reason) }) };
+                }) : [];
                 const verdict = decideBaseReproduction(reproductionFiles, files);
-                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, files, verdict };
+                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, files, verdict,
+                  ...(probed.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probed.setup_error) }),
+                  ...(probed.reason === undefined ? {} : { reason: boundedBaseProbeReason(probed.reason) }) };
                 appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
-                for (const file of files) reproductionCache.set(probeCacheKey(mainTipSha, file.file), file);
+                if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainTipSha, file.file), file);
                 if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {

@@ -21,8 +21,8 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
-import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
+import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
+import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type JobRequeueOutcome } from "./lib/sweep.js";
@@ -2013,6 +2013,7 @@ export function buildBaseReproductionProbe(
     git?: (args: string[], timeoutMs: number) => Promise<void>;
     link?: typeof linkWorktreeNodeModules;
     readFile?: (path: string) => Promise<unknown>;
+    remove?: typeof rmAsync;
     execute?: typeof execWhitelistedProofAsync;
     timeout?: () => number;
     clock?: Clock;
@@ -2020,6 +2021,7 @@ export function buildBaseReproductionProbe(
 ): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
   return (_pr, files, mainSha) => {
     const pending = baseReproductionQueue.then(async () => {
+      if (files.length > BASE_REPRODUCTION_MAX_FILES) return Object.assign([], { reason: "too many test files" });
       const results = new Map<string, BaseProbeFile>();
       const key = (file: string) => `${repoDir}:${probeCacheKey(mainSha, file)}`;
       const cache = probeCacheFromLedger((deps.readLedger ?? readLedgerLines)(ledgerPath));
@@ -2032,16 +2034,22 @@ export function buildBaseReproductionProbe(
       const worktreePath = join(worktreesDir(config), `base-repro-${mainSha.slice(0, 12)}`);
       const clock = deps.clock ?? systemClock;
       const started = clock.now();
+      let setupError: string | undefined;
       let created = false;
       let timeoutMs: number | undefined;
       const git = deps.git ?? (async (args: string[], timeout: number) => {
         await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
       });
+      const remove = deps.remove ?? rmAsync;
       const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
-        ({ file, outcome: "unrunnable", duration_ms: clock.now() - started, cached: false, ...detail });
+        ({ file, outcome: "unrunnable", duration_ms: clock.now() - started, cached: false, reason: boundedBaseProbeReason(detail.reason) });
       try {
         timeoutMs = checkProofTimeoutMs(deps.timeout);
         await mkdirAsync(worktreesDir(config), { recursive: true });
+        if (existsSync(worktreePath)) {
+          await remove(worktreePath, { recursive: true, force: true });
+          await git(["-C", repoDir, "worktree", "prune", "--expire", "now"], timeoutMs);
+        }
         await buildBaseProofDir([], repoDir, {
           detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(args, timeoutMs!) },
         }).pendingCheckout;
@@ -2074,15 +2082,18 @@ export function buildBaseReproductionProbe(
           }
         }
       } catch (error) {
-        for (const file of missing) if (!results.has(file)) results.set(file, unreadable(file, { reason: String(error) }));
+        const failed = baseProbeSetupFailure(missing, error);
+        setupError = failed.setup_error;
+        for (const file of failed) if (!results.has(file.file)) results.set(file.file, file);
       } finally {
-        if (created) {
-          try { await git(["-C", repoDir, "worktree", "remove", "--force", worktreePath], timeoutMs!); }
-          catch (error) { log("sweep.base_reproduction.cleanup_failed", { main_sha: mainSha, path: worktreePath, reason: String(error) }); }
+        try {
+          if (created) await git(["-C", repoDir, "worktree", "remove", "--force", worktreePath], timeoutMs!);
+          await remove(worktreePath, { recursive: true, force: true });
         }
+        catch (error) { log("sweep.base_reproduction.cleanup_failed", { main_sha: mainSha, path: worktreePath, reason: boundedBaseProbeReason(error) }); }
       }
-      for (const file of missing) baseReproductionHostCache.set(key(file), results.get(file)!);
-      return files.map((file) => results.get(file)!);
+      if (setupError === undefined) for (const file of missing) baseReproductionHostCache.set(key(file), results.get(file)!);
+      return Object.assign(files.map((file) => results.get(file)!), setupError === undefined ? {} : { setup_error: setupError });
     });
     // The caller receives a rejection; settling the queue lets the next probe run (W1-T5528).
     baseReproductionQueue = pending.then(() => {}, (error) => { log("sweep.base_reproduction.queue_failed", { reason: String(error) }); });
@@ -2420,6 +2431,7 @@ export function buildSweepEffects(
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
+      preserveStagedResidue: preserveStagedFixOwnerResidue,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -12438,13 +12450,15 @@ export async function runFixRung(opts: {
           execFileSync("git", ["-C", opts.worktreePath, "fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
           return execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
         }))();
-        const probes = files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
+        const probes: BaseProbeResult = files.length > BASE_REPRODUCTION_MAX_FILES ? Object.assign([], { reason: "too many test files" }) : files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
           buildBaseReproductionProbe(opts.config, opts.worktreePath, deps.ledgerPath, deps.log))(
           { prNumber: prNumber!, headSha: priorHeadSha } as OpenPrView, files, mainSha,
         ) : [];
         verified = decideBaseReproduction(files, probes) === "reproduced";
-        deps.log("sweep.base_reproduction", { head_sha: priorHeadSha, main_sha: mainSha, files: probes,
-          verdict: decideBaseReproduction(files, probes) });
+        deps.log("sweep.base_reproduction", { head_sha: priorHeadSha, main_sha: mainSha, files: [...probes],
+          verdict: decideBaseReproduction(files, probes),
+          ...(probes.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probes.setup_error) }),
+          ...(probes.reason === undefined ? {} : { reason: boundedBaseProbeReason(probes.reason) }) });
         if (verified) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha,
           main_sha: mainSha, reason: "worker-base-red-verified", test_files: files });
       } catch (error) {
@@ -34024,6 +34038,8 @@ async function drainCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        checkQuietHours: () =>
+          isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
@@ -42013,6 +42029,26 @@ export function preserveOrDiscardFixOwnerResidue(
   return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
 }
 
+/** W1-T5974: a staged-only residue on a head the PR has moved past, preserved from the owner's
+ *  INDEX (`git diff --cached --binary <localSha>`) into the same immutable recovery-ref shape, the
+ *  ref's tree proven equal to the owner's own index tree before the caller resets anything. */
+export function preserveStagedFixOwnerResidue(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  readTrackedDirtyOwnerPatch(ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
+  const gitOut = (args: string[]) =>
+    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] });
+  const patch = gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
+  const ownerIndex = resolve(ownerPath, gitOut(["rev-parse", "--git-path", "index"]).trim());
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps, () =>
+    temporaryIndexTree(ownerPath, localSha, () => {}, ownerIndex),
+  );
+}
+
 const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
 const FIX_OWNER_OPERATION_MARKERS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] as const;
 
@@ -42080,11 +42116,12 @@ function preserveTrackedDirtyPatch(
   localSha: string,
   patch: string,
   deps: CaptureRegisteredFixOwnerDeps,
+  ownerTreeOf?: () => string,
 ): string {
   if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
-  const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
+  const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
     execFileSync("git", ["-C", ownerPath, "add", "-A"], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
