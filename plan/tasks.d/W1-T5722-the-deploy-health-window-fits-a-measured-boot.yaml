@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P5 and its unhealthy_rollback defect"
   plan_refs: [W1-T3200, W1-T5688]
   files: [src/lib/deployer.ts, test/the-deploy-health-window-fits-a-measured-boot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

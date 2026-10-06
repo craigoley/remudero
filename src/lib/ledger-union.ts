@@ -310,6 +310,9 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   liveStartOffset?: number;
   /** Seed the bounded replay window without persisting raw ledger lines. */
   dedupeSeed?: readonly { step: string; fingerprint: string }[];
+  /** Asked after each ROTATION is fully read (never the live file): true ends the stream there, so
+   *  a caller with a time budget stops on a rotation boundary it can resume from via `afterRotation`. */
+  stopAfterRotation?: (path: string) => boolean;
 }
 
 export function fingerprintLedgerLine(raw: string): string {
@@ -487,6 +490,7 @@ export async function* openLedgerUnion(
       gunzip?.destroy();
       source?.destroy();
     }
+    if (entry.path !== livePath && opts.stopAfterRotation?.(entry.path)) return;
   }
 }
 
@@ -644,22 +648,12 @@ export function rotationWindowExcludedThroughMs(stateDir: string, windowMs: numb
   return Math.max(Number.NEGATIVE_INFINITY, ...rotations.filter((entry) => !read.has(entry.path)).map(stampMsOf));
 }
 
-export function readLedgerUnionRawLinesSync(
-  stateDir: string,
-  opts: LedgerUnionRawReadOptions = {},
-  fsDeps: LedgerGrepFsDeps = realLedgerFs,
-): LedgerUnionRawRead {
-  const { rotations, unclassified } = listedLedgerFiles(stateDir, fsDeps);
-  const archiveFiles = rotations.map((e) => e.path);
-  const livePath = ledgerLivePath(stateDir);
-  const liveFileRead = fsDeps.existsSync(livePath);
-  const minimumTs = sinceMs(opts);
+/** The line-matching half every raw union read shares: the pattern, step and keep filters and the exact-line dedupe,
+ *  accumulated into `rawLines` one buffer (or one slice of one) at a time. */
+function rawLineCollector(opts: LedgerUnionRawReadOptions): { rawLines: string[]; scan: (buf: Buffer, start?: number, maxLines?: number) => number } {
   const stepFilter = rawLineStepFilter(opts.step);
   const seen = new Set<string>();
   const rawLines: string[] = [];
-  const unread: string[] = [];
-  let filesRead = 0;
-
   // W1-T3335 — SCANNED, NOT SPLIT. This decoded each corpus file into one JS string and then
   // `split("\n")` it into an array of every line in that file. MEASURED on the live corpus
   // (919 files, 3.84 GB decompressed), one call each through resolveLedgerUnion:
@@ -675,11 +669,12 @@ export function readLedgerUnionRawLinesSync(
   //
   // `buf.toString("utf8", start, end)` already yields an OWNED string, so the round-trip through
   // `Buffer.from(line)` that used to sever slice-retention here is no longer needed.
-  const addBuffer = (buf: Buffer): void => {
-    let start = 0;
-    while (start < buf.length) {
+  const scan = (buf: Buffer, start = 0, maxLines = Number.POSITIVE_INFINITY): number => {
+    let lines = 0;
+    while (start < buf.length && lines < maxLines) {
       let end = buf.indexOf(0x0a, start);
       if (end === -1) end = buf.length;
+      lines += 1;
       if (end > start) {
         const line = buf.toString("utf8", start, end).trim();
         if (line && (!opts.pattern || opts.pattern.test(line)) && (!stepFilter || stepFilter(line)) && (!opts.keep || opts.keep(line))) {
@@ -693,14 +688,31 @@ export function readLedgerUnionRawLinesSync(
       }
       start = end + 1;
     }
+    return start;
   };
+  return { rawLines, scan };
+}
+
+export function readLedgerUnionRawLinesSync(
+  stateDir: string,
+  opts: LedgerUnionRawReadOptions = {},
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): LedgerUnionRawRead {
+  const { rotations, unclassified } = listedLedgerFiles(stateDir, fsDeps);
+  const archiveFiles = rotations.map((e) => e.path);
+  const livePath = ledgerLivePath(stateDir);
+  const liveFileRead = fsDeps.existsSync(livePath);
+  const minimumTs = sinceMs(opts);
+  const { rawLines, scan } = rawLineCollector(opts);
+  const unread: string[] = [];
+  let filesRead = 0;
 
   const readEntry = (entry: LedgerCorpusEntry): void => {
     if (rotationBeforeWindow(entry, minimumTs)) return;
     try {
       const buf = fsDeps.readFileSync(entry.path);
       filesRead += 1;
-      addBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf);
+      scan(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf);
     } catch {
       // deliberate: archive read failures are reported through unread rather than thrown.
       unread.push(entry.path);
@@ -711,7 +723,7 @@ export function readLedgerUnionRawLinesSync(
     if (!liveFileRead) return;
     try {
       filesRead += 1;
-      addBuffer(fsDeps.readFileSync(livePath));
+      scan(fsDeps.readFileSync(livePath));
     } catch {
       // deliberate: an unreadable live file is not an unread rotation and does not make the archive corpus partial.
       // Best-effort live read, matching the prior union readers' behavior.
@@ -726,6 +738,83 @@ export function readLedgerUnionRawLinesSync(
   if (opts.liveFirst) readLive();
   for (const entry of rotationsToRead) readEntry(entry);
   if (!opts.liveFirst) readLive();
+
+  const ok = !(opts.refuseIncomplete && unread.length > 0);
+  return {
+    stateDir,
+    archiveFiles,
+    archiveCount: archiveFiles.length,
+    liveFileRead,
+    unread,
+    unclassified,
+    ok,
+    rawLines: ok ? rawLines : [],
+    filesRead,
+  };
+}
+
+/** Yields the event loop between slices of one file's lines. */
+const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * {@link readLedgerUnionRawLinesSync} off the event loop: the same files in the same order, the same filters and
+ * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
+ * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
+ * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
+ */
+export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
+  const { rotations, unclassified } = listedLedgerFiles(stateDir, realLedgerFs);
+  const archiveFiles = rotations.map((e) => e.path);
+  const livePath = ledgerLivePath(stateDir);
+  const liveFileRead = nodeExistsSync(livePath);
+  const minimumTs = sinceMs(opts);
+  const { rawLines, scan } = rawLineCollector(opts);
+  const unread: string[] = [];
+  let filesRead = 0;
+
+  const scanInSlices = async (buf: Buffer): Promise<void> => {
+    for (let at = 0; at < buf.length; ) {
+      at = scan(buf, at, LEDGER_ROTATION_LOAD_LINES_PER_TURN);
+      await yieldTurn();
+    }
+  };
+
+  const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
+    if (rotationBeforeWindow(entry, minimumTs)) return;
+    let buf: Buffer;
+    try {
+      const raw = await nodeReadFile(entry.path);
+      filesRead += 1;
+      buf = entry.form === "gzip" ? await gunzipAsync(raw) : raw;
+    } catch {
+      // deliberate: archive read failures are reported through unread rather than thrown, as the sync read does.
+      unread.push(entry.path);
+      return;
+    }
+    await scanInSlices(buf);
+  };
+
+  const readLive = async (): Promise<void> => {
+    if (!liveFileRead) return;
+    let buf: Buffer;
+    try {
+      filesRead += 1;
+      buf = await nodeReadFile(livePath);
+    } catch {
+      // deliberate: an unreadable live file is not an unread rotation, exactly as in the sync read.
+      return;
+    }
+    await scanInSlices(buf);
+  };
+
+  if (opts.requireArchives && archiveFiles.length === 0) {
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, ok: false, rawLines: [], filesRead };
+  }
+
+  const rotationsToRead = orderedEntries(rotations, opts);
+  if (opts.liveFirst) await readLive();
+  for (const entry of rotationsToRead) await readEntry(entry);
+  if (!opts.liveFirst) await readLive();
 
   const ok = !(opts.refuseIncomplete && unread.length > 0);
   return {
@@ -1097,12 +1186,20 @@ export function resolveLedgerUnion(
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
   opts: LedgerUnionOptions = {},
 ): LedgerUnionResult {
+  return ledgerUnionResultOf(readLedgerUnionRawLinesSync(stateDir, resolveUnionReadOptions(pattern, opts), fsDeps));
+}
+
+/** {@link resolveLedgerUnion} off the event loop ({@link readLedgerUnionRawLinesAsync}): the same answer. */
+export async function resolveLedgerUnionAsync(stateDir: string, pattern: string | RegExp, opts: LedgerUnionOptions = {}): Promise<LedgerUnionResult> {
+  return ledgerUnionResultOf(await readLedgerUnionRawLinesAsync(stateDir, resolveUnionReadOptions(pattern, opts)));
+}
+
+function resolveUnionReadOptions(pattern: string | RegExp, opts: LedgerUnionOptions): LedgerUnionRawReadOptions {
   const re = pattern instanceof RegExp ? pattern : new RegExp(sanitizeRegExp(pattern));
-  const read = readLedgerUnionRawLinesSync(
-    stateDir,
-    { ...opts, pattern: re, requireArchives: true, refuseIncomplete: true },
-    fsDeps,
-  );
+  return { ...opts, pattern: re, requireArchives: true, refuseIncomplete: true };
+}
+
+function ledgerUnionResultOf(read: LedgerUnionRawRead): LedgerUnionResult {
   return {
     stateDir: read.stateDir,
     archiveFiles: read.archiveFiles,

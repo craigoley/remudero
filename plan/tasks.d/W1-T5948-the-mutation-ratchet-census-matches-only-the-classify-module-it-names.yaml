@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
   plan_refs: [W1-T5933]
   files: [test/mutation-ratchet.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: SSE push-latency measurement on the host (extracts in the session scratch push-latency/, with #9344 and #9338 open)"
   plan_refs: [W1-T5884, W1-T5066]
   files: [src/lib/read-model-worker.ts, test/a-cheap-view-never-waits-behind-an-expensive-one.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

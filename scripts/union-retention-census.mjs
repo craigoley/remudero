@@ -139,7 +139,7 @@ export function assertRetentionSetsResolved(sets) {
 }
 
 const UNION_CALL_RE =
-  /resolveLedgerUnion\(\s*[^,]+,\s*(new RegExp\([\s\S]{0,300}?\)|[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"]*")/g;
+  /resolveLedgerUnion(?:Async)?\(\s*[^,]+,\s*(new RegExp\([\s\S]{0,300}?\)|[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"]*")/g;
 
 /** Every `"step":"…"` occurrence in a pattern, INCLUDING an alternation group.
  *

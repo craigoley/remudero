@@ -75,7 +75,7 @@ test("runTaskBody calls logDiskReclaimRung — AFTER logWorktreeReapBootSurvey, 
 
 describe("no new predicate — every decision stays inside the sweep that already owns it", () => {
   it("the function body introduces no age arithmetic or liveness probe of its own", () => {
-    const defMarker = "export function logDiskReclaimRung(";
+    const defMarker = "export async function logDiskReclaimRung(";
     const endMarker = "\n/**\n * impl-FZ — build the daemon's plan re-reader";
     const start = runTaskSrc.indexOf(defMarker);
     const end = runTaskSrc.indexOf(endMarker, start);
@@ -88,9 +88,9 @@ describe("no new predicate — every decision stays inside the sweep that alread
     assert.doesNotMatch(body, /isPidAlive|process\.kill/, "no liveness probe of its own — none of the three sweeps needs one");
   });
 
-  it("reports exactly what each injected sweep decides, with no extra filtering layered on top", () => {
+  it("reports exactly what each injected sweep decides, with no extra filtering layered on top", async () => {
     const lines: Array<[string, Record<string, unknown>]> = [];
-    const result = logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
+    const result = await logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
       sweepTempDirs: () => tempSummary({ removed: ["rmd-a", "rmd-b", "rmd-c"] }),
       reapClonesSurvey: () => cloneSummary({ reaped: ["/x/review-1"], bytesReclaimed: 777 }),
       sweepWorkerHomes: () => homeSummary({ removed: ["worker-home-1"] }),
@@ -101,8 +101,8 @@ describe("no new predicate — every decision stays inside the sweep that alread
     assert.equal(result.workerHomesRemoved, 1);
   });
 
-  it("an injected sweep that reclaims nothing is reported as nothing — the rung invents no reclaim of its own", () => {
-    const result = logDiskReclaimRung(CONFIG, () => {}, {
+  it("an injected sweep that reclaims nothing is reported as nothing — the rung invents no reclaim of its own", async () => {
+    const result = await logDiskReclaimRung(CONFIG, () => {}, {
       sweepTempDirs: () => tempSummary(),
       reapClonesSurvey: () => cloneSummary(),
       sweepWorkerHomes: () => homeSummary(),
@@ -123,8 +123,8 @@ describe("no new predicate — every decision stays inside the sweep that alread
 // ── 3. THROW ISOLATION: a throw in any one sweep never blocks the dispatch or the other two ─
 
 describe("throw isolation — each sweep is its own guard", () => {
-  it("sweepStaleTempDirs throwing still lets the other two reclaim, and never throws out of the rung", () => {
-    const result = logDiskReclaimRung(CONFIG, () => {}, {
+  it("sweepStaleTempDirs throwing still lets the other two reclaim, and never throws out of the rung", async () => {
+    const result = await logDiskReclaimRung(CONFIG, () => {}, {
       sweepTempDirs: () => {
         throw new Error("tmp root unreadable");
       },
@@ -136,8 +136,8 @@ describe("throw isolation — each sweep is its own guard", () => {
     assert.equal(result.workerHomesRemoved, 1, "the worker-home sweep still ran");
   });
 
-  it("the clone reap survey throwing still lets the other two reclaim", () => {
-    const result = logDiskReclaimRung(CONFIG, () => {}, {
+  it("the clone reap survey throwing still lets the other two reclaim", async () => {
+    const result = await logDiskReclaimRung(CONFIG, () => {}, {
       sweepTempDirs: () => tempSummary({ removed: ["rmd-a"] }),
       reapClonesSurvey: () => {
         throw new Error("policy.yaml unreadable");
@@ -149,8 +149,8 @@ describe("throw isolation — each sweep is its own guard", () => {
     assert.equal(result.workerHomesRemoved, 1);
   });
 
-  it("sweepStaleWorkerHomes throwing still lets the other two reclaim", () => {
-    const result = logDiskReclaimRung(CONFIG, () => {}, {
+  it("sweepStaleWorkerHomes throwing still lets the other two reclaim", async () => {
+    const result = await logDiskReclaimRung(CONFIG, () => {}, {
       sweepTempDirs: () => tempSummary({ removed: ["rmd-a"] }),
       reapClonesSurvey: () => cloneSummary({ reaped: ["/x/review-1"], bytesReclaimed: 42 }),
       sweepWorkerHomes: () => {
@@ -162,9 +162,9 @@ describe("throw isolation — each sweep is its own guard", () => {
     assert.equal(result.workerHomesRemoved, 0);
   });
 
-  it("all three throwing is still caught — the rung returns all-zero, never throws", () => {
-    assert.doesNotThrow(() => {
-      const result = logDiskReclaimRung(CONFIG, () => {}, {
+  it("all three throwing is still caught — the rung returns all-zero, never throws", async () => {
+    await assert.doesNotReject(async () => {
+      const result = await logDiskReclaimRung(CONFIG, () => {}, {
         sweepTempDirs: () => {
           throw new Error("a");
         },
@@ -195,7 +195,7 @@ function fixtureBase(): { root: string; cleanup: () => void } {
 }
 
 describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.ndjson or its rotations", () => {
-  it("sweepStaleTempDirs never removes an rmd-prefixed FILE (a ledger masquerading under the rmd prefix)", () => {
+  it("sweepStaleTempDirs never removes an rmd-prefixed FILE (a ledger masquerading under the rmd prefix)", async () => {
     const f = fixtureBase();
     try {
       const past = new Date(Date.now() - 30 * 60 * 60 * 1000); // past the 24h ceiling
@@ -210,7 +210,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
       mkdirSync(leak, { recursive: true });
       utimesSync(leak, past, past);
 
-      const result = logDiskReclaimRung(CONFIG, () => {}, {
+      const result = await logDiskReclaimRung(CONFIG, () => {}, {
         sweepTempDirs: () => sweepStaleTempDirs({ root: f.root }),
         reapClonesSurvey: () => cloneSummary(),
         sweepWorkerHomes: () => homeSummary(),
@@ -225,7 +225,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
     }
   });
 
-  it("sweepStaleWorkerHomes never removes a worker-home-prefixed FILE (a ledger masquerading under the prefix)", () => {
+  it("sweepStaleWorkerHomes never removes a worker-home-prefixed FILE (a ledger masquerading under the prefix)", async () => {
     const f = fixtureBase();
     try {
       const past = new Date(Date.now() - 30 * 60 * 60 * 1000);
@@ -237,7 +237,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
       mkdirSync(leak, { recursive: true });
       utimesSync(leak, past, past);
 
-      const result = logDiskReclaimRung(CONFIG, () => {}, {
+      const result = await logDiskReclaimRung(CONFIG, () => {}, {
         sweepTempDirs: () => tempSummary(),
         reapClonesSurvey: () => cloneSummary(),
         sweepWorkerHomes: () => sweepStaleWorkerHomes(workerHomeRoot),
@@ -251,7 +251,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
     }
   });
 
-  it("reapStaleClones never removes a ledger file, nor a non-fleet-clone directory under a scratch root", () => {
+  it("reapStaleClones never removes a ledger file, nor a non-fleet-clone directory under a scratch root", async () => {
     const f = fixtureBase();
     try {
       const cloneRoot = join(f.root, "scratch");
@@ -265,7 +265,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
       mkdirSync(stateDir, { recursive: true });
       writeFileSync(join(stateDir, "ledger.ndjson"), '{"step":"run.start"}\n');
 
-      const result = logDiskReclaimRung(CONFIG, () => {}, {
+      const result = await logDiskReclaimRung(CONFIG, () => {}, {
         sweepTempDirs: () => tempSummary(),
         sweepWorkerHomes: () => homeSummary(),
         reapClonesSurvey: (config, log, deps) =>
@@ -289,9 +289,9 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
 // ── 5. ONE LEDGER LINE, and it is not decision-relevant ─────────────────────────────────────
 
 describe("one ledger line, summarising the whole rung, and it is not decision-relevant", () => {
-  it("when all three sweeps reclaim something, exactly one ledger line is written", () => {
+  it("when all three sweeps reclaim something, exactly one ledger line is written", async () => {
     const lines: Array<[string, Record<string, unknown>]> = [];
-    logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
+    await logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
       sweepTempDirs: () => tempSummary({ removed: ["rmd-a", "rmd-b"] }),
       reapClonesSurvey: () => cloneSummary({ reaped: ["/x/review-1"], bytesReclaimed: 500 }),
       sweepWorkerHomes: () => homeSummary({ removed: ["worker-home-1"] }),
@@ -309,9 +309,9 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
     assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has(step), false, "the summary line must not be decision-relevant");
   });
 
-  it("stays silent when nothing was reclaimed", () => {
+  it("stays silent when nothing was reclaimed", async () => {
     const lines: string[] = [];
-    logDiskReclaimRung(CONFIG, (s) => lines.push(s), {
+    await logDiskReclaimRung(CONFIG, (s) => lines.push(s), {
       sweepTempDirs: () => tempSummary(),
       reapClonesSurvey: () => cloneSummary(),
       sweepWorkerHomes: () => homeSummary(),
@@ -321,9 +321,9 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
     assert.deepEqual(lines, [], "a pass that reclaims nothing writes no ledger line");
   });
 
-  it("reusing logCloneReapSurvey does not ALSO emit its own daemon.clone_reap line — one summary, not two", () => {
+  it("reusing logCloneReapSurvey does not ALSO emit its own daemon.clone_reap line — one summary, not two", async () => {
     const lines: Array<[string, Record<string, unknown>]> = [];
-    logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
+    await logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
       sweepTempDirs: () => tempSummary(),
       sweepWorkerHomes: () => homeSummary(),
       // Default reapClonesSurvey = the real logCloneReapSurvey; drive it against a fake root

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(c), the coverage scratch half"
   plan_refs: [W1-T5655, W1-T4526, W1-T5707, W1-T5709, W1-T5550]
   files: [deploy/rmd-host-cleanup.sh, test/a-nested-coverage-scratch-with-no-lock-is-reaped.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

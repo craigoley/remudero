@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 9, review reuse across a merge-from-main head"
   plan_refs: [W1-T1015, W1-T3704, W1-T3798, W1-T3901, W1-T2793, W1-T5714, W1-T5696]
   files: [src/run-task.ts, test/review-orphan-wiring.test.ts, test/a-sweep-updated-reviewed-head-still-reaches-review-reuse.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

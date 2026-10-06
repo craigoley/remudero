@@ -35,9 +35,9 @@ function worktreeWithRunLock(pid: number | undefined): string {
 }
 
 /** Drive the REAL wiring: the predicates logDiskReclaimRung hands the reaper, applied by the real objectReapRefusal. */
-function refusalThroughWiring(inflightDir: string, worktrees: string[], ownTask: string): string | undefined {
+async function refusalThroughWiring(inflightDir: string, worktrees: string[], ownTask: string): Promise<string | undefined> {
   let refusal: string | undefined = "never reached";
-  logDiskReclaimRung({ root: tmp("w1t5119-root") } as never, () => {}, {
+  await logDiskReclaimRung({ root: tmp("w1t5119-root") } as never, () => {}, {
     sweepTempDirs: () => ({ removed: [] }) as never,
     reapClonesSurvey: () => ({ reaped: [], bytesReclaimed: 0 }) as never,
     sweepWorkerHomes: () => ({ removed: [] }) as never,
@@ -55,32 +55,32 @@ function refusalThroughWiring(inflightDir: string, worktrees: string[], ownTask:
   return refusal;
 }
 
-test("W1-T5119: the calling run own inflight lock does not refuse the reap", () => {
+test("W1-T5119: the calling run own inflight lock does not refuse the reap", async () => {
   const inflight = inflightDirWith({ "W1-T1": process.pid });
-  assert.equal(refusalThroughWiring(inflight, [], "W1-T1"), undefined, "the caller's own lock is not another worker");
-  assert.match(String(refusalThroughWiring(inflight, [], "W1-T2")), /inflight lock/, "someone else's live lock still refuses");
+  assert.equal(await refusalThroughWiring(inflight, [], "W1-T1"), undefined, "the caller's own lock is not another worker");
+  assert.match(String(await refusalThroughWiring(inflight, [], "W1-T2")), /inflight lock/, "someone else's live lock still refuses");
 });
 
-test("W1-T5119: a leftover worktree with no live run lock does not refuse the reap", () => {
+test("W1-T5119: a leftover worktree with no live run lock does not refuse the reap", async () => {
   const inflight = inflightDirWith({ "W1-T1": process.pid, "W1-T9": DEAD_PID });
   const leftovers = [worktreeWithRunLock(undefined), worktreeWithRunLock(DEAD_PID)];
-  assert.equal(refusalThroughWiring(inflight, leftovers, "W1-T1"), undefined, "dead locks and lockless leftovers are not active workers");
+  assert.equal(await refusalThroughWiring(inflight, leftovers, "W1-T1"), undefined, "dead locks and lockless leftovers are not active workers");
 });
 
-test("W1-T5119: a live worker worktree still refuses the reap", () => {
+test("W1-T5119: a live worker worktree still refuses the reap", async () => {
   const inflight = inflightDirWith({ "W1-T1": process.pid });
   const corrupt = tmp("w1t5119-corrupt");
   writeFileSync(runLockPath(corrupt), "{torn");
-  assert.match(String(refusalThroughWiring(inflight, [worktreeWithRunLock(process.pid)], "W1-T1")), /worktree/);
-  assert.match(String(refusalThroughWiring(inflight, [corrupt], "W1-T1")), /worktree/, "an unreadable run lock fails closed");
+  assert.match(String(await refusalThroughWiring(inflight, [worktreeWithRunLock(process.pid)], "W1-T1")), /worktree/);
+  assert.match(String(await refusalThroughWiring(inflight, [corrupt], "W1-T1")), /worktree/, "an unreadable run lock fails closed");
   const torn = inflightDirWith({ "W1-T1": process.pid });
   writeFileSync(join(torn, "W1-T3.lock"), "{torn");
-  assert.match(String(refusalThroughWiring(torn, [], "W1-T1")), /inflight lock/, "an unparseable inflight lock fails closed");
+  assert.match(String(await refusalThroughWiring(torn, [], "W1-T1")), /inflight lock/, "an unparseable inflight lock fails closed");
 });
 
-test("W1-T5119: an unreadable worktree registry still refuses the reap", () => {
+test("W1-T5119: an unreadable worktree registry still refuses the reap", async () => {
   const inflight = inflightDirWith({ "W1-T1": process.pid });
-  assert.match(String(refusalThroughWiring(inflight, ["<unreadable>"], "W1-T1")), /worktree/);
+  assert.match(String(await refusalThroughWiring(inflight, ["<unreadable>"], "W1-T1")), /worktree/);
 });
 
 test("W1-T5119: without the active-worker predicates the reaper still counts every lock and worktree", () => {

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
   plan_refs: [W1-T2863, W1-T2952, W1-T3170, W1-T3822, W1-T3825, W1-T5919]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

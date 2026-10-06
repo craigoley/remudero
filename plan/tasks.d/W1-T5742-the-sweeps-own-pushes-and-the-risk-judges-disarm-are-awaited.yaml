@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: found while building W1-T5284 (#9159)"
   plan_refs: [W1-T5284, W1-T5689, W1-T4477]
   files: [src/lib/sweep.ts, src/run-task.ts, test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
