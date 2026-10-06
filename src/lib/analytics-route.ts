@@ -1721,6 +1721,15 @@ function snapshotFromAccumulator(
   return out;
 }
 
+/** The non-enumerable `cache.reuse` terms JSON left out of a checkpoint's snapshot, from the `state.tokensTotal` it
+ *  was built from: the snapshot's own terms. A checkpoint without them restores none, never zeros. */
+function restoreCacheReuseTokens(snapshot: AnalyticsSnapshot, state: Partial<AnalyticsCheckpointState>): AnalyticsSnapshot {
+  const terms = state.tokensTotal;
+  if (snapshot.cacheReuseTokens !== undefined || !terms || ![terms.input, terms.cacheRead, terms.cacheCreation].every(Number.isFinite)) return snapshot;
+  Object.defineProperty(snapshot, "cacheReuseTokens", { value: { input: terms.input, cacheRead: terms.cacheRead, cacheCreation: terms.cacheCreation }, enumerable: false, writable: false });
+  return snapshot;
+}
+
 function attachUsageProjection(snapshot: AnalyticsSnapshot, state: UsageTelemetryState | undefined): AnalyticsSnapshot {
   if (state === undefined) return snapshot;
   const usage = buildUsageProjection(state, snapshot.asOf, snapshot.spend?.cash);
@@ -2280,9 +2289,8 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     drilldowns: breakdowns.drilldowns,
     operatorAgentMemory: { state: "cold", asOf: null, rows: [] },
   };
-  // Keep the pre-existing cold-cache object enumerable shape stable for callers that compare
-  // the retained cache value directly; buildAnalyticsRoute materializes these fields on the
-  // wire, and property access remains available to process-owned consumers.
+  // Keep the cold-cache enumerable shape stable for callers comparing the cache value directly; buildAnalyticsRoute
+  // materializes these fields on the wire, and property access remains available to process-owned consumers.
   Object.defineProperties(snapshot, {
     dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
@@ -2320,7 +2328,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(restoreCacheReuseTokens(checkpoint.snapshot, checkpoint.state), checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
@@ -2473,8 +2481,7 @@ export function buildAnalyticsRoute(deps: {
       const params = new URL(req.url ?? "/", "http://local").searchParams;
       const requestedVersion = params.get("projectionVersion") ?? params.get("projection") ?? undefined;
       const base = deps.currentSnapshot();
-      // The analytics cache owns historical refreshes. Live metrics are a separate, already
-      // captured process-owned value, so this handler never starts a refresh or provider read.
+      // The cache owns historical refreshes; live metrics are already captured, so this never starts a refresh or a read.
       const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
       // W1-T4024: a snapshot restored from a pre-W1-T4024 checkpoint has no `spend` until the first
       // refresh; say so explicitly rather than let the field vanish from the payload.

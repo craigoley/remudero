@@ -113,11 +113,18 @@ test("all heartbeat fixture runners install the native namespace boundary", () =
 test("heartbeat fixtures measure their real state but never scan a host-wide consumer", () => {
   const harness = readFileSync(fileURLToPath(new URL("./helpers/fleet-heartbeat-harness.ts", import.meta.url)), "utf8");
   assert.match(harness, /installFixtureDuGuard\(binDir, \[dir, rec\]\)/, "guard wiring must exist before executing the real script");
-  const beat = runBeat();
-  assert.equal(beat.status, 0, beat.stderr);
-  const field = (name: string) => beat.published.split("\n").find(line => line.startsWith(name + "="))?.slice(name.length + 1);
-  assert.match(field("consumer_state_kb") ?? "", /^[0-9]+$/);
-  assert.equal(field("consumer_rmd_kb"), "unknown");
-  assert.ok(beat.duCalls.some(call => call.allowed && call.status === 0));
-  assert.ok(beat.duCalls.some(call => call.requested === "/mnt/rmd" && !call.allowed));
+  for (const platform of ["Linux", "Darwin"]) {
+    const beat = runBeat({ unameStub: `#!/bin/sh\nprintf '%s\\n' '${platform}'\n` });
+    assert.equal(beat.status, 0, beat.stderr);
+    const field = (name: string) => beat.published.split("\n").find(line => line.startsWith(name + "="))?.slice(name.length + 1);
+    assert.match(field("consumer_state_kb") ?? "", /^[0-9]+$/);
+    assert.ok(beat.duCalls.some(call => call.allowed && call.status === 0));
+    if (platform === "Linux") {
+      assert.equal(field("consumer_rmd_kb"), "unknown");
+      assert.ok(beat.duCalls.some(call => call.requested === "/mnt/rmd" && !call.allowed));
+    } else {
+      assert.equal(field("consumer_rmd_kb"), undefined);
+      assert.equal(beat.duCalls.some(call => call.requested === "/mnt/rmd"), false);
+    }
+  }
 });

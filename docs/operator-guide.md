@@ -1289,6 +1289,16 @@ instances:
     container_config_dir: /etc/remudero/container-config
 ```
 
+An optional `gh_app_private_key_host_path` declares a separate readable host key file. With this
+field, `gh_app_private_key_path` is its absolute container destination (for example
+`/run/remudero/github-app.pem`); both installer and recycler mount the file read-only with Docker's
+`--mount` syntax. Legacy records without the host field retain their existing mount resolution.
+The explicit file is checked before lifecycle actions, shared with the pre-stop worker smoke,
+and verified against the replacement container's actual mount source and read-only mode. A missing
+or writable mount is a failed runtime contract, not successful adoption. This does not select or
+change a Claude OAuth store. `RMD_GH_APP_PRIVATE_KEY_HOST_PATH` provides the same input without a
+registry field.
+
 `--instance example` renders only `rmd-example-fleet.*` and `remudero-example-relaunch.sh`; it does
 not check, install, relaunch, or recycle another instance. STOP/PAUSE markers remain under that instance's
 own `state_dir`, so a deliberate example stop blocks only the example revival path. The core daemon's

@@ -4,7 +4,7 @@
 // host view only read it. FALSIFIER: put the append back in the route and the first test reads no row while
 // nobody reads, and the second reads an appended one.
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -423,6 +423,49 @@ test("a host providerRouting diff no rewrite or deadline between the two reads e
     writeRouting(w.root, NOW - 60_000, 600_000, 10);
     const fresh = routingDiffs(compareHost(w, NOW, NOW + 60_000, () => {}, (data) => void ((data.providerRouting as { freshness: string }).freshness = "stale")));
     assert.deepEqual(fresh.map((d) => [d.path, d.classification]), [["providerRouting.freshness", "real"]]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+// Host reading 2026-10-06 21:00:46Z, after #9667 deployed: the one host diff left was accountUsage.governorAsOf,
+// legacy "2026-10-06T21:00:35.781Z" vs the view's "2026-10-06T20:55:08.902Z", judged real. The posture is the
+// newest `daemon.headroom` row, appended every few minutes; the view read the ledger at its probe and legacy when
+// serve rendered the sample 46 s into the minute, so a row landing between them was in legacy's read alone.
+const HEADROOM = (ts: string, enforced: boolean): string => `${JSON.stringify({ ts, run_id: "DAEMON-1", task_id: "DAEMON", step: "daemon.headroom", enforced })}\n`;
+const accountDiffs = (compared: { diffs: Array<{ path: string; classification: string; reason: string }> }) => compared.diffs.filter((d) => d.path.startsWith("accountUsage"));
+
+test("a host governor posture from a headroom row landing between the two reads is timing, not real", () => {
+  const w = world();
+  try {
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:55:08.902Z", true));
+    const compared = compareHost(w, Date.parse("2026-10-06T21:00:00.000Z"), Date.parse("2026-10-06T21:00:46.278Z"),
+      () => appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T21:00:35.781Z", false)));
+    const diffs = accountDiffs(compared);
+    assert.deepEqual(diffs.map((d) => d.path).sort(), ["accountUsage.governor", "accountUsage.governorAsOf"], "the captured path and its state differ: not vacuous");
+    assert.deepEqual(diffs.filter((d) => d.classification !== "timing"), [], JSON.stringify(diffs));
+    assert.match(diffs[0]!.reason, /legacy read the accountUsage\.governorAsOf reading observed at 2026-10-06T21:00:35\.781Z, the body the one observed at 2026-10-06T20:55:08\.902Z/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a host governor posture no row between the two reads explains stays real", () => {
+  const w = world();
+  try {
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:55:08.902Z", true));
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:59:30.000Z", true));
+    const [viewAt, legacyAt] = [Date.parse("2026-10-06T21:00:00.000Z"), Date.parse("2026-10-06T21:00:46.278Z")];
+    // The body holds an OLDER row than one already in the ledger at its probe: the view missed a row it read.
+    const missed = accountDiffs(compareHost(w, viewAt, legacyAt, () => {}, (data) => void (data.accountUsage.governorAsOf = "2026-10-06T20:55:08.902Z")));
+    assert.deepEqual(missed.map((d) => [d.path, d.classification]), [["accountUsage.governorAsOf", "real"]]);
+    // The same row on both sides with a posture that differs anyway: nothing explains it.
+    const posture = accountDiffs(compareHost(w, viewAt, legacyAt, () => {}, (data) => void (data.accountUsage.governor = "telemetry-only")));
+    assert.deepEqual(posture.map((d) => [d.path, d.classification]), [["accountUsage.governor", "real"]]);
+    // A row between the reads explains its own posture only: a differing usage field beside it stays real.
+    const beside = accountDiffs(compareHost(w, viewAt, legacyAt, () => appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T21:00:35.781Z", true)),
+      (data) => void (data.accountUsage.measures = "tampered")));
+    assert.deepEqual(beside.map((d) => [d.path, d.classification]).sort(), [["accountUsage.governorAsOf", "timing"], ["accountUsage.measures", "real"]]);
   } finally {
     w.cleanup();
   }
