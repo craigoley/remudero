@@ -7,14 +7,14 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  defaultProofRunner,
-  defaultProofRunnerAsync,
-  openPullRequestChecked,
-  prerunPullRequestProofs,
-  PrOpenRefusedError,
-  type AsyncOpenPullRequestProofRunner,
-} from "../src/lib/pr-open.js";
+// A namespace import, not named ones: at the merge base the new exports are absent, and a named
+// import would fail the whole file at link time instead of failing each test on its own.
+import * as prOpen from "../src/lib/pr-open.js";
+import { defaultProofRunner, openPullRequestChecked, PrOpenRefusedError } from "../src/lib/pr-open.js";
+import type { AsyncOpenPullRequestProofRunner } from "../src/lib/pr-open.js";
+
+const defaultProofRunnerAsync: typeof prOpen.defaultProofRunnerAsync = (...args) => prOpen.defaultProofRunnerAsync(...args);
+const prerunPullRequestProofs: typeof prOpen.prerunPullRequestProofs = (...args) => prOpen.prerunPullRequestProofs(...args);
 import { gitRepo } from "./helpers/git-repo.js";
 
 /** A fake `rmd`: echoes its argv, writes to stderr, sleeps `RMD_FAKE_SLEEP_MS`, and exits 3 when
