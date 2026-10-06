@@ -29,6 +29,13 @@ SCRATCH_MANIFEST_NAME=".scratch-mounts"
 
 scratch_root() { printf '%s' "${RMD_SCRATCH_ROOT:-/mnt/scratch}"; }
 
+# A TEST PROCESS NEVER RESOLVES THE HOST'S REAL SCRATCH ROOT. W1-T5631's dead switch lives in the
+# suite's --import setup, so a run without it (a bare `node --import tsx --test <file>` on the host)
+# still read the real switch and mkdir'd ~70 fixture state dirs (recycle-state-*, state-root, ...)
+# under /mnt/scratch/rmd. Under the node test runner only an explicit RMD_SCRATCH_ROOT is used.
+scratch_root_refused() { [ -n "${NODE_TEST_CONTEXT:-}" ] && [ -z "${RMD_SCRATCH_ROOT:-}" ]; }
+SCRATCH_REFUSED_NOTE="NOT USED — a test process (NODE_TEST_CONTEXT) never uses the host's /mnt/scratch; set RMD_SCRATCH_ROOT"
+
 # True when the scratch root is itself a mounted filesystem: a bare directory at that path sits on
 # the 29 GB OS disk, and worktrees there would fill it.
 scratch_root_is_mounted() {
@@ -62,6 +69,10 @@ scratch_plan() {
   SCRATCH_STATE_DIR="${state_dir}"
   if ! scratch_enabled; then
     SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage and the read model stay on the state disk"
+    return 1
+  fi
+  if scratch_root_refused; then
+    SCRATCH_NOTE="${SCRATCH_REFUSED_NOTE}"
     return 1
   fi
   if ! scratch_root_is_mounted; then
@@ -142,6 +153,10 @@ scratch_fresh_tmp() {
 # launch's record. Only under the scratch root, and only when it is mounted. Never fails docker.
 scratch_restore() {
   local state_dir manifest owner dir path
+  if scratch_root_refused; then
+    echo "scratch-mounts: ${SCRATCH_REFUSED_NOTE}; nothing restored"
+    return 0
+  fi
   if ! scratch_root_is_mounted; then
     echo "scratch-mounts: $(scratch_root) is not mounted; nothing restored"
     return 0
