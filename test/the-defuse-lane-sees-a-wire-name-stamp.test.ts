@@ -83,13 +83,14 @@ test("W1-T6036: a quoted or JSON-escaped key reports the same stamp, and a left 
 });
 
 test("W1-T6036: a deadline row is dated at its own instant, not a staleness threshold later", () => {
+  // Census INPUT, scanned at the pinned NOW: no suite outcome here reads the real clock.
   const r = scan({ [FILE]: [
-    `deadline: "2026-10-08T00:00:00.000Z",`,
-    `snoozedUntil: "2026-10-09T00:00:00.000Z",`,
-    `freshUntil: "2026-10-10T00:00:00.000Z",`,
-    `deadline: "2026-10-01T18:00:00.000Z",`,
-    `lastActivityAt: "2026-09-23T00:00:00.000Z",`,
-    `retroAttemptAt: "2026-10-05T20:00:00.000Z",`,
+    `deadline: "2026-10-08T00:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
+    `snoozedUntil: "2026-10-09T00:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
+    `freshUntil: "2026-10-10T00:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
+    `deadline: "2026-10-01T18:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
+    `lastActivityAt: "2026-09-23T00:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
+    `retroAttemptAt: "2026-10-05T20:00:00.000Z",`, // expiring-fixture: exempt -- census input read at the pinned NOW
   ].join("\n") });
   const at = (field: string) => r.reported.filter((x) => x.field === field).map((x) => new Date(x.expiresAt).toISOString());
   assert.deepEqual(at("deadline"), ["2026-10-08T00:00:00.000Z"]);
