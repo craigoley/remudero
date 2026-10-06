@@ -1,0 +1,75 @@
+- id: W1-T5944
+  title: "JOIN A TOOL ATTEMPT TO ITS ACTUAL RESULT — metadata-only per-call lineage on the existing worker stream"
+  repo: remudero
+  depends_on: [W1-T4580, W1-T5882]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "operator approved Merge platform research follow-ups, 2026-10-05"
+  plan_refs: [W1-T942, W1-T3880, W1-T4578, W1-T4580, W1-T5882]
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - src/lib/worker-tool-lineage.ts
+    - test/worker-tool-lineage-joins.test.ts
+    - test/worker-tool-lineage-unknown.test.ts
+    - test/worker-tool-lineage-outcomes.test.ts
+    - test/worker-tool-lineage-redaction.test.ts
+    - test/worker-tool-lineage-wiring.test.ts
+  status: queued
+  attempts: 0
+  note: |
+    Retain the original operator reservation and branch; the refreshed filing preserves its ID.
+    reservation hand-off: codex/merge-tool-lineage-plan-oct5 -> codex/merge-lineage-current-v3-oct6
+  rationale: |
+    OBSERVED: W1-T4580 owns model-call assignment coverage. worker.ts already observes tool_use
+    and tool_result blocks for liveness, but its tool-executing event retains a tool name and
+    turnsSoFar, not a durable matched call/result identity. This task owns tool-level lineage,
+    not another model assignment counter or a replacement worker-state sensor. Merge's tool
+    call logs correlate calls by request, trace and turn:
+    https://docs.merge.dev/merge-agent-handler/observe/tool-call-logs.
+
+    Do not call an agent's proposed tool call an admitted action, and do not call a successful
+    tool response a verified task outcome. These are separate evidence boundaries. Node 24
+    compatibility remains hand-built; consume it as a dependency before touching its files.
+  design: |
+    Normalize metadata-only tool-use/result events from the existing consumed provider stream.
+    Bind correlation to the actual provider call ID plus run and turn, with bounded identifier
+    encoding. Preserve a known call/result join, an orphan result, a duplicate, and an
+    unfinished call as distinct outcomes. If a provider lacks stable IDs, record unsupported
+    lineage rather than guessing from tool name, order, timing or model prose.
+
+    Reuse the existing observer and durable sink; add no polling, second stream consumer or
+    live provider calls for reconstruction. Tool name and outcome are allowlisted/bounded;
+    never retain raw arguments, command lines, file paths, result bodies, credentials or model
+    text. Admission is not observed unless an authoritative executor receipt supplies it.
+    Result success means only the provider reported tool success. Verified task outcome stays
+    at its existing boundary. Telemetry failure must not affect worker execution or PR flow.
+
+    Add real assembly fixtures proving the default observer receives normalized events, plus
+    provider-specific tests for IDs, missing/foreign IDs, duplicates, out-of-order results,
+    error results, interruption and malformed payloads. Perform a caller census with positive
+    controls; unsupported adapters remain named, not silently counted as covered. No public
+    analytics labels or production permission changes in this task.
+  acceptance:
+    - claim: "real IDs join use and result without conflating tools or separate runs"
+      proof: "unit test: test/worker-tool-lineage-joins.test.ts"
+    - claim: "unsupported and incomplete evidence remains explicitly unknown"
+      proof: "unit test: test/worker-tool-lineage-unknown.test.ts"
+    - claim: "observation does not claim admission or verified task completion"
+      proof: "unit test: test/worker-tool-lineage-outcomes.test.ts"
+    - claim: "the actual default assembly observes events and preserves flow on sink failure"
+      proof: "unit test: test/worker-tool-lineage-wiring.test.ts"
+    - claim: "metadata remains bounded and raw tool payloads never enter durable receipts"
+      proof: "unit test: test/worker-tool-lineage-redaction.test.ts"
+    - claim: "the existing worker stream calls the lineage normalizer in its real assembly"
+      proof: "grep: observeWorkerToolLineage( in src/lib/worker.ts"
+  falsifier: |
+    Join two calls by tool name, count a duplicate as a second tool success, infer an orphan's
+    run, claim admission from tool_use, claim task completion from tool_result, bypass the
+    default observer, log a payload, or interrupt execution when the receipt sink fails. The
+    matching control must fail when each defect is introduced.
