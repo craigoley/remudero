@@ -136,61 +136,79 @@ function recommendation(
   return "balanced";
 }
 
-/** Adapt supplied capacity rows without guessing configured worker count or mutating state. */
-export function adaptOperatorAgentCapacityRows(rows: readonly OperatorAgentCapacityLedgerRow[]): OperatorAgentCapacitySignal {
-  const measurements: OperatorAgentCapacityMeasurement[] = [];
-  const unavailableRows: OperatorAgentCapacityUnavailable[] = [];
+/** What {@link finishOperatorAgentCapacity} reads: counts and the first details, never the rows. */
+export interface OperatorAgentCapacityFold {
+  measurementCount: number;
+  unavailableCount: number;
+  measurements: OperatorAgentCapacityMeasurement[];
+  unavailable: OperatorAgentCapacityUnavailable[];
+}
 
-  for (const row of rows) {
-    const repo = stringField(row, ["repo", "repository"]);
-    const configuredCapacity = numberField(row, ["configured_capacity", "configured_pool_size", "worker_pool_size", "wip_limit"]);
-    const admittedLanes = numberField(row, ["admitted_lanes", "lane_budget"]);
-    const activeWorkers = numberField(row, ["active_workers"]);
-    const queuedWork = numberField(row, ["queued_work", "queue_pending"]);
-    const windowStart = stringField(row, ["window_start", "measurement_start"]);
-    const windowEnd = stringField(row, ["window_end", "measurement_end"]);
-    const missing: OperatorAgentCapacityUnavailableCause[] = [];
+export function emptyOperatorAgentCapacityFold(): OperatorAgentCapacityFold {
+  return { measurementCount: 0, unavailableCount: 0, measurements: [], unavailable: [] };
+}
 
-    if (!repo) missing.push("missing-repo");
-    if (!validCapacity(configuredCapacity)) missing.push("missing-configured-capacity");
-    if (!validCount(admittedLanes)) missing.push("missing-admitted-lanes");
-    if (!validCount(activeWorkers)) missing.push("missing-active-workers");
-    if (!validCount(queuedWork)) missing.push("missing-queued-work");
-    if (!validWindow(windowStart)) missing.push("missing-window-start");
-    if (!validWindow(windowEnd)) missing.push("missing-window-end");
-    if (validWindow(windowStart) && validWindow(windowEnd) && Date.parse(windowEnd) <= Date.parse(windowStart)) {
-      missing.push("invalid-window");
-    }
-    if (missing.length > 0) {
-      unavailableRows.push(unavailable(row, repo, missing));
-      continue;
-    }
-    const measuredRepo = repo as string;
-    const measuredConfiguredCapacity = configuredCapacity as number;
-    const measuredAdmittedLanes = admittedLanes as number;
-    const measuredActiveWorkers = activeWorkers as number;
-    const measuredQueuedWork = queuedWork as number;
-    const measuredWindowStart = windowStart as string;
-    const measuredWindowEnd = windowEnd as string;
-    measurements.push({
-      repo: measuredRepo,
-      configuredCapacity: measuredConfiguredCapacity,
-      admittedLanes: measuredAdmittedLanes,
-      activeWorkers: measuredActiveWorkers,
-      queuedWork: measuredQueuedWork,
-      utilizationRatio: measuredActiveWorkers / measuredConfiguredCapacity,
-      windowStart: measuredWindowStart,
-      windowEnd: measuredWindowEnd,
-      recommendation: recommendation(measuredConfiguredCapacity, measuredAdmittedLanes, measuredActiveWorkers, measuredQueuedWork),
-    });
+export function foldOperatorAgentCapacityRow(fold: OperatorAgentCapacityFold, row: OperatorAgentCapacityLedgerRow): void {
+  const repo = stringField(row, ["repo", "repository"]);
+  const configuredCapacity = numberField(row, ["configured_capacity", "configured_pool_size", "worker_pool_size", "wip_limit"]);
+  const admittedLanes = numberField(row, ["admitted_lanes", "lane_budget"]);
+  const activeWorkers = numberField(row, ["active_workers"]);
+  const queuedWork = numberField(row, ["queued_work", "queue_pending"]);
+  const windowStart = stringField(row, ["window_start", "measurement_start"]);
+  const windowEnd = stringField(row, ["window_end", "measurement_end"]);
+  const missing: OperatorAgentCapacityUnavailableCause[] = [];
+
+  if (!repo) missing.push("missing-repo");
+  if (!validCapacity(configuredCapacity)) missing.push("missing-configured-capacity");
+  if (!validCount(admittedLanes)) missing.push("missing-admitted-lanes");
+  if (!validCount(activeWorkers)) missing.push("missing-active-workers");
+  if (!validCount(queuedWork)) missing.push("missing-queued-work");
+  if (!validWindow(windowStart)) missing.push("missing-window-start");
+  if (!validWindow(windowEnd)) missing.push("missing-window-end");
+  if (validWindow(windowStart) && validWindow(windowEnd) && Date.parse(windowEnd) <= Date.parse(windowStart)) {
+    missing.push("invalid-window");
   }
+  if (missing.length > 0) {
+    fold.unavailableCount += 1;
+    if (fold.unavailable.length < MAX_OPERATOR_AGENT_DETAIL_ITEMS) fold.unavailable.push(unavailable(row, repo, missing));
+    return;
+  }
+  const measuredRepo = repo as string;
+  const measuredConfiguredCapacity = configuredCapacity as number;
+  const measuredAdmittedLanes = admittedLanes as number;
+  const measuredActiveWorkers = activeWorkers as number;
+  const measuredQueuedWork = queuedWork as number;
+  const measuredWindowStart = windowStart as string;
+  const measuredWindowEnd = windowEnd as string;
+  fold.measurementCount += 1;
+  if (fold.measurements.length >= MAX_OPERATOR_AGENT_DETAIL_ITEMS) return;
+  fold.measurements.push({
+    repo: measuredRepo,
+    configuredCapacity: measuredConfiguredCapacity,
+    admittedLanes: measuredAdmittedLanes,
+    activeWorkers: measuredActiveWorkers,
+    queuedWork: measuredQueuedWork,
+    utilizationRatio: measuredActiveWorkers / measuredConfiguredCapacity,
+    windowStart: measuredWindowStart,
+    windowEnd: measuredWindowEnd,
+    recommendation: recommendation(measuredConfiguredCapacity, measuredAdmittedLanes, measuredActiveWorkers, measuredQueuedWork),
+  });
+}
 
+export function finishOperatorAgentCapacity(fold: OperatorAgentCapacityFold): OperatorAgentCapacitySignal {
   return {
     signal: OPERATOR_AGENT_CAPACITY_SIGNAL,
-    status: measurements.length > 0 ? "measured" : "not-collected",
-    measurementCount: measurements.length,
-    unavailableCount: unavailableRows.length,
-    measurements: measurements.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
-    unavailable: unavailableRows.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    status: fold.measurementCount > 0 ? "measured" : "not-collected",
+    measurementCount: fold.measurementCount,
+    unavailableCount: fold.unavailableCount,
+    measurements: [...fold.measurements],
+    unavailable: [...fold.unavailable],
   };
+}
+
+/** Adapt supplied capacity rows without guessing configured worker count or mutating state. */
+export function adaptOperatorAgentCapacityRows(rows: readonly OperatorAgentCapacityLedgerRow[]): OperatorAgentCapacitySignal {
+  const fold = emptyOperatorAgentCapacityFold();
+  for (const row of rows) foldOperatorAgentCapacityRow(fold, row);
+  return finishOperatorAgentCapacity(fold);
 }

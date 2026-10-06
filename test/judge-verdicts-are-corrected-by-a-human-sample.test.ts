@@ -390,14 +390,14 @@ test("the ledger readers load labels beside the ledger and the checkpoint carrie
   const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
   const firstA = stratum(first.snapshot.judgeCalibration!, "review:judge-1", "author-a");
   assert.ok(firstA.corrected.state === "estimated" && Math.abs(firstA.corrected.estimate - 0.6) < 1e-12);
-  assert.ok(Array.isArray(first.checkpoint.state.judgeCalibrationRows));
+  assert.ok(first.checkpoint.state.judgeCalibrationFold !== undefined);
   writeAnalyticsCheckpoint(dir, first.checkpoint);
   const prior = readAnalyticsCheckpoint(dir)!;
 
   const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, prior, { judgeLabelStore: memoryStore(labels) });
   assert.deepEqual(resumed.snapshot.judgeCalibration, first.snapshot.judgeCalibration, "a resumed scan hydrates the judge rows");
 
-  const legacy = { ...prior, state: { ...prior.state, judgeCalibrationRows: undefined } };
+  const legacy = { ...prior, state: { ...prior.state, judgeCalibrationRows: undefined, judgeCalibrationFold: undefined } };
   const rescanned = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, legacy);
   assert.deepEqual(rescanned.snapshot.judgeCalibration, first.snapshot.judgeCalibration, "a checkpoint predating the judge rows forces a full scan, never an empty calibration");
 
