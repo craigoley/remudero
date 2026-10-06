@@ -34474,12 +34474,24 @@ export function logDiskReclaimRung(
     const enabled = pin.fire && policyBlock.enabled;
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
     const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
+    // Every OTHER git store under `<root>/repos` is a managed repo too: the console and site
+    // daemons run this rung with their own root and clone into `repos/remudero-console` and
+    // `repos/remudero-site`, which a lone `repos/remudero` never reached.
+    const reposRoot = join(config.root, "repos");
+    const otherManaged = (existsSync(reposRoot) ? readdirSync(reposRoot) : [])
+      .filter((name) => name !== "remudero" && existsSync(join(reposRoot, name, ".git")))
+      .sort();
     const repos = [
       {
         repo: "managed",
-        dir: (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))(),
+        dir: (deps.objectRepoDir ?? (() => join(reposRoot, "remudero")))(),
         streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
       },
+      ...otherManaged.map((name) => ({
+        repo: `managed:${name}`,
+        dir: join(reposRoot, name),
+        streakPath: join(config.root, "state", `object-reap-refusal-streak-${name}.json`),
+      })),
       ...(existsSync(join(daemonCheckout, ".git"))
         ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
         : []),
