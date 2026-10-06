@@ -788,6 +788,7 @@ import {
   pruneOrphanedDrafts,
   parseProposalRegistry,
   parseSupersedesExpr,
+  deriveTaskReferent,
   approveRunBranch,
   approvedSkillRelPath,
   mostRecentApprovePr,
@@ -49007,6 +49008,11 @@ export async function approveCommand(
   // tip) and whether the result is pushed as a NEW branch or a new commit on an existing one.
   // Shared here so the mint/shard/stamp/advisory sequence can never drift between the two.
   const materializeAndCommitApproveFragment = (worktreePath: string, payload: RatificationPayload, purposeLabel: string): void => {
+    const subjectId = deriveTaskReferent(payload.proposalId);
+    const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
+    if (subject?.status === "blocked" && subject.retirement) {
+      throw new Error(`rmd approve: refusing to ratify ${payload.proposalId} — task ${subjectId} is ${subject.retirement} in the worktree plan`);
+    }
     // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
     // worktree's OWN plan, AFTER it is checked out and BEFORE anything is written — the same
     // ordering `rmd triage`/`rmd plan` already use (:11831,:12159), calling the ONE shared
