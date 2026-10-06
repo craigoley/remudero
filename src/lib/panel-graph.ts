@@ -159,8 +159,7 @@ export interface PanelGraphDeps {
   planPath: string;
   ledgerPath: string;
   readPlanSnapshot?: () => Plan;
-  /** W1-T5639: the qualified outcome of the read that produced `readPlanSnapshot`'s plan. Absent, that plan is trusted as
-   *  it always was; present, a reader must not turn an `unavailable` source's placeholder into counts or decisions. */
+  /** W1-T5639: how `readPlanSnapshot`'s plan was read. Absent, it is trusted; `unavailable` means it is a placeholder. */
   readPlanSource?: () => PlanSourceOutcome | undefined;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
@@ -713,14 +712,13 @@ function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Pla
   return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
 }
 
-/** W1-T5639: a body qualified by where its plan came from. Absent outcome, the body is unchanged. */
+/** W1-T5639: a body qualified by where its plan came from; unchanged when no outcome is tracked. */
 function withPlanSource<B extends object>(deps: PanelGraphDeps, body: B): B | (B & { planSource: PlanSourceOutcome }) {
   const planSource = deps.readPlanSource?.();
   return planSource === undefined ? body : { ...body, planSource };
 }
 
-/** W1-T5639: answer 503 when the plan was never read. The plan bound beside an `unavailable` source is a placeholder, so any
- *  count, classification or operator decision derived from it would be invented. Returns whether it refused. */
+/** W1-T5639: 503 when the plan was never read, since anything derived from the placeholder would be invented. */
 function refusePlanSourceUnavailable(deps: PanelGraphDeps, res: ServerResponse): boolean {
   const planSource = deps.readPlanSource?.();
   if (planSource?.state !== "unavailable") return false;
@@ -1474,7 +1472,6 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       }
       const planSource = deps.readPlanSource?.();
       if (planSource?.state === "unavailable") {
-        // Unknown, never a healthy zero: no counts, no sections and no frontier come from a placeholder plan.
         sendJson(res, 200, { planSource, progress: { unknown: true, unavailableReason: `plan_source_unavailable: ${planSource.failure.reason}` }, sections: [], frontier: [] });
         return;
       }
@@ -2120,7 +2117,6 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const plan = classified.plan();
-      // A dated last-known-good plan is evidence, but not a current generation: the census is partial, never complete.
       const planSource = deps.readPlanSource?.();
       const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
         step: ["ratify.approved", "verify_human.judged"],
