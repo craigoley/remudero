@@ -781,7 +781,9 @@ import {
   parseReopenedKeysCache,
   writeReopenedKeys,
   gitGrepAnchorTrue,
-  cachedAnchorGrep,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
+  gitGrepAnchorTrueAsync,
   createAnchorGrepCache,
   readOriginMainSha,
   inboxDraftPrompt,
@@ -1448,7 +1450,10 @@ import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readA
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
+  releaseDispatchClaimAsync,
   gitDispatchClaimReserver,
+  gitDispatchClaimReserverAsync,
+  gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
   parseClaimAnchorMessage,
@@ -1457,6 +1462,7 @@ import {
   findClaimMintRow,
   releaseReplacedContainerClaims,
   type DispatchClaimReserver,
+  type DispatchClaimReserverAsync,
 } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -15229,7 +15235,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
-  claimReserver?: DispatchClaimReserver;
+  claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
@@ -16157,7 +16163,7 @@ async function runTask(
      * throws (best-effort, caught in the `finally`) deterministically, without a genuine
      * two-writer race against a real git remote.
      */
-    claimReserver?: DispatchClaimReserver;
+    claimReserver?: DispatchClaimReserverAsync;
     /**
      * W1-T1268 coverage seam: overrides the independent remote-head read `worktreeAdd`'s own
      * `assertWorktreeBaseCurrent` performs right after this run's ONE worktree is cut. Default:
@@ -16381,9 +16387,9 @@ async function runTask(
       // `dispatchClaimReserverFor`'s own doc for why `repoDir`, not `repoRoot`. NO TIMER: the
       // only new input is `isMerged`, the identical evidence `decideDispatchClaimRelease`'s
       // one existing call site already reuses -- this hoists ITS reach, never its meaning.
-      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", task.repo));
-      if (staleClaimReserver.holder(task.id) !== undefined) {
-        const released = releaseDispatchClaim(task.id, staleClaimReserver, { evidenceObserved: true });
+      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", task.repo));
+      if ((await staleClaimReserver.holder(task.id)) !== undefined) {
+        const released = await releaseDispatchClaimAsync(task.id, staleClaimReserver, { evidenceObserved: true });
         log("dispatch.claim_released", {
           ref: dispatchClaimRef(task.id),
           arm: released.arm,
@@ -17577,10 +17583,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // both read a PUBLISHED artifact, and neither exists at the moment a second host — or an
   // operator dispatching by hand beside the fleet — starts the SAME task. `repoDir`, not
   // `repoRoot`: see {@link dispatchClaimReserverFor}'s own doc for why.
-  const claimReserver = opts.claimReserver ?? dispatchClaimReserverFor(repoDir);
-  const claimAnchor = claimReserver.mintAnchor();
-  const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
-  const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
+  // AWAITED, never `spawnSync` (2026-10-06): runTask runs inside the daemon process, and this
+  // claim's sync git was the loop's largest holder — 89 loop_lag rows, 1,506 s, up to 106 s each.
+  const claimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(repoDir);
+  const claimAnchor = await claimReserver.mintAnchor();
+  const claimOutcome = await claimReserver.attempt(task.id, claimAnchor);
+  const claimHolder = claimOutcome === "taken" ? await claimReserver.holder(task.id) : undefined;
   // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
   // verdict names its cause instead of only its category. Optional on the interface, so a test's
   // fake reserver that does not implement it yields today's wording byte-for-byte.
@@ -17610,19 +17618,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // narrow same-host/predates-boot shape is decidable when general cross-host liveness is
       // not. The probe is a THUNK: `releaseDispatchClaim` only calls it once an anchor has
       // actually parsed, so arms 1 and 2 still cost no /proc read and no git round trip.
-      const released = releaseDispatchClaim(task.id, claimReserver, {
+      // The awaited release hands the probe the anchor it already parsed, so the pid is read from
+      // the SAME git answer that decided the arm — no second fetch + cat-file round trip.
+      const released = await releaseDispatchClaimAsync(task.id, claimReserver, {
         evidenceObserved: isMerged(task),
-        livenessProbe: () => {
+        livenessProbe: (anchor) => {
           const namespaceBootMs = readNamespaceBootMs();
           if (namespaceBootMs === undefined) return undefined; // declines to the operator arm
-          const anchorPid = parseClaimAnchorMessage(claimReserver.anchorMessage?.(task.id))?.pid;
           return {
             localHost: hostname(),
             namespaceBootMs,
             namespaceBootIso: new Date(namespaceBootMs).toISOString(),
-            // No pid parsed ⇒ report PRESENT, which blocks the release. Same fail-closed
-            // direction every other absent input on this path takes.
-            pidPresent: anchorPid === undefined ? true : pidIsPresent(anchorPid),
+            pidPresent: pidIsPresent(anchor.pid),
           };
         },
       });
@@ -17715,7 +17722,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
     // W1-T4701: above the outer catch, so without this row the deferred run read as in flight forever.
     endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
-    releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
@@ -17752,7 +17759,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
       // before returning, or a stale base on THIS host would strand the claim for an operator
       // to clear even though nothing is actually in flight.
-      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       return refused;
     }
     if (e instanceof WorktreeNodeModulesRefusedError) {
@@ -17773,7 +17780,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
       }
       try {
-        releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+        await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       } catch (releaseErr) {
         // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
         log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
@@ -17791,7 +17798,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T5280: drop the claim AFTER the terminal row (W1-T4708), or the next dispatches read
     // `blocked_inflight` until the breaker trips; a throwing release never replaces the add's error.
     try {
-      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     } catch (releaseErr) {
       log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
     }
@@ -19858,7 +19865,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // another lane's. Best-effort, matching `removeRunLock` immediately above: a throw here
     // must never replace whatever verdict this run actually reached.
     try {
-      const released = releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      const released = await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       log("dispatch.claim_released", {
         ref: dispatchClaimRef(task.id),
         arm: released.arm,
@@ -21262,7 +21269,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
     // ledger row above already uses) reviews under the default risk and a default hard cap instead of
     // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId) {
+    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
@@ -25908,6 +25915,16 @@ export function dispatchClaimReserverFor(repoDir: string): DispatchClaimReserver
   return gitDispatchClaimReserver({
     run: gitRunAdapter((args) => spawnSync("git", ["-C", repoDir, ...args], { encoding: "utf8" })),
   });
+}
+
+/**
+ * {@link dispatchClaimReserverFor}, AWAITED — the reserver runTask takes its claim through. runTask
+ * runs inside the daemon process, so the sync reserver's `spawnSync` git held the whole loop for each
+ * push/ls-remote (2026-10-06: 89 loop_lag rows, 1,506 s, up to 106 s each). Same `repoDir` binding,
+ * same argv; every call bounded by `DISPATCH_CLAIM_GIT_TIMEOUT_MS`, a timeout reading `unreachable`.
+ */
+export function dispatchClaimReserverAsyncFor(repoDir: string): DispatchClaimReserverAsync {
+  return gitDispatchClaimReserverAsync({ run: gitClaimRunnerAsync(repoDir) });
 }
 
 /**
@@ -34474,12 +34491,24 @@ export function logDiskReclaimRung(
     const enabled = pin.fire && policyBlock.enabled;
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
     const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
+    // Every OTHER git store under `<root>/repos` is a managed repo too: the console and site
+    // daemons run this rung with their own root and clone into `repos/remudero-console` and
+    // `repos/remudero-site`, which a lone `repos/remudero` never reached.
+    const reposRoot = join(config.root, "repos");
+    const otherManaged = (existsSync(reposRoot) ? readdirSync(reposRoot) : [])
+      .filter((name) => name !== "remudero" && existsSync(join(reposRoot, name, ".git")))
+      .sort();
     const repos = [
       {
         repo: "managed",
-        dir: (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))(),
+        dir: (deps.objectRepoDir ?? (() => join(reposRoot, "remudero")))(),
         streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
       },
+      ...otherManaged.map((name) => ({
+        repo: `managed:${name}`,
+        dir: join(reposRoot, name),
+        streakPath: join(config.root, "state", `object-reap-refusal-streak-${name}.json`),
+      })),
       ...(existsSync(join(daemonCheckout, ".git"))
         ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
         : []),
@@ -47588,10 +47617,20 @@ export function buildInboxDraftHook(
     runId: string,
     log: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
-  grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
+  grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   github?: GitHub,
+  grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
 ): (tickRead?: TickReadFacts) => Promise<void> {
+  // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
+  // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
+  // that injects only the sync seam warms through that same seam, so its answers are unchanged.
+  const grepAnchorSync = grepAnchor ?? ((ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, ref, anchor));
+  const grepAnchorWarm =
+    grepAnchorAsync ??
+    (grepAnchor
+      ? async (ref: string, anchor: EvidenceAnchor) => grepAnchor(ref, anchor)
+      : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
   let lazyGithub: GitHub | undefined;
   const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
@@ -47659,11 +47698,13 @@ export function buildInboxDraftHook(
           : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
+        const anchors = proposals.flatMap((p) => p.evidenceAnchors);
+        const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftReadiness = {
           plan,
           isMerged,
           depsUnobservable,
-          grepAnchorTrue: (a: EvidenceAnchor) => cachedAnchorGrep(anchorGrepCache, sha, a, grepAnchor),
+          grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),

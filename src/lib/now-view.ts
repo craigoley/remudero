@@ -86,7 +86,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
-import { threadPlan, threadPlanPin } from "./thread-plan.js";
+import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
@@ -630,23 +630,29 @@ export interface NowViewOptions {
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
   readPinPolicy?: (instance: NowInstance) => PolicyValues;
+  /** Fact rows one `board` step ingests at most (W1-T6014); the projection's default when omitted. */
+  boardIngestChunkRows?: number;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
 export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
 
 /**
- * Compares a plan's checkout with its origin/main. The commit log is read only when the pair of
+ * Compares the plan this thread serves with its origin/main. The commit log is read only when the pair of
  * heads moved since `memo` last saw them, so a materialize costs one `git rev-parse` per instance.
+ * `base` is the commit the plan is pinned to when serve reloaded it in place (thread-plan.ts), else the
+ * checkout's HEAD: a generation's working tree never moves, so HEAD read every plan merge after its boot
+ * as behind while the pinned plan already held it (2026-10-06: 74 of 74 now reads stale over 8 reloads).
  */
 export function gitPlanBehind(
   planPath: string,
   memo: { heads?: string; result?: PlanBehind } = {},
   git: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  base: string = threadPlanPinnedRef(planPath) ?? "HEAD",
 ): PlanBehind {
   const dir = dirname(dirname(planPath));
   try {
-    const heads = git(["-C", dir, "rev-parse", "HEAD", "origin/main"]).trim();
+    const heads = git(["-C", dir, "rev-parse", base, "origin/main"]).trim();
     if (memo.heads === heads && memo.result) return memo.result;
     const [head, main] = heads.split("\n");
     const paths = [relative(dir, planPath), relative(dir, join(dirname(planPath), "tasks.d"))];
@@ -840,19 +846,29 @@ export function createNowView(opts: NowViewOptions): {
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
+  /** The pin/reviewer gates' steps and the operator items' steps (W1-T5374), read in ONE union pass: each read
+   *  parsed every rotation (30 days of them) on a generation's first build, twice over, while core's first
+   *  `decisions` stage per generation took 11 s p50 against 2.6 s after (2026-10-06, 56 generations). */
+  const isPinReviewerRow = (row: Record<string, unknown>): boolean => row.step === "rung.unratified" || row.step === "daemon.boot" ||
+    row.step === "daemon.freshness_not_stale" || row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_");
+  const operatorSteps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
+  const isOperatorRow = (row: Record<string, unknown>): boolean => typeof row.step === "string" && operatorSteps.test(row.step);
+  const gateLinePattern = /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_|cost\.anomaly|daemon\.image_drift|github_app\.token_refresh/;
   const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
   const gateRows = new Map<string, Array<Record<string, unknown>>>();
-  const pinReviewerSources = (instance: NowInstance, nowMs: number): HumanGateSource[] => {
-    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) =>
-      row.step === "rung.unratified" || row.step === "daemon.boot" || row.step === "daemon.freshness_not_stale" ||
-      row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_")));
+  /** The gate rows of one decisions build: complete, or the last complete read's rows with `complete: false`. */
+  const gateLedger = (instance: NowInstance): { complete: boolean; rows: Array<Record<string, unknown>> } => {
+    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row)));
     gateMemos.set(instance.name, memo);
     const pass = memo.pass({ parseMissing: true });
-    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords,
-      pattern: /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_/ });
+    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords, pattern: gateLinePattern });
     pass.complete();
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
     if (complete) gateRows.set(instance.name, read.rows);
+    return { complete, rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows };
+  };
+  const pinReviewerSources = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): HumanGateSource[] => {
+    const complete = ledger.complete;
     let pins: Ratifications | undefined;
     let policy: PolicyValues | undefined;
     let pinReason: string | undefined;
@@ -882,23 +898,13 @@ export function createNowView(opts: NowViewOptions): {
     }
     return projectPinReviewerGates({ instance: instance.name, state: complete ? "complete" : "partial",
       ...(!complete ? { reason: "pin/reviewer ledger source is missing, unreadable or incomplete" } : {}),
-      rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows, pins, policy, pinReason,
+      rows: ledger.rows.filter(isPinReviewerRow), pins, policy, pinReason,
       nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
-  const operatorMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
-  const operatorRows = new Map<string, Array<Record<string, unknown>>>();
   /** W1-T5374: NEEDS ME's operator items through status-board's own producers, classified by their real action route. */
-  const operatorItemsOf = (instance: NowInstance, nowMs: number): OperatorItemProjection => {
-    const steps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
-    const memo = operatorMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) =>
-      typeof row.step === "string" && steps.test(row.step)));
-    operatorMemos.set(instance.name, memo);
-    const pass = memo.pass({ parseMissing: true });
-    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords, pattern: steps });
-    pass.complete();
-    const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
-    if (complete) operatorRows.set(instance.name, read.rows);
-    const rows = complete ? read.rows : operatorRows.get(instance.name) ?? read.rows;
+  const operatorItemsOf = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): OperatorItemProjection => {
+    const complete = ledger.complete;
+    const rows = ledger.rows.filter(isOperatorRow);
     const stateRoot = dirname(instance.ledgerDir);
     const unreadable: string[] = [];
     const present = (path: string): boolean | undefined => {
@@ -926,6 +932,7 @@ export function createNowView(opts: NowViewOptions): {
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
   const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
+    const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     let feedbackEntries: FeedbackEntry[] = [];
     if (instance.name !== core) {
@@ -952,6 +959,7 @@ export function createNowView(opts: NowViewOptions): {
       if ("reason" in store) reasons.task_question = store.reason;
       else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
     }
+    lap("feedback");
     const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
     const sources: HumanGateSource[] = [{
       name: "escalations", instance: instance.name, state: escalationUnknown ? "partial" : "complete",
@@ -973,13 +981,17 @@ export function createNowView(opts: NowViewOptions): {
       actions: nowActions(snapshot, rows),
     }));
     sources.push(...nowDependencyVerificationGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }));
-    sources.push(...pinReviewerSources(instance, now));
+    lap("dependencies");
+    const ledger = gateLedger(instance);
+    lap("ledger");
+    sources.push(...pinReviewerSources(instance, now, ledger));
     // Only the gate source joins this body; every record stays on rmd status's NEEDS ME block, unchanged.
-    sources.push(operatorItemsOf(instance, now).source);
+    sources.push(operatorItemsOf(instance, now, ledger).source);
     const humanGates = projectHumanGates(sources);
     const capped = capDecisions(all);
     const shown = shownHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
     const needsYou = consumeHumanGateCounts(humanGates, { shown });
+    lap("gates");
     return { ...capped, humanGates, needsYou, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
   const behindMemo = new Map<string, { heads?: string; result?: PlanBehind }>();
@@ -1010,12 +1022,23 @@ export function createNowView(opts: NowViewOptions): {
   const builds = new Map<string, NowBuild>();
   /** Each instance's stage timings since its last `prepare`, for the worker's `read_model.slow_view` row. */
   const ran = new Map<string, Record<string, number>>();
+  /** The `decisions` stage's parts as `decisions.<part>` stages, each the ms since the previous lap: a cold or slow
+   *  decisions build (p99 27 s on 2026-10-06) is then attributed to its part, not only to the stage. */
+  const decisionsLap = (name: string): ((part: string) => void) => {
+    let last = clock.now();
+    return (part) => {
+      const at = clock.now();
+      (ran.get(name) ?? ran.set(name, {}).get(name)!)[`decisions.${part}`] = at - last;
+      last = at;
+    };
+  };
   const ledgerPathOf = (instance: NowInstance): string => join(instance.ledgerDir, LEDGER_FILENAME);
   const depsOf = (instance: NowInstance, b: NowBuild) => ({
     plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
   });
-  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. */
-  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void]> = [
+  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. A stage
+   *  returning false is not done: the next step resumes it (a cold `board` ingests one chunk per step). */
+  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void | false]> = [
     ["plan", (instance, b) => {
       const cachedPlan = planCache.get(instance.name);
       b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
@@ -1037,12 +1060,13 @@ export function createNowView(opts: NowViewOptions): {
           get github() { return held.get(name)!.gateway.github; },
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
+          ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
-      h.board.update({ force: true });
+      if (!h.board.update({ force: true }).caughtUp) return false;
       b.h = h;
       b.rows = h.board.rows();
     }],
@@ -1099,11 +1123,12 @@ export function createNowView(opts: NowViewOptions): {
       if (!more()) return false;
       const [stage, run] = STAGES[b.stage]!;
       const started = clock.now();
-      run(instance, b);
+      const done = run(instance, b) !== false;
       const ms = clock.now() - started;
-      (ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!)[stage] = ms;
+      const timed = ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!;
+      timed[stage] = (timed[stage] ?? 0) + ms;
       if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
-      b.stage++;
+      if (done) b.stage++;
     }
     return true;
   }

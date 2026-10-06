@@ -234,7 +234,7 @@ function effectsDeps(root: string, armImpl: BuildSweepEffectsDeps["armImpl"]): B
   };
 }
 
-test("the arm's ledger gate reads this PR's delivered verdict, never another PR's under a shared id", () => {
+test("the arm's ledger gate reads this PR's delivered verdict, never another PR's under a shared id", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5813-arm-`));
   try {
     // `unfiled` is the branch sentinel every run-unfiled PR shares: #9209's row is the newest one.
@@ -248,7 +248,7 @@ test("the arm's ledger gate reads this PR's delivered verdict, never another PR'
       decision = decideArmFromLedgerVerdict(priorReviewVerdictFromLedger(armDeps!.ledgerLines(), taskId!), HEAD);
       return decision.arm ? "armed" : "ledger-refused";
     }));
-    const outcome = effects.arm!(view({ taskId: "unfiled", isPlanFiling: false }));
+    const outcome = await effects.arm!(view({ taskId: "unfiled", isPlanFiling: false }));
     assert.equal(taskIdSeen, "unfiled");
     assert.equal(decision?.arm, true, decision?.reason);
     assert.notEqual(outcome, "ledger-refused");

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — which signal-ended fix rounds stand down and which still commit
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: W1-T5999 follow-up (research r-5999); built on run-W1-T5999-1791296617622 (7b31026c), held as PR #9589"
-  plan_refs: [W1-T5999, W1-T5325, W1-T4052, W1-T6027]
+  plan_refs: [W1-T5999, W1-T5325, W1-T4052, W1-T6027, W1-T6028]
   files: [src/run-task.ts, test/a-signal-ended-fix-round-that-left-work-still-commits-it.test.ts]
   status: queued
   priority: 1
@@ -23,6 +23,8 @@
     fixWorkerEndedBySignal) runs right after the spawn, before the harness commit, so the #8973 shape would now
     stand down with its edits discarded. A follow-up under W1-T5999 cannot pass proof-discrimination: that
     task's file proof became true on main when #9566 merged (#9589 refused executed_stale, closed and held).
+    Differs from W1-T6028, which decides how a signal-ended round is SCORED by the routing learner; this task
+    only decides whether such a round COMMITS its leftover work.
   design: |
     Record signal_terminated only when the signal-ended worker left NO work: no uncommitted edits
     (worktreeHasUncommittedChanges false) and no commits ahead of roundStartSha (when defined). Otherwise fall
