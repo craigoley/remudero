@@ -646,6 +646,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
+  "sweep.actions_incident_hold",
+  "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
   "sweep.fix.checkout_claim_declined",

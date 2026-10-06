@@ -68,7 +68,19 @@ import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudge
 import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
-import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
+import {
+  ACTIONS_INCIDENT_HOLD_BACKSTOP_MS,
+  ACTIONS_INCIDENT_HOLD_ESCALATED_STEP,
+  ACTIONS_INCIDENT_HOLD_STEP,
+  actionsIncidentHoldDecision,
+  actionsIncidentHoldsFromLedger,
+  classifyActionsIncident,
+  readGithubActionsStatus,
+  unreadableActionsIncident,
+  type ActionsIncident,
+  type ActionsIncidentHoldRecord,
+} from "./actions-incident.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
@@ -1679,6 +1691,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMergeQueueMembership",
   "escalateRearmExhausted",
   "readArmTimeline",
+  "readActionsStatusSummary", // W1-T5939
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1732,6 +1745,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMergeQueueMembership"
   | "escalateRearmExhausted"
   | "readArmTimeline"
+  | "readActionsStatusSummary"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2512,6 +2526,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
     readMergeQueueMembership: (pr) => readMergeQueueMembership(pr.prUrl, readJsonImpl),
     readArmTimeline: (pr) => readArmTimeline(pr.prUrl, readJsonImpl),
+    readActionsStatusSummary: isTestRunner() ? undefined : readGithubActionsStatus, // W1-T5939: tests never reach githubstatus.com
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
     escalateRearmExhausted: (pr, rearms, bound) => {
@@ -4410,6 +4425,39 @@ async function applyCiTimeoutRefresh(
   appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", ...result });
   if (result.outcome !== "updated") return escalate(`update-branch returned ${result.outcome}${result.error ? ` (${result.error})` : ""}`);
   return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
+}
+
+/** W1-T5939: during an Actions incident, hold a red that is only cancelled (W1-T2430's fold) or
+ *  never-started (W1-T5921) checks; returns the stand-down reason, or undefined to proceed. */
+async function applyActionsIncidentHold(
+  deps: SweepDeps,
+  pr: OpenPrView,
+  hold: ActionsIncidentHoldRecord | undefined,
+  readIncident: () => Promise<ActionsIncident>,
+  now: number,
+): Promise<string | undefined> {
+  if (!deps.readActionsStatusSummary || !isBlockedCi(pr)) return undefined;
+  const cancelled = pr.cancelledRequiredChecks ?? [];
+  const failures = pr.ciFailures ?? [];
+  const timeout = classifyCiTimeoutNoVerdict(failures, pr.redRequiredChecks ?? [], cancelled.map((c) => c.name));
+  if (!timeout && (cancelled.length === 0 || failures.some((f) => !cancelled.some((c) => c.name === f.name)))) return undefined;
+  const incident = await readIncident();
+  const decision = actionsIncidentHoldDecision(incident, hold, now);
+  if (decision === "proceed") return undefined;
+  const appendLine = deps.appendLine ?? appendLedger;
+  const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha,
+    actions_status: incident.state, detail: incident.detail };
+  if (decision === "escalate") {
+    const reason = `red held for a GitHub Actions incident past its BACKSTOP of ${ACTIONS_INCIDENT_HOLD_BACKSTOP_MS / 3_600_000}h (${incident.detail})`;
+    appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_ESCALATED_STEP });
+    await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    return `${reason} — escalated once; no requeue or fix strike`;
+  }
+  if (!hold) {
+    appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_STEP, held_at_ms: now,
+      cancelled_checks: cancelled.map((c) => ({ name: c.name, run_attempt: c.runAttempt ?? null })), not_ready_checks: timeout?.notReady ?? [] });
+  }
+  return `GitHub Actions ${incident.state}: ${incident.detail} — a red of cancelled or never-started checks is held; no requeue, fix strike or escalation`;
 }
 
 /** W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
@@ -10048,6 +10096,8 @@ export interface SweepDeps {
     pr: OpenPrView,
     check: CancelledRequiredCheck | CiFailure,
   ) => boolean | void | Promise<boolean | void>;
+  /** W1-T5939 — githubstatus.com's summary JSON, cached; the sweep classifies it with `classifyActionsIncident`. */
+  readActionsStatusSummary?: () => Promise<unknown>;
   /** W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
    *  spent its one re-queue. Distinct from `escalate`, which asks an operator to pick between two
    *  candidate diffs: here there is no diff to choose, only a CI-side fault re-queueing cannot
@@ -11791,6 +11841,7 @@ export async function runSweep(
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
+  const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const strikeLadderRows = [...ledgerLines];
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
@@ -11906,6 +11957,11 @@ export async function runSweep(
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
+  const incidentHolds = actionsIncidentHoldsFromLedger(ledgerLines, CHECK_REQUEUE_STEP); // W1-T5939
+  let actionsIncident: Promise<ActionsIncident> | undefined;
+  const readActionsIncident = (): Promise<ActionsIncident> => (actionsIncident ??= Promise.resolve()
+    .then(() => deps.readActionsStatusSummary!())
+    .then((summary) => classifyActionsIncident(summary), (error) => unreadableActionsIncident(error)));
   // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
   // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
   const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
@@ -12572,7 +12628,7 @@ export async function runSweep(
         blockerReadFailure = { reason: String(error) };
       }
     }
-    const blocker = finalBlocker(ruleBlockerByIndex.get(index)!, {
+    const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
       reviewerCodeStaleThisPass: reviewerWithheld,
@@ -13450,6 +13506,14 @@ export async function runSweep(
                 standDownReason = `PR head advanced from ${pr.headSha} to ${live.headSha} — awaiting the new head's checks`;
                 break;
               }
+              const incidentHold = await applyActionsIncidentHold(
+                deps, pr, incidentHolds.holds.get(`${pr.prNumber}@${pr.headSha}`), readActionsIncident, now);
+              if (incidentHold) {
+                incidentHeldPrs.add(pr.prNumber);
+                acted = false;
+                standDownReason = incidentHold;
+                break;
+              }
               // W1-T3980 — the CodeQL-blocker route: the same hold, claim and host admission as the
               // ordinary dispatch below, its dedupe key ledgered BEFORE the worker starts, and the
               // scanner fact handed over as fenced ci-log evidence. None of the red-check machinery
@@ -13797,9 +13861,8 @@ export async function runSweep(
                   // W1-T2431: OR the ledger-derived reading with the surface-derived one — a re-run
                   // this fleet ledgered, OR one GitHub's `run_attempt` shows already happened (an
                   // operator's own, invisible to the ledger). This only widens the true case.
-                  const decision = cancelledCheckRequeueDecision(
-                    requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt),
-                  );
+                  const decision = cancelledCheckRequeueDecision(incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
+                    (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt)));
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL, so a crash between this write and the real GitHub
                     // call still bounds the NEXT pass toward escalating. Not dry-run-guarded:
