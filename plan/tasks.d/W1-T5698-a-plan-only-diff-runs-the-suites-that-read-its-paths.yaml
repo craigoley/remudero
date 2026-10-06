@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 5(b), CI class v2"
   plan_refs: [W1-T2428, W1-T4787, W1-T4397, W1-T5697]
   files: [scripts/diff-class.mjs, test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

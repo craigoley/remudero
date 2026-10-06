@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, sweep.base_reproduction 381 KB in 70 rows"
   plan_refs: [W1-T5528, W1-T5318, W1-T5517]
   files: [src/run-task.ts, src/lib/base-reproduction.ts, src/lib/sweep.ts, test/a-base-reproduction-row-records-a-setup-failure-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

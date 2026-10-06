@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 23:55Z (#9186: red is expiring-fixture-census bundled under the comment-load-ratchet check name; misdirects triage)"
   plan_refs: [W1-T3720, W1-T2998, W1-T4004, W1-T4399, W1-T5695]
   files: [src/lib/sweep.ts, test/a-bundled-checks-remedy-follows-the-gate-that-refused.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

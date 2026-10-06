@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: local-only reds that pass on CI (research r-env)"
   plan_refs: [W1-T2811, W1-T4226]
   files: [test/helpers/serve-boot-banner.ts, test/install-symlink-refusal.test.ts, test/serve-service-boot.test.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/a-serve-boot-wait-names-its-timeout.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

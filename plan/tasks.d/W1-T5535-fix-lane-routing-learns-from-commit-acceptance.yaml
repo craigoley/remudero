@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03; operator ruling R2 (fix-lane routing may learn continuously from commit acceptance with a small exploration share; fix lane only)"
   plan_refs: [W1-T4613, W1-T4617, W1-T2577, W1-T4067, W1-T5112]
   files: [src/lib/fix-routing-learner.ts, src/lib/worker-provider.ts, src/lib/worker.ts, src/run-task.ts, test/fix-lane-routing-learns-from-commit-acceptance.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
