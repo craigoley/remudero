@@ -120,7 +120,7 @@ test("W1-T5002: a failed real heartbeat fetch refuses sampling rather than certi
   assert.equal(existsSync(samplesPath(stateDir)), false);
 });
 
-async function withNativeGitFault(readerDir: string, mode: "listing" | "show", run: () => Promise<void>): Promise<void> {
+async function withNativeGitFault(readerDir: string, mode: "listing" | "show" | "show-command", run: () => Promise<void>): Promise<void> {
   const nativeGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const bin = join(readerDir, "rmd-git-fault-bin");
   mkdirSync(bin);
@@ -128,6 +128,7 @@ async function withNativeGitFault(readerDir: string, mode: "listing" | "show", r
     'const {spawnSync}=require("node:child_process");const{writeFileSync}=require("node:fs");const{join}=require("node:path");',
     'const args=process.argv.slice(2);',
     `if(args[2]==="for-each-ref" && ${JSON.stringify(mode)}==="listing")args.push("--rmd-invalid");`,
+    `if(args[2]==="show" && ${JSON.stringify(mode)}==="show-command")args.splice(3,0,"--rmd-invalid");`,
     `const native=spawnSync(${JSON.stringify(nativeGit)},args,{encoding:"utf8"});`,
     `if(args[2]==="for-each-ref" && native.status===0 && ${JSON.stringify(mode)}==="show"){`,
     'writeFileSync(join(args[1],".git/refs/remotes/origin/heartbeat-azure"),"f".repeat(40)+"\\n");}',
@@ -175,6 +176,16 @@ test("W1-T5002: a missing real Git executable retains its native spawn refusal",
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
   }
+});
+
+test("W1-T5002: an unexpected native show failure keeps its error instead of dropping a host", async () => {
+  const { reader } = fixtures();
+  await withNativeGitFault(reader.dir, "show-command", async () => {
+    await assert.rejects(gitHeartbeatSource(reader.dir)(), error => {
+      const native = error as { code?: number; stderr?: string };
+      return native.code === 128 && /unrecognized argument.*--rmd-invalid/.test(native.stderr ?? "");
+    });
+  });
 });
 
 test("W1-T5002: an asynchronous heartbeat port is awaited and its failure retains the native cause", async () => {
