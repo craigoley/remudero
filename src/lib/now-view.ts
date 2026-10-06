@@ -940,7 +940,8 @@ export function createNowView(opts: NowViewOptions): {
         try {
           listed = overlayQueuedFeedbackEntries(listed, dirname(instance.ledgerDir));
         } catch (error) {
-          reasons.grill = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
+          const reason = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
+          reasons.grill = reason;
         }
         feedbackEntries = projectReconciledFeedback(listed, statusGithub);
         all.push(...grillDecisions(instance.name, feedbackEntries));
