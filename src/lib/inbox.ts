@@ -1840,19 +1840,19 @@ function draftPlaceholderViolations(
 
 // W1-T5827: the executor's `grep:` split (review.ts DIALECT_GREP_PATH_RE) — the pattern is everything before the last
 // ` in <path>`, so `grep: "x" not found in f.md` greps for the literal `"x" not found`, which no file holds.
-const DRAFT_GREP_SPLIT_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
-const ABSENCE_SUFFIX_RE = /\s(?:not found|absent|no longer|is gone|removed)$/i;
-const ABSENCE_PREFIX_RE = /^(?:no|not)\s+["'`]/i;
-
-/** A drafted `grep:` proof written as an absence can never pass: refuse it, drafts only. */
+/** A drafted `grep:` proof written as an absence can never pass: refuse it, drafts only. The patterns are
+ *  function-local on purpose: the negative-reachability ratchet counts module-scope `_RE` validators. */
 function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintViolation[] {
+  const splitPattern = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+  const absenceSuffix = /\s(?:not found|absent|no longer|is gone|removed)$/i;
+  const absencePrefix = /^(?:no|not)\s+["'`]/i;
   const out: DraftLintViolation[] = [];
   for (const [i, criterion] of (task.acceptance ?? []).entries()) {
     const proof = typeof criterion.proof === "string" ? criterion.proof.trim() : "";
     const body = /^grep:\s*([\s\S]*)$/i.exec(proof)?.[1];
     if (body === undefined) continue;
-    const pattern = (DRAFT_GREP_SPLIT_RE.exec(body.trim())?.[1] ?? "").trim();
-    if (ABSENCE_SUFFIX_RE.test(pattern) || ABSENCE_PREFIX_RE.test(pattern)) {
+    const pattern = (splitPattern.exec(body.trim())?.[1] ?? "").trim();
+    if (absenceSuffix.test(pattern) || absencePrefix.test(pattern)) {
       out.push({
         check: "draft-absence-proof",
         severity: "block",
