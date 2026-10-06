@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
   plan_refs: [W1-T1127, W1-T5919, W1-T2863]
   files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: #9160 read-model SHARE_ENV hotfix notes"
   plan_refs: [W1-T5624, W1-T5678, W1-T4805, W1-T5736]
   files: [test/setup/tmp-hygiene.ts, test/setup/no-live-remote.ts, test/a-shared-env-thread-runs-no-main-thread-setup-write.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

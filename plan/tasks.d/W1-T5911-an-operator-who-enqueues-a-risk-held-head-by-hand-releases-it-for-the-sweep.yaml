@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9391 enqueued by hand three times during a GitHub Actions outage ('when does this manual work end?!')"
   plan_refs: [W1-T970, W1-T219, W1-T5403, W1-T5909, W1-T1000002, W1-T4784]
   files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/ledger.ts, test/an-operator-who-enqueues-a-risk-held-head-by-hand-releases-it-for-the-sweep.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: "reservation hand-off: run-unfiled-1791235471919 -> run-unfiled-1791237718711"

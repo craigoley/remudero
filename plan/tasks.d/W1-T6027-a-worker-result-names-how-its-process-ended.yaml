@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: W1-T5999 (#9566) builder loose ends (a) and (c)"
   plan_refs: [W1-T5999, W1-T2402, W1-T5998, W1-T5535]
   files: [src/lib/worker-provider.ts, src/lib/worker.ts, src/run-task.ts, test/a-worker-result-names-how-its-process-ended.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

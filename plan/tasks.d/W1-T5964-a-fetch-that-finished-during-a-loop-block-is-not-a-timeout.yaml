@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: #9460 sat 60+ min with two passing reviews withheld"
   plan_refs: [W1-T5282, W1-T5771, W1-T5530, W1-T5689]
   files: [src/lib/git-fetch-retry.ts, test/a-fetch-that-finished-during-a-loop-block-is-not-a-timeout.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -1,0 +1,29 @@
+- id: W1-T6063
+  title: "THE IMAGE'S NODE MAJOR MOVES ONLY BY PLAN — Dependabot's /deploy docker lane proposes Node majors (#6763 to 25.9.0, #6336 to 26.8.2, both closed as noise); a major is a coordinated change to .nvmrc, the image and the code (W1-T5882), never a dependency bump"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low
+  origin: "operator session 2026-10-06: Node 24 upgrade follow-up"
+  plan_refs: [W1-T5883, W1-T2770]
+  files: [.github/dependabot.yml, test/the-image-node-major-moves-only-by-plan.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06: .github/dependabot.yml's docker lane on /deploy has no ignore block, and
+    Dependabot opened #6336 (node 22.22.3 to 26.8.2) and #6763 (to 25.9.0, an odd non-LTS line), both
+    closed unmerged. Moving 22 to 24 took code changes (W1-T5882: reporter default, Worker execArgv,
+    TestCoverage, readline) found only by running CI on the new runtime, so a major is a plan task.
+  design: |
+    The docker lane ignores node version-update:semver-major. Minor and patch updates and digest
+    renewals still flow (W1-T6064 keeps .nvmrc in step with them). A test reads dependabot.yml and
+    requires that ignore on the /deploy docker lane.
+  acceptance:
+    - claim: "the /deploy docker lane ignores node semver-major updates"
+      proof: 'grep: test("W1-T6063: the deploy docker lane ignores node majors" in test/the-image-node-major-moves-only-by-plan.test.ts'
+  falsifier: |
+    Delete the ignore entry: the test fails naming the /deploy docker lane.

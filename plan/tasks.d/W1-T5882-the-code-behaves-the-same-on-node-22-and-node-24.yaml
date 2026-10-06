@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-05: Node 22 to 24 upgrade, CI probe of probe/node24-ci runs 37329361415 and 37334420618"
   plan_refs: [W1-T2770]
   files: [package.json, scripts/clock-sweep.mjs, scripts/coverage-merge-ratchet.mjs, scripts/host-parity.ts, scripts/preflight-author.mjs, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, scripts/workflow-guard-mutation-ratchet.mjs, src/lib/board-worker.ts, src/lib/ci-parity.ts, src/lib/console-projection-worker.ts, src/lib/ledger-union.ts, src/lib/read-model-slow-lane.ts, src/lib/read-model-worker.ts, src/lib/repo-dashboard-route.ts, src/lib/retro-preflight.ts, src/lib/review.ts, src/lib/secret-boundary.ts, src/lib/serve-plan-reload.ts, src/lib/status.ts, src/lib/worker-provider.ts, src/run-task.ts, test/a-proof-can-name-a-second-runners-suite.test.ts, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/board-prewarm-does-not-block.test.ts, test/board-prewarm-refreshes-ahead.test.ts, test/cross-repo-proof-suite-registry.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/merge-lcov.test.ts, test/no-test-worktree-outlives-its-fixture.test.ts, test/node-24-runtime-compatibility.test.ts, test/proof-exec-tmp-hygiene.test.ts, test/pure-path-proof-outcomes.test.ts, test/pure-proof-incomplete-run.test.ts, test/retro-prepublish-validation.test.ts, test/review.test.ts, test/serve-workers-follow-the-reloaded-plan.test.ts, test/test-with-retry.test.ts, test/tests-exercise-the-path-they-name.test.ts, test/the-coverage-lane-retries-a-flake.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

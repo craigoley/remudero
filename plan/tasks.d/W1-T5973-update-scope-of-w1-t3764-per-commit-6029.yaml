@@ -6,9 +6,9 @@
   type: implement
   verify: auto
   risk: medium
-  priority: 4
-  status: queued
-  # backlog gardener: band=4 evidence=af5af096fca9ddfb
+  status: blocked
+  retirement: closed
+  # backlog gardener: retirement evidence=e3576e178302f6fb
   attempts: 0
   files:
     - plan/tasks.yaml

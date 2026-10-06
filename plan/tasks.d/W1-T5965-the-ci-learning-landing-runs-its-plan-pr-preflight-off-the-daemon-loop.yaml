@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: the loop block behind #9460's withheld review"
   plan_refs: [W1-T5521, W1-T5689, W1-T5964, W1-T2968]
   files: [src/lib/feedback-landing.ts, src/run-task.ts, test/the-ci-learning-landing-runs-its-plan-pr-preflight-off-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

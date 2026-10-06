@@ -20,7 +20,7 @@
     - src/lib/nav-badge-view.ts
     - test/nav-badge-from-the-read-model.test.ts
     - test/read-model-worker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01: after #8127 the operator-agent GETs answer in 4 to 59 ms, but each is still a

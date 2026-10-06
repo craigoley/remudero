@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; live ledger read of run W1-T5343-1790980010581 on the Azure host"
   plan_refs: [W1-T534, W1-T1268, W1-T4466, W1-T2794, W1-T3979]
   files: [src/run-task.ts, src/lib/pr-open.ts, test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -19,8 +19,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T5481 declares the daemon cadence phase's loop-lag bound: one declaring file and one site.
 // W1-T5521 declares the sweep's two plan-PR rungs' loop-lag bounds: one declaring file and two sites.
 // The off-loop proof runner's kill bound declares its elapsed-time assertion: one file, one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 29;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 47;
+// The object reaper's off-loop prune bound declares its elapsed-time assertion: one file, one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 30;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 48;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

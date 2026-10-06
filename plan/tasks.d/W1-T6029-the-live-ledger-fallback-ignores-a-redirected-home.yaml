@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: run-task.test.ts reds that pass on CI (research r-env)"
   plan_refs: [W1-T4923, W1-T4068, W1-T4805]
   files: [src/lib/live-write-guard.ts, test/the-live-ledger-fallback-ignores-a-redirected-home.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

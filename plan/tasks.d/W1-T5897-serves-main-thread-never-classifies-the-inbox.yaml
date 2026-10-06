@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: read-only host evidence gathered by the W1-T5886 build (PR #9364)"
   plan_refs: [W1-T5886, W1-T5269, W1-T4089]
   files: [src/lib/panel-graph.ts, src/lib/inbox-view.ts, src/lib/fleet-lane.ts, src/lib/read-model-slow-lane.ts, src/lib/serve.ts, test/serves-main-thread-never-classifies-the-inbox.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
