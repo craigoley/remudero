@@ -156,7 +156,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
   const busy = { repoDir: repoWithGcLog().repoDir };
   const r1 = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
@@ -166,7 +166,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
 
   const r2 = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
@@ -193,7 +193,7 @@ test("W1-T4022: the default refusal timestamp uses the shared system clock", () 
   const busy = { repoDir: repoWithGcLog().repoDir };
   const result = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     runPrune: () => assert.fail("refused"),
   });
@@ -226,20 +226,20 @@ test("W1-T4022: below-the-floor never touches the refusal streak, a different co
 
 test("W1-T4022: a quiesced window closes between the two checks and the prune never spawns", () => {
   const { repoDir, gcLog } = repoWithGcLog();
-  let worktreeCalls = 0;
+  let handleCalls = 0;
   const r = reapGitObjects(repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => {
-      worktreeCalls++;
-      // Quiet on the FIRST sample, busy by the SECOND — exactly what a fleet that dispatches
-      // between the two checks produces. Neither call is skipped: both ends are real reads.
-      return worktreeCalls === 1 ? [] : ["/w/late-arrival"];
+    openFileCount: () => {
+      handleCalls++;
+      // Clear on the FIRST sample, held by the SECOND — a process that opened the store between
+      // the two checks. Neither call is skipped: both ends are real reads.
+      return handleCalls === 1 ? 0 : 2;
     },
     runPrune: () => assert.fail("a window that closed before the prune must never spawn one"),
   });
-  assert.equal(worktreeCalls, 2, "the predicate must be sampled twice — once per end of the window");
+  assert.equal(handleCalls, 2, "the predicate must be sampled twice — once per end of the window");
   assert.match(r.refusedBecause ?? "", /quiesced window closed/);
-  assert.match(r.refusedBecause ?? "", /worktree/);
+  assert.match(r.refusedBecause ?? "", /open handle/);
   assert.equal(existsSync(gcLog), true, "a window that closed must leave gc.log exactly where a first-check refusal would");
 });
 

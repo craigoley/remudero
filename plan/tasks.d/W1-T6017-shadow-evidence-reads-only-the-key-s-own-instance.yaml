@@ -1,0 +1,34 @@
+- id: W1-T6017
+  title: "SHADOW EVIDENCE READS ONLY THE KEY'S OWN INSTANCE — the read-model worker's view shadow passes readShadowEvidence every slot's database for every key (read-model-worker.ts viewShadow), so a diff on one instance's key is explained (named, before the legacy horizon, in the timing gap) by fact rows from ANOTHER instance's store, and every comparison queries N databases instead of one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — which store a shadow diff's evidence is read from, across the modules it spans
+  band_meaning: span
+  origin: "2026-10-06 core-console architecture plan backlog E15 (shadow follow-up: scope readShadowEvidence to each key's instance)"
+  plan_refs: [W1-T6018]
+  files: [src/lib/read-model-worker.ts, src/lib/view-shadow.ts, test/shadow-evidence-reads-only-the-key-s-own-instance.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: read-model-worker.ts viewShadow builds the comparator with
+    `evidence: (input) => readShadowEvidence(slots.flatMap((slot) => (slot.db ? [slot.db] : [])), input)`, and
+    view-shadow.ts readShadowEvidence runs namedBy / unseenBy / the `seen` gap count over EVERY db it is given.
+    Two costs: correctness, because an id a core fact row names can classify a console key's diff as
+    legacy_horizon or timing (a real diff hidden), and cost, because each comparison queries every instance's
+    store (3 on the host). Readiness promotes a view on zero `real` diffs, so a hidden real diff can promote a
+    wrong view. Scope-time checks: no plan record, run- branch or open PR head names readShadowEvidence.
+  design: |
+    The evidence callback receives the compared key's instance and passes readShadowEvidence that instance's
+    slot database only. A key with no instance (a whole-fleet view) keeps today's all-slots read. A key whose
+    instance has no open database returns empty evidence rather than borrowing another store.
+  acceptance:
+    - claim: "a shadow diff on one instance's key whose id is named only in another instance's fact store is classified real, while the same id named in its own store is explained, and evidence for a per-instance key reads only that instance's database"
+      proof: "unit test: test/shadow-evidence-reads-only-the-key-s-own-instance.test.ts"
+  falsifier: |
+    Keep passing every slot's database: the cross-instance fixture's diff reads as legacy_horizon (or timing)
+    instead of real and the test fails.

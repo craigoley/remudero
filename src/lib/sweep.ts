@@ -24,7 +24,7 @@ import {
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
 import {
-  armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   decideArmReprobeFromFacts,
   armFailureAction,
@@ -35,7 +35,7 @@ import {
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
-  realArmDeps,
+  realArmDepsAsync,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
@@ -54,7 +54,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1066,15 +1066,16 @@ function prNumberFromRef(ref: string): number | undefined {
   return bareMatch ? Number(bareMatch[1]) : undefined;
 }
 
-function armAndLogOutcome(
+async function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = armAutoMergeDetailedAsync,
   lane: ArmLane = "operator",
   headSha?: string,
-): ArmOutcome {
-  const result = arm(prUrl, taskId);
+): Promise<ArmOutcome> {
+  // W1-T5781: awaited, so the production arm's plan merge-safety reads run off the daemon loop.
+  const result = await arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
@@ -1325,7 +1326,7 @@ export interface BuildSweepEffectsDeps {
     verdict: PostReviewStallVerdict,
     ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   ) => void;
-  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps, isDraft?: boolean) => ArmOutcome | ArmAttemptResult;
+  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps<true>, isDraft?: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
@@ -1417,7 +1418,7 @@ export interface BuildSweepEffectsDeps {
    *  observes the call instead of cutting a real one. */
   worktreeAddImpl?: typeof worktreeAdd;
   /** Same coverage seam for the branch push this rung performs. */
-  gitPushRunBranchImpl?: typeof gitPushRunBranch;
+  gitPushRunBranchImpl?: (worktreePath: string, opts?: Parameters<typeof gitPushRunBranchAsync>[1]) => void | Promise<void>;
   /** Same coverage seam for the two REST calls (dedup probe + PR create) this rung performs.
    *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
    *  spawns `gh`. */
@@ -1774,7 +1775,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     pushEmptyCommit = gitPushEmptyCommit,
     issuesImpl,
     stallNotice = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["stallNotice"]>>("stallNotice"),
-    armImpl = armAutoMergeDetailed,
+    armImpl = armAutoMergeDetailedAsync,
     armSessionPrsOverride,
     updateBranchImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updateBranchImpl"]>>("updateBranchImpl"),
     readyDraftImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["readyDraftImpl"]>>("readyDraftImpl"),
@@ -1829,7 +1830,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     planRepairGitImpl: planRepairGit = defaultPlanRepairGit,
     worktreeAddImpl: worktreeAddForBuild = worktreeAdd,
-    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranch,
+    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranchAsync,
     ghJsonImpl: ghJsonForBuild = ghJson,
     ghBufferImpl: ghBufferForBuild = readMutationVerdictZip,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -1950,9 +1951,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
-    const armDeps = realArmDeps(() => config);
+    const armDeps = realArmDepsAsync(() => config);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
       { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl) });
   };
@@ -2102,7 +2103,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       if (committed.changed !== true || typeof committed.sha !== "string" || committed.sha.length === 0) {
         return decline("generator_commit_empty", { scripts: ratchetScripts });
       }
-      gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
+      await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
       log("sweep.ratchet_repair_executor_applied", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
@@ -2191,7 +2192,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: (pr, mode) => {
+    arm: async (pr, mode) => {
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2201,8 +2202,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return "shadow-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
-      const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
-        ...realArmDeps(() => config),
+      const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
+        ...realArmDepsAsync(() => config),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
@@ -2220,14 +2221,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         },
       } : undefined;
       let attemptError: string | undefined;
-      const outcome = armAndLogOutcome(
+      const outcome = await armAndLogOutcome(
         pr.prUrl,
         pr.taskId,
         log,
-        (prUrl, taskId) => {
-          const result = idleDeps
+        async (prUrl, taskId) => {
+          const result = await (idleDeps
             ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
-            : sweepArmImpl(prUrl, taskId);
+            : sweepArmImpl(prUrl, taskId));
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
@@ -2825,8 +2826,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           },
           push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
             expectedHeadSha: sha,
-            capture: (file, args) => planRepairGit(file, args),
-            exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+            capture: (file, args) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, args),
+            exec: async (file, args) => {
+              await (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]);
+            },
           }),
           updateMetadata: async (metadata: { title: string; body: string }) => {
             const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
@@ -3783,7 +3786,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
                 }
-                gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+                await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
                 assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
                 return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
               } finally {
@@ -4106,7 +4109,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
           return true;
         }
-        gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+        await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
         const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
         planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
@@ -4339,6 +4342,9 @@ export type Disposition =
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** The check run's posted title, where the read carries it. A bundled check (W1-T3720) keeps its
+   *  required NAME and titles itself by the gate(s) that refused — see {@link refusingGatesOf}. */
+  title?: string;
   /** Latest check conclusion preserved from the rollup so narrow infrastructure classifiers do
    * not have to infer FAILURE from the presence of a log. */
   conclusion?: string;
@@ -6705,6 +6711,66 @@ export function recordableRatchetScripts(
   return new Set(Object.values(generators));
 }
 
+/** W1-T5769 — the `<gate>: BLOCKED` headline scripts/bundled-gate-report.mjs reads, optionally behind
+ *  GitHub's `##[error]` rendering or a raw `::error …::` command. Anchored per line. */
+const GATE_BLOCKED_HEADLINE = /^(?:##\[error\]|::error[^\n]*?::)?([a-z][a-z0-9-]*): BLOCKED\b/gm;
+const GATE_NAME = /^[a-z][a-z0-9-]*$/;
+
+function blockedHeadlines(text: string | undefined): string[] {
+  return [...new Set([...(text ?? "").matchAll(GATE_BLOCKED_HEADLINE)].map((m) => m[1]))].sort();
+}
+
+/**
+ * W1-T5769 — the gates a failing check names as refusing: `title` when the posted title is a gate
+ * list (W1-T3720's `a, b` form) or carries BLOCKED headlines, else `log` from the tail's own
+ * headlines, else `undefined`. PURE.
+ *
+ * ⚠ ONLY A TITLE REPLACES THE NAME. A tail is the hosting JOB's log, which can carry a SIBLING
+ * check's headline (ci.yml's commitlint job hosts several bundles), so {@link redGateNames} adds log
+ * gates beside the check's own name: that can only narrow what reads recordable, never widen it.
+ */
+export function refusingGatesOf(
+  failure: Pick<CiFailure, "title" | "logTail">,
+): { source: "title" | "log"; gates: string[] } | undefined {
+  const title = failure.title?.trim() ?? "";
+  const titled = blockedHeadlines(title);
+  if (titled.length > 0) return { source: "title", gates: titled };
+  const listed = title.split(",").map((gate) => gate.trim());
+  if (title !== "" && listed.every((gate) => GATE_NAME.test(gate))) return { source: "title", gates: [...new Set(listed)].sort() };
+  const logged = blockedHeadlines(failure.logTail);
+  return logged.length > 0 ? { source: "log", gates: logged } : undefined;
+}
+
+/** W1-T5769 — the red set keyed by REFUSING GATE, via {@link refusingGatesOf}. A check that names no
+ *  gate keeps its own name, which is exactly the pre-W1-T5769 set. */
+export function redGateNames(pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures">): string[] {
+  const named = new Map<string, Set<string>>();
+  for (const failure of pr.ciFailures ?? []) {
+    if (!failure.name) continue;
+    const refused = refusingGatesOf(failure);
+    const gates = named.get(failure.name) ?? new Set<string>();
+    if (refused?.source !== "title") gates.add(failure.name);
+    for (const gate of refused?.gates ?? []) gates.add(gate);
+    named.set(failure.name, gates);
+  }
+  const checks = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  return [...new Set(checks.flatMap((check) => [...(named.get(check) ?? [check])]))];
+}
+
+/** W1-T5769 — `<check> refused by <gates>` for each red check whose refusing gates are not just
+ *  itself, so a dispatch reason names the gate a worker must clear. Empty when none is. */
+export function bundledRefusalNote(pr: Pick<OpenPrView, "ciFailures">): string {
+  const notes = new Map<string, Set<string>>();
+  for (const failure of pr.ciFailures ?? []) {
+    const others = (refusingGatesOf(failure)?.gates ?? []).filter((gate) => gate !== failure.name);
+    if (!failure.name || others.length === 0) continue;
+    const gates = notes.get(failure.name) ?? new Set<string>();
+    for (const gate of others) gates.add(gate);
+    notes.set(failure.name, gates);
+  }
+  return [...notes].map(([check, gates]) => `${check} refused by ${[...gates].sort().join(", ")}`).join("; ");
+}
+
 /**
  * W1-T2998 — the generator scripts that would repair this PR's red required checks, or `undefined`
  * when even one red check is not of that class. PURE.
@@ -6723,7 +6789,7 @@ export function recordableRatchetRepairFor(
 ): string[] | undefined {
   // A dirty PR runs no checks at all (W1-T106), so a red name on one is stale by construction.
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  const red = redGateNames(pr);
   if (red.length === 0) return undefined;
   const admitted = recordableRatchetScripts(generators);
   const scripts: string[] = [];
@@ -6767,7 +6833,7 @@ export function ratifiedBaselineRatchetRepairFor(
   pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures" | "mergeState">,
 ): RatifiedBaselineRatchetScript[] | undefined {
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)])].filter(Boolean);
+  const red = redGateNames(pr);
   if (red.length === 0) return undefined;
   const scripts: RatifiedBaselineRatchetScript[] = [];
   for (const checkName of red) {
@@ -8439,7 +8505,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
     reason: (pr, policy) => {
-      const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}`;
+      const refusal = bundledRefusalNote(pr); // W1-T5769: name the gate a worker must actually clear.
+      const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}${refusal ? ` — ${refusal}` : ""}`;
       if ((pr.fixRefusalsAtHead ?? 0) > 0) return `${base} — refused (${pr.fixRefusalsAtHead} at this head) — retrying the fix round`;
       // W1-T2998 — NAME THE DETERMINISTIC REMEDY WHENEVER ONE EXISTS, INDEPENDENTLY OF WHETHER IT
       // MAY BE TAKEN. With `recordableRatchetRepairEnabled` false this sentence is the ONLY effect

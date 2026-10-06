@@ -1,0 +1,45 @@
+- id: W1-T6025
+  title: "A TAKEOVER INSIDE THE GRACE PERIOD LOSES AT task-id-existence, AND THE REFUSAL NAMES WHO WINS — the gate never reads source=reclaimed/taken_over_from, and its open-PR half refuses BOTH colliding PRs with the same 'renumber' text, so on 2026-10-06 a 15-second takeover of W1-T5997 by a stale client made #9556 AND #9557 both renumber and the id was filed by nobody"
+  repo: remudero
+  depends_on: [W1-T5279]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — task-id-existence adjudicates a contested reservation by its chain, in one script
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: refs/rmd-id/W1-T5997 taken over 15s after codex reserved it; #9556 renumbered to W1-T6003, #9557 to W1-T6002"
+  plan_refs: [W1-T5279, W1-T3674, W1-T3100, W1-T3742, W1-T6026]
+  files: [scripts/task-id-existence-check.mjs, test/a-takeover-inside-the-grace-period-loses-at-task-id-existence.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: refs/rmd-id/W1-T5997 = ec2cf986 (11:36:40.316Z, branch=file-followups2-1791286555509
+    host=Remudero source=reclaimed taken_over_from=codex/portable-fixture-plan-1791286800000), parent 876d5390
+    (11:36:25.567Z, codex branch, host=Mac-mini, source=automatic): a 14.75s-old reservation taken over. The codex
+    branch was created 12:05:13Z, inside W1-T5279's 2h grace, so main's reservationHolderDrift reads it `held`
+    (replayed with fixedClock: reclaim returns `taken`, no push). The takeover ran from a stale client
+    (/home/craigoleyagent/rmd-work/core at 036f4d0a, 687 behind main, predating 093cb95f, under
+    RMD_SELF_SYNC_DONE=1). A client fix cannot bind code already on disk; CI runs main's gate. Today the
+    gate's holder half says only "reserved by X" and its open-PR half (evaluateOpenPrIdCollisions) refuses BOTH
+    PRs with "Renumber to a fresh reserved id", so both renumbered (W1-T6002, W1-T6003) and no shard on main
+    files W1-T5997. Census of all 3729 refs/rmd-id/*: 7 reclaims; 5 within 30s of the original (3s, 7s, 15s,
+    21s, 30s), and 4 of those 5 ids were filed by nobody.
+  design: |
+    (1) When the reservation head's holder line has source=reclaimed, read its PARENT commit's holder too.
+    Takeover age = reclaimer started_at minus parent started_at. If both parse and the age is under the grace
+    (mirror RESERVATION_PUSH_GRACE_MS; the test pins parity with src/lib/task-id-reservation.ts), the ORIGINAL
+    holder is the rightful holder: a filer equal to taken_over_from passes the holder check, and a filer equal
+    to the reclaimer is refused with text naming the original branch, host and started_at and calling the
+    reclaimer the loser of the race. (2) Every holder refusal prints the holder's host, pid, started_at and
+    source, not only its branch. (3) The open-PR collision half asks the reservation which colliding PR's head
+    is the rightful holder (by (1)), refuses only the other PR, and names the winner's PR and branch. With no
+    readable holder it keeps today's symmetric refusal (fail-closed).
+  acceptance:
+    - claim: "a takeover younger than the grace period is refused on the reclaimer's PR and passed on the original holder's PR, the open-PR collision refuses only the non-holder, and every refusal names the winning holder's branch, host and started_at"
+      proof: "unit test: test/a-takeover-inside-the-grace-period-loses-at-task-id-existence.test.ts"
+  falsifier: |
+    Feed the W1-T5997 chain (876d5390 -> ec2cf986) with filer codex/portable-fixture-plan-1791286800000: today it
+    is refused. It must pass, and filer file-followups2-1791286555509 must be refused with text naming the codex
+    branch and Mac-mini. Set the parent started_at 3h earlier and the reclaimer must win instead.

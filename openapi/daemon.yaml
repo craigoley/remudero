@@ -7679,6 +7679,83 @@ components:
                   results:
                     $ref: "#/components/schemas/ExternalActionResultsEnvelope"
 
+    AgentView:
+      type: object
+      description: >
+        GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent
+        pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers
+        for that instance, computed by the route's own readers over the instance's `panel.*` facts in the
+        read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass.
+        `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics
+        snapshot; without one it carries a `reason`, never an empty list. Dark until
+        state/read-model/switches.json sets `agent` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [agent]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instance, part, body]
+          properties:
+            instance: {type: string}
+            part:
+              type: string
+              enum: [proposals, history, settings, experiments, delegations, follow-ups, promotions, actions, consequences, intent-plans]
+            repository:
+              type: string
+              description: The instance's `owner/name`, when serve names one.
+            body:
+              description: >
+                The part's route body: proposals = AgentProposals; history = GET /v1/operator-agent/proposals;
+                settings = GET /v1/operator-agent/settings; experiments, delegations, follow-ups, promotions,
+                actions, consequences and intent-plans = the GET of that name under /v1/operator-agent/.
+              oneOf:
+                - $ref: "#/components/schemas/AgentProposals"
+                - $ref: "#/components/schemas/OperatorAgentProposalList"
+                - $ref: "#/components/schemas/OperatorAgentSettingsResult"
+                - $ref: "#/components/schemas/OperatorAgentExperimentList"
+                - $ref: "#/components/schemas/DelegationProfileList"
+                - $ref: "#/components/schemas/FollowUpList"
+                - $ref: "#/components/schemas/OperatorAgentPromotionList"
+                - $ref: "#/components/schemas/OperatorAgentActionList"
+                - $ref: "#/components/schemas/OperatorAgentPendingConsequenceRead"
+                - $ref: "#/components/schemas/IntentPlanList"
+            scoped:
+              description: "The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>."
+              $ref: "#/components/schemas/OperatorAgentSettingsResult"
+
+    AgentProposals:
+      type: object
+      description: >
+        The agent view's `proposals` part (W1-T5051): the proposals core's engine generates for the instance from
+        its committed analytics snapshot and its operator-agent history, not terminal in that history and at or
+        above its repository's confidence threshold, highest confidence first. Either `proposals` or `reason`.
+      properties:
+        proposals:
+          type: array
+          items:
+            type: object
+            required: [proposalId, category, signal, confidence]
+            properties:
+              proposalId: {type: string}
+              category: {type: string}
+              signal: {type: string}
+              confidence: {type: number}
+        reason:
+          type: string
+          description: Why no proposal is generated (no repository, or no committed analytics snapshot yet).
+
     NeedsYouView:
       type: object
       description: >
@@ -14238,6 +14315,49 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
+
+  /v1/views/agent:
+    get:
+      summary: One agent page part for one instance, served from the read model.
+      description: >
+        W1-T5051 (arch Phase 4 design §1.1, P4-T12). Answers what the part's GET /v1/operator-agent/* route
+        answers for the instance (and, for `proposals`, the nav badge's engine), without a request-time fold.
+        DARK: it answers 404 `view_disabled` until state/read-model/switches.json sets `agent` to `serve`, and
+        `shadow` answers 404 `view_shadow` while the worker compares it with the routes' own computation over
+        the ledger. An instance serve does not project answers 404 `view_not_ready`. Same ETag and 304 rules as
+        every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: query
+          required: true
+          description: The registry instance name (core's is `core`).
+          schema:
+            type: string
+        - name: part
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [proposals, history, settings, experiments, delegations, follow-ups, promotions, actions, consequences, intent-plans]
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body for that key yet (`view_not_ready`).
 
   /v1/views/events:
     get:

@@ -71,7 +71,7 @@ test("an invalid or unreadable registry does not invent shadow mode", () => {
   }
 });
 
-test("the independent sweep path cannot arm a shadow instance", () => {
+test("the independent sweep path cannot arm a shadow instance", async () => {
   let sweepArmCalls = 0;
   const effects = buildSweepEffects({
     owner: "owner",
@@ -84,7 +84,7 @@ test("the independent sweep path cannot arm a shadow instance", () => {
     log: () => {},
     armImpl: () => { sweepArmCalls += 1; return "armed"; },
   });
-  const outcome = effects.arm({
+  const outcome = await effects.arm({
     prUrl: "https://github.com/owner/repo/pull/1",
     taskId: "W1-T4265",
     headSha: "abc123",

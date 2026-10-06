@@ -302,3 +302,22 @@ test("non-dispatch benchmark receipt failure preserves normal flow", async () =>
   await assert.rejects(benchmarkNonDispatchSpawn("triage", failing)(args("/dev/null")),
     (error: unknown) => error === thrown, "telemetry cannot replace the worker's error");
 });
+
+test("Codex attempts preserve explicit notional pricing without turning it into cash or a served model", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-notional-receipt-"));
+  try {
+    const raw = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(assignment("notional", "codex", "gpt-6.1-sol"));
+      return { ...result("codex", "gpt-6.1-sol", "notional"), costUsd: 0, notionalCostUsd: 0.75,
+        servedModel: null, servedModelReason: "CLI reports no served identity" };
+    }) as typeof spawnWorker;
+    await benchmarkNonDispatchSpawn("review", raw)(args(root));
+    const receipt = rows(root).find(row => row.step === "worker.attempt")!;
+    assert.equal(receipt.notional_cost_usd, 0.75);
+    assert.equal(receipt.total_cost_usd, undefined);
+    assert.equal(receipt.served_model, null);
+    const accounting = (receipt.benchmark_run as Record<string, any>).accounting;
+    assert.deepEqual(accounting.subscriptionNotionalUsd, { state: "observed", value: 0.75 });
+    assert.equal(accounting.apiCostUsd.state, "unavailable");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -1237,8 +1237,10 @@ import {
 import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
- *  rather than authorising something the operator never read. */
-export const OBJECT_REAP_CONTRACT_VERSION = "1";
+ *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
+ *  a busy store is pruned on expiry alone, stale maintenance locks are reclaimed first, and the
+ *  daemon's own checkout is reaped beside the managed one. */
+export const OBJECT_REAP_CONTRACT_VERSION = "2";
 import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
@@ -4747,6 +4749,14 @@ export function lostRaceEscalation(input: {
     ],
     recommendation: "accept-the-merge",
   };
+}
+
+export async function riskJudgeDisarm(
+  ctx: Parameters<typeof disposeDisarm>[1],
+  disarm: typeof disarmAutoMergeAsync = disarmAutoMergeAsync,
+  disposition: Parameters<typeof disposeDisarm>[2] = {},
+): Promise<ReturnType<typeof disposeDisarm>> {
+  return disposeDisarm(await disarm(ctx.prUrl), ctx, disposition);
 }
 
 /**
@@ -12138,6 +12148,32 @@ export async function runFixRung(opts: {
           `strike: ${e.message}`,
       );
       throw e;
+    }
+
+    // W1-T5999: a worker KILLED BY A SIGNAL returned a truncated report, not a refusal. No commit is
+    // attempted, and no `fix.dispatch`/`fix.commit_refused` is written, so `fixRoundTally` counts it
+    // neither as a strike nor toward "refused twice" — the same ledger shape W1-T2402's thrown kill leaves.
+    if (fixWorkerEndedBySignal(fixResult)) {
+      deps.log("fix.done", {
+        ...fixReceipt.ledgerFields(fixResult),
+        round_id: roundId,
+        ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+        head_sha: priorHeadSha,
+        strike: attempt,
+        round,
+        session_id: fixResult.sessionId,
+        subtype: "signal_terminated",
+        worker_subtype: fixResult.subtype,
+        worker_exit: "signal",
+        cost_usd: fixResult.costUsd,
+        num_turns: fixResult.numTurns,
+        elapsed_ms: spawnElapsedMs,
+      });
+      deps.branchClaim?.release();
+      deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} worker TERMINATED BY SIGNAL (${fixResult.subtype}) — ` +
+        `not a commit refusal, no strike spent: ${opts.prUrl}`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "fix worker terminated by signal",
+        standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
@@ -19547,7 +19583,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
       spend: riskJudgeSpend,
-      escalate: (verdict, action) => {
+      escalate: async (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),
         // so there is usually nothing here to withdraw — kept as the same
@@ -19559,7 +19595,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // which GitHub refused because the pull request had ALREADY MERGED — was recorded as a
         // completed withdrawal. Same predicate and same vocabulary `withdrawArmIfVerdictRefuses`
         // already established (W1-T1056); this only applies them at the site that fired.
-        const disposition = disposeDisarm(disarmAutoMerge(prUrl), {
+        const disposition = await riskJudgeDisarm({
           prUrl, taskId, runId, ledgerPath,
           reason: "risk judge escalated — auto-merge refused",
           refusal: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${action.reason}`,
@@ -21226,7 +21262,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
     // ledger row above already uses) reviews under the default risk and a default hard cap instead of
     // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId) {
+    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
@@ -21337,7 +21373,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
     () =>
-      withMaterialized(worktreePath, subjectRepoDir, () =>
+      withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(runId, () =>
         runReviewDep({
           owner,
           repo,
@@ -21381,7 +21417,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           ledgerPath,
           runId,
           openTaskIds,
-        }),
+        })),
       ),
   );
 
@@ -34365,6 +34401,8 @@ export function logDiskReclaimRung(
     /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
     objectStreakPath?: () => string;
     objectOwnInflightLock?: string;
+    /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
+    objectDaemonCheckoutDir?: () => string;
   } = {},
 ): {
   tempDirsRemoved: number;
@@ -34411,11 +34449,13 @@ export function logDiskReclaimRung(
   // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
   // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
   // outcomes: a survey that reached different probes would describe a decision nobody will make.
+  //
+  // TWO REPOS (operator ruling 2026-10-06): the managed checkout and the daemon's own checkout,
+  // each with its own decision row and refusal streak. The daemon checkout is reaped only where a
+  // git store exists at `<root>/remudero`; a host that keeps it elsewhere has nothing there.
   let objectsPruned = 0;
   let objectsWouldPrune = 0;
-  let objectRefusal: string | undefined;
-  let objectConsecutiveRefusals: number | undefined;
-  let objectRefusingSinceIso: string | undefined;
+  const objectRows: Array<[string, Record<string, unknown>]> = [];
   try {
     // W1-T4022: `loadDefaultPolicy()` reads the install's own policy (the seam `runAdhocLaneReapRung`
     // uses). The prior `loadPolicy(policyPath(config.root))` THREW every tick — the daemon root has no
@@ -34432,24 +34472,56 @@ export function logDiskReclaimRung(
     const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
     if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
     const enabled = pin.fire && policyBlock.enabled;
-    const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const streakPath = (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))();
-    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, {
-      dryRun: !enabled,
-      // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
-      // falls back to when nothing supplies a counter — production wired nothing before this, so
-      // the open-handle refusal fired unconditionally and the other two conditions were moot.
-      openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
-      streakPath,
-      ownInflightLock: deps.objectOwnInflightLock,
-      ...activeWorkerProbes(inflight),
-    });
-    objectsPruned = r.pruned;
-    objectsWouldPrune = r.wouldPrune ?? 0;
-    objectRefusal = r.refusedBecause;
-    objectConsecutiveRefusals = r.consecutiveRefusals;
-    objectRefusingSinceIso = r.refusingSinceIso;
+    const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
+    const repos = [
+      {
+        repo: "managed",
+        dir: (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))(),
+        streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
+      },
+      ...(existsSync(join(daemonCheckout, ".git"))
+        ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
+        : []),
+    ];
+    for (const { repo, dir, streakPath } of repos) {
+      const r = (deps.reapObjects ?? reapGitObjects)(dir, inflight, {
+        dryRun: !enabled,
+        // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
+        // falls back to when nothing supplies a counter.
+        openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
+        streakPath,
+        ownInflightLock: deps.objectOwnInflightLock,
+        ...activeWorkerProbes(inflight),
+      });
+      objectsPruned += r.pruned;
+      objectsWouldPrune += r.wouldPrune ?? 0;
+      // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
+      // that decides whether arming this rung is worth anything, and it is unreadable unless the
+      // declines are ledgered too, with the CONSECUTIVE REFUSAL streak and when it began (W1-T4022).
+      if (r.refusedBecause !== undefined) {
+        objectRows.push(["run.disk_reclaim.objects_declined", {
+          repo,
+          reason: r.refusedBecause,
+          consecutive_refusals: r.consecutiveRefusals,
+          refusing_since: r.refusingSinceIso,
+        }]);
+      } else if (r.carriedBy !== undefined) {
+        // WHICH BARRIER CARRIED IT: `quiet` (both held) or `expiry` (the store was busy).
+        objectRows.push(["run.disk_reclaim.objects_decision", {
+          repo,
+          carried_by: r.carriedBy,
+          quiet_shortfall: r.quietShortfall,
+          dry_run: !enabled,
+          loose_before: r.looseBefore,
+          pruned: r.pruned,
+          would_prune: r.wouldPrune,
+          locks_reclaimed: r.locks?.reclaimed,
+          locks_kept: r.locks?.kept,
+          locks_failed: r.locks?.failed,
+        }]);
+      }
+    }
   } catch {
     // best-effort — a throw here must never block the dispatch or the other three sweeps
   }
@@ -34465,17 +34537,7 @@ export function logDiskReclaimRung(
       objects_would_prune: objectsWouldPrune,
     });
   }
-  // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
-  // that decides whether arming this rung is worth anything at all, and it is unreadable unless
-  // the declines are ledgered too. W1-T4022 adds the CONSECUTIVE REFUSAL streak and when it began,
-  // so a single busy tick and a three-week-long block stop reading as the same one-line fact.
-  if (objectRefusal !== undefined) {
-    log("run.disk_reclaim.objects_declined", {
-      reason: objectRefusal,
-      consecutive_refusals: objectConsecutiveRefusals,
-      refusing_since: objectRefusingSinceIso,
-    });
-  }
+  for (const [step, fields] of objectRows) log(step, fields);
 
   return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
@@ -36132,6 +36194,34 @@ export function buildDaemonReadRefresher(options: {
   };
 }
 
+/** W1-T5998 — run ids of workers this process spawned and has not reaped. A review takes no
+ *  inflight lock, so only this registry tells the orphan sweep its worker is still running. */
+const liveWorkerRunIds = new Set<string>();
+
+/** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
+export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>): Promise<T> {
+  liveWorkerRunIds.add(runId);
+  try {
+    return await spawn();
+  } finally {
+    liveWorkerRunIds.delete(runId);
+  }
+}
+
+/** W1-T5998 — the orphan sweep's `isRunActive`: this daemon's own run id (its fix workers carry
+ *  it), a run it spawned and has not reaped, or a live lock's run id or its prefix before
+ *  `:fix-claim:`. A previous daemon's id matches none of these, so its strays are still killed. */
+export function orphanSweepRunActive(
+  ownRunId: string,
+  inflightDir: string,
+  isPidAlive?: (pid: number) => boolean,
+): (runId: string) => boolean {
+  return (runId) =>
+    runId === ownRunId ||
+    liveWorkerRunIds.has(runId) ||
+    liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -36691,10 +36781,8 @@ export async function daemonCommand(
   // (design part i/ii) — ONE shared closure wired into BOTH daemonBoot's boot-time param
   // (below) and DaemonDeps.sweepOrphans (the per-poll half, at the deps literal further
   // down), so both halves run the identical attribution/kill/ledger logic rather than two
-  // independently drifting copies. `isRunActive` reads the SAME inflight-lock directory
-  // (state/inflight/*.lock) the drain/daemon dispatch path itself takes before running a
-  // task (see `liveInflightRuns`'s own doc) — a run still holding that lock is never a
-  // stray, no matter how long its process has been alive. Each kill's own
+  // independently drifting copies. `isRunActive` is `orphanSweepRunActive` (W1-T5998): a lock
+  // alone missed this daemon's lockless reviews and its fix workers. Each kill's own
   // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
   // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
   const inflightDir = join(config.root, "state", "inflight");
@@ -36704,7 +36792,7 @@ export async function daemonCommand(
       expectedScope: orphanWorkerScope,
       listCandidates: defaultListCandidates,
       readMarkers: defaultReadMarkers,
-      isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
+      isRunActive: orphanSweepRunActive(runId, inflightDir),
       kill: (pid) => killProcessGroup(pid),
       ledger: orphanWorkerKillLedger(ledgerPath),
     });
@@ -42711,6 +42799,14 @@ function lastCommitRefusalPromptLines(
  *  carries no anchored COMMIT_MESSAGE line. Shared with `resumeForMissingCommitLine` below so the
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
+
+/** W1-T5999: did this worker END BY A SIGNAL? The codex runner (`spawnCodexWorkerInPrivateTemp`) names a
+ *  failed exit `error_exit_${code}`, and Node's `exit` event passes `code === null` only to a child a
+ *  signal ended — so `error_exit_null` IS the runner's exit-by-signal flag (it keeps no signal name).
+ *  A Claude worker killed before its result envelope throws instead; W1-T2402's catch owns that. */
+function fixWorkerEndedBySignal(result: Pick<WorkerResult, "subtype" | "isError">): boolean {
+  return result.isError && result.subtype === "error_exit_null";
+}
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
 export const REFUSED_REPORT_TAIL_CHARS = 800;

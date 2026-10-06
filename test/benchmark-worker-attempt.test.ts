@@ -32,3 +32,12 @@ test("benchmark worker attempts separate cash from notional cost", () => {
   assert.deepEqual(subscription?.accounting.subscriptionNotionalUsd, { state: "observed", value: 0.5 });
   assert.equal(subscription?.accounting.apiCostUsd.state, "unavailable");
 });
+
+test("an explicit invalid notional receipt cannot borrow a zero cash placeholder", () => {
+  const invalid = benchmarkRunAttemptReceipt({ step: "worker.attempt", billing_mode: "subscription",
+    total_cost_usd: 0, notional_cost_usd: -1 });
+  assert.deepEqual(invalid?.accounting.subscriptionNotionalUsd, { state: "unavailable", reason: "worker-cost-not-reported" });
+  const explicit = benchmarkRunAttemptReceipt({ step: "worker.attempt", billing_mode: "subscription",
+    total_cost_usd: 0, notional_cost_usd: 0.75 });
+  assert.deepEqual(explicit?.accounting.subscriptionNotionalUsd, { state: "observed", value: 0.75 });
+});

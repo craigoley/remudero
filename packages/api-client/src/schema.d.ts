@@ -3064,6 +3064,36 @@ export interface components {
         })[];
       };
     };
+    /** GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers for that instance, computed by the route's own readers over the instance's `panel.*` facts in the read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass. `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics snapshot; without one it carries a `reason`, never an empty list. Dark until state/read-model/switches.json sets `agent` to `serve`. */
+    AgentView: {
+      view: "agent";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instance: string;
+        part: "proposals" | "history" | "settings" | "experiments" | "delegations" | "follow-ups" | "promotions" | "actions" | "consequences" | "intent-plans";
+        /** The instance's `owner/name`, when serve names one. */
+        repository?: string;
+        /** The part's route body: proposals = AgentProposals; history = GET /v1/operator-agent/proposals; settings = GET /v1/operator-agent/settings; experiments, delegations, follow-ups, promotions, actions, consequences and intent-plans = the GET of that name under /v1/operator-agent/. */
+        body: (AgentProposals) | (OperatorAgentProposalList) | (OperatorAgentSettingsResult) | (OperatorAgentExperimentList) | (DelegationProfileList) | (FollowUpList) | (OperatorAgentPromotionList) | (OperatorAgentActionList) | (OperatorAgentPendingConsequenceRead) | (IntentPlanList);
+        /** The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>. */
+        scoped?: OperatorAgentSettingsResult;
+      };
+    };
+    /** The agent view's `proposals` part (W1-T5051): the proposals core's engine generates for the instance from its committed analytics snapshot and its operator-agent history, not terminal in that history and at or above its repository's confidence threshold, highest confidence first. Either `proposals` or `reason`. */
+    AgentProposals: {
+      proposals?: ({
+        proposalId: string;
+        category: string;
+        signal: string;
+        confidence: number;
+      })[];
+      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      reason?: string;
+    };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
       view: "needs-you";
@@ -5379,6 +5409,18 @@ export interface paths {
       responses: {
           "200": ActionsView;
           "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/agent": {
+    get: {
+      responses: {
+          "200": AgentView;
+          "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
           "404": undefined;

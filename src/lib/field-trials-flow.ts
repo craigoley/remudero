@@ -92,6 +92,9 @@ export interface FlowRow {
   requestedModel: string | null;
   selectedModel: string | null;
   servedModel: string | null;
+  servedModelReason?: string | null;
+  notionalCostUsd?: number | null;
+  notionalCostReported?: boolean;
   taskClass: string | null;
   risk: string | null;
   workLane: string | null;
@@ -140,6 +143,10 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
     servedModel: text(row.served_model),
+    servedModelReason: text(row.served_model_reason),
+    notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
+    notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
+      ? row.notional_cost_usd : null,
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
     risk: risk?.state === "observed" ? text(risk.value) : text(row.risk),
     workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
@@ -409,7 +416,8 @@ export interface FieldTrialsFlowSnapshot {
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
-    apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
+    apiCostEstimateUsd: number; subscriptionNotionalUsd: number; servedModelKnownAssignments: number;
+    workerOutcomeKnownAssignments: number; servedModelUnavailableReasons: Record<string, number> }[];
   /** Private finding-quality evidence. Never copied into the public release. No trusted labels are inferred from GitHub workflow state. */
   reviewFindingOutcomes: FindingOutcomeReport;
   reviewFindingEvidence: FindingEvidenceReport;
@@ -697,7 +705,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         const counts = assignmentTelemetry.get(key) ?? { source: source.label, selectedModel, assignments: 0,
           taskClass: 0, risk: 0, workLane: 0, harnessPinned: 0, promptPinned: 0, toolPinned: 0,
           scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 0,
-          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 };
+          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0,
+          servedModelKnownAssignments: 0, workerOutcomeKnownAssignments: 0, servedModelUnavailableReasons: {} };
         counts.assignments += 1;
         counts.taskClass += Number(row.taskClass !== null);
         counts.risk += Number(row.risk !== null);
@@ -710,10 +719,20 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         const attempt = row.assignmentId === null ? undefined : attemptByAssignment.get(row.assignmentId);
         if (attempt === undefined) counts.nonStarterAssignments += 1;
         else counts.attemptReceipts += 1;
-        if (attempt?.costUsd === null || attempt?.costUsd === undefined || attempt.billingMode === null)
+        counts.servedModelKnownAssignments += Number(attempt?.servedModel != null);
+        counts.workerOutcomeKnownAssignments += Number(attempt?.success != null);
+        if (attempt !== undefined && attempt.servedModel === null) {
+          const reason = (attempt.servedModelReason ?? "provider-did-not-report-served-model").slice(0, 256);
+          const bucket = Object.hasOwn(counts.servedModelUnavailableReasons, reason) || Object.keys(counts.servedModelUnavailableReasons).length < 20
+            ? reason : "other-unavailable-reason";
+          const hits = Object.hasOwn(counts.servedModelUnavailableReasons, bucket) ? counts.servedModelUnavailableReasons[bucket] : 0;
+          Object.defineProperty(counts.servedModelUnavailableReasons, bucket, { value: hits + 1, enumerable: true, configurable: true });
+        }
+        const cost = attempt?.billingMode === "subscription" ? attempt.notionalCostReported ? attempt.notionalCostUsd : attempt.costUsd : attempt?.costUsd;
+        if (cost === null || cost === undefined || attempt?.billingMode == null)
           counts.costMissingAssignments += 1;
-        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += attempt.costUsd;
-        else counts.subscriptionNotionalUsd += attempt.costUsd;
+        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += cost;
+        else counts.subscriptionNotionalUsd += cost;
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);

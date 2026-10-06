@@ -9,8 +9,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assessGatewayCheckout, buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, type GatewayCheckoutAssessment, type ServeDeps } from "../src/lib/serve.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { assessGatewayCheckout, buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, SERVE_HANDOFF_COALESCE_MS, type GatewayCheckoutAssessment, type ServeDeps } from "../src/lib/serve.js";
+import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -28,12 +28,15 @@ test("a supervised serve sends a handoff request instead of exiting", async () =
   const asked: Array<Record<string, unknown>> = [];
   const steps: string[] = [];
   let assessment = BEHIND;
+  let now = CLOCK.now();
   const gate = gateStaleCodeExit({
     bootSha: "a".repeat(40),
     resolveCurrentSha: () => "a".repeat(40),
     resolveCommitsBehind: () => 0,
     exit: (code) => exits.push(code),
-    clock: CLOCK,
+    clock: clockFromMillisFn(() => now),
+    // A generation that has already served a full coalescing window.
+    bootedAt: CLOCK.now() - SERVE_HANDOFF_COALESCE_MS,
     scheduleRecheck: () => () => {},
     log: (step) => steps.push(step),
     assessCheckout: async () => assessment,
@@ -49,6 +52,7 @@ test("a supervised serve sends a handoff request instead of exiting", async () =
   await gate.recheck();
   assert.equal(asked.length, 1, "the same stale state is asked about once");
   assessment = { ...BEHIND, state: { ...BEHIND.state, behindBy: 3 } };
+  now += SERVE_HANDOFF_COALESCE_MS;
   await gate.recheck();
   assert.equal(asked.length, 2, "a newer origin asks again, so the supervisor can target the newest sha");
   assert.deepEqual(steps.filter((s) => s === "serve.handoff_requested").length, 2);
@@ -165,4 +169,158 @@ test("a supervised serve reads its real checkout past the boot-sync guard the su
   const supervised = await assessGatewayCheckout({ repoDir: served.dir, env, clock: CLOCK, supervised: true });
   assert.equal(supervised.state.behindBy, 1);
   assert.equal(supervised.restartDue, true, "the generation sees main moved a path it loads");
+});
+
+// OPERATOR RULING 2026-10-06: code handoffs are coalesced into one per SERVE_HANDOFF_COALESCE_MS;
+// plan-only advances keep reloading in place at once.
+const MIN = 60_000;
+const T0 = Date.parse("2026-10-06T12:00:00Z");
+const SHA1 = "1".repeat(40);
+const SHA2 = "2".repeat(40);
+
+function behindAt(targetSha: string, behindBy: number, reloadPlanAt?: string): GatewayCheckoutAssessment {
+  return {
+    state: { head: "a".repeat(40), behindBy, dirty: false, checkedAt: CLOCK.iso() },
+    restartDue: true,
+    targetSha,
+    ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+  };
+}
+
+function coalescingGate(assess: () => Promise<GatewayCheckoutAssessment>, extra: Partial<Parameters<typeof gateStaleCodeExit>[0]> = {}) {
+  const clock = { at: T0 };
+  const asked: Array<Record<string, unknown>> = [];
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const exits: number[] = [];
+  const reloads: string[] = [];
+  const gate = gateStaleCodeExit({
+    bootSha: "a".repeat(40),
+    resolveCurrentSha: () => "a".repeat(40),
+    resolveCommitsBehind: () => 0,
+    exit: (code) => exits.push(code),
+    clock: clockFromMillisFn(() => clock.at),
+    bootedAt: T0,
+    scheduleRecheck: () => () => {},
+    log: (step, detail) => rows.push([step, detail]),
+    assessCheckout: assess,
+    reloadPlan: async (ref) => (reloads.push(ref), true),
+    requestHandoff: (detail) => asked.push(detail),
+    ...extra,
+  });
+  const coalesced = () => rows.filter(([step]) => step === "serve.handoff_coalesced").map(([, detail]) => detail);
+  return { gate, clock, asked, rows, exits, reloads, coalesced };
+}
+
+const settleLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+test("two relevant merges three minutes apart ride one handoff after the window, to the newer sha", async () => {
+  let assessment = behindAt(SHA1, 1);
+  const g = coalescingGate(async () => assessment);
+  g.clock.at = T0 + 5 * MIN;
+  await g.gate.recheck();
+  assert.equal(g.asked.length, 0, "the first relevant merge waits for the window");
+  assessment = behindAt(SHA2, 2);
+  g.clock.at = T0 + 8 * MIN;
+  await g.gate.recheck();
+  g.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS - 1;
+  await g.gate.recheck();
+  assert.equal(g.asked.length, 0, "and so does the second, until the window closes");
+  g.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS;
+  await g.gate.recheck();
+  assert.equal(g.asked.length, 1, "both merges ride ONE handoff");
+  assert.equal(g.asked[0].targetSha, SHA2, "aimed at the newest origin/main");
+  assert.deepEqual(g.coalesced(), [{ firstSeenSha: SHA1, targetSha: SHA2, waitedMs: 10 * MIN, mergesAbsorbed: 2, windowMs: SERVE_HANDOFF_COALESCE_MS }]);
+});
+
+test("a relevant merge after a long-idle generation asks at once, and one inside the first window waits for its boundary", async () => {
+  const idle = coalescingGate(async () => behindAt(SHA1, 1));
+  idle.clock.at = T0 + 120 * MIN;
+  await idle.gate.recheck();
+  assert.equal(idle.asked.length, 1, "the window measured from boot closed long ago");
+  assert.deepEqual(idle.coalesced(), [], "nothing waited, so nothing is coalesced");
+
+  const fresh = coalescingGate(async () => behindAt(SHA1, 1));
+  fresh.clock.at = T0 + 10 * MIN;
+  await fresh.gate.recheck();
+  fresh.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS - 1;
+  await fresh.gate.recheck();
+  assert.equal(fresh.asked.length, 0, "a merge 10 min after boot waits out the window measured from boot");
+  fresh.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS;
+  await fresh.gate.recheck();
+  assert.equal(fresh.asked.length, 1, "and asks at its boundary");
+});
+
+/** assessGatewayCheckout over a hermetic git that diffs the boot sha against `diff()`'s paths. */
+function hermeticAssess(diff: () => string, origin: () => string) {
+  return () =>
+    assessGatewayCheckout({
+      repoDir: "/nonexistent",
+      env: {},
+      fetch: async () => {},
+      clock: CLOCK,
+      git: (args) => {
+        if (args[0] === "rev-parse") return args[1] === "HEAD" ? `${"a".repeat(40)}\n` : `${origin()}\n`;
+        if (args[0] === "diff") return diff();
+        if (args[0] === "rev-list") return "1\n";
+        return "";
+      },
+    });
+}
+
+test("a plan-only merge inside a coalescing window reloads the plan in place at once", async () => {
+  let paths = "src/lib/serve.ts\n";
+  let origin = SHA1;
+  const g = coalescingGate(hermeticAssess(() => paths, () => origin));
+  g.clock.at = T0 + 2 * MIN;
+  await g.gate.recheck();
+  await settleLoop();
+  assert.equal(g.asked.length, 0, "the code merge is coalesced");
+  // The diff from boot is cumulative, so the plan-only merge on top still reads code-relevant.
+  paths = "src/lib/serve.ts\nplan/tasks.d/W1-T2-x.yaml\n";
+  origin = SHA2;
+  g.clock.at = T0 + 3 * MIN;
+  await g.gate.recheck();
+  await settleLoop();
+  assert.deepEqual(g.reloads, [SHA2], "the plan-only merge is served now, not after the window");
+  assert.equal(g.asked.length, 0);
+});
+
+test("a merge that changes code and a reloadable plan file reloads the plan now and hands off the code at the window", async () => {
+  const g = coalescingGate(hermeticAssess(() => "src/lib/serve.ts\nplan/tasks.d/W1-T2-x.yaml\n", () => SHA1));
+  g.clock.at = T0 + 1 * MIN;
+  await g.gate.recheck();
+  await settleLoop();
+  assert.deepEqual(g.reloads, [SHA1], "the plan half reloads in place at once");
+  assert.equal(g.asked.length, 0, "the code half waits");
+  g.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS;
+  await g.gate.recheck();
+  await settleLoop();
+  assert.equal(g.asked.length, 1, "and is handed off at the window boundary");
+  assert.equal(g.asked[0].targetSha, SHA1);
+});
+
+test("the supervisor's drain bypasses an open coalescing window", async () => {
+  const g = coalescingGate(async () => behindAt(SHA1, 1), { drain: async () => {} });
+  g.clock.at = T0 + 1 * MIN;
+  await g.gate.recheck();
+  assert.equal(g.asked.length, 0, "a handoff is being coalesced");
+  await g.gate.handover("generation_crashed");
+  assert.deepEqual(g.exits, [0], "a forced drain does not wait for the window");
+  g.clock.at = T0 + SERVE_HANDOFF_COALESCE_MS;
+  await g.gate.recheck();
+  assert.equal(g.asked.length, 0, "and a drained generation never asks afterwards");
+});
+
+test("a coalescing window writes one serve.handoff_coalesced row however many polls it spans", async () => {
+  let behindBy = 0;
+  const g = coalescingGate(async () => ({ ...behindAt(behindBy === 1 ? SHA1 : SHA2, behindBy), restartDue: behindBy > 0 }));
+  for (let minute = 1; minute <= 20; minute += 1) {
+    if (minute === 2 || minute === 6 || minute === 11) behindBy += 1;
+    g.clock.at = T0 + minute * MIN;
+    await g.gate.recheck();
+  }
+  assert.equal(g.coalesced().length, 1, "one row for the window, not one per poll");
+  assert.equal(g.coalesced()[0]?.mergesAbsorbed, 3);
+  assert.equal(g.asked.length, 1);
+  assert.equal(g.rows.filter(([step]) => step === "serve.handoff_requested").length, 1);
 });

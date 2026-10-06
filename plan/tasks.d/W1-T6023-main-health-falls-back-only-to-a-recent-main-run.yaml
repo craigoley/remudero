@@ -1,0 +1,42 @@
+- id: W1-T6023
+  title: "MAIN-HEALTH FALLS BACK ONLY TO A RECENT MAIN RUN — W1-T5490's fallback reads `actions/runs?branch=main&event=push&status=completed`, which GitHub answered on 2026-10-06 with runs from 2026-09-28; main read GREEN at 13:46Z on the evidence of 22397b6d (#7047, 2026-09-24) and RED at 13:56Z on ca9be1f7 (#9381, 2026-10-05), and 80 of 374 fallback verdicts since 10-04 (21%) rest on a commit more than 6 h old or outside the 7-day merge window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — which main run the main-health fallback may take a verdict from; every base-red decision reads it
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: red-main research (main.health.observed decided_by_sha audit)"
+  plan_refs: [W1-T5490, W1-T4351, W1-T5806]
+  files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/main-health-falls-back-only-to-a-recent-main-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06. `GET repos/craigoley/remudero/actions/runs?branch=main&event=push&status=completed&per_page=100`
+    (the `mainPushRunHistoryRestArgs` call) returned 100 runs created 2026-09-28..09-29; the same call
+    WITHOUT `status=completed` returned runs created 13:37Z that day (control). main.health.observed
+    rows whose reason starts "main's head has no completed required run" (374 rows, 2026-10-04T08:12Z
+    onward): 27 were decided by a merge commit merged more than 6 h before the row, and 53 by a sha that
+    is not a merge commit of any PR merged in the prior 7 days (49 green, 31 red in all). Two rows on
+    10-06: 13:46:20Z state green, decided_by_sha 22397b6d (#7047, merged 2026-09-24); 13:56:20Z state
+    red, decided_by_sha ca9be1f7 (#9381, merged 2026-10-05), on main head a6a28515 both times.
+    INTERMITTENT: the operator session's control at 2026-10-06 ~14:00Z got current runs from the same
+    status=completed call, so the defect is a sometimes-stale answer, which is why the window check, not
+    the dropped filter alone, is the fix.
+    `decideBaseRed` (src/lib/sweep.ts) and the main-health escalation read these rows, so a stale
+    fallback can release a base-red wait onto a still-red main or hold an own-red PR as base red.
+  design: |
+    (1) Read the push run history without the `status=completed` filter and keep completed runs
+    client-side. (2) `mainHealthFallbackRuns` accepts a run only when its head sha is one of main's
+    last N first-parent commits (N named with its derivation, read from the same compare the rung
+    already makes); an older or unrelated run is skipped, and when none qualifies the observation stays
+    `undetermined` with a reason naming the skipped sha, never a green or red verdict.
+  acceptance:
+    - claim: "a run history whose only completed required run is for a sha outside main's recent first-parent window leaves main undetermined with that sha named, a run in the window decides as today, and the history request carries no status filter"
+      proof: "unit test: test/main-health-falls-back-only-to-a-recent-main-run.test.ts"
+  falsifier: |
+    Accept the first completed run whatever its sha: the 22397b6d fixture decides main green and the
+    test fails.
