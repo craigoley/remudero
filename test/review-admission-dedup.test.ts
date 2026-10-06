@@ -168,7 +168,9 @@ test("W1-T2583: dedup filtering preserves both bounds and immutable oldest-first
 test("W1-T2792: after the first lanes-worth delivers, the next pass admits the next", async () => {
   const path = ledgerPath();
   const lanes = DEFAULT_SWEEP_POLICY.reviewLanes;
-  const prs = [1, 2, 3, 4].map((n) => reviewPr(n, `2026-08-2${n}T00:00:00Z`));
+  // One more PR than there are lanes, so the second pass always has someone to admit.
+  const prs = Array.from({ length: lanes + 1 }, (_, i) => i + 1)
+    .map((n) => reviewPr(n, `2026-08-${String(20 + n)}T00:00:00Z`));
   const expectedFirst = prs.slice(0, lanes).map((pr) => pr.prNumber);
   const expectedSecond = prs.slice(lanes).map((pr) => pr.prNumber);
   assert.ok(expectedSecond.length > 0, "the fixture must hold more PRs than one pass can admit, or this proves nothing");

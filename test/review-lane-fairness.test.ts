@@ -172,9 +172,10 @@ test("W1-T1218: the review budget and its floor are unchanged", () => {
   // one, which is why main went red; both are updated together here. Kept as a LITERAL on purpose:
   // reading the row here would assert a value against itself and guard nothing, so an unintended
   // budget change must still redden this.
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "the shipped budget is what policy.yaml commits");
-  assert.equal(validateReviewLanesRow({ value: 3, origin: "net-new", min: 1, max: 3 }), 3);
-  assert.throws(() => validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 3 }), /reviewLanes/i,
+  // 2026-10-06: 3 -> 4, max 3 -> 5, by operator ruling ("width 4, max 5").
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 4, "the shipped budget is what policy.yaml commits");
+  assert.equal(validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 5 }), 4);
+  assert.throws(() => validateReviewLanesRow({ value: 6, origin: "net-new", min: 1, max: 5 }), /reviewLanes/i,
     "a value past the bound is still a PolicyError — the ceiling still refuses");
   assert.equal(orderPendingReviews.length, 1, "the ordering takes ONE argument — the jobs — and no policy");
   // The floor is `Math.max(1, policy.reviewLanes)`: a misconfigured 0 must still mean one lane,
