@@ -32,12 +32,14 @@ import {
   logArmAttribution,
   mergeDirectViaRest,
   readHeadShaRest as readArmHeadShaRest,
+  readArmTimeline,
   readMergeQueueMembership,
   realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
   type MergeQueueMembership,
+  type ArmTimeline,
   type ArmDeps,
   type ArmLane,
   type ArmOutcome,
@@ -1676,6 +1678,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "strikeLadder",
   "readMergeQueueMembership",
   "escalateRearmExhausted",
+  "readArmTimeline",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1728,6 +1731,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchPlanGateRound"
   | "readMergeQueueMembership"
   | "escalateRearmExhausted"
+  | "readArmTimeline"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2507,6 +2511,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // terminal for the deterministic retry lane, but never a source-code worker strike. The
     // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
     readMergeQueueMembership: (pr) => readMergeQueueMembership(pr.prUrl, readJsonImpl),
+    readArmTimeline: (pr) => readArmTimeline(pr.prUrl, readJsonImpl),
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
     escalateRearmExhausted: (pr, rearms, bound) => {
@@ -4081,6 +4086,39 @@ export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
 
 const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
   lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+
+/** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
+export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
+
+/** W1-T970's refusal, cleared for THIS head only by a capped override or an observed hand arm (W1-T219). */
+function riskRefusalStands(lines: ReadonlyArray<Record<string, unknown>>, riskRefused: Map<string, string | undefined>,
+  pr: OpenPrView): boolean {
+  return riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
+    !(pr.taskId !== undefined && cappedOverrideFromLedger(lines, pr.taskId, pr.headSha, pr.prUrl) !== undefined) &&
+    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0;
+}
+
+/** W1-T5911 — the first non-fleet arm or enqueue after this head's latest escalation, or why none counts. */
+async function handArmAfterEscalation(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView): Promise<{ by: string; reason: string } | { stands: string }> {
+  const stamps = rowsAtHead(lines, "risk_judge.escalated", pr).map((line) => String(line.ts));
+  if (!stamps.length || stamps.some((ts) => !Number.isFinite(Date.parse(ts)))) {
+    return { stands: "this head's risk_judge.escalated row carries no readable ts" };
+  }
+  const since = stamps.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+  const escalatedAt = Date.parse(since);
+  let timeline: ArmTimeline;
+  try {
+    timeline = await deps.readArmTimeline!(pr);
+  } catch (e) {
+    timeline = { unreadable: true, reason: String((e as Error)?.message ?? e) };
+  }
+  if ("unreadable" in timeline) return { stands: timeline.reason };
+  const hand = timeline.events.find((event) => !isFleetAppAuthor(event.actor) && Date.parse(event.at) > escalatedAt);
+  return hand
+    ? { by: hand.actor, reason: `${hand.kind} by ${hand.actor} at ${hand.at}, after the risk judge escalated this head at ${since}` }
+    : { stands: `no arm or enqueue by anyone but the fleet App after the escalation at ${since}` };
+}
 
 async function observedQueueMembership(deps: SweepDeps, pr: OpenPrView): Promise<MergeQueueMembership | undefined> {
   if (!deps.readMergeQueueMembership) return undefined;
@@ -7067,9 +7105,10 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
-/** The fleet App, as REST (`remudero-fleet[bot]`) and `gh` (`app/remudero-fleet`) spell it. */
+/** The fleet App, as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL timeline
+ *  actors (`remudero-fleet`, W1-T5911) spell it. */
 export function isFleetAppAuthor(login: string | undefined): boolean {
-  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet";
+  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet" || login === "remudero-fleet";
 }
 
 export interface PlanRepairFacts {
@@ -9867,6 +9906,8 @@ export interface SweepDeps {
   /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
   readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
   escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number) => string | null | Promise<string | null>;
+  /** W1-T5911 — read only for a risk-refused head with no override, on a pass that may arm. Omitted: refused. */
+  readArmTimeline?: (pr: OpenPrView) => ArmTimeline | Promise<ArmTimeline>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
@@ -12962,9 +13003,7 @@ export async function runSweep(
         // rule's `when` and never in the merge path — the SAME non-action shape every other dedup
         // has. It clears on a NEW head sha or an explicit operator override.
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
-        const refused =
-          prior.riskRefused.has(riskRefusedKey) &&
-          !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha, pr.prUrl) !== undefined);
+        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr);
         // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
         // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push while
         // held changes nothing. No dedup key is seeded, so the pass re-derives whole the moment an
@@ -12972,9 +13011,29 @@ export async function runSweep(
         const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
         if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
+        const mergeActionable = deps.actionable?.("mergeable") ?? true;
+        // W1-T5911: the operator's own arm or enqueue of the held head is its override; a hold outranks it.
+        let handArmStands: string | undefined;
+        if (refused && !armedByGitHub && deps.readArmTimeline && !deps.dryRun && mergeActionable) {
+          const seen = hold !== undefined ? { stands: "an operator merge hold stands over this PR" }
+            : await handArmAfterEscalation(deps, ledgerLines, pr);
+          if ("by" in seen) {
+            const issueUrl = prior.riskRefused.get(riskRefusedKey);
+            try {
+              appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RISK_OVERRIDE_OBSERVED_STEP,
+                pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, by: seen.by, reason: seen.reason,
+                ...(issueUrl ? { issue_url: issueUrl } : {}) });
+              refused = false;
+            } catch (e) {
+              // Refused still: a release the ledger cannot hold would not survive the next pass.
+              handArmStands = `override row not written: ${String((e as Error)?.message ?? e)}`;
+            }
+          } else {
+            handArmStands = seen.stands;
+          }
+        }
         // W1-T5909: a queued PR reads `auto_merge: null` too, so the queue is asked before the
         // memory is believed. The memory dedups only when that read is unwired or unreadable.
-        const mergeActionable = deps.actionable?.("mergeable") ?? true;
         queueMembership = !armedByGitHub && !refused && hold === undefined && mergeActionable
           ? await observedQueueMembership(deps, pr) : undefined;
         const queued = queueMembership === "queued";
@@ -13036,9 +13095,10 @@ export async function runSweep(
           // pointer exists one row away, and this only moves it to the row a reader reaches first.
           // Never widens the override — naming the escape is not taking it.
           const issueUrl = prior.riskRefused.get(riskRefusedKey);
-          dedupStandDownReason = issueUrl
+          dedupStandDownReason = (issueUrl
             ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
-            : "risk judge escalated this head, no operator override recorded";
+            : "risk judge escalated this head, no operator override recorded") +
+            (handArmStands === undefined ? "" : `; no hand arm taken: ${handArmStands}`);
         } else if (hold !== undefined) {
           dedupStandDownReason = "an operator merge hold stands over this PR — refusing to arm until it is released";
         }
@@ -13291,8 +13351,7 @@ export async function runSweep(
               }
               if (failedArm && facts) {
                 const freshLines = readLedger(deps.ledgerPath);
-                const refused = priorActionsFromLedger(freshLines).riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
-                  !(pr.taskId && cappedOverrideFromLedger(freshLines, pr.taskId, pr.headSha, pr.prUrl));
+                const refused = riskRefusalStands(freshLines, priorActionsFromLedger(freshLines).riskRefused, pr);
                 const stack = deps.stackPrerequisite?.(pr);
                 const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
                 if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||

@@ -108,6 +108,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "test.pass": A_LANE_RUN_ID,
   // Command lanes: review, dep-review, approve/inbox, alert-fix, onboarding, the CI mutation ratchet.
   "automerge.capped_override_granted": A_LANE_RUN_ID,
+  "automerge.risk_override_observed": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
   "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,
