@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { classifyUpdateBranchFailure } from "../src/lib/fix-rung-classify.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -23,7 +22,8 @@ import {
   type SweepDeps,
   type UpdateBranchOutcome,
 } from "../src/lib/sweep.js";
-import { updateBranchViaGh } from "../src/run-task.js";
+// run-task.ts re-exports the classifier from src/lib/fix-rung-classify.ts (W1-T2891).
+import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // The three 422 bodies GitHub returns for this endpoint, as `gh api` prints them on stderr.
