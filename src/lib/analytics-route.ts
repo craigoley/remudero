@@ -673,8 +673,7 @@ type CheckpointBreakdownState = {
 
 const CHECKPOINT_VERSION = 2 as const;
 const CHECKPOINT_FILENAME = ".analytics-console-v1.checkpoint.json";
-/** A budgeted scan that stopped on a rotation boundary leaves its fold here, never in the checkpoint
- *  file: the checkpoint's snapshot is what a booting serve publishes, and a partial fold is not one. */
+/** A budgeted scan's partial fold: never the checkpoint, whose snapshot a booting serve publishes. */
 const PROGRESS_FILENAME = ".analytics-console-v1.progress.json";
 const CHECKPOINT_HISTORY_BUCKETS = 30;
 const CHECKPOINT_DAY_MS = 24 * 60 * 60 * 1000;
@@ -773,11 +772,8 @@ export interface AnalyticsResumePoint {
 
 /** How a scan was served, for the refresh's ledger rows: the evidence a stuck refresh needs. */
 export interface AnalyticsScanReport {
-  /** `resume` from the checkpoint, `continue` a persisted progress, or `full` from the first rotation. */
   mode: "resume" | "continue" | "full";
-  /** Why the checkpoint could not be resumed; absent when it was. */
   reason?: string;
-  /** Why an offered progress could not be continued; absent when none was offered or it was used. */
   progressRefused?: string;
   rotationsRead: number;
   rotationsRemaining: number;
@@ -1656,7 +1652,6 @@ export interface AnalyticsDeriveOptions {
   operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
   judgeLabels?: JudgeLabelsInput;
   judgeLabelStore?: JudgeLabelStore;
-  /** A persisted partial fold to continue when the checkpoint itself cannot be resumed. */
   progress?: AnalyticsResumePoint;
   /** On the scan's clock: past this, stop at the next rotation boundary and return the progress. */
   yieldAtMs?: number;
@@ -1853,18 +1848,14 @@ function supersededArchiveNames(stateDir: string): Set<string> | undefined {
   try {
     return new Set(readdirSync(join(stateDir, LEDGER_COLD_STORE_DIRNAME)));
   } catch {
-    // No cold store means no compaction moved anything here: a vanished archive is then unexplained,
-    // and the caller refuses to resume rather than assume its rows were already folded.
+    // No cold store: a vanished archive is unexplained, so the caller refuses to resume.
     return undefined;
   }
 }
 
-/**
- * Why `previous` cannot be resumed against `current`, or undefined when it can. Compaction is the
- * case this names: it MOVES already-folded rotations into the cold store and writes their rows to an
- * archive named no later than its newest source, which `afterRotation` skips. A checkpoint that
- * refused that rescanned the whole corpus on every refresh and timed out each time (2026-10-06).
- */
+/** Why `previous` cannot resume against `current`. Compaction MOVES folded rotations to the cold store and
+ *  names its output no later than its newest source, so `afterRotation` skips it; refusing that rescanned
+ *  the whole corpus on every refresh, and each one timed out (2026-10-06). */
 function checkpointSourceResumeRefusal(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource, stateDir: string): string | undefined {
   const last = previous.lastArchive;
   const unread = (name: string): boolean => last === null || name > last;
@@ -2024,8 +2015,7 @@ function validCheckpoint(value: unknown): value is AnalyticsCheckpoint {
   return checkpoint.version === CHECKPOINT_VERSION && checkpoint.source !== undefined && checkpoint.state !== undefined && checkpoint.snapshot !== undefined && Array.isArray(checkpoint.tail);
 }
 
-/** The snapshot's non-enumerable fields (`abilityMap`, `judgeCalibration`, `workIntegrity`, …) by
- *  owner. JSON.stringify drops them, so a checkpoint carries them beside the snapshot explicitly. */
+/** Non-enumerable snapshot fields by owner: JSON.stringify drops them, so the checkpoint carries them. */
 type HiddenSnapshotFields = { top: Record<string, unknown>; routingTelemetry: Record<string, unknown> };
 
 function hiddenFields(owner: object | undefined): Record<string, unknown> {
@@ -2049,8 +2039,7 @@ function readJson(path: string): unknown {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    // A missing or malformed file is intentionally indistinguishable from no prior cache; the next
-    // refresh performs the full union and publishes fresh evidence when available.
+    // A missing or malformed file is no prior cache: the next refresh performs the full union.
     return undefined;
   }
 }
@@ -2122,7 +2111,6 @@ export interface AnalyticsSnapshotReadResult {
   scan?: AnalyticsScanReport;
 }
 
-/** A budgeted scan that stopped on a rotation boundary: no snapshot, only where to pick up. */
 export interface AnalyticsPartialReadResult {
   progress: AnalyticsResumePoint;
   scan: AnalyticsScanReport;
@@ -2135,16 +2123,12 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   priorCheckpoint?: AnalyticsCheckpoint,
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
-  // Unbudgeted, so the scan always runs to the end and returns a snapshot.
   return await scanAnalyticsLedger(stateDir, clock, signal, priorCheckpoint, { ...options, yieldAtMs: undefined }) as AnalyticsSnapshotReadResult;
 }
 
-/**
- * Fold the ledger union from the furthest point that can be resumed — a persisted progress, else the
- * checkpoint, else the first rotation. With `yieldAtMs` it stops on the first rotation boundary past
- * that time and returns the partial fold, so a corpus too large for one refresh is folded across
- * several instead of restarted by each (a cold scan of the host corpus outlives the 120 s bound).
- */
+/** Fold the union from a persisted progress, else the checkpoint, else the first rotation. Past `yieldAtMs`
+ *  it stops on a rotation boundary and returns the partial fold, so a corpus too large for one refresh
+ *  is folded across several instead of restarted by each. */
 export async function scanAnalyticsLedger(
   stateDir: string,
   clock: Clock,
@@ -2186,8 +2170,7 @@ export async function scanAnalyticsLedger(
     : resumePoint?.source.liveOffset ?? 0;
   const lastArchive = resumePoint?.source.lastArchive ?? null;
   const rotationsPending = (currentSource?.archives ?? []).filter((entry) => lastArchive === null || entry.name > lastArchive).length;
-  // Only the newest MAX_RETAINED_LINES_PER_STEP accepted rows per step can seed the next resume, so
-  // keep that window rather than a fingerprint per corpus row (4.0M rows held ~700 MB, measured).
+  // Only the newest window per step seeds a resume; a fingerprint per row held ~700 MB on 4.0M rows.
   const acceptedByStep = new Map<string, string[]>();
   let unreadArchives = resumePoint?.unreadRotations ?? 0;
   let unreadLive = 0;
@@ -2239,8 +2222,7 @@ export async function scanAnalyticsLedger(
   };
   const tail = appendCheckpointTail(resumePoint?.tail, accepted);
   if (stoppedAfter !== undefined && currentSource !== undefined) {
-    // Everything through `stoppedAfter` is folded and the live file is not: a later leg reads the
-    // rotations after it and the whole live file, exactly as a resume from a checkpoint taken then.
+    // Folded through `stoppedAfter`, live unread: the next leg resumes as from a checkpoint taken then.
     const through = stoppedAfter;
     const archives = currentSource.archives.filter((entry) => entry.name <= through);
     return {
@@ -2636,8 +2618,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         }
         if (controller === refreshController) controller = undefined;
         if (inFlight === operation) inFlight = undefined;
-        // A partial fold continues after a pause as long as its leg ran, so a long scan holds at most
-        // half the process instead of waiting out the 15-minute interval (or the serve) per leg.
+        // A partial fold continues after a pause as long as its leg, not the 15-minute interval.
         scheduleNext(continueAfterMs ?? refreshIntervalMs);
       });
     inFlight = operation;
