@@ -35050,8 +35050,9 @@ export function buildCiLearningCadenceRunner(deps: {
     (deps.recordAttempt ?? recordCiLearningAttempt)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
     let window: CiFailureCorpusInput;
+    const windowDays = deps.windowDays ?? ciLearningLookbackDays(deps.root, at);
     try {
-      window = await deps.loadWindow(deps.windowDays ?? ciLearningLookbackDays(deps.root, at));
+      window = await deps.loadWindow(windowDays);
       corpus = collectCiFailureCorpus(window);
     } catch (e) {
       // No successful fire was recorded. The attempt marker gives a bounded retry after a
@@ -35067,7 +35068,11 @@ export function buildCiLearningCadenceRunner(deps: {
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
     const lessonRecurrences =
       filedLessons.status === "measured"
-        ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING)
+        ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING, {
+            windowStart: fixedClock(at.getTime() - windowDays * 86_400_000).iso(), asOf: at.toISOString(),
+            complete: corpus.windowComplete !== false && corpus.unreadableShas.length === 0 && (corpus.unreadablePrs?.length ?? 0) === 0,
+            prsScanned: corpus.prsScanned,
+          })
         : { status: "unreadable" as const };
     // FILING IS BEST-EFFORT AND MUST NOT TAKE THE RUN DOWN, the same contract the CLI path holds:
     // drafts already exist, and losing the whole firing to a filer exception turns a partial success

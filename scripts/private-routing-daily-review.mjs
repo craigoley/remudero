@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-observation.ts";
+import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
 import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
@@ -113,6 +114,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
       ciLearning: lastCiLearning ? { at: lastCiLearning.ts, status: lastCiLearning.status ?? null,
         filed: validCount(lastCiLearning.filed), refused: validCount(lastCiLearning.refused),
         recurredLessons: validCount(lastCiLearning.lesson_recurrences?.recurrenceCount),
+        lessonExposure: readCiLessonExposure(lastCiLearning.lesson_recurrences?.exposure, asOf, quality.state === "observed"),
         laterExposure: "not-certified-by-this-daily-window" } : null,
       ciLearningFailures: learningRows.filter(row => row.step === "ci_learning_cadence.run_failed").length,
       gardenerCredits: learningRows.filter(row => String(row.step).endsWith(".gardener_judged") && row.verdict === "credit").length,
