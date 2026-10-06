@@ -976,6 +976,107 @@ export function hydrateScannerBlockerObservations(
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T5633 — A HEAD WHOSE `CodeQL` RESULTS CHECK FAILED. ci-gate never waits on that check, so a new
+ * high alert used to merge (#9034, alert #311). The sweep reads its open alerts ONCE per pass for such
+ * a head, and the machine judge decides each. This module only OBSERVES: a failed read is `undefined`
+ * (nothing is judged on a guess), and an alert not analysed at THIS head never counts. */
+export const CODEQL_CHECK_NAME = "CodeQL";
+export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
+export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
+
+export interface CodeqlHeadAlert {
+  alertNumber: number;
+  ruleId: string;
+  severity: string;
+  path: string;
+  line: number;
+  message: string; // bounded to SCANNER_DIAGNOSTIC_MAX_CHARS; untrusted scanner text
+}
+
+/** `alerts` is never empty: a head whose failed CodeQL check has no readable high alert is `undefined`. */
+export interface CodeqlHeadObservation {
+  headSha: string;
+  alerts: CodeqlHeadAlert[];
+}
+
+/** True when the LATEST attempt of the `CodeQL` check concluded failure. Deduped by the latest
+ *  `startedAt` per name first: a listing keeps superseded attempts, so a re-run that went green would
+ *  otherwise still read red. An absent check (paths-ignored) is not a failed one. */
+export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined): boolean {
+  let latest: RestRollupEntry | undefined;
+  for (const entry of rollup ?? []) {
+    if ((entry.name ?? entry.context) !== CODEQL_CHECK_NAME) continue;
+    if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
+  }
+  return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
+}
+
+export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/head&state=open&per_page=${SCANNER_PAGE_SIZE}`];
+}
+
+interface RestHeadAlert extends RestScannerAlert {
+  rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
+}
+
+/** The open high/error CodeQL alerts analysed at exactly `headSha`; `undefined` for a truncated or
+ *  malformed listing, and for a listing holding none. */
+export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
+  if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
+  const found: CodeqlHeadAlert[] = [];
+  for (const raw of alerts as RestHeadAlert[]) {
+    const instance = raw.most_recent_instance ?? undefined;
+    const location = instance?.location ?? undefined;
+    const severity = [raw.rule?.security_severity_level, raw.rule?.severity].find((v) =>
+      typeof v === "string" && CODEQL_HIGH_SEVERITIES.includes(v));
+    if (
+      (raw.tool ? raw.tool.name : undefined) !== "CodeQL" ||
+      typeof severity !== "string" ||
+      typeof raw.number !== "number" ||
+      typeof raw.rule?.id !== "string" ||
+      instance === undefined ||
+      instance.commit_sha !== headSha ||
+      typeof location?.path !== "string" ||
+      typeof location.start_line !== "number"
+    ) continue;
+    const text = instance.message ? instance.message.text : undefined;
+    found.push({
+      alertNumber: raw.number,
+      ruleId: raw.rule.id,
+      severity,
+      path: location.path,
+      line: location.start_line,
+      message: (typeof text === "string" ? text : "").slice(0, SCANNER_DIAGNOSTIC_MAX_CHARS),
+    });
+  }
+  return found.length === 0 ? undefined : { headSha, alerts: found };
+}
+
+/** One bounded read per failing-CodeQL candidate; a failed read is absent from the map, so that head is
+ *  untouched this pass rather than judged on nothing. */
+export function hydrateCodeqlHeadAlerts(
+  owner: string,
+  repo: string,
+  candidates: readonly { number: number; headSha: string }[],
+  fetch: GhApiFetcher,
+  cap: number = CODEQL_HEAD_ALERT_HYDRATION_CAP,
+): Map<number, CodeqlHeadObservation> {
+  const out = new Map<number, CodeqlHeadObservation>();
+  for (const candidate of candidates.slice(0, cap)) {
+    let listing: unknown;
+    try {
+      listing = fetch(codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
+    } catch (error) {
+      void error; // a failed read leaves the head unobserved, and an unobserved head is untouched
+      continue;
+    }
+    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);
+    if (observed !== undefined) out.set(candidate.number, observed);
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
  * Workflow run observations (W1-T2340) — the producer for `OpenPrView.workflowRuns`.
  *
  * `stalledRunReason` (lib/sweep.ts) joins a run's own conclusion against its jobs' statuses: a job left

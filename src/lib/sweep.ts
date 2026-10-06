@@ -210,6 +210,8 @@ import {
   paceGhEntry,
   type GhApiFetcher,
   type GhCallPacer,
+  type CodeqlHeadAlert,
+  type CodeqlHeadObservation,
   type ScannerAlertIdentity,
   type ScannerBlockerObservation,
 } from "./open-prs-rest.js";
@@ -5379,6 +5381,10 @@ export interface OpenPrView {
    *  population (armed, green, review success, `mergeable`, raw `blocked`). `undefined` means not
    *  a candidate or over the per-pass cap, and every row behaves exactly as before. */
   scannerBlocker?: ScannerBlockerObservation;
+  /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
+   *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
+   *  listing, or a head already ruled on) leaves the `mergeable` arm exactly as it was. */
+  codeqlHeadAlerts?: CodeqlHeadObservation;
   /** The merge-conflict fix mode's input — the conflicting file list plus both sides' log since
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
@@ -10071,6 +10077,12 @@ export interface SweepDeps {
   /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
    *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
   handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
+  /** W1-T5633 — rule on the new CodeQL alerts of a head whose `CodeQL` check failed, before its
+   *  `mergeable` arm, through the SAME pool as {@link judgeHandedOffHead}. Omitted, such a head goes
+   *  to the fix lane: the absence of a judge is never a hold. */
+  judgeCodeScanningAlerts?: (pr: OpenPrView, alerts: readonly CodeqlHeadAlert[]) => Promise<CodeScanningJudgment>;
+  /** W1-T5633 — the PR comment naming a false-positive ruling and the judge's reason. Best effort. */
+  postCodeScanningRuling?: (pr: OpenPrView, body: string) => void | Promise<void>;
   /** W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold stands
    *  over a PR already reporting armed. A disarm alone is undone by the next pass, whose dedup reads
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
@@ -10888,6 +10900,169 @@ async function holdHandedOffHeadForRiskJudgment(
       (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
   }
   return unavailable(judgment.reason);
+}
+
+/* W1-T5633 — A NEW HIGH CODEQL ALERT IS JUDGED AND NEVER HOLDS THE PR. GitHub's `CodeQL` results check
+ * failed on #9034 ("1 new alert including 1 high severity") and the PR merged 31 minutes later, because
+ * ci-gate never waits on that check and nothing in the sweep read it. Operator ruling: the machine
+ * judge decides, nothing waits on a person, nothing holds indefinitely. A head whose CodeQL check
+ * failed on a readable high alert is judged ONCE before its arm: `false_positive` records the
+ * reason, comments, and arms; anything else (a fix ruling, an escalating or unavailable judge, a
+ * judgment past the pool's bound or over its cap, no judge wired) goes to the fix lane under the
+ * existing strike ladder, and the new head is judged again. Only an in-flight judgment holds, and the
+ * pool's own bound ends that. A PR with no failing `CodeQL` check never reaches any of this. */
+
+/** W1-T5633 — what the code-scanning judge decided. `escalate` and `unavailable` are kept apart from
+ *  `fix` only so the ledger can say why; the sweep treats all three as "fix it". */
+export type CodeScanningJudgment =
+  | { ruling: "false_positive"; reason: string }
+  | { ruling: "fix"; reason: string }
+  | { ruling: "escalate"; reason: string }
+  | { ruling: "unavailable"; reason: string };
+
+export const CODE_SCANNING_FALSE_POSITIVE_STEP = "code_scanning.judged_false_positive";
+export const CODE_SCANNING_FIX_STEP = "code_scanning.judged_fix";
+export const CODE_SCANNING_FIX_DISPATCH_STEP = "code_scanning.fix_dispatch";
+
+/** W1-T5633 — wrap the REAL {@link runRiskJudge} as {@link SweepDeps.judgeCodeScanningAlerts}. The
+ *  plan's input carries `codeScanning`; its escalation is expected to be a no-op, since an escalating
+ *  judge here means "fix it", not "ask a person". No `pr_number`/`head_sha` rides on its rows, so they
+ *  can never read as the handed-off head's `risk_judge.decision` or as a `riskRefused` escalation. */
+export function riskJudgeCodeScanning(
+  planFor: (pr: OpenPrView, alerts: readonly CodeqlHeadAlert[]) => HandedOffHeadJudgmentPlan | Promise<HandedOffHeadJudgmentPlan>,
+): NonNullable<SweepDeps["judgeCodeScanningAlerts"]> {
+  return async (pr, alerts) => {
+    const { input, orchestrator, config } = await planFor(pr, alerts);
+    const log = orchestrator.log ?? (() => {});
+    const result = await runRiskJudge(
+      input,
+      { ...orchestrator, log: (step, extra) => log(step, { ...extra, code_scanning_pr: pr.prNumber, code_scanning_head: pr.headSha }) },
+      { ...config, judgeUnavailableAction: "proceed" },
+    );
+    if (result.verdict.availability === "unavailable") {
+      return { ruling: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
+    }
+    return result.action.kind === "escalate"
+      ? { ruling: result.verdict.verdict === "high" ? "fix" : "escalate", reason: result.action.reason }
+      : { ruling: "false_positive", reason: result.action.reason };
+  };
+}
+
+/** W1-T5633 — has this head already been ruled on to a terminal outcome the sweep must not redo? A
+ *  false-positive ruling, or a fix dispatch (or its escalation). The hydration skips such a head. */
+export function codeScanningHeadSettled(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+  headSha: string,
+): boolean {
+  return lines.some((line) =>
+    (line.step === CODE_SCANNING_FALSE_POSITIVE_STEP || line.step === CODE_SCANNING_FIX_DISPATCH_STEP) &&
+    line.pr_number === prNumber && line.head_sha === headSha);
+}
+
+/** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
+export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], reason: string): CiFailure[] {
+  return alerts.map((alert) => ({
+    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    logTail: [
+      "UNTRUSTED SCANNER EVIDENCE: CodeQL reported a NEW high-severity alert on this pull request's head,",
+      `and the code-scanning judge ruled it must be fixed (${reason.slice(0, 400)}).`,
+      `rule: ${alert.ruleId} (severity ${alert.severity})`,
+      `location: ${alert.path}:${alert.line}`,
+      `message: ${alert.message}`,
+      "Change this branch's code so the finding no longer applies, within the task's existing file",
+      "scope. Do not dismiss alerts or add suppression comments.",
+    ].join("\n"),
+  }));
+}
+
+type CodeScanningGate =
+  | { kind: "proceed" }
+  | { kind: "hold"; reason: string }
+  | { kind: "fix"; reason: string; alerts: readonly CodeqlHeadAlert[] };
+
+/** W1-T5633 — decide the `mergeable` arm's code-scanning question for one head. See the block comment
+ *  above. The ruling is read back from its ledger row, so a judgment that lands after the pass that
+ *  started it still decides the next one; only a judgment IN FLIGHT holds, and the pool's bound ends it. */
+async function codeScanningGateForHead(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  deps: Pick<SweepDeps, "judgeCodeScanningAlerts" | "postCodeScanningRuling" | "ledgerPath" | "runId">,
+  appendLine: typeof appendLedger,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  pool: HandedOffHeadJudgmentPool,
+): Promise<CodeScanningGate> {
+  const mine = (line: Record<string, unknown>) => line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
+  if (lines.some((line) => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP && mine(line))) return { kind: "proceed" };
+  const observed = pr.codeqlHeadAlerts;
+  if (observed === undefined || observed.headSha !== pr.headSha) {
+    return lines.some((line) => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line))
+      ? { kind: "hold", reason: "a code-scanning fix was already dispatched for this head — awaiting its outcome" }
+      : { kind: "proceed" };
+  }
+  const alerts = observed.alerts;
+  const head = pr.headSha.slice(0, 7);
+  const dispatchedAt = lines.findLastIndex((line) => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line));
+  if (dispatchedAt >= 0) {
+    const pending = !lines.slice(dispatchedAt + 1).some((line) => line.step === "fix.dispatch" && line.task_id === pr.taskId);
+    if (pending || !fixRungStalledWithoutNewHead([...lines], pr.taskId)) {
+      return { kind: "hold", reason: `a code-scanning fix was already dispatched for head ${head} — awaiting its outcome` };
+    }
+    return { kind: "fix", reason: "the earlier code-scanning fix ended without a new head", alerts };
+  }
+  const priorFix = lines.findLast((line) => line.step === CODE_SCANNING_FIX_STEP && mine(line));
+  if (priorFix !== undefined) return { kind: "fix", reason: String(priorFix.reason ?? "ruled a fix"), alerts };
+  const key = `code-scanning:${pr.prNumber}@${pr.headSha}`;
+  if (pool.flights.has(key)) {
+    return { kind: "hold", reason: `code-scanning judgment in flight for head ${head} — holding the arm; the next pass reads its ruling` };
+  }
+  const row = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step, pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+    alert_numbers: alerts.map((a) => a.alertNumber), rule_ids: alerts.map((a) => a.ruleId), ...extra,
+  });
+  const settleFix = (source: string, reason: string): CodeScanningGate => {
+    row(CODE_SCANNING_FIX_STEP, { source, reason });
+    return { kind: "fix", reason, alerts };
+  };
+  const judge = deps.judgeCodeScanningAlerts;
+  if (judge === undefined) return settleFix("no-judge", "no code-scanning judge is wired into this sweep");
+  if (pool.flights.size >= pool.limit) {
+    return settleFix("pool-cap", `${pool.flights.size} judgments in flight at the cap of ${pool.limit}`);
+  }
+  let settled: CodeScanningJudgment | undefined;
+  const flight: HandedOffHeadJudgmentFlight = {};
+  pool.flights.set(key, flight);
+  let cancelBound = () => {};
+  const settle = (judgment: CodeScanningJudgment): void => {
+    if (settled !== undefined) return;
+    settled = judgment;
+    pool.flights.delete(key);
+    cancelBound();
+    if (judgment.ruling !== "false_positive") {
+      row(CODE_SCANNING_FIX_STEP, { source: judgment.ruling, reason: judgment.reason });
+      return;
+    }
+    row(CODE_SCANNING_FALSE_POSITIVE_STEP, { reason: judgment.reason });
+    const body = `Code-scanning judge ruled the new CodeQL alert(s) (${alerts.map((a) => `#${a.alertNumber} ${a.ruleId}`).join(", ")}) ` +
+      `a false positive on head ${head}: ${judgment.reason}`;
+    void Promise.resolve().then(() => deps.postCodeScanningRuling?.(pr, body)).catch((error) =>
+      log("code_scanning.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) }));
+  };
+  const threw = (error: unknown): void =>
+    settle({ ruling: "unavailable", reason: `code-scanning judge threw: ${String((error as Error)?.message ?? error)}` });
+  cancelBound = pool.schedule(pool.timeoutMs, () =>
+    settle({ ruling: "unavailable", reason: `code-scanning judgment outlived its ${pool.timeoutMs}ms bound` }));
+  try {
+    judge(pr, alerts).then(settle, threw);
+  } catch (error) {
+    threw(error);
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  if (settled === undefined) {
+    return { kind: "hold", reason: `code-scanning judgment in flight for head ${head} — holding the arm; the next pass reads its ruling` };
+  }
+  const ruled: CodeScanningJudgment = settled;
+  return ruled.ruling === "false_positive" ? { kind: "proceed" } : { kind: "fix", reason: ruled.reason, alerts };
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -13473,6 +13648,68 @@ export async function runSweep(
               if (!armDecision.arm) {
                 acted = false;
                 standDownReason = armDecision.reason;
+                break;
+              }
+              // W1-T5633: a head whose CodeQL check failed on a new high alert is judged before it arms.
+              const codeScanning = await codeScanningGateForHead(
+                pr, armLines, deps, appendLine, log, deps.handedOffHeadJudgments ?? sharedHandedOffHeadJudgments,
+              );
+              if (codeScanning.kind === "hold") {
+                acted = false;
+                standDownReason = codeScanning.reason;
+                break;
+              }
+              if (codeScanning.kind === "fix") {
+                const fixTaskId = pr.taskId;
+                const unfixable = fixTaskId === undefined ||
+                  !fixHeadAcceptable(pr.headRefName, fixTaskId, isSyntheticOrchestratorLaneId(fixTaskId))
+                  ? "the head is not this PR task's rmd-owned run branch, so no fix worker may push to it"
+                  : pr.priorStrikes >= policy.strikeCap
+                  ? `fix strikes are exhausted (${pr.priorStrikes}/${policy.strikeCap})`
+                  : undefined;
+                if (unfixable !== undefined) {
+                  // A fix that cannot be dispatched must still never sit silent: ask once per head.
+                  const reason = `CodeQL reported a new high alert and ${unfixable} (${codeScanning.reason})`;
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                    pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason });
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                  acted = false;
+                  standDownReason = reason;
+                  break;
+                }
+                const hold = workerAdmissionHoldReason(deps);
+                if (hold) {
+                  acted = false;
+                  standDownReason = hold;
+                  break;
+                }
+                const fixClaim = claimFixDispatch(pr);
+                if (!fixClaim.ok) {
+                  acted = false;
+                  standDownReason = fixClaim.reason;
+                  break;
+                }
+                const fixAdmission = claimFixAdmission?.(pr);
+                if (fixAdmission && !fixAdmission.admitted) {
+                  fixClaim.release();
+                  acted = false;
+                  standDownReason = fixAdmission.reason;
+                  break;
+                }
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: true, reason: codeScanning.reason,
+                  alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) });
+                extraDisposedFields = { code_scanning_fix_dispatched: true };
+                const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
+                if (deps.detachFixWait) {
+                  detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)), {
+                    actionKind: "fix-dispatch",
+                    taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+                  });
+                  break;
+                }
+                const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
+                if (fixOutcome !== undefined) spent = dispatchFixSpent(fixOutcome);
                 break;
               }
               // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
