@@ -202,7 +202,7 @@ test("one caller-owned repair receipt records each fallback selection and does n
   const lines: Row[] = [];
   const raw = async (args: SpawnWorkerArgs) => {
     args.onSelectionAssignment?.(assignment("first"));
-    args.onModelFallbackAttempt?.({ selectionAssignmentId: "first", model: "first-model", reason: "api-error",
+    args.onModelFallbackAttempt?.({ selectionAssignmentId: "first", model: "first-model", reason: "unsupported-response-format",
       result: worker({ selectionAssignmentId: "first", isError: true }) });
     args.onSelectionAssignment?.(assignment("second"));
     return worker({ selectionAssignmentId: "second" });
