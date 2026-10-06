@@ -706,6 +706,32 @@ function* mergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
   }
 }
 
+/** W1-T5909 — is one PR IN the merge queue now? Three-valued: a failed read is never "not queued". */
+export type MergeQueueMembership = "queued" | "not-queued" | { unreadable: true; reason: string };
+
+const PR_IN_MERGE_QUEUE_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}";
+
+/** W1-T5909 — a queued PR reads `auto_merge: null` exactly like a disarmed one, so only this read
+ *  tells them apart. Never cached: membership changes minute to minute, unlike the queue setting. */
+export async function readMergeQueueMembership(
+  prUrl: string,
+  read: (args: string[]) => unknown,
+): Promise<MergeQueueMembership> {
+  const target = parsePrUrl(prUrl);
+  if (!target) return { unreadable: true, reason: `cannot resolve owner/repo/number from ${prUrl}` };
+  try {
+    const answer = (await read(["api", "graphql", "-f", `query=${PR_IN_MERGE_QUEUE_QUERY}`,
+      "-f", `owner=${target.owner}`, "-f", `name=${target.repo}`, "-F", `number=${target.number}`])) as
+      { data?: { repository?: { pullRequest?: { isInMergeQueue?: unknown } | null } } } | undefined;
+    const queued = answer?.data?.repository?.pullRequest?.isInMergeQueue;
+    if (typeof queued !== "boolean") return { unreadable: true, reason: "the GraphQL answer carried no isInMergeQueue boolean" };
+    return queued ? "queued" : "not-queued";
+  } catch (e) {
+    return { unreadable: true, reason: String((e as Error)?.message ?? e) };
+  }
+}
+
 /** W1-T4405 — GitHub's refusal when the PR is ALREADY in the queue: it is armed, not stuck. */
 export function armFailureIsAlreadyQueued(stderrText: string): boolean {
   return /already (?:queued|in (?:the )?merge queue)|already enqueued/i.test(stderrText);
