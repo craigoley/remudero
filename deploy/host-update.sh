@@ -986,7 +986,9 @@ STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   STATE_SNAPSHOT_IMAGE="${RMD_STATE_SNAPSHOT_IMAGE:-${REF}}"
-  STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-7}"
+  # Operator ruling 2026-10-06: keep the newest 2 nightly snapshots (was 7). They stay on the
+  # durable state disk (<root>/state-backups), never /mnt/scratch, which deallocation wipes.
+  STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-2}"
   case "${STATE_BACKUP_KEEP}" in
     ''|*[!0-9]*|0) echo "host-update: REFUSING — RMD_STATE_BACKUP_KEEP must be a positive integer, got '${STATE_BACKUP_KEEP}'." >&2; exit 2 ;;
   esac
