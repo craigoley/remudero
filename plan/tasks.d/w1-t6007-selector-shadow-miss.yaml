@@ -1,0 +1,16 @@
+- id: W1-T6007
+  title: "REPAIR THE SELECTOR EDGE INTO test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37458420445 for PR #9551 at 7e17b4ebba39a8164e5b9f83bcf357b8ccf48411: src/lib/ledger-projector.ts, src/lib/panel-graph.ts, src/lib/workstreams-view.ts, test/workstreams-view.test.ts -> test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts when this edge is exercised"
+      proof: "grep: test/the-knowledge-gardener-pins-its-own-retirement-golden\\.test\\.ts in src/lib/affected-suites.ts"

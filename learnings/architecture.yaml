@@ -172,7 +172,8 @@
   cited: "2026-08-23"
 - id: step-names-come-from-source
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire step-names-come-from-source
+  lifecycle: superseded
   files: [ src/lib/ledger.ts, src/lib/ledger-union.ts, src/run-task.ts ]
   fact: >-
     A guessed ledger step name is indistinguishable from an absent event.

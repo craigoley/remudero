@@ -1,0 +1,38 @@
+- id: W1-T5995
+  title: "A FLOW-REMEDY PROPOSAL PASSES MACHINE-FILING ADMISSION, AND THE GARDENER NEVER OPENS ONE THAT CANNOT — the flow-remedy gardener (W1-T5538) files verify:human machine shards with origin flow-blocker: and a new test path, which machineFilingAdmissionViolations exempts only for ci-friction:, ci-learning: and selector-shadow: origins; its own pre-file check (ciFrictionRecordVerdict) lints WITHOUT the admission context CI uses, so #9505 opened red at 07:29Z 2026-10-06 and sat red for 4 hours"
+  repo: remudero
+  depends_on: [W1-T5538]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — admission of one machine filer's proposals, checked where it files and where CI lints
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: #9505 red since 07:29Z (operator: fix 9505)"
+  plan_refs: [W1-T5538, W1-T3843, W1-T5348, W1-T4435]
+  files: [src/lib/plan.ts, src/lib/flow-remedy-gardener.ts, test/a-flow-remedy-proposal-passes-machine-filing-admission.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: #9505 (chore(plan): draft a flow remedy for own-red-required-checks-red, files
+    plan/tasks.d/W1-T5984-flow-own-red-required-checks-red.yaml) has lint-plan, ci, ci-gate and remudero-review
+    red since 07:29Z. `rmd lint-plan --base origin/main` on its head: [machine-filing-admission] "W1-T5984 is
+    verify:human — not auto-runnable by the proto-runner; ... declares file path(s) that exist in neither the
+    checkout nor the base tree: test/flow-own-red-required-checks-red.test.ts". machineFilingAdmissionViolations
+    (src/lib/plan.ts) admits a verify:human machine shard only via isParkedMachineProposal, whose remedy arm
+    (isCiFrictionRemedyProposal) requires origin ci-friction:, and allows a not-yet-existing test path only for
+    that same predicate. The flow-remedy gardener (src/lib/flow-remedy-gardener.ts, apply) checks its draft with
+    ciFrictionRecordVerdict, which calls lintTask with no machineFilingAdmission context, so the refusal is
+    first seen in CI and every flow-remedy filing is born red. gate-gardener.ts already runs
+    machineFilingAdmissionViolations before filing (the pattern to copy).
+  design: |
+    (1) Treat a flow-blocker: origin with the ci-friction remedy shape (src/scripts owner file(s) plus new test
+    files only) as a parked machine remedy proposal in src/lib/plan.ts. (2) In the flow gardener's apply, run
+    machineFilingAdmissionViolations on the drafted shard (as gate-gardener does) and throw before writing
+    when it refuses, so a refused draft is a failed garden pass, never a red PR.
+  acceptance:
+    - claim: "a flow-blocker remedy shard of the gardener's shape is admitted by the same machine-filing admission CI runs, and the gardener refuses to file a draft that admission refuses"
+      proof: "unit test: test/a-flow-remedy-proposal-passes-machine-filing-admission.test.ts"
+  falsifier: |
+    Leave the remedy arm ci-friction-only: the #9505 shard is refused by admission and the test fails.

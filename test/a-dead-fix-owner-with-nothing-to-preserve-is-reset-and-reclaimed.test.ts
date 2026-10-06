@@ -353,6 +353,7 @@ test("W1-T5918: a dead owner dirty only through an interrupted merge is recorded
   try {
     interruptMerge(f);
     const localSha = sha(f.ownerPath, "HEAD");
+    const ownerRealpath = realpathOf(f.ownerPath);
     const order: string[] = [];
     const { logs, threw } = await drive(f, realRecovery(f, order));
     assert.equal(threw, undefined);
@@ -372,7 +373,7 @@ test("W1-T5918: a dead owner dirty only through an interrupted merge is recorded
         pr_number: 9362,
         task_id: TASK,
         branch: f.branch,
-        worktree_path: realpathOf(f.ownerPath),
+        worktree_path: ownerRealpath,
         local_sha_prefix: localSha.slice(0, 12),
         marker_kind: "MERGE_HEAD",
         marker_sha: sha(f.repoDir, "other"),
