@@ -178,7 +178,8 @@ export function readBootId(path: string = BOOT_ID_PATH): string | undefined {
 function parseTestSlotHolder(raw: string): TestSlotHolder | null {
   try {
     const h = JSON.parse(raw);
-    if (!Number.isSafeInteger(h?.pid) || typeof h.host !== "string" || typeof h.startedAt !== "string" ||
+    if (typeof h !== "object" || h === null) return null;
+    if (!Number.isSafeInteger(h.pid) || typeof h.host !== "string" || typeof h.startedAt !== "string" ||
         typeof h.heartbeatAt !== "string" || !Number.isFinite(Date.parse(h.heartbeatAt))) return null;
     return h as TestSlotHolder;
   } catch {
@@ -259,6 +260,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
     // Every container user and the host operator reclaim each other's records: umask must not narrow it.
     if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
   } catch (error) {
+    // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
     const concurrency = testRunConcurrency(load(), slots);
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
@@ -271,6 +273,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
   try {
     return waitForSlot();
   } catch (error) {
+    // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
     const concurrency = testRunConcurrency(load(), slots);
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
