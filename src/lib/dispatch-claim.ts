@@ -339,7 +339,7 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
   };
 }
 
-type GitAnswer = { status: number; stdout: string; stderr: string };
+export type GitAnswer = { status: number; stdout: string; stderr: string };
 
 function claimAnchorMessage(): string {
   return `rmd-dispatch claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
@@ -362,7 +362,7 @@ function claimFetchArgs(taskId: string): string[] {
   return ["fetch", "--quiet", "origin", `${dispatchClaimRef(taskId)}:${dispatchClaimRef(taskId)}`];
 }
 
-function holderFromLsRemote(res: GitAnswer): string | undefined {
+export function holderFromLsRemote(res: GitAnswer): string | undefined {
   if (res.status !== 0) return undefined;
   const sha = res.stdout.trim().split(/\s+/)[0];
   return sha ? sha : undefined;
@@ -382,7 +382,7 @@ function messageFromCatFile(res: GitAnswer): string | undefined {
   return blank === -1 ? undefined : res.stdout.slice(blank + 2).trim();
 }
 
-type Awaitable<T> = T | Promise<T>;
+export type Awaitable<T> = T | Promise<T>;
 
 /** {@link DispatchClaimReserver}, awaitable (its sync git held the daemon loop up to 106 s); a sync one fits. */
 export interface DispatchClaimReserverAsync {

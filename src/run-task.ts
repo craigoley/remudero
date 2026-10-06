@@ -1453,7 +1453,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -25948,6 +25948,16 @@ export function triageClaimReserverFor(worktreePath: string): TriageClaimReserve
 }
 
 /**
+ * {@link triageClaimReserverFor}, AWAITED — what the triage lane and the auto-triage claim sweep take
+ * their claim through. Both run inside the daemon process, so the sync reserver's `spawnSync` git held
+ * the whole loop (2026-10-06: ~543 s per 17 h of loop_lag). Same binding, same argv; every call bounded
+ * by `DISPATCH_CLAIM_GIT_TIMEOUT_MS`, a timeout reading `unreachable` with the bound in its refusal.
+ */
+export function triageClaimReserverAsyncFor(repoDir: string): TriageClaimReserverAsync {
+  return gitTriageClaimReserverAsync({ run: gitClaimRunnerAsync(repoDir) });
+}
+
+/**
  * The real cross-host DISPATCH claim reserver (W1-T1268), bound to ONE task's clone dir.
  *
  * `repoDir`, NOT `repoRoot`: the claim must be taken on the SAME `origin` this run would push
@@ -29457,7 +29467,7 @@ export function ratifyCommand(rest: string[], deps: { now?: () => Date; ratified
  * change exists to remove.
  */
 export function buildAutoTriageDaemonHooks(deps: {
-  check?: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision;
+  check?: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision | Promise<AutoTriageDecision>;
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
@@ -29469,7 +29479,7 @@ export function buildAutoTriageDaemonHooks(deps: {
    *  `plan/ratifications.yaml` governs, exactly as before. */
   ratifications?: Ratifications;
 } = {}): {
-  checkAutoTriage: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision;
+  checkAutoTriage: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision | Promise<AutoTriageDecision>;
   runAutoTriage: (feedbackId: string) => Promise<void>;
 } {
   const check =
@@ -29508,7 +29518,7 @@ export function buildAutoTriageDaemonHooks(deps: {
  * "the shipped default is false". It passed by coincidence of that value until the flag was genuinely
  * flipped (#1093). Production still passes nothing and reads the checked-in file exactly as before.
  */
-export function autoTriageCheck(
+export async function autoTriageCheck(
   opts: {
     config?: Config;
     now?: Date;
@@ -29522,7 +29532,7 @@ export function autoTriageCheck(
     laneBudget?: number;
     /** W1-T4769: injected claim reserver for the once-per-pass claim sweep. Production builds the
      *  real one over the SAME clone the triage lane claims on. */
-    claimReserver?: TriageClaimReserver;
+    claimReserver?: TriageClaimReserverAsync;
     /** W1-T4769: injected ledger-union read for the liveness verdict; `undefined` = unreadable. */
     readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
     /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
@@ -29531,7 +29541,7 @@ export function autoTriageCheck(
     /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
     readRefusalRows?: () => Array<Record<string, unknown>> | undefined;
   } = {},
-): AutoTriageDecision {
+): Promise<AutoTriageDecision> {
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
   // W1-T2694 (design (ii)): consulted AFTER the `enabled` read above (it lives inside
@@ -29590,7 +29600,7 @@ export function autoTriageCheck(
     return { fire: false, reason: `every one of the ${inputs.candidates.length} candidate(s) at status: new has a refused triage commit — cleared by a ${TRIAGE_REFUSAL_CLEARED_STEP} row` };
   }
   const passInputs = { ...inputs, candidates };
-  const sweep = triageClaimSweepForPass(config, now, candidates, opts);
+  const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
   return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
 }
 
@@ -29599,16 +29609,16 @@ export function autoTriageCheck(
  * liveness arm. Returns the ids still held, or `undefined` when the namespace could not be read
  * (the caller then keeps today's behaviour: oldest candidate, the lane's own claim decides).
  */
-function triageClaimSweepForPass(
+async function triageClaimSweepForPass(
   config: Config,
   now: Date,
   candidates: readonly string[],
   opts: {
-    claimReserver?: TriageClaimReserver;
+    claimReserver?: TriageClaimReserverAsync;
     readClaimLivenessRows?: (sinceIso: string) => Array<Record<string, unknown>> | undefined;
     resolveClaimRepo?: () => { repo: string };
   },
-): readonly string[] | undefined {
+): Promise<readonly string[] | undefined> {
   const ledgerPath = ledgerPathFor(config);
   const log = (step: string, extra: Record<string, unknown> = {}): void => {
     try {
@@ -29630,7 +29640,7 @@ function triageClaimSweepForPass(
       return undefined;
     }
     if (!existsSync(repoDir)) return undefined;
-    reserver = triageClaimReserverFor(repoDir);
+    reserver = triageClaimReserverAsyncFor(repoDir);
   }
   const readRows =
     opts.readClaimLivenessRows ??
@@ -29638,7 +29648,7 @@ function triageClaimSweepForPass(
       const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { since: sinceIso, requireArchives: true, refuseIncomplete: true });
       return read.ok ? read.rows : undefined;
     });
-  const result = sweepTriageClaims(candidates, reserver, { now, readRows, log });
+  const result = await sweepTriageClaims(candidates, reserver, { now, readRows, log });
   return result.held;
 }
 
@@ -46496,7 +46506,7 @@ async function triageCommandLocked(
   // able to release on EVERY exit, success or throw. Only the anchor matters there: a lane that
   // LOST the claim holds nothing to release.
   let triageClaim: TriageClaimResult | undefined;
-  let claimReserver: TriageClaimReserver | undefined;
+  let claimReserver: TriageClaimReserverAsync | undefined;
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -46545,10 +46555,11 @@ async function triageCommandLocked(
     // outlives the worktree, which is what the release arm actually needs. (Still emphatically
     // not the module-level `repoRoot`: that is the INSTALL root and points at whatever remote the
     // install happened to point at — the trap the id reservation beside this already names.)
-    claimReserver = triageClaimReserverFor(repoDir);
+    // AWAITED (2026-10-06): this lane runs inside the daemon process, where sync claim git held the loop.
+    claimReserver = triageClaimReserverAsyncFor(repoDir);
     // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
     // nothing for the evidence arm's input.
-    triageClaim = claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
+    triageClaim = await claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
     if (!triageClaim.proceed) {
       say(`REFUSED — ${triageClaim.reason}`);
       worktreeRemove(repoDir, worktreePath);
@@ -47003,7 +47014,7 @@ async function triageCommandLocked(
     // the claim was already taken holds nothing, and calling the release there would ask the
     // decision a question it has already answered on the contention path.
     if (triageClaim?.anchor !== undefined && claimReserver !== undefined)
-      releaseTriageClaimWithLogging(log, feedbackId, claimReserver, triageClaim.anchor);
+      await releaseTriageClaimWithLogging(log, feedbackId, claimReserver, triageClaim.anchor);
   }
 }
 
