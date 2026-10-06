@@ -9302,9 +9302,6 @@ export interface ReadyRefreshFacts {
   readSource?: (pr: OpenPrView, path: string) => string | undefined;
 }
 
-const TEST_FILE_RE = /\.test\.[cm]?[jt]s$/;
-const PATH_LITERAL_RE = /[\w.-]+(?:\/[\w.-]+)+\/?/g;
-
 /** W1-T6022 — W1-T5696's overlap and baseline arms without the distance gate, plus one reach rule: a
  *  changed test file whose source names a path literal prefixing (at a segment) a main-changed path. */
 function readyRefreshCause(
@@ -9317,10 +9314,10 @@ function readyRefreshCause(
   if (cause.reason !== undefined) return { reason: "ready-overlap", files: cause.files };
   let unread = false;
   const reached = new Set<string>();
-  for (const path of readSource ? (pr.changedFiles ?? []).filter((f) => TEST_FILE_RE.test(f)) : []) {
+  for (const path of readSource ? (pr.changedFiles ?? []).filter((f) => /\.test\.[cm]?[jt]s$/.test(f)) : []) {
     const source = readSource!(pr, path);
     if (source === undefined) unread = true;
-    const literals = source?.match(PATH_LITERAL_RE) ?? [];
+    const literals = source?.match(/[\w.-]+(?:\/[\w.-]+)+\/?/g) ?? [];
     for (const f of base?.files ?? []) {
       if (literals.some((l) => f === l || f.startsWith(l.endsWith("/") ? l : `${l}/`))) reached.add(f);
     }
