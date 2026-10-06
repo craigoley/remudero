@@ -1779,7 +1779,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = ghJsonAsync,
-    readActionsStatusImpl = processActionsStatusReader,
+    readActionsStatusImpl = process.env.NODE_TEST_CONTEXT ? undefined : processActionsStatusReader,
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -12060,7 +12060,8 @@ export async function runSweep(
     if (!checks) return undefined;
     const obs = await observeActions(deps.readActionsStatus);
     annotate({ actions_state: obs.state, actions_reason: obs.reason });
-    const decision = decideActionsIncidentHold(obs, actionsIncidentHoldState(ledgerLines, pr), now);
+    const hold = actionsIncidentHoldState(ledgerLines, pr);
+    const decision = decideActionsIncidentHold(obs, hold, now);
     const named = checks.map((c) => `"${c}"`).join(", ");
     const row = {
       run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
@@ -12074,7 +12075,7 @@ export async function runSweep(
       case "proceed":
         return undefined;
       case "hold":
-        if (decision.record) appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_STEP, held_since: new Date(now).toISOString() });
+        if (decision.record) appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_STEP, held_since: clockFromMillisFn(() => now).iso() });
         return `GitHub Actions incident: ${obs.reason} — red only from cancelled/never-started check(s) ${named}; ` +
           "held with no fix dispatch, strike, requeue or escalation until Actions is operational";
       case "keep-hold":
@@ -12090,16 +12091,24 @@ export async function runSweep(
         const cancelled = (pr.cancelledRequiredChecks ?? []).map((c) => c.name);
         // A ci-gate timeout needs a NEW head, not a same-sha rerun: W1-T5921's refresh, below, owns it.
         const timeout = classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], cancelled);
-        appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_REQUEUE_STEP, route: timeout ? "ci_timeout_refresh" : "job_requeue" });
-        if (timeout) return undefined;
+        if (timeout) {
+          appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_REQUEUE_STEP, route: "ci_timeout_refresh" });
+          return undefined;
+        }
+        const rollup = await deps.readCiGateRollup?.(pr);
+        let complete = true;
         const notes: string[] = [];
         for (const name of checks) {
+          if (hold.requeuedChecks.includes(name)) continue;
           const check = (pr.cancelledRequiredChecks ?? []).find((c) => c.name === name) ?? (pr.ciFailures ?? []).find((f) => f.name === name)!;
           const key = `${pr.headSha}@${name}`;
-          const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), undefined, { surface: "actions_incident_recovery" });
+          const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup, { surface: "actions_incident_recovery" });
           if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+          else complete = false;
+          if (result.escalate) await deps.escalate(pr, result.escalate, renderClarificationQuestion(pr, result.escalate, pr.strikeHistory ?? []));
           notes.push(result.note ?? `${result.kind === "dispatched" ? "re-queued" : `requeue ${result.kind} for`} "${name}"`);
         }
+        if (complete) appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_REQUEUE_STEP, route: "job_requeue" });
         return `GitHub Actions operational again: one fresh requeue of the held check(s): ${notes.join("; ")} — no fix strike`;
       }
     }
@@ -13007,7 +13016,11 @@ export async function runSweep(
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
     }
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
-    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
+    const incidentPreemptsPlanRepair = disposition === "blocked-fixable" && isBlockedCi(pr) &&
+      pr.isPlanFiling === true && deps.readActionsStatus &&
+      cancelledOnlyRedChecks(pr) && decideActionsIncidentHold(await observeActions(deps.readActionsStatus),
+        actionsIncidentHoldState(ledgerLines, pr), now).kind !== "proceed";
+    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true && !incidentPreemptsPlanRepair) {
       const repair = await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;

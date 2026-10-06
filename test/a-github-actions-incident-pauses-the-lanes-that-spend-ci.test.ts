@@ -7,9 +7,12 @@
 // status is named and never read as operational, and that the hold is bounded by a BACKSTOP.
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { Config } from "../src/lib/config.js";
+import type { Plan } from "../src/lib/plan.js";
 
 import {
   ACTIONS_INCIDENT_BACKSTOP_MS,
@@ -17,6 +20,7 @@ import {
   cancelledOnlyRedChecks,
   classifyActionsIncident,
   createActionsStatusReader,
+  fetchActionsStatusJson,
   type ActionsStatusRead,
 } from "../src/lib/actions-incident.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
@@ -24,6 +28,8 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  CHECK_REQUEUE_DEFERRAL_BACKSTOP,
+  buildSweepEffects,
   runSweep,
   type CiFailure,
   type FixDispatchEvidence,
@@ -153,6 +159,7 @@ test("classifyActionsIncident: an unreadable status is named and never read as o
     { ok: true, fetchedAtMs: T0, body: { components: [{ name: "Pages", status: "operational" }] } },
     { ok: true, fetchedAtMs: T0, body: { components: [{ name: "Actions", status: "melting" }] } },
     { ok: true, fetchedAtMs: T0, body: { components: [{ name: "Actions" }] } },
+    { ok: true, fetchedAtMs: T0, body: { components: [{ name: "Actions", status: "operational" }], incidents: {} } },
   ];
   for (const read of cases) {
     const obs = classifyActionsIncident(read);
@@ -167,9 +174,11 @@ test("createActionsStatusReader: one fetch per TTL window, and a thrown fetch is
   let fetches = 0;
   let fail = false;
   const read = createActionsStatusReader({
-    nowMs: () => at,
-    ttlMs: 60_000,
-    fetchJson: async () => {
+    now: () => at,
+    freshMs: 60_000,
+    fetchJson: async (signal) => {
+      assert.ok(signal instanceof AbortSignal);
+      assert.equal(signal.aborted, false);
       fetches += 1;
       if (fail) throw new Error("HTTP 503");
       return OPERATIONAL.ok ? OPERATIONAL.body : undefined;
@@ -179,12 +188,16 @@ test("createActionsStatusReader: one fetch per TTL window, and a thrown fetch is
   at += 30_000;
   await read();
   assert.equal(fetches, 1, "cached inside the window");
-  at += 60_000;
+  at += 30_000;
   fail = true;
   const failed = await read();
   assert.equal(fetches, 2);
   assert.equal(failed.ok, false);
   assert.equal(classifyActionsIncident(failed).state, "unreadable");
+  assert.equal(failed.fetchedAtMs, at, "the shared time seam stamps the read at the TTL boundary");
+  at += 30_000;
+  assert.equal(await read(), failed, "unreadable reads are cached inside the same window");
+  assert.equal(fetches, 2);
 });
 
 test("cancelledOnlyRedChecks: only a red made wholly of cancelled or never-started checks qualifies", () => {
@@ -201,7 +214,7 @@ test("cancelledOnlyRedChecks: only a red made wholly of cancelled or never-start
   assert.equal(cancelledOnlyRedChecks({ redRequiredChecks: [], ciFailures: [], cancelledRequiredChecks: [] }), undefined);
 });
 
-test("during an Actions incident a cancelled-only red is held: no fix dispatch, strike, requeue or escalation", async () => {
+test("test/a-github-actions-incident-pauses-the-lanes-that-spend-ci.test.ts: during an Actions incident a cancelled-only red is held: no fix dispatch, strike, requeue or escalation", async () => {
   const path = ledger("hold");
   const h = harness(path, MAJOR);
   await runSweep([subject()], h.d, DEFAULT_SWEEP_POLICY);
@@ -214,6 +227,7 @@ test("during an Actions incident a cancelled-only red is held: no fix dispatch, 
   assert.equal(holds[0].head_sha, HEAD);
   assert.equal(holds[0].actions_state, "incident");
   assert.equal(holds[0].component_status, "major_outage");
+  assert.equal(holds[0].held_since, "2026-10-05T20:00:00.000Z", "the hold uses the injected sweep time");
   const row = disposed(path);
   assert.equal(row?.acted, false, "nothing seeds prior.fixed, and no strike is spent");
   assert.equal(row?.actions_state, "incident");
@@ -351,6 +365,17 @@ test("the BACKSTOP: a hold older than the bound escalates ONCE and ordinary hand
   assert.deepEqual(later.requeued, ["test (1/8)"], "the hold no longer freezes this head");
 });
 
+test("an operational observation releases an old hold instead of escalating a recovered incident", async () => {
+  const path = ledger("late-recovery");
+  await runSweep([subject()], harness(path, MAJOR).d, DEFAULT_SWEEP_POLICY);
+  const recovered = harness(path, OPERATIONAL, T0 + ACTIONS_INCIDENT_BACKSTOP_MS + 60_000);
+  await runSweep([subject()], recovered.d, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(recovered.escalated, []);
+  assert.deepEqual(recovered.requeued.sort(), ["ci", "test (1/8)"]);
+  assert.equal(rows(path, "sweep.actions_incident_requeue").length, 1);
+  assert.equal(rows(path, "sweep.actions_incident_backstop").length, 0);
+});
+
 test("a new head is not held by the old head's hold", () => {
   const lines = [{ step: "sweep.actions_incident_hold", pr_number: 9391, head_sha: HEAD, held_since: "2026-10-05T20:00:00.000Z" }];
   assert.equal(actionsIncidentHoldState(lines, { prNumber: 9391, headSha: HEAD }).open, true);
@@ -361,5 +386,143 @@ test("a new head is not held by the old head's hold", () => {
 test("the hold, requeue and backstop rows survive rotation, because the gate reads them back", () => {
   for (const step of ["sweep.actions_incident_hold", "sweep.actions_incident_requeue", "sweep.actions_incident_backstop"]) {
     assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(step), step);
+  }
+});
+
+test("concurrent status reads share one fetch and cache its failure", async () => {
+  let fetches = 0;
+  const read = createActionsStatusReader({ fetchJson: async () => {
+    fetches += 1;
+    throw new Error("HTTP 503");
+  } });
+  const [first, second] = await Promise.all([read(), read()]);
+  assert.equal(fetches, 1);
+  assert.equal(first, second);
+  assert.equal(classifyActionsIncident(await read()).state, "unreadable");
+  assert.equal(fetches, 1);
+});
+
+test("a missing incident list is unreadable even when the Actions component says operational", () => {
+  assert.equal(classifyActionsIncident({ ok: true, fetchedAtMs: T0,
+    body: { components: [{ name: "Actions", status: "operational" }] } }).state, "unreadable");
+});
+
+test("real failure evidence wins over a cancellation with the same check name", () => {
+  assert.equal(cancelledOnlyRedChecks(subject({ redRequiredChecks: ["test (1/8)"], ciFailures: [
+    { name: "test (1/8)", conclusion: "CANCELLED", logTail: "not ok 1 - failed before cancellation\n# fail 1" },
+  ] })), undefined);
+});
+
+test("incident recovery retries a deferred current attempt without repeating an accepted requeue", async () => {
+  const path = ledger("deferred-recovery");
+  const pr = subject({ cancelledRequiredChecks: [{ name: "test (1/8)", jobId: "71", runAttempt: 2 }] });
+  await runSweep([pr], harness(path, MAJOR).d, DEFAULT_SWEEP_POLICY);
+  const first = harness(path, OPERATIONAL, T0 + 60_000);
+  first.d.requeueCheck = (_pr, check) => {
+    first.requeued.push(check.name);
+    return check.name === "test (1/8)"
+      ? { kind: "deferred", refusal: "already_running", error: "workflow run already running (HTTP 403)" }
+      : { kind: "dispatched" };
+  };
+  await runSweep([pr], first.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(actionsIncidentHoldState(readLedgerLines(path), pr).open, true);
+  assert.equal(rows(path, "sweep.actions_incident_requeue").length, 0);
+  const retry = harness(path, OPERATIONAL, T0 + 120_000);
+  retry.d.readCiGateRollup = () => [{ name: "test (1/8)", conclusion: "CANCELLED", status: "COMPLETED", jobId: "72" }];
+  const jobs: Array<string | undefined> = [];
+  retry.d.requeueCheck = (_pr, check) => { jobs.push(check.jobId); retry.requeued.push(check.name); return true; };
+  await runSweep([pr], retry.d, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(retry.requeued, ["test (1/8)"]);
+  assert.deepEqual(jobs, ["72"]);
+  assert.deepEqual(retry.escalated, []);
+  assert.equal(retry.fixed.length, 0);
+  assert.equal(rows(path, "sweep.actions_incident_requeue").length, 1);
+  assert.equal(actionsIncidentHoldState(readLedgerLines(path), pr).open, false);
+});
+
+test("the incident gate precedes a paid plan repair round", async () => {
+  const path = ledger("plan-round");
+  const h = harness(path, MAJOR);
+  let rounds = 0;
+  h.d.readPlanRepairFacts = () => ({ authorLogin: "remudero-fleet[bot]" });
+  h.d.repairPlanPr = () => ({ outcome: "unwired" });
+  h.d.dispatchPlanGateRound = async () => { rounds += 1; return { outcome: "refused", reason: "test round" }; };
+  await runSweep([subject({ isPlanFiling: true, headRefName: "ci-friction-garden-1790927000000" })], h.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(rounds, 0);
+  assert.equal(rows(path, "sweep.actions_incident_hold").length, 1);
+  assert.deepEqual(h.escalated, []);
+});
+
+test("incident recovery carries the requeue deferral backstop reason and escalates it once", async () => {
+  const path = ledger("recovery-backstop");
+  const pr = subject();
+  await runSweep([pr], harness(path, MAJOR).d, DEFAULT_SWEEP_POLICY);
+  for (let attempt = 0; attempt < CHECK_REQUEUE_DEFERRAL_BACKSTOP; attempt += 1) {
+    const h = harness(path, OPERATIONAL, T0 + (attempt + 1) * 60_000);
+    h.d.requeueCheck = (_pr, check) => check.name === "ci" ? { kind: "dispatched" }
+      : { kind: "deferred", refusal: "already_running", error: "already running (HTTP 403)" };
+    await runSweep([pr], h.d, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(h.escalated, []);
+    assert.equal(h.fixed.length, 0);
+  }
+  const capped = harness(path, OPERATIONAL, T0 + 10 * 60_000);
+  await runSweep([pr], capped.d, DEFAULT_SWEEP_POLICY);
+  assert.equal(capped.escalated.length, 1);
+  assert.match(capped.escalated[0], /BACKSTOP/);
+  assert.match(capped.escalated[0], /already_running/);
+  assert.deepEqual(capped.requeued, []);
+  const later = harness(path, OPERATIONAL, T0 + 11 * 60_000);
+  await runSweep([pr], later.d, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(later.escalated, []);
+  assert.deepEqual(later.requeued, []);
+});
+
+test("an incident holds cancelled reds while green PRs arm and reviews continue", async () => {
+  const path = ledger("other-lanes");
+  const h = harness(path, MAJOR);
+  const armed: number[] = [];
+  const reviewed: number[] = [];
+  h.d.arm = pr => { armed.push(pr.prNumber); };
+  h.d.postReview = async pr => { reviewed.push(pr.prNumber); };
+  const green: Partial<OpenPrView> = { checksState: "green", ciFailures: [], cancelledRequiredChecks: [], redRequiredChecks: [] };
+  await runSweep([subject(), subject({ prNumber: 9392 }),
+    subject({ ...green, prNumber: 9393, reviewState: "success", unmetCriteria: [] }),
+    subject({ ...green, prNumber: 9394, reviewState: "none" })], h.d, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(armed, [9393]);
+  assert.deepEqual(reviewed, [9394]);
+  assert.equal(h.statusReads, 1);
+  assert.equal(rows(path, "sweep.actions_incident_hold").length, 2);
+});
+
+test("the default status transport reads bounded JSON and names HTTP and malformed-response failures", async t => {
+  const server = createServer((request, response) => {
+    if (request.url === "/error") { response.writeHead(503).end("unavailable"); return; }
+    response.setHeader("content-type", "application/json");
+    response.end(request.url === "/malformed" ? "{" : JSON.stringify(OPERATIONAL.ok ? OPERATIONAL.body : {}));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  assert.equal(classifyActionsIncident({ ok: true, fetchedAtMs: T0, body: await fetchActionsStatusJson(url) }).state, "operational");
+  await assert.rejects(fetchActionsStatusJson(`${url}/error`), /HTTP 503/);
+  await assert.rejects(fetchActionsStatusJson(`${url}/malformed`), /JSON/);
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (_url: unknown, init: RequestInit) => realFetch(url, init));
+  assert.equal(classifyActionsIncident(await createActionsStatusReader()()).state, "operational");
+  const testContext = process.env.NODE_TEST_CONTEXT;
+  const input = { owner: "craigoley", repo: "remudero", config: { root: tmpdir() } as Config,
+    ledgerPath: ledger("effects"), runId: "W1-T5939", plan: { tasks: [], byId: new Map() } as unknown as Plan,
+    log: () => {} };
+  assert.equal(buildSweepEffects(input).readActionsStatus, undefined);
+  try {
+    delete process.env.NODE_TEST_CONTEXT;
+    const effects = buildSweepEffects(input);
+    assert.ok(effects.readActionsStatus);
+    assert.equal(classifyActionsIncident(await effects.readActionsStatus()).state, "operational");
+  } finally {
+    if (testContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = testContext;
   }
 });

@@ -1,9 +1,4 @@
-// W1-T5939 — A GITHUB ACTIONS INCIDENT PAUSES THE LANES THAT SPEND CI. During the 2026-10-05
-// outage (githubstatus: Actions degraded, then major_outage) jobs that never got a runner were
-// cancelled, and the sweep read each cancellation as a red to act on: job requeues refused with
-// 403, paid fix workers that returned FLAKE, strikes and escalations spent on infrastructure.
-// This module is the reader: a cached poll of githubstatus.com's summary and the PURE classifier
-// the sweep calls on it. UNREADABLE IS ITS OWN STATE — a failed read is never "operational".
+import { fetchBoundedStatusJson, type readClaudeModelHealth } from "./claude-model-health.js";
 
 export const ACTIONS_STATUS_URL = "https://www.githubstatus.com/api/v2/summary.json";
 /** At most one githubstatus read per this window, whatever the sweep cadence. */
@@ -50,7 +45,10 @@ export function classifyActionsIncident(read: ActionsStatusRead): ActionsInciden
   if (!COMPONENT_STATUSES.has(componentStatus)) {
     return { state: "unreadable", componentStatus, reason: `githubstatus Actions status "${componentStatus}" is not a known state` };
   }
-  const incident = (Array.isArray(body?.incidents) ? body.incidents : []).map(record).find((i) =>
+  const incidents = body?.incidents;
+  if (incidents === undefined) return { state: "unreadable", componentStatus, reason: "githubstatus summary carries no incidents list" };
+  if (!Array.isArray(incidents)) return { state: "unreadable", componentStatus, reason: "githubstatus summary carries a malformed incidents list" };
+  const incident = incidents.map(record).find((i) =>
     i !== undefined && !CLOSED_INCIDENT.has(String(i.status ?? "")) &&
     ((Array.isArray(i.components) && i.components.some((c) => isActions(record(c)?.name))) ||
       (typeof i.name === "string" && /\bactions\b/i.test(i.name))));
@@ -68,31 +66,33 @@ export function classifyActionsIncident(read: ActionsStatusRead): ActionsInciden
 
 /** The default fetch: one GET with a short timeout; any non-2xx is a thrown, named failure. */
 export async function fetchActionsStatusJson(url: string = ACTIONS_STATUS_URL): Promise<unknown> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(5_000), headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-  return res.json();
+  return fetchBoundedStatusJson(url, { signal: AbortSignal.timeout(5_000) });
 }
 
 /** A cached reader: at most one fetch per `ttlMs`, failures cached too so an outage of the status
  *  page itself is not hammered. A thrown fetch becomes an `ok: false` read, never a throw. */
-export function createActionsStatusReader(deps: {
-  fetchJson?: () => Promise<unknown>;
-  nowMs?: () => number;
-  ttlMs?: number;
-} = {}): () => Promise<ActionsStatusRead> {
+export function createActionsStatusReader(
+  deps: Pick<NonNullable<Parameters<typeof readClaudeModelHealth>[1]>, "fetchJson" | "now" | "freshMs"> = {},
+): () => Promise<ActionsStatusRead> {
   const fetchJson = deps.fetchJson ?? (() => fetchActionsStatusJson());
-  const nowMs = deps.nowMs ?? Date.now;
-  const ttlMs = deps.ttlMs ?? ACTIONS_STATUS_TTL_MS;
+  const nowMs = deps.now ?? Date.now;
+  const ttlMs = deps.freshMs ?? ACTIONS_STATUS_TTL_MS;
   let cached: ActionsStatusRead | undefined;
+  let inFlight: Promise<ActionsStatusRead> | undefined;
   return async () => {
     const at = nowMs();
     if (cached && at - cached.fetchedAtMs < ttlMs) return cached;
-    try {
-      cached = { ok: true, body: await fetchJson(), fetchedAtMs: at };
-    } catch (e) {
-      cached = { ok: false, error: String((e as Error)?.message ?? e), fetchedAtMs: at };
-    }
-    return cached;
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      try {
+        cached = { ok: true, body: await fetchJson(AbortSignal.timeout(5_000)), fetchedAtMs: at };
+      } catch (error) {
+        cached = { ok: false, error: String((error as Error)?.message ?? error), fetchedAtMs: at };
+      }
+      return cached;
+    })();
+    try { return await inFlight; }
+    finally { inFlight = undefined; }
   };
 }
 
@@ -112,9 +112,9 @@ const NEVER_STARTED_CONCLUSION = new Set(["CANCELLED", "STARTUP_FAILURE"]);
 export function cancelledOnlyRedChecks(pr: RedEvidence): string[] | undefined {
   const names = new Set((pr.cancelledRequiredChecks ?? []).map((c) => c.name));
   for (const f of pr.ciFailures ?? []) {
-    if (names.has(f.name)) continue;
     const tail = f.logTail ?? "";
     if (GENUINE_FAILURE.test(tail)) return undefined;
+    if (names.has(f.name)) continue;
     if (!NEVER_STARTED_CONCLUSION.has((f.conclusion ?? "").toUpperCase()) && !NEVER_STARTED_TAIL.test(tail)) return undefined;
     names.add(f.name);
   }
@@ -127,6 +127,7 @@ export interface ActionsIncidentHoldState {
   open: boolean;
   heldSince?: string;
   backstopped: boolean;
+  requeuedChecks: string[];
 }
 
 /** PURE: the ledger's hold history for one (PR, head). A requeue row closes the episode; a
@@ -138,19 +139,24 @@ export function actionsIncidentHoldState(
   let open = false;
   let heldSince: string | undefined;
   let backstopped = false;
+  const requeuedChecks = new Set<string>();
   for (const l of lines) {
     if (l.pr_number !== pr.prNumber || l.head_sha !== pr.headSha) continue;
     if (l.step === ACTIONS_INCIDENT_HOLD_STEP && !open) {
       open = true;
+      requeuedChecks.clear();
       heldSince = typeof l.held_since === "string" ? l.held_since : typeof l.ts === "string" ? l.ts : undefined;
     } else if (l.step === ACTIONS_INCIDENT_REQUEUE_STEP) {
       open = false;
       heldSince = undefined;
     } else if (l.step === ACTIONS_INCIDENT_BACKSTOP_STEP) {
       backstopped = true;
+    } else if (open && typeof l.check_name === "string") {
+      if (l.step === "sweep.check_requeued" && l.surface === "actions_incident_recovery") requeuedChecks.add(l.check_name);
+      else if (l.step === "sweep.check_requeue.deferred" && l.outcome === "deferred") requeuedChecks.delete(l.check_name);
     }
   }
-  return { open, ...(heldSince !== undefined ? { heldSince } : {}), backstopped };
+  return { open, ...(heldSince !== undefined ? { heldSince } : {}), backstopped, requeuedChecks: [...requeuedChecks] };
 }
 
 export type ActionsIncidentDecision =
@@ -168,9 +174,10 @@ export function decideActionsIncidentHold(
   backstopMs: number = ACTIONS_INCIDENT_BACKSTOP_MS,
 ): ActionsIncidentDecision {
   if (hold.backstopped) return { kind: "proceed" };
+  if (obs.state === "operational" && hold.open) return { kind: "requeue" };
   const since = hold.heldSince !== undefined ? Date.parse(hold.heldSince) : Number.NaN;
   if (hold.open && Number.isFinite(since) && nowMs - since >= backstopMs) return { kind: "backstop", heldMs: nowMs - since };
   if (obs.state === "incident") return { kind: "hold", record: !hold.open };
   if (!hold.open) return { kind: "proceed" };
-  return obs.state === "operational" ? { kind: "requeue" } : { kind: "keep-hold" };
+  return { kind: "keep-hold" };
 }
