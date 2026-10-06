@@ -268,13 +268,17 @@ function codexResult(): WorkerResult {
 /** One spawn through the real auction; `rows` present means the fix rung supplied learned arms. */
 async function spawnFix(
   root: string,
-  input: { taskId: string; effort: string; rows?: Array<Record<string, unknown>> },
+  input: {
+    taskId: string; effort: string; rows?: Array<Record<string, unknown>>;
+    readCodex?: (request: { preferredModel?: { model: string }; selectedModel?: string }) => Promise<ProviderCapacity>;
+    onDecision?: (fields: Record<string, unknown>) => void;
+  },
 ): Promise<{ assignment: WorkerSelectionAssignment; decisions: Array<Record<string, unknown>> }> {
   const assignments: WorkerSelectionAssignment[] = [];
   const decisions: Array<Record<string, unknown>> = [];
   const evidence = input.rows ? fixArmEvidence(input.rows, NOW) : undefined;
   const learnedArms: FixLearnedArms | undefined = evidence
-    ? { evidence, weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed), onDecision: (fields) => decisions.push(fields) }
+    ? { evidence, weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed), onDecision: input.onDecision ?? ((fields) => decisions.push(fields)) }
     : undefined;
   await spawnWorker({
     cwd: root,
@@ -293,7 +297,9 @@ async function spawnFix(
     providerRouting: {
       readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
       readClaude: async () => capacity("claude", 50),
-      readCodex: async (_config, request) => capacity("codex", 50, request.preferredModel?.model ?? request.selectedModel ?? "gpt-6-sol"),
+      readCodex: async (_config, request) => (input.readCodex
+        ? input.readCodex(request)
+        : capacity("codex", 50, request.preferredModel?.model ?? request.selectedModel ?? "gpt-6-sol")),
       spawnCodex: async () => codexResult(),
       writeStatus: () => undefined,
       now: () => NOW,
@@ -331,3 +337,61 @@ test("W1-T5535: the ledger read is cached for a short time and a failed read is 
   assert.equal((await readFixRoutingRows("/other", NOW, read)).length, 1, "the failure left nothing in the cache");
   clearFixRoutingEvidenceCache();
 });
+
+test("W1-T5535: a codex arm that out-draws the served model is re-read and adopted", async () => {
+  const root = fixtureRoot("rmd-fix-learner-reread-");
+  try {
+    const asked: string[] = [];
+    const rows = [...armRounds("codex", "gpt-6-sol", 30, 0), ...armRounds("codex", "gpt-better", 0, 30), ...armRounds("claude", "claude-sonnet-5-5", 30, 0)];
+    const { decisions } = await spawnFix(root, {
+      taskId: "W1-T9302", effort: "medium", rows,
+      readCodex: async (request) => {
+        if (request.preferredModel?.model) asked.push(request.preferredModel.model);
+        return capacity("codex", 50, request.preferredModel?.model ?? request.selectedModel ?? "gpt-6-sol");
+      },
+    });
+    assert.ok(asked.includes("gpt-better"), "the better-drawn codex arm is re-read");
+    const arms = (decisions[0]?.arms ?? []) as Array<Record<string, unknown>>;
+    assert.ok(arms.some((arm) => arm.model === "gpt-better" && arm.draw !== null), "the adopted model is a drawn candidate");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T5535: a codex re-read that throws is logged and keeps the served capacity", async (t) => {
+  const root = fixtureRoot("rmd-fix-learner-reread-throws-");
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: unknown) => { errors.push(String(line)); });
+  try {
+    const rows = [...armRounds("codex", "gpt-6-sol", 30, 0), ...armRounds("codex", "gpt-better", 0, 30), ...armRounds("claude", "claude-sonnet-5-5", 30, 0)];
+    const { assignment } = await spawnFix(root, {
+      taskId: "W1-T9303", effort: "medium", rows,
+      readCodex: async (request) => {
+        if (request.preferredModel?.model === "gpt-better") throw new Error("codex app-server unavailable");
+        return capacity("codex", 50, request.preferredModel?.model ?? request.selectedModel ?? "gpt-6-sol");
+      },
+    });
+    assert.ok(errors.some((line) => line.includes("worker.fix_routing_codex_reread_failed") && line.includes("codex app-server unavailable")));
+    assert.ok(assignment.selected.provider, "the spawn still routes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T5535: a decision sink that throws is logged and never changes routing", async (t) => {
+  const root = fixtureRoot("rmd-fix-learner-sink-throws-");
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: unknown) => { errors.push(String(line)); });
+  try {
+    const rows = [...armRounds("codex", "gpt-6.1-sol", 5, 5), ...armRounds("claude", "claude-sonnet-5-5", 5, 5)];
+    const { assignment } = await spawnFix(root, {
+      taskId: "W1-T9304", effort: "medium", rows,
+      onDecision: () => { throw new Error("ledger append failed"); },
+    });
+    assert.ok(assignment.selected.provider, "the spawn still routes");
+    assert.ok(errors.some((line) => line.includes("worker.fix_routing_decision_write_failed") && line.includes("ledger append failed")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
