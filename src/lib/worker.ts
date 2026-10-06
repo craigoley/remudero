@@ -167,6 +167,7 @@ import {
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
+  type WorkerExit,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -200,6 +201,18 @@ export interface ModelUsageEntry {
 }
 
 /** Structured result of one worker run. */
+/** W1-T6027: declared in worker-provider.ts, whose runners produce it, so that file needs no edge back to this one. */
+export type { WorkerExit };
+
+/** W1-T6027: the process end an SDK error reports. The SDK's `getProcessExitError` attaches `signal` to a worker a signal
+ * killed and `exitCode` to one that exited non-zero; any other throw names no process end, so it is `unobserved`. */
+export function workerExitOfError(e: unknown): WorkerExit {
+  const { signal, exitCode } = (typeof e === "object" && e !== null ? e : {}) as { signal?: unknown; exitCode?: unknown };
+  if (typeof signal === "string" && signal.length > 0) return { kind: "signal", signal };
+  if (typeof exitCode === "number" && Number.isInteger(exitCode)) return { kind: "exit", code: exitCode };
+  return { kind: "unobserved" };
+}
+
 export interface WorkerResult {
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
   provider?: WorkerProviderId;
@@ -227,6 +240,9 @@ export interface WorkerResult {
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
   isError: boolean;
+  /** W1-T6027: HOW THE WORKER'S PROCESS ENDED, read off the process itself and never off `subtype`. See {@link WorkerExit}.
+   * Every runner sets it; it is optional only for the hand-built fixture literals across test/. */
+  exit?: WorkerExit;
   /** An Anthropic-side api error hit the stream — a `<synthetic>`/`isApiErrorMessage` message. TRAP: the result ENVELOPE may
    * still report `subtype: "success"` (WS-0 envelope shape), so this field is the only place the signal survives. Transient
    * for the classifier: retry, no strike, never a task failure. */
@@ -3504,6 +3520,8 @@ export async function collectWorkerResult(
   let assistantStopReason: string | undefined;
   let permissionDenials: unknown[] = [];
   let sawResult = false;
+  // W1-T6027: only an SDK throw reports the process's end; a clean envelope saw none.
+  let exit: WorkerExit = { kind: "unobserved" };
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
   // The LAST real (non-`<synthetic>`) `msg.message.model` seen on the live assistant stream — see {@link
@@ -3653,6 +3671,7 @@ export async function collectWorkerResult(
     const swallowed = String((err as Error)?.message ?? err);
     stderrChunks.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
     isError = true;
+    exit = workerExitOfError(err);
     // CLASSIFY THE REFUSAL HERE, while the message still exists. `detectUsageLimitRefusal` (lib/classify.ts) is the fleet's
     // ONE usage-limit detector, already wired into the fix-retry loop; this is a second CALLER, never a second classifier
     // (W1-T2564, W1-T2515).
@@ -3679,6 +3698,7 @@ export async function collectWorkerResult(
     stderr: stderrChunks.join(""),
     subtype,
     isError,
+    exit,
     apiError,
     ...(usageRefusal ? { usageRefusal } : {}),
     ...(safeguardRefusal ? { safeguardRefusal } : {}),

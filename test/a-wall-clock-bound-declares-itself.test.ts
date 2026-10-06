@@ -108,6 +108,9 @@ function gitGrepLines(args: readonly string[]): string[] {
   return out.split("\n").filter(Boolean);
 }
 
+// A bound declared INSIDE a test/helpers/*.ts wrapper is outside both queries' `test/*.test.ts`
+// pathspec. W1-T6031's waitForServeBanner (test/helpers/serve-boot-banner.ts) is one: its two
+// callers import the wrapper, not this helper, so it moved neither recorded count (measured).
 function declaredMemberFiles(): string[] {
   return gitGrepLines(["grep", "-lF", HELPER_IMPORT, "--", "test/*.test.ts"])
     .filter((file) => file !== THIS_FILE)

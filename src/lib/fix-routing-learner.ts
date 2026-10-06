@@ -46,6 +46,8 @@ export interface FixArmEvidence {
   arms: FixArmStats[];
   /** `fix.done` rows with no provider or no selected_model: counted, never pooled into an arm. */
   unattributedExcluded: number;
+  /** W1-T6028: rounds whose worker a signal ended with nothing pushed: counted, never pooled into an arm. */
+  signalExcluded: number;
   /** Pooled fix-lane acceptance mean, the prior's centre. */
   priorMean: number;
   priorWeight: number;
@@ -53,6 +55,20 @@ export interface FixArmEvidence {
 }
 
 const text = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
+
+/**
+ * W1-T6028: A SIGNAL-ENDED ROUND THAT PUSHED NOTHING TEACHES THE LEARNER NOTHING. A process ended from outside
+ * (orphan sweep, deploy, OOM) says nothing about whether its arm's rounds commit. W1-T5999 writes it as
+ * `worker_exit: "signal"`. The `error_exit_null` arm reads the same round from rows without that field: every
+ * pre-W1-T5999 row (the newest leaves FIX_ROUTING_READ_WINDOW_MS on 2026-10-20, when that population is gone),
+ * and W1-T6032's fall-through row, which a round that LEFT work still writes with the worker's own subtype.
+ * The arm can go after 2026-10-20 only once that fall-through row also carries `worker_exit`. A round
+ * whose leftover work was committed and pushed made a commit, so it is scored like any pushed round.
+ */
+function endedBySignalWithNothingPushed(row: Row): boolean {
+  if (row.worker_exit === "signal") return true;
+  return (row.subtype === "error_exit_null" || row.worker_subtype === "error_exit_null") && !text(row.pushed_head_sha);
+}
 
 /** Fold the ledger's `fix.done` and `fix.ci_not_green` rows into per-(provider, selected_model) evidence. */
 export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvidence {
@@ -68,12 +84,17 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
   }
   const byArm = new Map<string, FixArmStats>();
   let unattributedExcluded = 0;
+  let signalExcluded = 0;
   for (const row of rows) {
     if (row.step !== "fix.done") continue;
     const provider = text(row.provider);
     const model = text(row.selected_model);
     if (!provider || !model) {
       unattributedExcluded += 1;
+      continue;
+    }
+    if (endedBySignalWithNothingPushed(row)) {
+      signalExcluded += 1;
       continue;
     }
     const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -101,6 +122,7 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
   return {
     arms,
     unattributedExcluded,
+    signalExcluded,
     priorMean: Math.min(Math.max(mean, PRIOR_MEAN_EPSILON), 1 - PRIOR_MEAN_EPSILON),
     priorWeight: FIX_ROUTING_PRIOR_WEIGHT,
     halfLifeMs: FIX_ROUTING_HALF_LIFE_MS,
@@ -136,6 +158,7 @@ export interface FixRoutingWeights {
   epsilon: number;
   nEffMin: number;
   unattributedExcluded: number;
+  signalExcluded: number;
   halfLifeMs: number;
 }
 
@@ -208,6 +231,7 @@ export function fixRoutingWeights(
     epsilon: evidence.priorWeight / (evidence.priorWeight + nEffMin),
     nEffMin,
     unattributedExcluded: evidence.unattributedExcluded,
+    signalExcluded: evidence.signalExcluded,
     halfLifeMs: evidence.halfLifeMs,
   };
 }
@@ -233,6 +257,7 @@ export function fixRoutingDecisionFields(input: {
     epsilon: weights.epsilon,
     n_eff_min: weights.nEffMin,
     unattributed_excluded: weights.unattributedExcluded,
+    signal_excluded: weights.signalExcluded,
     half_life_ms: weights.halfLifeMs,
     arms: weights.arms.map((arm) => {
       const serves = arm.draw !== null && weights.preferredModel[arm.provider] === arm.model;
