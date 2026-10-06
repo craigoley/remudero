@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
+import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
 test("a transient GitHub 503 does not leave posted gate checks incomplete", () => {
   const workflow = parseYaml(readFileSync(".github/workflows/ci.yml", "utf8")) as {
@@ -35,6 +36,7 @@ sleep() { :; }
     const env = {
       ...process.env,
       ...Object.fromEntries(Object.keys(reporter.env).filter((key) => key.startsWith("OUTCOME_")).map((key) => [key, "success"])),
+      SETUP_OUTCOMES: successfulReporterSetupFixture(reporter.env),
       GITHUB_REPOSITORY: "owner/repo",
       HEAD_SHA: "abc123",
       POSTING_JOB_ID: "12345",
