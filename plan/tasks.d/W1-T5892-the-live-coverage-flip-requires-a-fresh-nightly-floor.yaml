@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 2; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T5705, W1-T5704, W1-T5811, W1-T5891, W1-T5930]
-  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts]
+  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts, test/the-live-selection-narrows-the-coverage-lane.test.ts]
   status: queued
   priority: 3
   attempts: 0
@@ -40,13 +40,16 @@
     Report the historical-baseline absolute floor separately from current-head added-line coverage
     and final full integration assurance. A valid narrow run whose pinned input later becomes
     unreadable still refuses; never relabel its partial current-head LCOV as an absolute floor.
+    Update the existing live-selector workflow controls to execute the new single admission owner
+    and pinned shard/aggregate consumers; preserve flag-off, final full integration and refused-input
+    behavior instead of keeping assertions for independently chosen per-shard floors.
     Exercise the real workflow body and builtin helper with real local artifacts and subprocesses;
     synthetic GitHub transport only. Controls include valid fresh success, completed-red upload,
     missing/expired/partial/malformed artifacts, head/attempt/repository/digest disagreement,
     boundary clock and Node22/24 separation, shared pinned choice and failure propagation.
   acceptance:
     - claim: "with the live flag on and no successful compatible pinned coverage-nightly or coverage-merged artifact within the 24-hour bound, every shard falls back to full with a named reason; a complete fresh success authorizes narrowing against one verified floor, failed or incompatible artifacts never do, and flag-off behavior is unchanged"
-      proof: "unit test: test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
+      proof: "grep: node scripts/coverage-floor.mjs select coverage-floor-pin in .github/workflows/ci.yml"
   falsifier: |
     Narrow without checking the floor: the no-artifact fixture narrows and the test fails. Accept a
     completed-red upload, different runtime/digest or independently select a replacement after the

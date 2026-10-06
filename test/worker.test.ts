@@ -31,7 +31,7 @@ import {
   workerLedgerFields,
   workerTranscript,
 } from "../src/lib/worker.js";
-import { runReview } from "../src/run-task.js";
+import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -321,14 +321,8 @@ test("runReview (W1-T2205, end-to-end): the advisory reviewer's overlapping text
     writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
     const ledgerPath = join(root, "ledger.ndjson");
 
-    // `runReview` has no keychain-override seam of its own, so its `spawnWorker` call runs the
-    // REAL non-darwin credential-file preflight (`assertWorkerCredentialFile`, worker-home.ts)
-    // against the process's real HOME. That preflight's own documented precedence accepts a
-    // non-empty `CLAUDE_CODE_OAUTH_TOKEN` as an authenticated worker regardless of what the
-    // `.credentials.json` file says — set here so this test is deterministic on a CI runner with
-    // no such file (this repo's own `ci` job measured that shape), not merely on a host that
-    // happens to already carry a real credential on disk. Never a real secret — the injected
-    // `reviewerQueryFn` above means the value is never sent anywhere.
+    // The existing spawn seam keeps the real worker and ledger wrapper, but gives this
+    // synthetic provider an explicitly synthetic credential-file preflight on every host.
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
 
     // `runReview`'s own `spawnWorker` call takes no `claudeExecutable` override (unlike
@@ -404,6 +398,10 @@ esac
       say: () => {},
       account: (r: never) => r,
       spawnReviewer: true,
+      // Synthetic provider, synthetic file preflight: never enter the host's Mac keychain.
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", (args) => spawnWorker({
+        ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" },
+      })),
       reviewerQueryFn,
       reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
       headCheckoutDir: REPO_ROOT,
