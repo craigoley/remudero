@@ -1023,9 +1023,11 @@ import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cos
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
-const workerBoundaryStack: BenchmarkStackEvidence = {
+import { captureImportedModule } from "./lib/prevention-source-evidence.js";
+const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./lib/prevention-source-evidence.js").ImportedModuleEvidence } = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
+workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";

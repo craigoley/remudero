@@ -92,6 +92,9 @@ test("the existing private repair family consumes explicit PR costs without expo
   assert.equal(cost.knownApiAttempts, 2); assert.equal(cost.apiCostEstimateUsd, 3);
   assert.equal(cost.subscriptionNotionalUsd, null);
   assert.equal(cost.history, "unavailable-retention-uncertified");
+  const candidate = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-repair-release-salt");
+  assert.equal(candidate.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(candidate), /fix-1|round-1|repair_pr_url|repair_round_id|worker_run_id/);
   assert.equal(snapshot.causalClaims, "none");
 });
 
@@ -701,4 +704,25 @@ test("private field trials distinguish explicit Codex notional from cash and kee
   assert.equal(counts.servedModelKnownAssignments, 1);
   assert.equal(counts.workerOutcomeKnownAssignments, 2, "known failure is an outcome, not an accepted task");
   assert.deepEqual(counts.servedModelUnavailableReasons, { "CLI-no-model": 1 });
+});
+
+test("the existing private flow consumes prevention source import and later work while its release excludes the evidence", () => {
+  const prevention = { id: "ci-friction:check:synthetic-private-gate", taskId: "W1-Tprivate-source", causeKey: "check:synthetic-private-gate",
+    path: "src/run-task.ts", blob: "b".repeat(40), mergeRevision: "a".repeat(40), mergedAt: T(2), workScope: "fix-worker-attempt" };
+  const imported = { state: "observed", source: "module-import-git", path: prevention.path, blob: prevention.blob,
+    revision: "c".repeat(40), capturedAt: T(3) };
+  const repair = { worker_run_id: "private-worker-source", worker_rung: "fix", repair_round_id: "private-source-round",
+    repair_pr_url: "https://github.com/acme/core/pull/9" };
+  const assigned = assign("private-task-source", "daemon", "private-source-assignment", T(4));
+  const rows = [row("ci-friction.scorecard", "DAEMON", "garden", T(2), { prevention_sources: [prevention] }),
+    { ...assigned, ...repair, benchmark_run: { ...((assigned as Record<string, unknown>).benchmark_run as object), loadedModule: imported } },
+    row("worker.attempt", "private-task-source", "daemon", T(5), { ...repair, selection_assignment_id: "private-source-assignment", success: true })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const actual = snapshot.preventionAdoption![0]!.evidence.records[0]!;
+  assert.equal(actual.expectedSource.blob, prevention.blob); assert.deepEqual(actual.loadedSource, imported);
+  assert.equal(actual.laterWork.state, "observed"); assert.equal(actual.efficacyClaim, "none");
+  const release = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-prevention-release-salt");
+  assert.equal(release.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(release), /private-worker-source|private-source-round|private-source-assignment|synthetic-private-gate|preventionAdoption|module-import-git/);
 });

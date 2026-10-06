@@ -17,6 +17,7 @@
  * checked per repository, salted pseudonyms, small cells withheld, and REFUSED if any private join
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
+import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -97,6 +98,8 @@ export interface FlowRow {
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
+  importedModule?: ImportedModuleEvidence;
+  preventions?: PreventionSourceRegistration[];
   taskClass: string | null;
   risk: string | null;
   workLane: string | null;
@@ -148,6 +151,8 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     servedModelReason: text(row.served_model_reason),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
+    importedModule: importedModuleOf(benchmark?.loadedModule),
+    preventions: preventionRegistrationsOf(row.prevention_sources),
     notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
       ? row.notional_cost_usd : null,
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
@@ -417,6 +422,7 @@ export interface FieldTrialsFlowSnapshot {
   causalClaims: "none";
   followUpWindowDays: number;
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  preventionAdoption?: { source: string; repo: string; evidence: ReturnType<typeof preventionAdoption> }[];
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
@@ -668,6 +674,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
     learning: [] as LearningUnit[] };
   const transitions: ModelTransition[] = [];
+  const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
   const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
@@ -693,6 +700,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         deploymentsKnown: Object.keys(store?.deployments ?? {}).length } });
     privateKeys.add(source.repo);
     const pulls = Object.values(store?.pulls ?? {});
+    preventionSources.push({ source: source.label, repo: source.repo, evidence: preventionAdoption(ledgerRows, input.asOf) });
     const ctx: SourceContext = { label: source.label, repo: source.repo, store, rows: ledgerRows, asOf: input.asOf,
       boots: ledgerRows.filter((row) => row.step === "daemon.boot"),
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
@@ -818,7 +826,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes, reviewFindingEvidence,
+    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
