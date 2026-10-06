@@ -27,6 +27,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import type { OpenFileProbe } from "./clone-reaper.js";
 import { type Clock, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
@@ -40,6 +41,10 @@ export const OBJECT_PRUNE_EXPIRY = "24.hours.ago";
 export const LOOSE_OBJECT_FLOOR = 5000;
 
 const UNREADABLE_WORKTREE = "<unreadable>";
+
+/** An awaited loose-object count that could not be read. Never 0: 0 is a reading, this is not. */
+export const UNKNOWN_COUNT = "unknown" as const;
+export type LooseCount = number | typeof UNKNOWN_COUNT;
 
 /** BACKSTOP on the awaited prune (and its `-n` survey, the same walk). MEASURED 2026-10-06: one armed
  *  prune held the daemon loop 161 s on a store of ~141k loose objects; prune time grows with the store,
@@ -80,13 +85,16 @@ export interface ObjectReapDeps {
   listInflightLocks?: () => readonly string[];
   /** Open-handle count under `.git`. Non-zero REFUSES; unreadable must return >0 (fail closed). */
   openFileCount?: (dir: string) => number;
+  /** {@link reapGitObjectsAsync} only: the awaited open-handle probe, preferred over openFileCount.
+   *  A probe killed at its bound REFUSES, and the decision names it (`handleProbe: "timed_out"`). */
+  openFileCountAsync?: (dir: string) => Promise<OpenFileProbe>;
   /** W1-T5119: the CALLING run's own inflight lock file name; it is not another worker, so it never refuses. */
   ownInflightLock?: string;
   /** W1-T5119: whether a lock file names a live holder. Absent counts every lock (the strict default). */
   isInflightLockActive?: (lockFile: string) => boolean;
   /** W1-T5119: whether a registered worktree has a live worker. Absent counts every worktree (the strict default). */
   isWorktreeActive?: (worktreePath: string) => boolean;
-  /** Loose object count. */
+  /** Loose object count. {@link reapGitObjectsAsync}'s default answers {@link UNKNOWN_COUNT} when unreadable. */
   looseObjectCount?: (repoDir: string) => number;
   /** Runs the prune. Injected so a test can assert the ARGV, which is where the expiry lives. */
   runPrune?: (repoDir: string, args: readonly string[]) => void;
@@ -136,6 +144,8 @@ export interface ObjectReapDecision {
   carriedBy?: ObjectReapBarrier;
   /** The quiet condition that failed, when {@link carriedBy} is `expiry`. */
   quietShortfall?: string;
+  /** Awaited decision only: the open-handle probe was killed at its bound, so the refusal is that. */
+  handleProbe?: "timed_out";
 }
 
 /** Persisted at {@link ObjectReapDeps.streakPath}: how many CONSECUTIVE REFUSALS the quiet
@@ -148,13 +158,17 @@ export interface RefusalStreak {
 }
 
 export interface ObjectReapResult {
-  /** Objects removed, or 0 when refused OR surveying. */
-  pruned: number;
+  /** Objects removed, or 0 when refused OR surveying. {@link UNKNOWN_COUNT} when the awaited count
+   *  after the prune could not be read: a difference against an unread count is not a figure. */
+  pruned: LooseCount;
   /** SURVEY ONLY: what a prune would have removed. Undefined on an armed pass. An estimate. */
   wouldPrune?: number;
   /** Present iff nothing was pruned. Names the cause in the operator's own vocabulary. */
   refusedBecause?: string;
-  looseBefore: number;
+  /** {@link UNKNOWN_COUNT} when the awaited count could not be read; the reap then skips. */
+  looseBefore: LooseCount;
+  /** Awaited refusal only: the open-handle probe was killed at its bound. */
+  handleProbe?: "timed_out";
   /** Present iff {@link ObjectReapDeps.streakPath} was supplied. The updated streak AFTER this
    *  call's own outcome is folded in. */
   consecutiveRefusals?: number;
@@ -509,7 +523,11 @@ function belowFloor(looseBefore: number): ObjectReapResult {
 }
 
 function closedWindow(looseBefore: number, refusedBecause: string): ObjectReapResult {
-  return { pruned: 0, looseBefore, refusedBecause: `quiesced window closed before the prune: ${refusedBecause}` };
+  return { pruned: 0, looseBefore, refusedBecause: closedWindowReason(refusedBecause) };
+}
+
+function closedWindowReason(refusedBecause: string): string {
+  return `quiesced window closed before the prune: ${refusedBecause}`;
 }
 
 /** Reclaim stale maintenance locks, then take off the auto-gc suppressor: only with the prune committed to. */
@@ -548,10 +566,11 @@ export async function defaultListWorktreesAsync(repoDir: string): Promise<readon
   return r.ok ? worktreesFromPorcelain(r.stdout) : [UNREADABLE_WORKTREE];
 }
 
-/** {@link defaultLooseObjectCount}, awaited. Unreadable or timed out reads 0: a SKIP, never a prune. */
-export async function defaultLooseObjectCountAsync(repoDir: string): Promise<number> {
+/** {@link defaultLooseObjectCount}, awaited. Unreadable or timed out answers {@link UNKNOWN_COUNT},
+ *  never 0: a 0 after a prune would credit the prune with every object it was given. */
+export async function defaultLooseObjectCountAsync(repoDir: string): Promise<LooseCount> {
   const r = await runGitBounded(repoDir, COUNT_OBJECTS_ARGS, OBJECT_PROBE_TIMEOUT_MS);
-  return r.ok ? looseCountFrom(r.stdout) : 0;
+  return r.ok ? looseCountFrom(r.stdout) : UNKNOWN_COUNT;
 }
 
 /** {@link defaultCountPrunable}, awaited, under the prune's bound (it is the same walk). Unreadable reads 0. */
@@ -574,10 +593,21 @@ export async function defaultRunPruneAsync(
 }
 
 /** The awaited decision. The worktree list is read FIRST so the open-handle sample, the one that
- *  refuses, stays the last probe before the prune; the verdict is {@link objectReapDecision}'s. */
+ *  refuses, stays the last probe before the prune; the verdict is {@link objectReapDecision}'s. An
+ *  awaited handle probe killed at its bound refuses, named: it cannot rule out a live holder. */
 async function objectReapDecisionAsync(repoDir: string, inflightDir: string, deps: ObjectReapDeps): Promise<ObjectReapDecision> {
   const worktrees = await (deps.listWorktrees ?? defaultListWorktreesAsync)(repoDir);
-  return objectReapDecision(repoDir, inflightDir, { ...deps, listWorktrees: () => worktrees });
+  const probe = deps.openFileCountAsync ? await deps.openFileCountAsync(join(repoDir, ".git")) : undefined;
+  if (probe !== undefined && "timedOutAfterMs" in probe) {
+    const refusedBecause = `open-handle probe timed out after ${probe.timedOutAfterMs} ms — a live holder of .git cannot be ruled out`;
+    return { refusedBecause, handleProbe: "timed_out" };
+  }
+  const openFileCount = probe !== undefined ? () => probe.count : deps.openFileCount;
+  return objectReapDecision(repoDir, inflightDir, { ...deps, listWorktrees: () => worktrees, openFileCount });
+}
+
+function refused(looseBefore: LooseCount, d: ObjectReapDecision, because = d.refusedBecause): ObjectReapResult {
+  return { pruned: 0, looseBefore, refusedBecause: because, ...(d.handleProbe ? { handleProbe: d.handleProbe } : {}) };
 }
 
 /**
@@ -591,17 +621,23 @@ export async function reapGitObjectsAsync(
   inflightDir: string,
   deps: ObjectReapDeps = {},
 ): Promise<ObjectReapResult> {
-  const looseCount = deps.looseObjectCount ?? defaultLooseObjectCountAsync;
+  const looseCount: (dir: string) => LooseCount | Promise<LooseCount> = deps.looseObjectCount ?? defaultLooseObjectCountAsync;
   const looseBefore = await looseCount(repoDir);
+  // An unread count is not "below the floor": it skips, named, and touches no streak (as a skip doesn't).
+  if (looseBefore === UNKNOWN_COUNT) {
+    return { pruned: 0, looseBefore, refusedBecause: "loose object count unreadable (git count-objects failed or timed out)" };
+  }
   if (looseBefore < LOOSE_OBJECT_FLOOR) return belowFloor(looseBefore);
   const first = await objectReapDecisionAsync(repoDir, inflightDir, deps);
-  if (first.refusedBecause !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: first.refusedBecause });
+  if (first.refusedBecause !== undefined) return withStreak(deps, true, refused(looseBefore, first));
   if (deps.dryRun === true) {
     const wouldPrune = await (deps.countPrunable ?? defaultCountPrunableAsync)(repoDir, [...SURVEY_ARGS]);
     return withStreak(deps, false, { pruned: 0, wouldPrune, looseBefore, ...barrierFields(first) });
   }
   const second = await objectReapDecisionAsync(repoDir, inflightDir, deps);
-  if (second.refusedBecause !== undefined) return withStreak(deps, true, closedWindow(looseBefore, second.refusedBecause));
+  if (second.refusedBecause !== undefined) {
+    return withStreak(deps, true, refused(looseBefore, second, closedWindowReason(second.refusedBecause)));
+  }
   const locks = commitToPrune(repoDir, deps);
   // An injected runPrune (tests) answers no outcome; only the default prune can be killed at its bound.
   let outcome: PruneOutcome = {};
@@ -609,7 +645,9 @@ export async function reapGitObjectsAsync(
   else outcome = await defaultRunPruneAsync(repoDir, [...PRUNE_ARGS], deps.pruneTimeoutMs);
   const looseAfter = await looseCount(repoDir);
   const timedOut = outcome.timedOutAfterMs !== undefined ? { pruneTimedOutAfterMs: outcome.timedOutAfterMs } : {};
-  return withStreak(deps, false, { pruned: Math.max(0, looseBefore - looseAfter), looseBefore, ...barrierFields(second), locks, ...timedOut });
+  // An unread after-count leaves the prune's yield unknown — never `looseBefore - 0`.
+  const pruned = looseAfter === UNKNOWN_COUNT ? UNKNOWN_COUNT : Math.max(0, looseBefore - looseAfter);
+  return withStreak(deps, false, { pruned, looseBefore, ...barrierFields(second), locks, ...timedOut });
 }
 
 function barrierFields(d: ObjectReapDecision): Pick<ObjectReapResult, "carriedBy" | "quietShortfall"> {
