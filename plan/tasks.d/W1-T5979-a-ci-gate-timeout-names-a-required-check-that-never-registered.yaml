@@ -1,0 +1,35 @@
+- id: W1-T5979
+  title: "A CI-GATE TIMEOUT NAMES A REQUIRED CHECK THAT NEVER REGISTERED — W1-T5934's ciTimeoutNotReadyChecks falls back to the fresh rollup when the gate's annotation lists no names, but a required check whose workflow never started has no rollup entry at all, so the escalation can read 'not ready: none' for exactly the check that is missing; the rollup is also not filtered to the REQUIRED set"
+  repo: remudero
+  depends_on: [W1-T5934]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — which names a ci-gate timeout escalation reports as not ready
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5934's build (#9474) follow-up"
+  plan_refs: [W1-T5934, W1-T5921, W1-T5939, W1-T1275]
+  files: [src/lib/sweep.ts, test/a-ci-gate-timeout-names-a-required-check-that-never-registered.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main: ciTimeoutNotReadyChecks (src/lib/sweep.ts) returns the annotation's names,
+    else every rollup entry whose latest attempt is QUEUED/PENDING/WAITING/REQUESTED/EXPECTED (minus the review
+    and ci-gate contexts). Two gaps, both noted by W1-T5934's builder: (1) a required check that never
+    registered (its workflow was never triggered, the W1-T5921 never-started case) has no rollup entry, so it
+    is absent from the list; (2) the rollup is not filtered to the required set, so a queued optional check is
+    named as what the gate waits for. readCiGateRequiredChecks (src/lib/ci-gate-required.ts) already reads
+    the gate's REQUIRED list, and redQualityGateNames already filters a rollup by required names.
+  design: |
+    When the list comes from the rollup, intersect it with the gate's required set, and add each required name
+    with no rollup entry as "never registered". An unreadable required set is named as such (W1-T5934's
+    source labels), never silently treated as empty. The W1-T5939 hold and the W1-T1275 re-drive read the
+    same list, so they inherit it; this task does not change them otherwise.
+  acceptance:
+    - claim: "a ci-gate timeout names a required check absent from the rollup as never registered, and never names a queued check outside the required set"
+      proof: "unit test: test/a-ci-gate-timeout-names-a-required-check-that-never-registered.test.ts"
+  falsifier: |
+    Keep the unfiltered rollup fallback: a timeout whose required check never registered reports no not-ready
+    names, and the test fails.
