@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-05: reduce repeated CI/coverage work; current-main 15406e72bfe86b72a1f7b3d86dd688c51f44bac7"
   plan_refs: [W1-T3207, W1-T4406, W1-T5705, W1-T5891, W1-T5892]
-  files: [.github/workflows/ci.yml, test/a-source-pr-has-one-test-verdict.test.ts, test/the-full-suite-runs-in-the-merge-queue.test.ts]
+  files: [.github/workflows/ci.yml, scripts/ci-shard-admission.mjs, test/ci-shard-admission.test.ts, test/a-source-pr-has-one-test-verdict.test.ts, test/the-full-suite-runs-in-the-merge-queue.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -30,6 +30,11 @@
     the real workflow shell body in controls proving ordinary SOURCE diffs invoke no second
     test runner at flag 0 or 1, while changed-test and helper fallback work still runs. Keep
     the live flag at 0: promotion and baseline qualification remain separate governed work.
+    Align setup admission with this same test ownership: ordinary SOURCE shards 2-8 have no
+    duplicate work at either flag, so neither npm dependencies nor Chromium should be installed.
+    Keep shard 1 setup for typecheck, workflow/helper/test diffs and uncertain inputs admitted.
+    Exercise the actual dependency-free admission CLI at both flag values; a dormant flag reader
+    must not retain seven idle installs after the test-floor consumer is removed.
     Update W1-T4406's historical CI-floor assertion to follow its new coverage owner; retain
     the real selector subprocess control against the coverage step and full merge-group controls.
   acceptance:
