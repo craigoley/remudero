@@ -11,7 +11,8 @@ import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 // read-plane worker 401'd from 20:10:41Z for exactly this (#9156); the read-model projector files
 // stall escalations and its oracle files drift escalations through GitHub, so both 401 the same way.
 // Each thread re-runs the runner's setup through execArgv, which rewrites GH_TOKEN to the no-live
-// sentinel, so the refresh is written only once a thread has answered: its setup has run by then.
+// sentinel when the env lacks one, so the refresh is written only once a thread has answered: its
+// setup has run by then.
 
 const REFRESHED = "token-refreshed-an-hour-later";
 const thread = (body: string): URL => new URL(`data:text/javascript,${encodeURIComponent(`import { parentPort } from "node:worker_threads";\n${body}`)}`);
@@ -87,7 +88,9 @@ test("a read-model thread re-running the test setup leaves the parent's HOME and
   restoreToken(t);
   const home = process.env.HOME;
   const count = process.env.GIT_CONFIG_COUNT;
-  process.env.GH_TOKEN = "set-by-the-parent";
+  // No token to start: the setup fills in only a value the shared env lacks, so the sentinel appearing
+  // is the proof the thread ran it (a token the parent already holds is left as it is).
+  delete process.env.GH_TOKEN;
   const oracle = threadOracle({
     workerUrl: thread(`parentPort.on("message", (m) => parentPort.postMessage({ type: "done", id: m.id, result: { ok: true, rows: 0, elapsedMs: 0 } }));`),
     log: () => {},

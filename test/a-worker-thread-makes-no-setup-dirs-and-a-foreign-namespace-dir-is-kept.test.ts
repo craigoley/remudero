@@ -55,7 +55,10 @@ test("W1-T5624: a worker thread loading the test setup creates no rmd-test-gh-* 
     "setInterval(() => {}, 1000);",
     "",
   ].join("\n"));
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root, GH_TOKEN: "set-before-the-worker-setup" };
+  // GH_TOKEN is absent: a worker's setup fills in only a value its env lacks, so the sentinel it
+  // reports is the proof the setup ran.
+  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root };
+  delete env.GH_TOKEN;
   delete env.RMD_ALLOW_LIVE_WRITES;
   delete env.RMD_SELF_SYNC_DONE;
   // The runner's own two `--import`s, spelled out rather than read from process.execArgv, so the
@@ -67,8 +70,8 @@ test("W1-T5624: a worker thread loading the test setup creates no rmd-test-gh-* 
       worker.once("error", reject);
       worker.once("exit", (code) => reject(new Error(`worker exited (${code}) before reporting`)));
     });
-    // Positive control: the worker DID load the setup — it rewrote the token it was handed to the
-    // sentinel. Without this, a worker that skipped the `--import`s would pass the assertion below by
+    // Positive control: the worker DID load the setup — it filled in the token it lacked with the
+    // sentinel (the env it was handed had none). Without this, a worker that skipped the `--import`s would pass the assertion below by
     // never running the code under test. (It no longer mints a HOME: under SHARE_ENV that write
     // would move the parent's HOME, so it keeps the parent's.)
     assert.equal(seen.token, LIVE_WRITE_SENTINEL_TOKEN, "the worker loaded the setup");
