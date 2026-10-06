@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "../src/lib/git-fetch-retry.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/poll-interval.js";
 import type { AsyncGitRunner, GitRunner } from "../src/lib/git-fetch-retry.js";
 import * as selfSync from "../src/lib/self-sync.js";
 import { checkReviewerCodeFreshnessAsync, checkServiceFreshnessAsync, type ServiceFreshness } from "../src/lib/self-sync.js";
@@ -120,6 +122,7 @@ test("test/a-reviewer-freshness-check-survives-one-stalled-github-handshake.test
   await t.test("the recency bound admits its own edge and refuses a ref one second older, or one dated in the future", async () => {
     const bound = selfSync.RECENT_FETCH_MAX_AGE_MS; // a namespace read, so this file still loads where the export is absent
     assert.equal(bound, 240_000, "one daemon poll interval plus three fetch bounds");
+    assert.equal(bound, DEFAULT_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS, "the inlined poll interval matches the daemon's");
     const edge = await reviewerCheck({ outcomes: [STALLED_IN_REMOTE_REFS, STALLED_IN_REMOTE_REFS], reflog: reflogAged(bound) });
     assert.equal(edge.reviewer.status, "fresh");
     const past = await reviewerCheck({ outcomes: [STALLED_IN_REMOTE_REFS, STALLED_IN_REMOTE_REFS], reflog: reflogAged(bound + 1_000) });

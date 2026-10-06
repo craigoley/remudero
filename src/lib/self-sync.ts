@@ -44,7 +44,6 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { systemClock, type Clock } from "./clock.js";
 
 function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
@@ -509,9 +508,10 @@ export async function checkServiceFreshnessAsync(
 }
 
 /** W1-T6033 BACKSTOP: the oldest origin/main update that may stand in for two stalled fetches. Derived from the
- *  daemon's freshness cadence: a healthy view is at most one poll interval plus one fetch bound old, and this check
- *  has just spent two more bounds (stall and retry). A quiet main writes no reflog entry, so it reads older. */
-export const RECENT_FETCH_MAX_AGE_MS = DEFAULT_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS;
+ *  daemon's freshness cadence: a healthy view is at most one poll interval (DEFAULT_POLL_INTERVAL_MS, inlined to keep
+ *  the baked closure; the test pins parity) plus one fetch bound old, and this check has spent two more bounds. */
+const DAEMON_POLL_INTERVAL_MS = 60_000;
+export const RECENT_FETCH_MAX_AGE_MS = DAEMON_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS;
 
 function isStalledHandshake(error: unknown): boolean {
   const message = String(error);
