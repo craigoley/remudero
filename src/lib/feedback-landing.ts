@@ -1448,7 +1448,7 @@ export function queuedFeedbackLandings(stateRoot: string): string[] {
   return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
 }
 
-/** The directory a queued record lands in under `stateRoot` — its mtime moves when a record is queued or acknowledged. */
+/** The directory queued records sit in; its mtime moves with the queue. */
 export function queuedFeedbackDir(stateRoot: string): string {
   return join(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR);
 }
@@ -1480,12 +1480,7 @@ export function overlayQueuedFeedback<E extends { id: string; status: string }>(
   return { ...entry, status: record.status as E["status"], ...answeredBy, landing: "queued" };
 }
 
-/**
- * W1-T5730: every reader of the feedback checkout overlays the one queue the same way — each entry
- * the queue holds reads its queued record, and a queued record with no checkout entry (a console
- * capture W1-T5628 left no copy of) is appended as an entry carrying `landing: "queued"`. Throws on an
- * unreadable queue: the caller names that in its source, it is never read as "nothing queued".
- */
+/** W1-T5730: the one overlay every feedback reader applies, queue-only records appended as `landing: "queued"`; throws on an unreadable queue. */
 export function overlayQueuedFeedbackEntries<E extends { id: string; status: string }>(entries: readonly E[], stateRoot: string): Array<E | (E & { landing: "queued" })> {
   const queued = readQueuedFeedbackRecords(stateRoot);
   const listed = new Set(entries.map((entry) => `${FEEDBACK_REL_DIR}/${entry.id}.yaml`));
