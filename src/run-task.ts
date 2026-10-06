@@ -25,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
-  type JobRequeueOutcome } from "./lib/sweep.js";
+  type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -36047,7 +36047,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       loadPlan: () => plan, projectPlan: () => projection,
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
-    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch);
+    const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch, undefined, baseChangedFilesByPr);
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -36064,7 +36065,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
+      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
   };
 }
 
@@ -38114,19 +38115,34 @@ export function distanceRefreshProbeTargets(
  * compare endpoint rather than `mergeable_state`: the latter is a mergeability label, not a
  * graph-distance guarantee. The pure selector in `sweep.ts` receives only measured distances.
  */
+/** GitHub's compare endpoint lists at most this many files; a list this long may be cut short. */
+const BASE_COMPARE_FILES_CAP = 300;
+
 export function buildBehindMainByPr(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
   fetch: GhApiFetcher = ghJson,
   nowMs: number = Date.now(),
+  baseChangedFilesOut?: Map<number, BaseChangedFiles>,
 ): Map<number, number> {
   const out = new Map<number, number>();
   for (const pr of distanceRefreshProbeTargets(openPrs, nowMs)) {
     try {
-      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as { ahead_by?: unknown };
+      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as {
+        ahead_by?: unknown;
+        files?: unknown;
+      };
       if (typeof compare?.ahead_by === "number" && Number.isFinite(compare.ahead_by)) {
         out.set(pr.prNumber, compare.ahead_by);
+        // W1-T5696: the same response's files[] is the base-side change list (GitHub caps it at 300).
+        // A response without a files array records nothing, which the distance arm reads as unknown.
+        if (baseChangedFilesOut !== undefined && Array.isArray(compare.files)) {
+          const files = compare.files.flatMap((f) =>
+            typeof (f as { filename?: unknown } | null)?.filename === "string" ? [(f as { filename: string }).filename] : [],
+          );
+          baseChangedFilesOut.set(pr.prNumber, { files, truncated: compare.files.length >= BASE_COMPARE_FILES_CAP });
+        }
       }
     } catch {
       // Best-effort distance: an unreadable compare omits this PR from the distance rung.
@@ -43359,7 +43375,8 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+  const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, baseChangedFilesByPr);
   await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
@@ -43380,6 +43397,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       staleGateWorkflowsByPr,
       updatedForWorkflow,
       behindMainByPr,
+      baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -44628,7 +44646,10 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-      const behindMainByPr = tickRead?.behindMainByPr ?? buildBehindMainByPr(owner, repo, prsForFixRung);
+      const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
+      const behindMainByPr = tickRead?.behindMainByPr
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
+      const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
@@ -44649,6 +44670,7 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
+          baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),

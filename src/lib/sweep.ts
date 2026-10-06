@@ -5075,6 +5075,9 @@ export interface SweepPolicy {
    *  press the existing update-branch button. Strictly greater-than: a value of 10 fires at 11, not
    *  at 10, matching the incident split that found red PRs at 10-11 behind and clean PRs at 1-8. */
   reviewWaitingBranchRefreshThreshold: number;
+  /** W1-T5696 — past this many commits behind, a distance refresh no longer needs a main-side change
+   *  that touches the PR. Omitted reads as {@link DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING}. */
+  reviewWaitingBranchRefreshCeiling?: number;
   /** W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
    *  escalates once at this many consecutive rows; {@link repeatDispositionStreaksFromLedger} says
    *  why the key excludes the rendered `reason`. ONCE PER HEAD PER ROTATION WINDOW (W1-T2382):
@@ -9103,7 +9106,66 @@ export interface ArmedStalledPr {
   /** W1-T3277: the main-distance fact that selected this ordinary stale PR, when present. */
   behindBy?: number;
   /** W1-T3277/W1-T1212: why this PR reached the shared update-branch effect. */
-  updateReason?: "armed-stalled" | "stale-gate" | "distance" | "stale-blocked";
+  updateReason?:
+    | "armed-stalled"
+    | "stale-gate"
+    | "distance"
+    | "stale-blocked"
+    | "distance-overlap"
+    | "distance-baseline"
+    | "distance-ceiling"
+    | "distance-unknown";
+  /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
+  matchingBaseFiles?: readonly string[];
+}
+
+/** W1-T5696 — the files `main` changed since a PR head, from the same compare call that measures the
+ *  distance. `truncated` when GitHub capped the list (300), so absence of a path proves nothing. */
+export interface BaseChangedFiles {
+  files: readonly string[];
+  truncated: boolean;
+}
+
+/** W1-T5696 — main-side paths that move a PR's verdict without touching any of the PR's own files:
+ *  recorded baselines, the two CI workflows, and the dependency/compiler manifests. `*` matches within
+ *  one path segment. */
+export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
+  "scripts/*-baseline.json",
+  ".github/workflows/ci.yml",
+  ".github/workflows/ci-gate.yml",
+  "package.json",
+  "package-lock.json",
+  "tsconfig*.json",
+];
+
+/** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. BACKSTOP: the
+ *  primary control is the main-side file intersection; this only catches a PR so far behind that
+ *  an unrelated-looking base is no longer trusted. */
+export const DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING = 60;
+
+/** `*` is the only glob character; every other character in a path glob is literal. */
+function refreshPathMatches(glob: string, path: string): boolean {
+  const parts = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join("[^/]*")}$`).test(path);
+}
+
+/** W1-T5696 — does `main` carry a change this PR must re-run against, and which files say so? A
+ *  missing map entry, unknown PR file list or truncated base list is `distance-unknown`: today's
+ *  refresh is kept. */
+export function distanceRefreshCause(
+  behindBy: number,
+  prFiles: readonly string[] | undefined,
+  base: BaseChangedFiles | undefined,
+  ceiling: number,
+): { reason: "distance-overlap" | "distance-baseline" | "distance-ceiling" | "distance-unknown" | undefined; files: string[] } {
+  if (base === undefined || prFiles === undefined || base.truncated) return { reason: "distance-unknown", files: [] };
+  const own = new Set(prFiles);
+  const overlap = base.files.filter((f) => own.has(f));
+  if (overlap.length > 0) return { reason: "distance-overlap", files: overlap };
+  const relevant = base.files.filter((f) => REFRESH_RELEVANT_BASE_PATHS.some((glob) => refreshPathMatches(glob, f)));
+  if (relevant.length > 0) return { reason: "distance-baseline", files: relevant };
+  if (behindBy > ceiling) return { reason: "distance-ceiling", files: [] };
+  return { reason: undefined, files: [] };
 }
 
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. `"updated"`: GitHub ACCEPTED
@@ -9139,8 +9201,10 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
 export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
-  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> &
+    Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">>,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
@@ -9165,13 +9229,30 @@ export function openPrsBehindMain(
       pr.reviewState === "success" &&
       pr.isDraft !== true;
     if (!staleBlocked && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
+    // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
+    // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
+    // own files and every refresh-relevant path are untouched by main stays put.
+    let reason: NonNullable<ArmedStalledPr["updateReason"]> = staleBlocked ? "stale-blocked" : "distance";
+    let matching: string[] = [];
+    if (!staleBlocked && baseChangedFilesByPr !== undefined) {
+      const cause = distanceRefreshCause(
+        behindBy,
+        pr.changedFiles,
+        baseChangedFilesByPr.get(pr.prNumber),
+        policy.reviewWaitingBranchRefreshCeiling ?? DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING,
+      );
+      if (cause.reason === undefined) continue;
+      reason = cause.reason;
+      matching = cause.files;
+    }
     out.push({
       prNumber: pr.prNumber,
       prUrl: pr.prUrl,
       ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
       headSha: pr.headSha,
       behindBy,
-      updateReason: staleBlocked ? "stale-blocked" : "distance",
+      updateReason: reason,
+      ...(matching.length === 0 ? {} : { matchingBaseFiles: matching }),
     });
   }
   return out;
@@ -9261,8 +9342,9 @@ export function queuedBehindMainSkips(
   behindMainByPr: ReadonlyMap<number, number>,
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
   queued: (pr: ArmedStalledPr) => boolean,
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr[] {
-  return openPrsBehindMain(prs, behindMainByPr, policy).filter(queued);
+  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr).filter(queued);
 }
 
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
@@ -9276,8 +9358,10 @@ export function selectUpdateBranchTarget(
   staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
   updatedForWorkflow: ReadonlySet<string> = new Set(),
   behindMainByPr: ReadonlyMap<number, number> = new Map(),
-  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> = DEFAULT_SWEEP_POLICY,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> &
+    Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">> = DEFAULT_SWEEP_POLICY,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -9286,7 +9370,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -10560,6 +10644,10 @@ export interface SweepDeps {
    *  data for the ordinary stale-PR refresh rung; omission keeps the rung quiet, so callers that
    *  cannot read the comparison never invent a refresh. */
   behindMainByPr?: ReadonlyMap<number, number>;
+  /** W1-T5696 — per open PR, the files main changed since its head (the same compare call as
+   *  {@link behindMainByPr}). Present, a distance refresh needs a main-side change that touches the
+   *  PR; omitted, the distance refresh is unchanged. */
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>;
   /** W1-T2620 — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip, consulted ONCE before the
    *  per-PR walk; this module never calls gh or git, so the read is the caller's. Feeds
    *  {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind` GitHub
@@ -15599,7 +15687,7 @@ export async function runSweep(
         } catch {
           return false; // a queue read that fails is "no queue": the refresh below is unchanged
         }
-      });
+      }, deps.baseChangedFilesByPr);
       for (const c of skipped) {
         queuedPrNumbers.add(c.prNumber);
         const already = ledgerLines.some(
@@ -15626,6 +15714,7 @@ export async function runSweep(
       behindMainByPr,
       policy,
       queuedPrNumbers,
+      deps.baseChangedFilesByPr,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
@@ -15633,7 +15722,10 @@ export async function runSweep(
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
       const staleWorkflowFields = staleWorkflow === undefined ? {} : { stale_workflow: staleWorkflow };
       const behindFields = target.behindBy === undefined ? {} : { behind_by: target.behindBy };
-      const updateReasonFields = target.updateReason === undefined ? {} : { update_reason: target.updateReason };
+      const updateReasonFields = {
+        ...(target.updateReason === undefined ? {} : { update_reason: target.updateReason }),
+        ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+      };
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: target.taskId ?? "SWEEP",
