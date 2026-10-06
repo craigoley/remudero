@@ -231,7 +231,17 @@ test("W1-T4095: a pass lands its changes as one reviewed PR", () => {
   });
   assert.equal(first.prUrl, "https://github.com/acme/remudero/pull/9");
   assert.equal(landed.length, 1, "one PR per pass");
-  assert.deepEqual(landed[0]!.paths, [GARDEN_LOG, "learnings/core.yaml"]);
+  // W1-T5837: a merge that changed a shard also lands the knowledge-retire golden the prompt-surface gate demands.
+  const golden = "test/fixtures/golden-verdicts/knowledge-retire";
+  assert.deepEqual(landed[0]!.paths, [
+    GARDEN_LOG,
+    "learnings/core.yaml",
+    `${golden}/checkout/${GARDEN_LOG}`,
+    `${golden}/checkout/learnings/core.yaml`,
+    `${golden}/criteria.yaml`,
+    `${golden}/diff.patch`,
+    `${golden}/report.md`,
+  ]);
   assert.match(landed[0]!.title, /^chore\(knowledge\): /);
   assert.ok(landed[0]!.paths.every((p) => !p.startsWith("src/")), "the gardener never edits code");
   // The body's proofs name text only this pass wrote.
