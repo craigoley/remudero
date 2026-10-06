@@ -279,7 +279,7 @@ async function resumeSteps<R>(steps: Steps<R>, pending: PromiseLike<unknown>): P
   return next.value;
 }
 
-export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
+export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P extends PrState | Promise<PrState> = PrState> {
   stateDir: string;
   /** The checkout the gardener reads its corpus from for planning (the daemon's own). */
   repoRoot: string;
@@ -287,7 +287,7 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   memoryDirs?: string[];
   openWorkspace: GardenWorkspacePort<W>;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  prState?: (prUrl: string) => PrState;
+  prState?: (prUrl: string) => P;
   seed?: number;
   clock?: Clock;
   /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
@@ -483,11 +483,17 @@ export function judgedByOutcomeNote(name: string, actionClass: string, why: stri
 }
 
 /** Where a landed PR stands, read over REST with the given fetcher. */
-export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState {
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => Promise<unknown>): PrState | Promise<PrState>;
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState;
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState | Promise<PrState> {
+  return runStepsEager(gardenPrStateSteps(owner, repo, prUrl, fetch));
+}
+
+function* gardenPrStateSteps(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): Steps<PrState> {
   const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
   if (!n) return "unknown";
   try {
-    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]) as { merged?: boolean; state?: string };
+    const pr = (yield* step(() => fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]))) as { merged?: boolean; state?: string };
     return pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open";
   } catch {
     // deliberate: an unreadable PR is "unknown", which keeps the pending class waiting, never judged on a guess.
@@ -559,7 +565,7 @@ export interface GardenPassResult<C extends string, A extends GardenAction<C>> {
   scorecard?: Record<string, unknown>;
 }
 
-/** A released pending frees the lane. A `lastPass` that landed nothing was recorded while the pending
+/** A settled pending frees the lane. A `lastPass` that landed nothing was recorded while the pending
  *  held every class, so its candidates were seen but never offered; forgetting it lets them act. */
 function heldPassForgotten<C extends string>(state: GardenState<C>): GardenState<C> {
   return state.lastPass?.landed === undefined ? { ...state, lastPass: undefined } : state;
@@ -577,14 +583,14 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
  *  same steps, so the same rows, state and refusals. */
 export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
   return runStepsAsync(gardenPassSteps(spec, deps));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
@@ -602,11 +608,11 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
   const pendingBefore = state.pending;
-  const prState = pendingBefore ? deps.prState?.(pendingBefore.prUrl) ?? "unknown" : undefined;
+  const prState = pendingBefore ? (yield* step(() => deps.prState?.(pendingBefore.prUrl) ?? "unknown")) : undefined;
   // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
-    state = judged.state;
+    state = heldPassForgotten(judged.state);
     deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (state.lastCheap === cheap) {
       writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
@@ -630,7 +636,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
     const judged = judgedByDecision(spec, held.actionClass)
       ? judgeGardenDecision(state, prState ?? "unknown")
       : judgeGardenPending(state, metricOf(spec, inventory, held.actionClass), prState ?? "unknown", clock);
-    state = judged.verdict === "released" ? heldPassForgotten(judged.state) : judged.state;
+    state = judged.state.pending ? judged.state : heldPassForgotten(judged.state);
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (judged.verdict === "released") {
       deps.log(`${spec.name}.pending_released`, { pr_url: held.prUrl, action_class: held.actionClass, waited_ms: clock.now() - Date.parse(held.mergeSeenAt!), bound_ms: GARDEN_PENDING_RELEASE_MS });
@@ -695,7 +701,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
 /** Run passes on their own timer beside the main loop, never two at once. */
 export function startGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;

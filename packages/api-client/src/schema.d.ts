@@ -604,6 +604,8 @@ export interface components {
       counts: InboxCounts;
       page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
     SubmitFeedbackRequest: {
@@ -616,7 +618,7 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
-      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when staging or its queue confirmation fails, with `landing_error` recorded in the `panel.feedback_submitted` ledger row (W1-T5731). */
       landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */
@@ -3023,6 +3025,30 @@ export interface components {
         })[];
       };
     };
+    /** GET /v1/views/host (docs/views.md, src/lib/host-view.ts; W1-T5053, P4-T14): the console's /host page in one read. Each part is the body its route answers, built by the same function: `control` GET /v1/control/status, `accountUsage` GET /v1/account-usage without its `*AgeMs` fields, `providerRouting` GET /v1/provider-routing, `skills` GET /v1/skills's list, `selfMeasurement` GET /v1/self-measurement. `gauges` are the exact disk and REST rate-limit readings (the `now` view carries them as bands). Built in the read-model worker's view thread at most once a minute, the rate limit and the measurement union read asynchronously. The view writes nothing; the credit-state edge is ledgered by the slow lane. Dark until state/read-model/switches.json sets `host` to `serve`. */
+    HostView: {
+      view: "host";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        control: FleetControlStatus;
+        accountUsage: AccountUsageSnapshot;
+        providerRouting: ProviderRoutingStatus;
+        skills: (SkillEntry)[];
+        selfMeasurement: (SelfMeasurementRows) | (SelfMeasurementUnreadable);
+        gauges: {
+          /** statfs `bavail * bsize` of core's state dir, exact. */
+          diskFreeBytes?: number;
+          /** `gh api rate_limit`'s `resources.core.remaining`, exact. */
+          rateLimitRemaining?: number;
+          /** Why a gauge is absent, per gauge. */
+          reasons?: Record<string, string>;
+        };
+      };
+    };
     /** GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers for that instance, computed by the route's own readers over the instance's `panel.*` facts in the read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass. `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics snapshot; without one it carries a `reason`, never an empty list. Dark until state/read-model/switches.json sets `agent` to `serve`. */
     AgentView: {
       view: "agent";
@@ -3392,10 +3418,10 @@ export interface components {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
     };
-    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open. */
+    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open, and so is each summary (`true`, not `{}`, so the strict view validator reads it open too: GET /v1/views/host). */
     SelfMeasurementRow: {
       ts: string;
-      result: Record<string, unknown>;
+      result: Record<string, never>;
     };
     /** The newest measurement rows, newest first. */
     SelfMeasurementRows: {
@@ -3626,6 +3652,8 @@ export interface components {
       fleet?: (InboxFleetItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
     InboxDigestEntry: {
@@ -3792,7 +3820,7 @@ export interface components {
     };
     /** A non-2xx body from POST /v1/inbox/thread/reply's handler. `delivery` says whether the reply is known not to be stored (`not_delivered`) or cannot be confirmed (`unverified`). */
     InboxThreadReplyRefusal: {
-      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress";
+      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress" | "inbox_not_ready";
       detail?: string;
       delivery?: "not_delivered" | "unverified";
       replyId?: string;
@@ -3844,9 +3872,9 @@ export interface components {
       proposalId: string;
       restored: boolean;
     };
-    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`. */
+    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet). */
     InboxRefusal: {
-      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable";
+      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable" | "inbox_not_ready";
       detail: string;
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
@@ -5350,6 +5378,17 @@ export interface paths {
         };
     };
   };
+  "/v1/views/host": {
+    get: {
+      responses: {
+          "200": HostView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
   "/v1/views/agent": {
     get: {
       responses: {
@@ -5563,6 +5602,7 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5592,6 +5632,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5603,6 +5644,7 @@ export interface paths {
           "403": Error;
           "404": InboxRefusal;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };

@@ -212,6 +212,7 @@ test("census:bound-kind targets test/bound-kind-declared.test.ts, and that suite
     process.execPath,
     [
       "--test",
+      "--test-reporter=tap",
       "--import",
       "tsx",
       "--import",

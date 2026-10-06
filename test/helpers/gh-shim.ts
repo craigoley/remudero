@@ -47,9 +47,19 @@ export interface GhShim {
   /** Add a route ahead of the existing table (so it can override an earlier default) without
    *  rebuilding the whole shim. Rewrites the script on disk immediately. */
   addRoute(route: GhShimRoute): void;
+  /** Every invocation's start and end rows, in order — lets a caller prove a child was in flight. */
+  events(): GhShimEvent[];
 }
 
-function renderScript(routes: GhShimRoute[], callsPath: string): string {
+/** One child-process lifecycle row: `start` when the shim is entered, `end` when it exits. `id` is
+ *  the shim process's pid, so a start pairs with its end. */
+export interface GhShimEvent {
+  id: number;
+  phase: "start" | "end";
+  args: string[];
+}
+
+function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: string): string {
   const cases = routes
     .map((r) => {
       if (r.delaySeconds !== undefined && (!Number.isFinite(r.delaySeconds) || r.delaySeconds < 0)) {
@@ -71,6 +81,8 @@ function renderScript(routes: GhShimRoute[], callsPath: string): string {
   return [
     "#!/bin/sh",
     `printf '%s\\n' "$*" >> ${JSON.stringify(callsPath)}`,
+    `printf 'start\\t%s\\t%s\\n' "$$" "$*" >> ${JSON.stringify(eventsPath)}`,
+    `trap 'printf "end\\t%s\\t%s\\n" "$$" "$*" >> ${JSON.stringify(eventsPath)}' EXIT`,
     'case "$*" in',
     cases,
     "  *) exit 0 ;;",
@@ -80,13 +92,15 @@ function renderScript(routes: GhShimRoute[], callsPath: string): string {
 }
 
 /** Build a `gh` PATH shim answering from `routes` (checked in order; see {@link GhShimRoute}). */
-export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string } = {}): GhShim {
+export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string; command?: string } = {}): GhShim {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${opts.kind ?? "gh-shim"}-`));
-  const ghPath = join(dir, "gh");
+  const ghPath = join(dir, opts.command ?? "gh");
   const callsPath = join(dir, "calls.log");
+  const eventsPath = join(dir, "events.log");
   writeFileSync(callsPath, "");
+  writeFileSync(eventsPath, "");
   let table = [...routes];
-  writeFileSync(ghPath, renderScript(table, callsPath), { mode: 0o755 });
+  writeFileSync(ghPath, renderScript(table, callsPath, eventsPath), { mode: 0o755 });
 
   return {
     dir,
@@ -96,7 +110,14 @@ export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string } = {})
     },
     addRoute(route: GhShimRoute): void {
       table = [route, ...table];
-      writeFileSync(ghPath, renderScript(table, callsPath), { mode: 0o755 });
+      writeFileSync(ghPath, renderScript(table, callsPath, eventsPath), { mode: 0o755 });
+    },
+    events(): GhShimEvent[] {
+      const text = existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "";
+      return text.split("\n").filter((line) => line.length > 0).map((line) => {
+        const [phase, id, ...rest] = line.split("\t");
+        return { id: Number(id), phase: phase as "start" | "end", args: rest.join("\t").split(" ") };
+      });
     },
   };
 }

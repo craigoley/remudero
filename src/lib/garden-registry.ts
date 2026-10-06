@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
 import {
@@ -42,6 +43,9 @@ export const REGISTERED_GARDEN_NAMES = [
   "hot-file",
   "host-resource",
   "backlog",
+  // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
+  "flow",
+  "flow-remedy",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
@@ -111,11 +115,15 @@ interface GardenSchedule {
 
 const sameInterval = (intervalMs: number) => intervalMs;
 
+/** The flow garden reports once a UTC day; an hourly due probe finds the new day without a child per poll. */
+const FLOW_DUE_PROBE_INTERVAL_MS = 60 * 60 * 1000;
+
 export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   if (name === "host-resource") {
     return { intervalFor: (i) => Math.max(1_000, Math.min(i, HOST_RESOURCE_MIN_INTERVAL_MS)), minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   }
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "flow") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }
 
@@ -325,7 +333,8 @@ export function selectorShadowMainFailures(
 }
 
 /** W1-T4439/W1-T5409: one selector-shadow pass as the daemon builds it — the PR runs, their changed
- *  paths, and main's failures at each run's base sha, all read through `io` (absent: the gh transport). */
+ *  paths, main's failures at each run's base sha and (W1-T5925) a bounded replay of older failing runs,
+ *  all read through `io` (absent: the gh transport). */
 export function selectorShadowGardenPass(
   d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: SelectorShadowGhReads = {},
 ): () => Promise<void> {
@@ -338,9 +347,25 @@ export function selectorShadowGardenPass(
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
       await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
-        undefined, undefined, selectorShadowMainFailures(owner, repo, io));
+        undefined, undefined, selectorShadowMainFailures(owner, repo, io),
+        { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
     } catch (e) {
       d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
   };
+}
+
+/** W1-T5904: one daily flow pass as the daemon builds it — the ledger union, GitHub's CI timings through
+ *  `io` (absent: the gh transport) and the shared filing path. Its due probe skips a reported day. */
+export function flowGardenPass(
+  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: Pick<SelectorShadowGhReads, "readJson"> = {},
+): (() => Promise<void>) & { due: () => boolean } {
+  const pass = async (): Promise<void> => {
+    try {
+      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson) });
+    } catch (e) {
+      d.log(FLOW_GARDENER_FAILED_STEP, { error: String((e as Error)?.message ?? e) });
+    }
+  };
+  return Object.assign(pass, { due: () => flowPassDue(d.stateDir, d.clock) });
 }

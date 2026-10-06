@@ -2417,14 +2417,15 @@ export function refusesAsPlanOnly(task: Pick<Task, "id" | "files">, files: reado
  */
 export function persistVerifiedCredit(
   ledgerPath: string,
-  taskId: string,
+  task: Pick<Task, "id" | "files"> | string,
   pr: { number: number; url: string },
   files: readonly string[] | undefined,
 ): "recorded" | "plan-only" | "unreadable" {
   if (!files || files.length === 0) return "unreadable";
-  if (isPlanOnlyChangeset(files)) return "plan-only";
+  const creditTask = typeof task === "string" ? { id: task } : task;
+  if (refusesAsPlanOnly(creditTask, files)) return "plan-only";
   const path = defaultCreditStorePath(ledgerPath);
-  saveCreditStore(path, recordCredit(loadCreditStore(path), taskId, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
+  saveCreditStore(path, recordCredit(loadCreditStore(path), creditTask.id, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
   return "recorded";
 }
 
@@ -3038,7 +3039,7 @@ const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
 /** The cold fix rung runs under its caller's run_id, not the task run's. Its task_id is deliberately
  *  preserved, so allow only that fix invocation's own rows to extend liveness after fix.dispatch;
  *  a later sweep/automerge/review row naming the same task is not evidence that the worker lived. */
-const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
+export const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
   "fix.done",
   "fix.resolved",
   "fix.exhausted",
@@ -5153,7 +5154,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place

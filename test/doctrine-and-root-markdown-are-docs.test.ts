@@ -36,9 +36,11 @@ test("W1-T4397: the suites that read doctrine still run for a doctrine edit", ()
   const index = "test/the-doctrine-index-points-at-every-body.test.ts";
   assert.equal(base.has(index), false, "the doctrine index suite is not in the plain plan-reading set");
   assert.ok(mod.planReadingSuiteFiles(REPO_ROOT, ["doctrine/ci-and-merging/x.md"]).includes(index));
-  // A CLAUDE.md edit adds the suites that read CLAUDE.md, and only a changed file's readers are added.
+  // A CLAUDE.md edit selects its readers; unrelated plan/docs readers stay out of the scoped set.
   const claude = mod.planReadingSuiteFiles(REPO_ROOT, ["CLAUDE.md"]);
-  assert.ok(claude.length > base.size && claude.every((s) => base.has(s) || /CLAUDE\.md/.test(readFileSync(join(REPO_ROOT, s), "utf8"))));
+  assert.ok(claude.includes(index), "the CLAUDE.md index reader must run");
+  assert.ok(claude.every((s) => /CLAUDE\.md/.test(readFileSync(join(REPO_ROOT, s), "utf8"))));
+  assert.ok(!claude.includes("test/every-shard-on-main-is-lintable.test.ts"), "an unrelated plan reader stays out");
   assert.equal(mod.readsChangedProse('x = "XCLAUDE.md"', ["CLAUDE.md"]), false, "a longer name is not the changed file");
   assert.equal(mod.readsChangedProse('join(REPO_ROOT, "doctrine")', ["CLAUDE.md"]), false, "doctrine readers only when doctrine changed");
   // The CLI takes the changed list, as ci.yml passes it, and plain plan-only diffs pay for nothing extra.
@@ -50,7 +52,12 @@ test("W1-T4397: the suites that read doctrine still run for a doctrine edit", ()
   assert.ok(r.stdout.split("\n").includes(index));
   writeFileSync(list, "plan/tasks.yaml\n");
   const plain = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--list-plan-reading-suites", "--changed-files", list], { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.equal(plain.stdout.trim().split("\n").length, base.size);
+  assert.equal(plain.status, 0, plain.stderr);
+  const plan = mod.planReadingSuiteFiles(REPO_ROOT, ["plan/tasks.yaml"]);
+  assert.deepEqual(plain.stdout.trim().split("\n"), plan);
+  assert.ok(plan.includes("test/every-shard-on-main-is-lintable.test.ts"), "the plan census still runs");
+  assert.ok(!plan.includes(index), "a plan edit does not select the doctrine index reader");
+  assert.match(plain.stderr, new RegExp(`selected_count=${plan.length} previous_count=${base.size}`));
   const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   assert.equal((ci.match(/--list-plan-reading-suites --changed-files changed-files\.txt/g) ?? []).length, 2, "both lanes pass the changed list");
 });

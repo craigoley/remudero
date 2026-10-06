@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: coordinator item 18 (00:17-00:47Z review stall after reviewer fetch timeouts)"
   plan_refs: [W1-T5476, W1-T5282, W1-T5772, W1-T5726]
   files: [src/lib/sweep.ts, src/lib/self-sync.ts, test/an-unprovable-reviewer-freshness-is-re-probed-not-waited-out.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

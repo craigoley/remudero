@@ -608,8 +608,8 @@ if [ -n "$_janitor_files" ]; then
 fi
 
 # Sizes (`du -sk`) of the known consumers, every Nth beat only (RMD_CONSUMER_EVERY, default 6) —
-# `du` over a worktrees root is not free. A consumer that cannot be read is ABSENT from the payload,
-# never a 0. The gardener attributes a falling disk to whichever of these grows fastest.
+# `du` over a worktrees root is not free. Failed scheduled reads publish unknown, never 0.
+# The gardener attributes a falling disk to whichever of these grows fastest.
 CONSUMER_EVERY="${RMD_CONSUMER_EVERY:-6}"
 case "$CONSUMER_EVERY" in ''|*[!0-9]*|0) CONSUMER_EVERY=6 ;; esac
 BEAT_N_FILE="${RMD_ROOT}/state/heartbeat-count.txt"
@@ -618,23 +618,69 @@ if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)";
 case "$BEAT_N" in ''|*[!0-9]*) BEAT_N=0 ;; esac
 CONSUMER_LINES=""
 consumer_kb() {
-  local name="$1" total=0 seen=0 p kb
+  local name="$1" total=0 seen=0 failed=0 p kb device devices="" paths=""
   shift
   for p in "$@"; do
-    [ -e "$p" ] || continue
-    kb="$(du -sk "$p" 2>/dev/null | awk 'NR==1 {print $1}')"
-    case "$kb" in ''|*[!0-9]*) continue ;; esac
-    total=$((total + kb)); seen=1
+    case "$p" in *'*'*) continue ;; esac
+    case "
+$paths
+" in *"
+$p
+"*) continue ;; esac
+    paths="${paths}
+${p}"
+    seen=1
+    if kb="$(du -sk "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
+      case "$kb" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + kb)) ;; esac
+    else
+      failed=1
+    fi
+    device="$(df_field "$p" 1)"; [ -n "$device" ] || device="unknown"
+    devices="${devices}
+${device}"
   done
-  if [ "$seen" = 1 ]; then CONSUMER_LINES="${CONSUMER_LINES}
-consumer_${name}_kb=${total}"; fi
+  if [ "$seen" = 0 ] || [ "$failed" = 1 ]; then total="unknown"; fi
+  if [ -z "$devices" ] || [[ "$devices" = *unknown* ]]; then
+    devices="unknown"
+  else
+    devices="$(printf '%s\n' "$devices" | sed '/^$/d' | sort -u | paste -sd, -)"
+  fi
+  CONSUMER_LINES="${CONSUMER_LINES}
+consumer_${name}_kb=${total}
+consumer_${name}_device=${devices}"
   return 0
 }
+
+live_consumer_path() {
+  local path="$1" destination="$2" source
+  source="$(printf '%s\n' "$CONSUMER_MOUNTS" | awk -F '\t' -v p="$path" -v d="$destination" '$2==p || $2==d {print $1; exit}')"
+  case "$source" in /*) printf '%s' "$source" ;; *) printf '%s' "$path" ;; esac
+}
 if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
-  consumer_kb worktrees "${RMD_ROOT}/worktrees"
+  CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+  CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
+    --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
+  LIVE_TMP="$(live_consumer_path "${RMD_ROOT}/tmp" /home/node/Remudero/tmp)"
+  consumer_kb worktrees "$(live_consumer_path "${RMD_ROOT}/worktrees" /home/node/Remudero/worktrees)"
   consumer_kb state "${RMD_ROOT}/state"
-  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then consumer_kb docker /var/lib/docker; fi
-  consumer_kb scratch /tmp/claude* "${RMD_ROOT}/tmp"
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    DOCKER_ROOT="$("$CONSUMER_RUNTIME" info --format '{{.DockerRootDir}}' 2>/dev/null)" || DOCKER_ROOT=""
+    case "$DOCKER_ROOT" in /*) : ;; *)
+      DOCKER_ROOT="$(grep -o '"data-root"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        "${RMD_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}" 2>/dev/null | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')" ;;
+    esac
+    case "$DOCKER_ROOT" in /*) : ;; *) DOCKER_ROOT=/var/lib/docker ;; esac
+    consumer_kb docker "$DOCKER_ROOT"
+    consumer_kb containerd /var/lib/containerd
+    consumer_kb rmd_tmp /mnt/rmd/tmp
+    consumer_kb rmd /mnt/rmd
+  fi
+  CONSUMER_TMP="${TMPDIR:-/tmp}"
+  LIVE_SYSTEM_TMP="$(live_consumer_path "$CONSUMER_TMP" /tmp)"
+  consumer_kb scratch "$CONSUMER_TMP"/claude* "$LIVE_SYSTEM_TMP"/claude* "$LIVE_TMP"
+  consumer_kb coverage "$CONSUMER_TMP"/rmd-c-* "$LIVE_SYSTEM_TMP"/rmd-c-* /mnt/rmd/tmp/rmd-c-* "$LIVE_TMP"/rmd-c-* \
+    "$(live_consumer_path "${RMD_ROOT}/.remudero-coverage" /home/node/Remudero/.remudero-coverage)" \
+    "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
 fi
@@ -979,7 +1025,7 @@ if [ -n "$IMAGE_BUILD_SHA" ]; then
 image_build_sha=${IMAGE_BUILD_SHA}"
 fi
 
-# Consumer sizes are APPENDED, only when measured (every Nth beat): an absent `consumer_*_kb` means
+# Consumer sizes are APPENDED, only when scheduled (every Nth beat): an absent `consumer_*_kb` means
 # "not measured this beat", which a reader must never coerce to 0.
 if [ -n "$CONSUMER_LINES" ]; then
   PAYLOAD="${PAYLOAD}${CONSUMER_LINES}"

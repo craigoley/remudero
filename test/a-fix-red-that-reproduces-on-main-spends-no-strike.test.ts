@@ -279,12 +279,14 @@ test("W1-T5528: production probing materializes the observed tip and cleans up u
 test("W1-T5528: a worktree-add or dependency-link failure returns unrunnable for every file", async (t) => {
   const addFailed = probeHarness(t, { git: async () => { throw new Error("add failed"); } });
   const files = await addFailed.probe(redPr(), [FILE, "test/other.test.ts"], MAIN);
-  assert.ok(files.every((file) => file.outcome === "unrunnable" && file.reason?.includes("add failed")));
+  assert.equal(files.setup_error, "Error: add failed");
+  assert.deepEqual([...files], [FILE, "test/other.test.ts"].map((file) =>
+    ({ file, outcome: "unrunnable", duration_ms: 0, cached: false })));
   for (const link of ["failed", "no-source", "linked-lockfile-mismatch"] as const) {
     const h = probeHarness(t, { link: () => link });
     const result = await h.probe(redPr(), [FILE], MAIN);
-    assert.equal(result[0]?.outcome, "unrunnable");
-    assert.ok(result[0]?.reason?.includes(link));
+    assert.equal(result.setup_error, `Error: probe node_modules: ${link}`);
+    assert.deepEqual([...result], [{ file: FILE, outcome: "unrunnable", duration_ms: 0, cached: false }]);
     assert.equal(h.calls.length, 2);
   }
 });
@@ -303,7 +305,10 @@ test("W1-T5528: absent files and unreadable files retain different production ou
 
 test("W1-T5528: missing dependencies, no-match, invalid proof paths, and timeouts are unrunnable", async (t) => {
   const missingDeps = probeHarness(t, { readFile: async () => { throw new Error("missing tsx"); } });
-  assert.match((await missingDeps.probe(redPr(), [FILE], MAIN))[0]?.reason ?? "", /missing tsx/);
+  const missing = await missingDeps.probe(redPr(), [FILE], MAIN);
+  assert.equal(missing.setup_error, "Error: missing tsx");
+  assert.deepEqual([...missing], [{ file: FILE, outcome: "unrunnable", duration_ms: 0, cached: false }]);
+  assert.equal(missingDeps.calls.length, 2);
   for (const execute of [async () => "no-match" as const, async () => { throw new Error("proof timeout"); }]) {
     const h = probeHarness(t, { execute });
     const result = await h.probe(redPr(), [FILE], MAIN);

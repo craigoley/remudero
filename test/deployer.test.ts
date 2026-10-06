@@ -682,7 +682,7 @@ test("realDeployDeps: waitBootHealth reads daemon.boot heartbeats after the kick
       healthPollMs: 3,
     });
     const h = deps.waitBootHealth(since);
-    assert.deepEqual(h, { bootObserved: true, crashCount: 0 });
+    assert.deepEqual(h, { bootObserved: true, crashCount: 0, rowsSeen: ["daemon.boot"] });
   });
 });
 

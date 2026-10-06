@@ -9,6 +9,18 @@ export interface BaseProbeFile {
   cached: boolean;
   reason?: string;
 }
+export type BaseProbeResult = readonly BaseProbeFile[] & { setup_error?: string; reason?: string };
+export const BASE_REPRODUCTION_MAX_FILES = 64; // PRIMARY CONTROL: bound probe work and row size.
+export const BASE_PROBE_REASON_MAX_LENGTH = 512; // PRIMARY CONTROL: bound recorded diagnostics.
+
+export function boundedBaseProbeReason(reason: unknown): string {
+  return String(reason).slice(0, BASE_PROBE_REASON_MAX_LENGTH);
+}
+
+export function baseProbeSetupFailure(files: readonly string[], error: unknown): BaseProbeResult {
+  return Object.assign(files.map((file): BaseProbeFile =>
+    ({ file, outcome: "unrunnable", duration_ms: 0, cached: false })), { setup_error: boundedBaseProbeReason(error) });
+}
 type Failure = { name: string; logTail: string };
 type Row = Record<string, unknown>;
 
@@ -44,6 +56,7 @@ export function baseReproductionFiles(failures: readonly Failure[]): string[] {
 export function decideBaseReproduction(
   files: readonly string[], outcomes: readonly BaseProbeFile[],
 ): BaseReproductionVerdict {
+  if (files.length > BASE_REPRODUCTION_MAX_FILES) return "unrunnable";
   if (files.length === 0) return "clear";
   const byFile = new Map(outcomes.map((probe) => [probe.file, probe.outcome]));
   const states = files.map((file) => byFile.get(file) ?? "unrunnable");
@@ -59,12 +72,13 @@ export function probeCacheKey(mainSha: string, file: string): string {
 export function probeCacheFromLedger(lines: readonly Row[]): Map<string, BaseProbeFile> {
   const cache = new Map<string, BaseProbeFile>();
   for (const line of lines) {
-    if (line.step !== "sweep.base_reproduction" || typeof line.main_sha !== "string" || !Array.isArray(line.files)) continue;
+    if (line.step !== "sweep.base_reproduction" || typeof line.main_sha !== "string" || !Array.isArray(line.files) ||
+        typeof line.setup_error === "string") continue;
     for (const probe of line.files) {
       if (!probe || typeof probe.file !== "string" || !["fails", "passes", "absent", "unrunnable"].includes(probe.outcome)) continue;
       cache.set(probeCacheKey(line.main_sha, probe.file), {
         file: probe.file, outcome: probe.outcome, duration_ms: typeof probe.duration_ms === "number" ? probe.duration_ms : 0,
-        cached: true, ...(typeof probe.reason === "string" ? { reason: probe.reason } : {}),
+        cached: true, ...(typeof probe.reason === "string" ? { reason: boundedBaseProbeReason(probe.reason) } : {}),
       });
     }
   }

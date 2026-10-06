@@ -48,12 +48,13 @@ const KNOWN_GAP =
 
 /** Each step the scan finds that the gardener deliberately does not read, and why. */
 const EXEMPT: Readonly<Record<string, string>> = {
-  // The five W1-T5526 removed from the read, and the three other cost-only rows.
+  // The five W1-T5526 removed from the read, and the other cost-only rows.
   "cost.anomaly": DONE_STEPS_PRICE_THE_RUN,
   "containment.probe": DONE_STEPS_PRICE_THE_RUN,
   "isolation.probe": DONE_STEPS_PRICE_THE_RUN,
   "risk_judge.decision": DONE_STEPS_PRICE_THE_RUN,
   "budget.warning": DONE_STEPS_PRICE_THE_RUN,
+  "pr.open_deferred_to_existing": DONE_STEPS_PRICE_THE_RUN, // W1-T5520: the run's restated total, its verdict row follows
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,
   worker_smoke: DONE_STEPS_PRICE_THE_RUN,
   "sweep.plan_round.worker": DONE_STEPS_PRICE_THE_RUN,
@@ -62,8 +63,10 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
+  "sweep.check_requeue.deferred": A_LANE_RUN_ID,
   "sweep.ci_gate_reaggregated": A_LANE_RUN_ID,
   "sweep.codeql_blocker.dispatch": A_LANE_RUN_ID,
+  "code_scanning.fix_dispatch": A_LANE_RUN_ID, // W1-T5633: the code-scanning fix hand-off, under the sweep's deps.runId
   "sweep.credit_backfill": A_LANE_RUN_ID,
   "sweep.disposed": A_LANE_RUN_ID,
   "pr.terminal": A_LANE_RUN_ID, // W1-T5318: the sweep's terminal-row rung, under SWEEP-/DAEMON- run ids
@@ -107,6 +110,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "test.pass": A_LANE_RUN_ID,
   // Command lanes: review, dep-review, approve/inbox, alert-fix, onboarding, the CI mutation ratchet.
   "automerge.capped_override_granted": A_LANE_RUN_ID,
+  "automerge.risk_override_observed": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
   "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,

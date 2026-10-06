@@ -402,7 +402,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SO
 /** On its OWN thread because the daemon's git is synchronous (`gitPushRunBranch` is an `execFileSync`): a socket on
  *  the blocked main thread never answers the helper that push spawns, and both wait forever (MEASURED, W1-T5115). */
 function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL): Promise<CredentialHelperSocketHandle> {
-  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath }, execArgv: process.execArgv, env: { ...process.env } });
+  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath }, env: { ...process.env } });
   let closing = false;
   let onClosed: (() => void) | undefined;
   const close = (): Promise<void> =>

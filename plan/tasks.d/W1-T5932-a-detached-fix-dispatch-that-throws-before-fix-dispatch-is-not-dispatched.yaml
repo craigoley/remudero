@@ -1,0 +1,37 @@
+- id: W1-T5932
+  title: "A DETACHED FIX DISPATCH THAT THROWS BEFORE fix.dispatch STILL READS AS DISPATCHED — W1-T1127's rule records a throw before the fix.dispatch row as acted:false, but production runs with detachFixWait, so detachSweepAction swallows the throw after runSweep already wrote acted:true, and the head is deduped as 'fix already dispatched' with no worker; W1-T5919 closed this only for the registered-owner decline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a detached dispatch failure before fix.dispatch must not seed the prior.fixed dedup
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
+  plan_refs: [W1-T1127, W1-T5919, W1-T2863]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5919 (#9429, merged). With detachFixWait: true (both
+    withFullSweepRepairAdmission and the light pass), the sweep.disposed acted:true row is written
+    before dispatchFix settles. A throw before the fix.dispatch row is caught by detachSweepAction, so
+    W1-T1127's acted:false path never fires in production, and priorActionsFromLedger seeds prior.fixed
+    from the acted:true row. That is the same stall shape as #9362/#9379 (stall #7b) for every
+    pre-dispatch throw except the registered-owner decline W1-T5919 now voids. Live: #9379 sat
+    "fix already dispatched for this head (9c0fa1b)" from 22:53Z to 23:58Z with no fix.* row for W1-T5882.
+  design: |
+    detachSweepAction writes one sweep.fix.dispatch_failed row (pr, head, task, error) when a detached
+    dispatch rejects before its fix.dispatch row. priorActionsFromLedger voids pr@head from
+    prior.fixed on that row unless a fix.dispatch/fix.retrigger exists at that task and head, the same
+    rule W1-T5919 uses. The retry is bounded by W1-T5919's FIX_CLAIM_DECLINE_BACKSTOP family (or a sibling
+    BACKSTOP constant), then escalates once naming the error. Register the step in
+    DECISION_RELEVANT_LEDGER_STEPS.
+  acceptance:
+    - claim: "a detached fix dispatch that rejects before writing fix.dispatch records a dispatch-failed row and the next pass retries instead of deduping, a real fix.dispatch at that head still dedups, and past the bound one escalation names the error"
+      proof: "unit test: test/a-detached-fix-dispatch-that-throws-before-fix-dispatch-is-not-dispatched.test.ts"
+  falsifier: |
+    Let detachSweepAction swallow the rejection silently: the next pass reads "fix already dispatched"
+    and the test fails.

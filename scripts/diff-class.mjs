@@ -214,27 +214,52 @@ export function namesPlanOrDocsPath(content) {
   );
 }
 
+/** Literal paths and joined segments, retaining directory prefixes in dynamic template paths. */
+export function namedPlanOrDocsPaths(content) {
+  const paths = new Set();
+  const add = (path) => paths.add(path.replace(/^(?:\.\.\/)+/, "").split("${")[0].replace(/\/+$/, ""));
+  for (const m of content.matchAll(/["'`]((?:\.\.\/)*(?:plan\/|docs\/)[^"'`]*|MASTER-PLAN\.md)["'`]/g)) add(m[1]);
+  for (const m of content.matchAll(/\bjoin\(\s*[^,()]+,\s*((?:["'`][^"'`]+["'`]\s*,?\s*)+)/g)) {
+    const segments = [...m[1].matchAll(/["'`]([^"'`]+)["'`]/g)].map((q) => q[1]);
+    const path = segments.join("/").replace(/^(?:\.\.\/)+/, "");
+    if (/^(?:plan|docs)(?:\/|$)/.test(path)) add(path);
+  }
+  return paths;
+}
+
+/** Match the changed file, a directory ancestor, a shard id, or a reader of the whole plan. */
+export function readsChangedPlanOrDocs(content, changedFiles) {
+  const paths = namedPlanOrDocsPaths(content);
+  const planChanged = changedFiles.some(isInPlanScope);
+  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
+  const walksPlan = enumeratesPopulation(content) &&
+    ["plan", "plan/tasks.d", "plan/tasks.yaml"].some((p) => paths.has(p));
+  if (planChanged && (loadsPlan || walksPlan)) return true;
+  return changedFiles.some((file) => {
+    for (const path of paths) if (file === path || file.startsWith(path + "/")) return true;
+    const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
+    return Boolean(id && new RegExp(`\\b${id}\\b`).test(content));
+  });
+}
+
 /**
- * The plan-reading suite set, enumerated from the tree at run time — never a hand-copied list.
- * Directory-only: `test/helpers`/`test/setup` are shared fixtures, not suites `npm test`'s glob
- * selects either way. Qualifies by `namesPlanOrDocsPath(content)` alone — `hasRepoRootConstant`
- * used to gate this too but was dropped: MEASURED, it excluded six suites that can fail on a
- * plan-only diff, and no other source-shape spelling separated the set either.
+ * Enumerate readers of changed plan/docs paths, plus the census floor. Without a changed list,
+ * preserve the broad set for older callers and for the CLI's previous-count comparison.
  */
 // Why: docs/forensics/diff-class.md#planreadingsuitefiles.
 export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
-  const out = [];
+  const out = new Set(changedFiles.length > 0 ? censusSuiteFiles(changedFiles, root) : []);
   for (const entry of readdirSync(testDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const abs = join(testDir, entry.name);
     const content = readFileSync(abs, "utf8");
-    if (namesPlanOrDocsPath(content) || readsChangedProse(content, changedFiles)) {
-      out.push(relative(root, abs).split(sep).join("/"));
+    if ((changedFiles.length > 0 ? readsChangedPlanOrDocs(content, changedFiles) : namesPlanOrDocsPath(content)) ||
+        readsChangedProse(content, changedFiles)) {
+      out.add(relative(root, abs).split(sep).join("/"));
     }
   }
-  out.sort();
-  return out;
+  return [...out].sort();
 }
 
 // ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
@@ -474,9 +499,12 @@ export function main(argv) {
   if (values["list-plan-reading-suites"]) {
     try {
       const root = values["plan-reading-root"] ?? REPO_ROOT;
-      // W1-T4397: with --changed-files, also the suites that read a changed root-markdown or doctrine file.
+      // The changed list narrows plan/docs readers and adds changed prose readers and censuses.
       const changed = values["changed-files"] ? readChangedFilesArg(values["changed-files"]) : [];
-      for (const path of planReadingSuiteFiles(root, changed)) console.log(path);
+      const suites = planReadingSuiteFiles(root, changed);
+      const previous = changed.length > 0 ? planReadingSuiteFiles(root).length : suites.length;
+      console.error(`diff-class: plan-reading selected_count=${suites.length} previous_count=${previous}`);
+      for (const path of suites) console.log(path);
       process.exitCode = 0;
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the plan-reading suite set — ${err && err.message ? err.message : String(err)}`);

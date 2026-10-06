@@ -1,10 +1,14 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+import { isPromiseLike } from "./gardener.js";
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { existsSync, readFileSync } from "node:fs";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 
-import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type Proposal } from "./inbox.js";
+import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import { machineTokens } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
@@ -38,11 +42,11 @@ import { appendPanelLedger } from "./panel-actions.js";
 
 export type FleetLaneDecision = "file" | "merge";
 
-export interface FleetLaneDeps {
+export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   stateDir: string;
   ledgerPath: string;
   /** How many PRs the fleet merged in the last 24 hours. */
-  mergedLastDay: () => number;
+  mergedLastDay: () => R;
   /** Hand one drafted finding to the ordinary approve flow (`rmd approve`, detached). */
   approve: (proposalId: string) => void;
   clock?: Clock;
@@ -86,6 +90,51 @@ export function readClassificationSnapshot(stateDir: string): ({ generatedAt: st
   }
 }
 
+/** W1-T5897: everything serve's inbox readers build from, which the slow lane persists so serve's main thread never classifies. */
+export function persistedInboxPath(stateDir: string): string {
+  return `${stateDir}/inbox-classification.json`;
+}
+
+/** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
+export interface PersistedInboxContent extends ClassificationEvidence {
+  proposals: Proposal[];
+  classifications: InboxClassification[];
+  /** The only ledger rows the readers take from a pass: fleet-lane decisions and verify-human releases. */
+  ledgerRows: Array<Record<string, unknown>>;
+  mergedTaskIds: string[];
+  projectionIndeterminate: boolean;
+}
+export interface PersistedInbox extends PersistedInboxContent {
+  identity: string;
+  generatedAt: string;
+}
+
+export function persistedInboxIdentity(content: PersistedInboxContent): string {
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 32);
+}
+
+/** Written atomically by the slow lane, stamped at `atMs`, the same instant the view bodies it built name. */
+export function writePersistedInbox(stateDir: string, content: PersistedInboxContent, atMs: number): PersistedInbox {
+  const persisted = { identity: persistedInboxIdentity(content), generatedAt: fixedClock(atMs).iso(), ...content };
+  writeAtomic(persistedInboxPath(stateDir), JSON.stringify(persisted) + "\n");
+  return persisted;
+}
+
+/** The last persisted classification; undefined when none is readable, which a reader answers as not ready. */
+export function readPersistedInbox(stateDir: string): PersistedInbox | undefined {
+  const raw = readJson(persistedInboxPath(stateDir));
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PersistedInbox>;
+    const valid = typeof parsed.identity === "string" && Number.isFinite(Date.parse(parsed.generatedAt ?? "")) && Array.isArray(parsed.proposals) &&
+      Array.isArray(parsed.classifications) && Array.isArray(parsed.ledgerRows) && Array.isArray(parsed.mergedTaskIds) && typeof parsed.complete === "boolean";
+    return valid ? (parsed as PersistedInbox) : undefined;
+  } catch {
+    // deliberate: a torn or foreign file is no classification, answered as not ready until the next pass rewrites it.
+    return undefined;
+  }
+}
+
 /** The classification states a finding can be worked from: open, not retired, declined or ratified. */
 const OPEN_STATES: ReadonlySet<string> = new Set(["ready", "not_ready", "drafting", "deferred_with_trigger"]);
 const ORIGIN = "fleet-lane";
@@ -93,8 +142,22 @@ const ORIGIN = "fleet-lane";
 /** How many commits landed on origin/main's first-parent line in the last day — the merge rate the
  *  lane paces its filing by. */
 export function mergedInLastDay(repoDir: string, run: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8" })): number {
+  return runStepsSync(mergedInLastDaySteps(repoDir, run));
+}
+
+const mergeRateExecFile = promisify(execFile);
+
+export function mergedInLastDayAsync(
+  repoDir: string,
+  run: (args: string[]) => string | Promise<string> = async (args) => (await mergeRateExecFile("git", args, { encoding: "utf8" })).stdout,
+): Promise<number> {
+  return runStepsAsync(mergedInLastDaySteps(repoDir, run));
+}
+
+function* mergedInLastDaySteps(repoDir: string, run: (args: string[]) => string | Promise<string>): Steps<number> {
   try {
-    return run(["-C", repoDir, "log", "origin/main", "--first-parent", "--since=24 hours ago", "--format=%H"]).split("\n").filter(Boolean).length;
+    const raw = yield* step(() => run(["-C", repoDir, "log", "origin/main", "--first-parent", "--since=24 hours ago", "--format=%H"]));
+    return raw.split("\n").filter(Boolean).length;
   } catch {
     // deliberate: an unanswerable merge rate is zero, which files nothing — never a guess upward.
     return 0;
@@ -153,7 +216,7 @@ export function readFleetLaneStore(stateDir: string): DecisionStore {
   return raw === undefined ? {} : (JSON.parse(raw) as DecisionStore);
 }
 
-function decide(deps: FleetLaneDeps, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
+function decide(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
   const reason = PLAIN_REASON[decision];
   if (machineTokens(reason).length > 0) throw new Error(`fleet-lane: reason for ${decision} is not plain`);
   store[proposalId] = { decision, ts: (deps.clock ?? systemClock).iso() };
@@ -172,6 +235,14 @@ export interface FleetLanePass {
 
 /** One pass over the fleet lane. Pure over its deps except for the ledger rows and approve calls. */
 export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
+  return runStepsSync(triageFleetLaneSteps(deps));
+}
+
+export function triageFleetLaneAsync(deps: FleetLaneDeps<number | Promise<number>>): Promise<FleetLanePass> {
+  return runStepsAsync(triageFleetLaneSteps(deps));
+}
+
+function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): Steps<FleetLanePass> {
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
   if (!snapshot) return { filed: [], merged: [], room: 0 };
@@ -215,7 +286,7 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
 
   // FILE: drafted findings, oldest of the most common kind first, at the fleet's own pace.
   const filedToday = Object.values(store).filter((d) => d.decision === "file" && withinDay(d.ts)).length;
-  const room = Math.max(0, deps.mergedLastDay() - filedToday);
+  const room = Math.max(0, (yield* step(() => deps.mergedLastDay())) - filedToday);
   const kindCount = new Map<string, number>();
   for (const p of survivors) kindCount.set(inboxKind(p.id), (kindCount.get(inboxKind(p.id)) ?? 0) + 1);
   const drafted = survivors
@@ -250,24 +321,29 @@ export function fleetLaneDecisions(
 
 /** Run one fleet-lane pass ({@link triageFleetLane}) on its own timer, never two at once. */
 export function startFleetLane(
-  pass: () => FleetLanePass,
+  pass: () => FleetLanePass | Promise<FleetLanePass>,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): { stop: () => void } {
   let running = false;
+  const report = (result: FleetLanePass) => {
+    if (result.filed.length + result.merged.length > 0) {
+      log("fleet_lane.pass", { filed: result.filed.length, merged: result.merged.length, room: result.room, classificationAgeMs: result.classificationAgeMs });
+    }
+  };
+  const failed = (e: unknown) => log("fleet_lane.failed", { error: String((e as Error)?.message ?? e) });
+  const done = () => { running = false; };
   const tick = () => {
     if (running) return;
     running = true;
     try {
       const result = pass();
-      if (result.filed.length + result.merged.length > 0) {
-        log("fleet_lane.pass", { filed: result.filed.length, merged: result.merged.length, room: result.room, classificationAgeMs: result.classificationAgeMs });
-      }
+      if (isPromiseLike(result)) return void result.then(report).catch(failed).finally(done);
+      report(result);
     } catch (e) {
       log("fleet_lane.failed", { error: String((e as Error)?.message ?? e) });
-    } finally {
-      running = false;
     }
+    done();
   };
   tick();
   const timer = setInterval(tick, intervalMs);

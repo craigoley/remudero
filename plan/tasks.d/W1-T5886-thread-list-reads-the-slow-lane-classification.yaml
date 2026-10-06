@@ -17,7 +17,7 @@
     - src/lib/inbox-view.ts
     - src/lib/serve.ts
     - test/inbox-thread-list-view.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-05 15:06-15:12Z on the Azure host (read-only, read token, inside remudero-serve):

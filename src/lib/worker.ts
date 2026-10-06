@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
@@ -156,6 +157,9 @@ import {
   OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
   type ProviderSelection,
+  type ProviderMixing,
+  selectWorkerProvider,
+  routingDrawValue,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
@@ -169,6 +173,7 @@ import {
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
+import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -315,7 +320,7 @@ export interface WorkerResult {
    * git fell back to the AMBIENT credential path and the boundary was not in force — the one
    * outcome on this boundary that used to leave no trace anywhere. */
   credentialHelperUnwired?: string;
-  /** W1-T1289: why the egress broker did NOT apply to this spawn in observe mode. Absent when it applied or is off. */
+  /** Egress refusal in observe mode or readiness stall/retry evidence. Absent on healthy readiness or when off. */
   egressUnenforced?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
@@ -427,6 +432,8 @@ export interface RoutingDecision {
   capability?: CodexModelTier;
   /** The live routing experiment this assignment belongs to (src/lib/routing-experiments.ts). */
   ab?: string;
+  /** W1-T5535: the learner that shaped this fix-lane draw. Mutually exclusive with `ab`: a learned draw is no crossover. */
+  learner?: string;
   /** The cash trial this run belongs to, its arm, and why (src/lib/cash-trial.ts). */
   trial?: string;
   trialArm?: string;
@@ -1004,7 +1011,7 @@ export interface SpawnWorkerArgs {
   egress?: {
     mode?: WorkerEgressMode;
     checkVersion?: (bin: string) => string;
-    startProxy?: (policy: unknown) => Promise<{ httpProxyPort: number; socksProxyPort: number; verifyAllowed(): Promise<void>; close(): Promise<void> }>;
+    startProxy?: (policy: unknown) => Promise<WorkerEgressProxy>;
   };
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
@@ -1073,6 +1080,11 @@ export interface SpawnWorkerArgs {
     ) => Promise<WorkerResult>;
     /** Test seam: the auction's drawn value in [0, 1), in place of the seeded draw (W1-T4617). */
     draw?: number;
+    /**
+     * W1-T5535: the fix rung's learned acceptance arms. Set ONLY by `runFixRung`; absent, the auction weighs
+     * headroom alone, exactly as before. Ignored for a task enrolled in a live routing experiment.
+     */
+    learnedArms?: FixLearnedArms;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
@@ -1175,6 +1187,9 @@ export interface SpawnWorkerArgs {
    * never on total run age — and `spawnWorker` throws {@link WorkerAbandonedError} carrying the evidence. run-task.ts wires
    * the real bound at its dispatch-spawn wrapper, never here (Standing rule 14; W1-T1045). */
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
+  /** W1-T5659 — a caller's cancel. Aborting it aborts THIS call's query (chained into the same `options.abortController` the
+   * clock bound uses; one is constructed when only this is set). Omitted leaves behaviour byte-identical. */
+  signal?: AbortSignal;
   /** Observe the per-spawn worker-home reap this teardown already runs. `reapWorkerHome` ALREADY COMPUTES a {@link
    * WorkerHomeReapResult} naming what it removed and why, and that value was discarded in statement position until this.
    * Called on EVERY exit path including a thrown error, never allowed to throw. INSTRUMENTATION ONLY: it observes, it never
@@ -1650,13 +1665,15 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
   const rule = routingRule(args, input);
-  const ab = rule === "headroom-auction" && experimentTaskIdentity(args.taskId) !== undefined
+  const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
+  const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
     : undefined;
   return {
     rule,
     ...(input.capability ? { capability: input.capability } : {}),
     ...(ab ? { ab } : {}),
+    ...(learner ? { learner } : {}),
     ...(args.routingTrial
       ? { trial: args.routingTrial.id, trialArm: args.routingTrial.arm, trialReason: args.routingTrial.reason }
       : {}),
@@ -1702,6 +1719,75 @@ export function auctionDrawSeed(
   const unit = experimentTaskIdentity(args.taskId);
   if (experiment && unit) return experimentDrawSeed(experiment, unit);
   return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
+}
+
+/** The concrete model a capacity reading would serve: the arm key's `selected_model`, aliases resolved as the assignment row does. */
+function fixArmModel(
+  args: Pick<SpawnWorkerArgs, "model">,
+  capacity: ProviderCapacity,
+  capabilities: CapabilityLadder | undefined,
+): string | undefined {
+  const model = capacity.model ?? args.model;
+  return model !== undefined && capacity.provider === "claude" ? resolveClaudeModelAlias(model, capabilities) : model;
+}
+
+/** The decision row is the rung's evidence, never a precondition: a sink that throws changes no routing. */
+function emitFixRoutingDecision(learned: FixLearnedArms, fields: Record<string, unknown>): void {
+  try {
+    learned.onDecision?.(fields);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.fix_routing_decision_write_failed", reason: "write-failed", error: String(error) }));
+  }
+}
+
+/**
+ * W1-T5535: shape ONE fix-lane auction by commit acceptance. Steers the Codex read to the arm whose Thompson draw
+ * beats the model the read served (revalidated by that read: a model without headroom is bypassed, never forced),
+ * then weighs every eligible provider's served arm. Never throws: an unreadable re-read keeps the original capacity.
+ */
+async function applyFixLearner(input: {
+  args: SpawnWorkerArgs;
+  learned: FixLearnedArms;
+  capacities: ProviderCapacity[];
+  seed: string;
+  capability: CodexModelTier | undefined;
+  capabilities: CapabilityLadder | undefined;
+  codexPreference: unknown;
+  reservePercent: number;
+  readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
+}): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
+  const { args, learned, seed, capability, capabilities } = input;
+  let capacities = input.capacities;
+  const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
+  if (codexIndex >= 0 && capability && !input.codexPreference) {
+    const current = capacities[codexIndex];
+    const known = learned.evidence.arms.filter((arm) => arm.provider === "codex").map((arm) => ({ provider: "codex", model: arm.model }));
+    const drawn = learned.weigh([...known, { provider: "codex", model: current.model }], seed).arms;
+    const beat = drawn.find((arm) => arm.model === (current.model ?? ""))?.draw ?? 0;
+    const better = drawn
+      .flatMap((arm) => (arm.draw !== null && arm.model !== "" && arm.model !== current.model && arm.draw > beat ? [{ model: arm.model, draw: arm.draw }] : []))
+      .sort((a, b) => b.draw - a.draw);
+    for (const arm of better.slice(0, 3)) {
+      try {
+        const reread = await input.readCodexFor({ capability, effort: args.effort ?? "default", model: arm.model });
+        if (reread.readable && reread.model === arm.model) {
+          capacities = capacities.map((capacity, index) => (index === codexIndex ? reread : capacity));
+          break;
+        }
+      } catch (error) {
+        console.error(JSON.stringify({ event: "worker.fix_routing_codex_reread_failed", model: arm.model, reason: "read-failed", error: String(error) }));
+      }
+    }
+  }
+  const candidates = capacities
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible)
+    .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
+  const weights = learned.weigh(candidates, seed);
+  return {
+    capacities,
+    weights,
+    mixing: { epsilon: weights.epsilon, multipliers: weights.multipliers as ProviderMixing["multipliers"] },
+  };
 }
 
 let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
@@ -2200,17 +2286,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
   }
   if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
-    const capacities = await Promise.all(
+    const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
+      (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
+        requestedModel: args.model,
+        requestedEffort: args.effort,
+        ...(preferred ? { preferredModel: preferred } : {}),
+        reservePercent: routingPolicy.reservePercent,
+        ...(args.model && capabilities ? { capabilities } : {}),
+      });
+    let capacities = await Promise.all(
       providers.map((provider) => {
-        if (provider === "codex") {
-          return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
-            requestedModel: args.model,
-            requestedEffort: args.effort,
-            ...(routingPolicy.codexModelPreference ? { preferredModel: routingPolicy.codexModelPreference } : {}),
-            reservePercent: routingPolicy.reservePercent,
-            ...(args.model && capabilities ? { capabilities } : {}),
-          });
-        }
+        if (provider === "codex") return readCodexFor(routingPolicy.codexModelPreference);
         if (claudeHealthRoute && !claudeHealthRoute.eligible) return unavailableClaudeCapacity(claudeHealthRoute);
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))()
           .then((capacity) => claudeHealthRoute
@@ -2243,13 +2329,44 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
-      const routed = selectWorkerProviderForPolicy(
-        capacities,
-        auction.policy,
-        args.providerRouting?.draw ?? auctionDrawSeed(args, auction.policy, capacities, requestedCapability),
-      );
+      // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
+      // is judged on the arms the auction would have drawn without the learner.
+      const keyed = auctionDrawSeed(args, auction.policy, capacities, requestedCapability);
+      const draw = args.providerRouting?.draw ?? keyed;
+      const learned = args.providerRouting?.learnedArms;
+      let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
+      if (learned) {
+        const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
+          : auction.policy.preference !== "automatic" ? "operator-preference" : undefined;
+        if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
+        else {
+          const learning = await applyFixLearner({
+            args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
+            codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, readCodexFor,
+          });
+          capacities = learning.capacities;
+          fixLearning = { mixing: learning.mixing, weights: learning.weights };
+        }
+      }
+      const routed = fixLearning
+        ? {
+          selection: selectWorkerProvider(
+            capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
+            auction.policy.reservePercent, draw, fixLearning.mixing,
+          ),
+          preferenceBypass: undefined,
+        }
+        : selectWorkerProviderForPolicy(capacities, auction.policy, draw);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
+      const learnedProbabilities = selection.draw?.learned?.probabilities;
+      if (fixLearning && learned && learnedProbabilities) {
+        emitFixRoutingDecision(learned, fixRoutingDecisionFields({
+          weights: fixLearning.weights,
+          probabilities: learnedProbabilities,
+          selected: { provider: selection.provider, model: fixArmModel(args, selection.capacity, capabilities) },
+        }));
+      }
     } catch (error) {
       // W1-T3692: A BLOCKED AUCTION IS THE MOMENT CASH SHOULD CARRY THE WORK, NOT A DEAD END.
       // This fires ONLY where dispatch would otherwise stall, so its worst case is spending
@@ -2820,9 +2937,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let abandonment: WorkerAbandonmentEvidence | undefined;
     let stopWatchdog: (() => void) | undefined;
     let streamObserver = args.streamObserver;
-    if (args.clockBound) {
+    let unchainSignal: (() => void) | undefined;
+    if (args.clockBound || args.signal) {
       const controller = new AbortController();
       options.abortController = controller;
+      if (args.signal) {
+        const sig = args.signal;
+        if (sig.aborted) controller.abort();
+        else {
+          const onAbort = (): void => controller.abort();
+          sig.addEventListener("abort", onAbort, { once: true });
+          unchainSignal = () => sig.removeEventListener("abort", onAbort);
+        }
+      }
+    }
+    if (args.clockBound) {
+      const controller = options.abortController as AbortController;
       const watchdog = createWorkerClockBoundWatchdog(args.clockBound);
       streamObserver = (event) => {
         watchdog.observer(event);
@@ -2870,7 +3000,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           (args.egress?.checkVersion ?? assertWorkerEgressEnforcerVersion)(claudeBin);
           const policy = JSON.parse(fs.readFileSync(args.settingsFile, "utf8")) as { sandbox?: { network?: Record<string, unknown> } };
           egressProxy = await (args.egress?.startProxy ?? startWorkerEgressProxy)(policy);
-          await verifyWorkerEgressProxy(egressProxy);
+          await verifyWorkerEgressProxy(egressProxy, diagnostic => {
+            egressUnenforced = egressUnenforced ? `${egressUnenforced}; ${diagnostic}` : diagnostic;
+          });
           const network = { ...policy.sandbox?.network, httpProxyPort: egressProxy.httpProxyPort, socksProxyPort: egressProxy.socksProxyPort };
           options.settings = { ...policy, sandbox: { ...policy.sandbox, network } } as Options["settings"];
         } catch (error) {
@@ -2937,6 +3069,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw err;
     } finally {
       stopWatchdog?.();
+      unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
       await egressProxy?.close();
@@ -6693,14 +6826,14 @@ export function ghPrMergeSquash(prUrl: string): string {
 export interface WorkerEgressProxy {
   httpProxyPort: number;
   socksProxyPort: number;
-  verifyAllowed(): Promise<void>;
+  verifyAllowed(onDiagnostic?: (message: string) => void): Promise<void>;
   close(): Promise<void>;
 }
 
 export class WorkerEgressError extends RmdError {
   override name = "WorkerEgressError";
 
-  constructor(message: string) {
+  constructor(message: string, readonly readinessTimeout?: { classification: "loop_stalled" | "proxy_unresponsive"; lagMs: number }) {
     super("install", GENERIC_EXIT_CODE, message);
   }
 }
@@ -6849,7 +6982,7 @@ export async function startWorkerEgressProxy(
   try {
     const httpProxyPort = await listen(http);
     const socksProxyPort = await listen(socks);
-    const verifyAllowed = async () => {
+    const verifyAllowed = async (onDiagnostic?: (message: string) => void) => {
       const canarySockets = new Set<Socket>();
       const canary = createTcpServer(socket => {
         canarySockets.add(socket);
@@ -6862,12 +6995,12 @@ export async function startWorkerEgressProxy(
         const marker = randomUUID();
         control = { host, port };
         const header = "HTTP/1.1 200 Connection Established\r\n\r\n";
-        const httpReply = await egressReadinessExchange(httpProxyPort, `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n${marker}`, header.length + marker.length);
+        const httpReply = await egressReadinessExchange(httpProxyPort, `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n${marker}`, header.length + marker.length, onDiagnostic);
         if (httpReply.toString() !== header + marker) throw new WorkerEgressError("worker HTTP egress positive control failed");
         const name = Buffer.from(host);
         const socksReply = await egressReadinessExchange(socksProxyPort, Buffer.concat([
           Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([port >> 8, port & 255]), Buffer.from(marker),
-        ]), 12 + marker.length);
+        ]), 12 + marker.length, onDiagnostic);
         if (!socksReply.subarray(0, 12).equals(Buffer.concat([Buffer.from([5, 0]), SOCKS_REPLY(0)])) || socksReply.subarray(12).toString() !== marker) {
           throw new WorkerEgressError("worker SOCKS egress positive control failed");
         }
@@ -6887,24 +7020,58 @@ export async function startWorkerEgressProxy(
 }
 
 /** Exchange bytes through a real local listener, bounded so failed readiness cannot hang spawn. */
-function egressReadinessExchange(port: number, bytes: Buffer | string, length: number): Promise<Buffer> {
-  return new Promise<Buffer>((resolveReply, reject) => {
+async function egressReadinessExchange(port: number, bytes: Buffer | string, length: number, onDiagnostic?: (message: string) => void): Promise<Buffer> {
+  const exchange = () => new Promise<Buffer>((resolveReply, reject) => {
+    const startedAt = performance.now();
+    const sampleMs = 25;
+    let sampledAt = startedAt;
+    let lagMs = 0;
+    const sample = () => {
+      const now = performance.now();
+      lagMs = Math.max(lagMs, now - sampledAt - sampleMs);
+      sampledAt = now;
+    };
     const socket = connectTcp(port, "127.0.0.1", () => socket.write(bytes));
+    const sampler = setInterval(sample, sampleMs);
     let received = Buffer.alloc(0);
-    socket.setTimeout(EGRESS_READY_MS, () => socket.destroy(new WorkerEgressError("worker egress readiness timed out")));
+    socket.setTimeout(EGRESS_READY_MS, () => {
+      sample();
+      const elapsedMs = performance.now() - startedAt;
+      // A stall must consume at least half the readiness budget; ordinary timer jitter is not a stall.
+      const classification = lagMs >= Math.min(elapsedMs, EGRESS_READY_MS) / 2 ? "loop_stalled" : "proxy_unresponsive";
+      socket.destroy(new WorkerEgressError(`worker egress readiness timed out (${classification} lag ${(lagMs / 1000).toFixed(3)}s)`, { classification, lagMs }));
+    });
+    socket.once("close", () => clearInterval(sampler));
     socket.on("error", reject);
     socket.on("data", chunk => { received = Buffer.concat([received, chunk]); if (received.length >= length) { resolveReply(received); socket.destroy(); } });
     socket.on("end", () => { resolveReply(received); socket.destroy(); });
   });
+  let stalled: WorkerEgressError;
+  try {
+    return await exchange();
+  } catch (error) {
+    if (!(error instanceof WorkerEgressError) || error.readinessTimeout?.classification !== "loop_stalled") throw error;
+    stalled = error;
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  let reply: Buffer;
+  try {
+    reply = await exchange();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new WorkerEgressError(`${stalled.message.slice(0, -1)}; retry failed: ${reason})`, error instanceof WorkerEgressError ? error.readinessTimeout : undefined);
+  }
+  onDiagnostic?.(`${stalled.message.slice(0, -1)}; retry ok)`);
+  return reply;
 }
 
 /** Both forwarding controls and refusals must succeed before a worker is released. */
-export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy): Promise<void> {
-  await proxy.verifyAllowed();
-  const http = await egressReadinessExchange(proxy.httpProxyPort, "CONNECT egress-readiness.invalid:443 HTTP/1.1\r\n\r\n", 12);
+export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy, onDiagnostic?: (message: string) => void): Promise<void> {
+  await proxy.verifyAllowed(onDiagnostic);
+  const http = await egressReadinessExchange(proxy.httpProxyPort, "CONNECT egress-readiness.invalid:443 HTTP/1.1\r\n\r\n", 12, onDiagnostic);
   if (!http.toString().startsWith("HTTP/1.1 403")) throw new WorkerEgressError("worker HTTP egress refusal not established");
   const name = Buffer.from("egress-readiness.invalid");
-  const socks = await egressReadinessExchange(proxy.socksProxyPort, Buffer.concat([Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([1, 187])]), 12);
+  const socks = await egressReadinessExchange(proxy.socksProxyPort, Buffer.concat([Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([1, 187])]), 12, onDiagnostic);
   if (socks[0] !== 5 || socks[1] !== 0 || socks[2] !== 5 || socks[3] !== 2) throw new WorkerEgressError("worker SOCKS egress refusal not established");
 }
 

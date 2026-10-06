@@ -1649,9 +1649,32 @@ echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_I
 # Volumes are never pruned — same rule host-update.sh states, and there is no flag here to enable
 # it. `docker container prune` is NOT run either: it removes STOPPED containers, and an ad-hoc
 # worker that has exited is indistinguishable from junk from here (the W1-T2725 reasoning).
+#
+# ── EXCEPT THIS RECYCLE'S OWN LEFTOVER SMOKE (W1-T5706) ────────────────────────────────────────
+# READ 2026-10-04: two Created `*-worker-smoke` containers held 4.0 GB images each, and the reclaim
+# read 0B every time. Section 5.5's smoke runs with `--rm` and is removed only on its failure path,
+# so one left in Created state outlives the run and pins its image through the protected set. That
+# ONE name is ours by construction, so a non-running container named EXACTLY `${SMOKE_NAME}` is
+# removed before the protected set is read. `--filter name=` is a substring match, hence the exact
+# re-check; `rm` has no `-f`, so docker itself refuses a running one. No other name is ever removed.
+# And when the prune still frees nothing, every image held ONLY by stopped containers is named with
+# its unique bytes and its pinning containers — for the operator to judge, never removed from here.
 if [ "${RMD_RECYCLE_SKIP_RECLAIM:-0}" = "1" ]; then
   echo "recycle-container: reclaim SKIPPED (RMD_RECYCLE_SKIP_RECLAIM=1)"
 else
+  STALE_SMOKE_ROWS="$(docker ps -a --filter "name=${SMOKE_NAME}" --format '{{.ID}} {{.Names}} {{.State}}' 2>/dev/null || true)"
+  while read -r smoke_id smoke_names smoke_state; do
+    [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
+    [ -n "${smoke_state}" ] && [ "${smoke_state}" != "running" ] || continue
+    if docker container rm "${smoke_id}" >/dev/null 2>&1; then
+      echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) — it would pin its image through the reclaim"
+    else
+      echo "recycle-container: could not remove leftover ${SMOKE_NAME} (${smoke_state}) — its image stays pinned" >&2
+    fi
+  done <<EOF_SMOKE
+${STALE_SMOKE_ROWS}
+EOF_SMOKE
+
   # Every image id any container — running or stopped — is built on, plus the digest just pulled.
   PROTECTED_IMAGE_IDS="$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null || true)"
   PROTECTED_IMAGE_IDS="$(printf '%s\n%s\n' "${PROTECTED_IMAGE_IDS}" "${PULLED_IMAGE_ID}" | sed '/^$/d' | sort -u)"
@@ -1685,6 +1708,30 @@ EOF_PROTECTED
 
   if [ -z "${RECLAIMED}" ] || [ "${RECLAIMED}" = "0B" ]; then
     echo "recycle-container: reclaimed 0B — nothing was unreferenced. Not an error, and not a success either."
+    # One `<image> <name> <running>` row per container; an image is a STOPPED PIN when no row on
+    # it is running. Rows of any other shape are ignored rather than guessed at.
+    PIN_ROWS="$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}} {{.Name}} {{.State.Running}}' 2>/dev/null || true)"
+    STOPPED_PINS="$(printf '%s\n' "${PIN_ROWS}" | awk '
+      $3 == "true" { running[$1] = 1; next }
+      $3 == "false" { n = $2; sub(/^\//, "", n); pins[$1] = (($1 in pins) ? pins[$1] "," : "") n }
+      END { for (img in pins) if (!(img in running)) print img, pins[img] }' | sort)"
+    if [ -z "${STOPPED_PINS}" ]; then
+      echo "recycle-container: no image is held only by stopped containers"
+    else
+      DF_VERBOSE="$(docker system df -v 2>/dev/null || true)"
+      echo "recycle-container: images held ONLY by stopped containers (listed, never removed from here):"
+      while read -r pin_image pin_names; do
+        [ -n "${pin_image}" ] || continue
+        pin_short="${pin_image#sha256:}"
+        pin_short="${pin_short:0:12}"
+        pin_unique="$(printf '%s\n' "${DF_VERBOSE}" | awk -v id="${pin_short}" '
+          /space usage:/ { images = ($0 ~ /^Images/); next }
+          images && $3 == id { print $(NF-1); exit }')"
+        echo "recycle-container:   PINNED ${pin_image} unique=${pin_unique:-unknown} by ${pin_names}"
+      done <<EOF_PINS
+${STOPPED_PINS}
+EOF_PINS
+    fi
   else
     echo "recycle-container: reclaimed ${RECLAIMED}"
   fi

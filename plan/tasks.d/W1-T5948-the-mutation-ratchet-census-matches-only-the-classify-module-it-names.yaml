@@ -1,0 +1,33 @@
+- id: W1-T5948
+  title: "THE MUTATION-RATCHET CENSUS MATCHES ONLY THE CLASSIFY MODULE IT NAMES — test/mutation-ratchet.test.ts finds the importers of src/lib/classify.ts with importsModule(text, /classify(\\.js)?$/), which is unanchored, so a test that imports src/lib/fix-rung-classify.js is counted as importing classify.ts and fails the census; W1-T5933 had to import its classifier through run-task.ts's re-export to get past it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low  # one concern — one census regex
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
+  plan_refs: [W1-T5933]
+  files: [test/mutation-ratchet.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5933 (#9447, merged). test/mutation-ratchet.test.ts line ~331
+    filters test files with importsModule(..., /classify(\.js)?$/). Any module path ending in
+    "classify" matches, including fix-rung-classify.js, so a test of the update-branch classifier was
+    refused as a classify.ts importer. The workaround (importing through run-task.ts's re-export) hides the
+    real dependency.
+  design: |
+    Anchor the match on the path segment: /(^|\/)classify(\.js)?$/, and add a self-test that a
+    fix-rung-classify import is not counted while a classify import still is.
+  acceptance:
+    - claim: "the mutation-ratchet census counts an import of src/lib/classify.js as a classify importer and does not count an import of src/lib/fix-rung-classify.js"
+      proof: "unit test: test/mutation-ratchet.test.ts"
+      kind: guard
+    - claim: "the census self-test names the fix-rung-classify import it must not count"
+      proof: "grep: fix-rung-classify in test/mutation-ratchet.test.ts"
+  falsifier: |
+    Drop the anchor: a fix-rung-classify import is counted again and the self-test fails.

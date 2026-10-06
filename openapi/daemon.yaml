@@ -1564,6 +1564,10 @@ components:
           $ref: "#/components/schemas/ReadPage"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+        classifiedAt:
+          type: string
+          format: date-time
+          description: W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from.
 
     SubmitFeedbackRequest:
       type: object
@@ -1605,7 +1609,8 @@ components:
           description: >
             W1-T5626: `queued` when this write's feedback record was staged under the state root
             for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
-            the record was not staged.
+            staging or its queue confirmation fails, with `landing_error` recorded in the
+            `panel.feedback_submitted` ledger row (W1-T5731).
 
     OperatorActivityItem:
       type: object
@@ -7578,6 +7583,65 @@ components:
                   activity:
                     $ref: "#/components/schemas/OperatorActivityResult"
 
+    HostView:
+      type: object
+      description: >
+        GET /v1/views/host (docs/views.md, src/lib/host-view.ts; W1-T5053, P4-T14): the console's /host
+        page in one read. Each part is the body its route answers, built by the same function: `control`
+        GET /v1/control/status, `accountUsage` GET /v1/account-usage without its `*AgeMs` fields,
+        `providerRouting` GET /v1/provider-routing, `skills` GET /v1/skills's list, `selfMeasurement`
+        GET /v1/self-measurement. `gauges` are the exact disk and REST rate-limit readings (the `now` view
+        carries them as bands). Built in the read-model worker's view thread at most once a minute, the
+        rate limit and the measurement union read asynchronously. The view writes nothing; the credit-state
+        edge is ledgered by the slow lane. Dark until state/read-model/switches.json sets `host` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [host]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [control, accountUsage, providerRouting, skills, selfMeasurement, gauges]
+          properties:
+            control:
+              $ref: "#/components/schemas/FleetControlStatus"
+            accountUsage:
+              $ref: "#/components/schemas/AccountUsageSnapshot"
+            providerRouting:
+              $ref: "#/components/schemas/ProviderRoutingStatus"
+            skills:
+              type: array
+              items:
+                $ref: "#/components/schemas/SkillEntry"
+            selfMeasurement:
+              oneOf:
+                - $ref: "#/components/schemas/SelfMeasurementRows"
+                - $ref: "#/components/schemas/SelfMeasurementUnreadable"
+            gauges:
+              type: object
+              properties:
+                diskFreeBytes:
+                  type: integer
+                  description: statfs `bavail * bsize` of core's state dir, exact.
+                rateLimitRemaining:
+                  type: integer
+                  description: "`gh api rate_limit`'s `resources.core.remaining`, exact."
+                reasons:
+                  type: object
+                  description: Why a gauge is absent, per gauge.
+                  additionalProperties:
+                    type: string
+
     AgentView:
       type: object
       description: >
@@ -8287,14 +8351,15 @@ components:
         One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's
         `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each
         value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and
-        array counts. The verb set grows with the cadence, so the map is genuinely open.
+        array counts. The verb set grows with the cadence, so the map is genuinely open, and so is
+        each summary (`true`, not `{}`, so the strict view validator reads it open too: GET /v1/views/host).
       required: [ts, result]
       properties:
         ts:
           type: string
         result:
           type: object
-          additionalProperties: {}
+          additionalProperties: true
 
     SelfMeasurementRows:
       type: object
@@ -8895,6 +8960,10 @@ components:
           $ref: "#/components/schemas/InboxCounts"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+        classifiedAt:
+          type: string
+          format: date-time
+          description: W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from.
 
     InboxDigestEntry:
       type: object
@@ -9340,6 +9409,7 @@ components:
             - reply_store_unavailable
             - reply_intent_conflict
             - reply_in_progress
+            - inbox_not_ready
         detail:
           type: string
         delivery:
@@ -9469,7 +9539,8 @@ components:
         `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a
         proposal not currently READY -- detail is `refusalReason`), `already_ratified`,
         `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`),
-        `seq_ahead` (a read mark past the last message), `thread_store_unreadable`.
+        `seq_ahead` (a read mark past the last message), `thread_store_unreadable`,
+        `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet).
       required:
         - error
         - detail
@@ -9484,6 +9555,7 @@ components:
             - not_declined
             - seq_ahead
             - thread_store_unreadable
+            - inbox_not_ready
         detail:
           type: string
 
@@ -11246,8 +11318,9 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           description: >
-            A `submissionKey` or `replyTo` check could not read the landing queue (W1-T5628), where a
-            console capture lives until it lands, so nothing is filed, queued or ledgered.
+            The landing queue could not be read before capture (W1-T5731), so the response is
+            `landing_queue_unreadable` and nothing is captured or staged. Logs
+            `serve.feedback_landing_queue_unreadable` with route `/v1/feedback` and the reason.
           content:
             application/json:
               schema:
@@ -14151,6 +14224,34 @@ paths:
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
+  /v1/views/host:
+    get:
+      summary: The host page -- control status, account usage, provider routing, skills, self-measurement and exact gauges -- in one read.
+      description: >
+        W1-T5053 (arch Phase 4 design §1.1, P4-T14). Answers what GET /v1/control/status,
+        /v1/account-usage, /v1/provider-routing, /v1/skills and /v1/self-measurement answer, plus the
+        exact disk and rate-limit gauges; no query parameters. DARK: while `off` (the default) it answers
+        serve's own computation over the same route deps, the gauges and measurement taken from the
+        view's latest body; `shadow` keeps that legacy side primary while the comparator samples it. The
+        GET writes nothing. Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Kept for the view contract; the legacy computation answers whenever the view has no body.
+
   /v1/views/agent:
     get:
       summary: One agent page part for one instance, served from the read model.
@@ -14984,6 +15085,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
 
   /v1/inbox/digests:
     get:
@@ -15060,6 +15167,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
 
   /v1/inbox/thread:
     get:
@@ -15096,6 +15209,12 @@ paths:
                 $ref: "#/components/schemas/InboxRefusal"
         "500":
           description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
           content:
             application/json:
               schema:
@@ -15156,7 +15275,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/InboxThreadReplyRefusal"
         "503":
-          description: "`reply_store_unavailable` -- the thread store write failed; `delivery` says whether the reply is known absent."
+          description: "`reply_store_unavailable` -- the thread store write failed; `delivery` says whether the reply is known absent. `inbox_not_ready` -- W1-T5897: no persisted inbox classification to check the thread against."
           content:
             application/json:
               schema:

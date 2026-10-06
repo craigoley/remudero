@@ -557,6 +557,9 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "automerge.rearmed_after_disarm",
+  "automerge.rearm_exhausted",
+  "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
@@ -564,6 +567,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
+  "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
+  "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
   "pr.head_provider",
@@ -637,8 +643,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "sweep.ci_timeout_refresh.attempted",
+  "sweep.ci_timeout_refresh.outcome",
+  "sweep.ci_timeout_refresh.escalated",
+  "sweep.actions_incident_hold",
+  "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
+  "sweep.fix.checkout_claim_declined",
+  "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
@@ -672,6 +685,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // so losing either one inverts the answer.
   "panel.proposal_restored",
   "fix.dispatch",
+  "fix.retrigger",
   "fix.review",
   // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads "fix.ci_not_green"/"fix.resolved"
   // beside "fix.review"; losing either re-strands the PR against a head nothing will move again.
@@ -685,7 +699,25 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
+  "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
+  "fix.exhausted", // W1-T5966: with fix.done/resolved, status.ts FIX_LANE_TERMINAL_STEPS ends a fix.dispatch
+  "fix.stood_down", // round on these; lost, a finished round reads in flight. autonomy.ts strikeCount reads
+  "fix.superseded", // fix.exhausted beside fix.resolved, and a fix.stood_down's issue_url as human evidence.
+  "fix.superseded_unknown",
+  "fix.spawn_abandoned",
+  "sweep.fix.error", // the same round's crashed-spawn outcome, with its cost.
+  "fix.base_refreshed", // ci-friction-gardener prices a round by it (CI_FRICTION_LEDGER_STEPS).
+  "sweep.check_requeued", // W1-T5935: requeuedCheckKeysFromLedger (sweep.ts) bounds one requeue per head and check.
+  "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
+  "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
+  "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
+  "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
+  "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
+  "plan_repair.dispatch", // priorPlanRepairStrikesFromLedger: lost, the plan-repair strike budget resets.
+  "sweep.missing_task_trailer_repaired", // priorActionsFromLedger: one body edit per PR, head and task.
+  "sweep.codeql_blocker.dispatch", // codeqlBlockerDispatched: one CodeQL repair per PR, head and alert.
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",
@@ -791,12 +823,17 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1212: run-task.ts derives `updatedForWorkflow` from this row's `stale_workflow` field;
   // dropping it re-selects the same stale-gate PR every pass, spending the head for nothing.
   "sweep.update_branch.updated",
-  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. The
-  // attempted/conflict/error siblings are retained with it so rotation cannot erase the evidence
-  // that an update was attempted but did not mint a new head; only `.updated` suppresses an orphan.
+  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. Its
+  // attempted/conflict/error/head-moved/up-to-date siblings (W1-T5949) are kept so rotation cannot
+  // erase evidence that an update ran but minted no new head; only `.updated` suppresses an orphan.
   "sweep.update_branch.attempted",
   "sweep.update_branch.conflict",
   "sweep.update_branch.error",
+  "sweep.update_branch.head-moved",
+  "sweep.update_branch.up-to-date",
+  // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
+  // it on rotation would re-log the same stand-down every pass.
+  "sweep.update_branch.skipped_queue",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however

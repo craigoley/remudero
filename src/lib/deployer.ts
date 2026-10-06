@@ -788,6 +788,8 @@ export interface IdleProbe {
    *  a probe that cannot see the daemon must not report it quiet. Optional — absent means every
    *  read succeeded, so an existing {@link IdleProbe} literal is unaffected. */
   unreadable?: readonly string[];
+  /** W1-T5764 — booted recently, no `sweep.pass` since. Optional: absent means not settling. */
+  bootSettling?: boolean;
 }
 
 /**
@@ -800,7 +802,56 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   // unreadable signal can never wedge the fleet — the alternative, an in-place restart, costs a
   // SIGKILLed worker.
   if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
+  if (p.bootSettling === true) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
+}
+
+/** Why {@link daemonIsIdle} reads the probe busy (`boot-settling` among them); empty ⇔ idle. */
+export function idleBlockers(p: IdleProbe): string[] {
+  const out: string[] = [];
+  if (p.unreadable !== undefined && p.unreadable.length > 0) out.push("unreadable");
+  if (p.bootSettling === true) out.push("boot-settling");
+  if (p.workers !== 0) out.push("workers");
+  if (p.inflightLocks !== 0) out.push("inflight-locks");
+  if (p.worktreeLocks !== 0) out.push("worktree-locks");
+  return out;
+}
+
+/** W1-T5764 — BACKSTOP on how long a sweep-less boot counts as settling (first sweep: median ~8 min). */
+export const BOOT_SETTLING_BACKSTOP_MS = 15 * 60_000;
+
+/** Latest `daemon.boot` younger than `backstopMs` with no `sweep.pass` after it. No boot or no ledger
+ *  is not settling; any other read failure is `unreadable`, never a quiet "not settling". */
+export function readBootSettling(
+  ledgerPath: string,
+  nowMs: number,
+  backstopMs: number = BOOT_SETTLING_BACKSTOP_MS,
+): { settling: boolean; unreadable: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    return { settling: false, unreadable: !lockReadFailureMeansZero(err) };
+  }
+  let bootMs: number | undefined;
+  let swept = false;
+  for (const line of text.split("\n")) {
+    const isBoot = line.includes('"step":"daemon.boot"');
+    if (!isBoot && !line.includes('"step":"sweep.pass"')) continue;
+    const ts = /"ts":"([^"]+)"/.exec(line)?.[1];
+    const ms = ts === undefined ? NaN : Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    if (isBoot) {
+      if (bootMs === undefined || ms >= bootMs) {
+        bootMs = ms;
+        swept = false;
+      }
+    } else if (bootMs !== undefined && ms >= bootMs) {
+      swept = true;
+    }
+  }
+  if (bootMs === undefined || swept) return { settling: false, unreadable: false };
+  return { settling: nowMs - bootMs < backstopMs, unreadable: false };
 }
 
 /** Does this `pgrep` failure mean a TRUE zero (exit 1, no processes matched) rather than a read
@@ -966,11 +1017,23 @@ export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   return { ok, conflicting, discardable };
 }
 
+/** A boot's progress rows in write order: paths (before plan sync), boot_held (PAUSE), boot. */
+export const BOOT_PROGRESS_STEPS = ["daemon.paths", "daemon.boot_held", "daemon.boot"] as const;
+export type BootProgressStep = (typeof BOOT_PROGRESS_STEPS)[number];
+
+/** BACKSTOP (W1-T5722): once a boot is OBSERVED in progress — a `daemon.paths` or
+ *  `daemon.boot_held` row after the restart — the wait for `daemon.boot` extends to at least this.
+ *  A 45 s window declared 8 of 15 kickstarts `unhealthy_rollback` at ~46 s, at least 3 of them on
+ *  images that then booted (one boot held ~75 s). No progress row at all still fails at 45 s. */
+export const BOOT_IN_PROGRESS_WINDOW_MS = 180_000;
+
 export interface HealthInputs {
   /** A `daemon.boot` heartbeat was observed AFTER the kickstart instant. */
   bootObserved: boolean;
   /** Distinct non-zero daemon exits seen in the window (KeepAlive restart-storm). */
   crashCount: number;
+  /** Boot-progress rows seen after the kickstart, for the verdict row. Omitted ⇒ none seen. */
+  rowsSeen?: BootProgressStep[];
 }
 
 export interface HealthOpts {
@@ -999,6 +1062,26 @@ export function countLedgerBootsAfter(ledgerPath: string, sinceMs: number): numb
     /* no ledger yet — 0 boots observed */
   }
   return n;
+}
+
+/** Scan for boot-progress rows ({@link BOOT_PROGRESS_STEPS}) timestamped strictly after `sinceMs`:
+ *  the `daemon.boot` count (as {@link countLedgerBootsAfter}) and which of the three steps appeared
+ *  at all. Matches the `step` field exactly, so `daemon.boot_held` is never read as a boot. */
+export function readBootProgressAfter(ledgerPath: string, sinceMs: number): { boots: number; seen: BootProgressStep[] } {
+  let boots = 0;
+  const seen = new Set<BootProgressStep>();
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      const step = /"step":"(daemon\.(?:paths|boot_held|boot))"/.exec(line)?.[1] as BootProgressStep | undefined;
+      const ts = step ? /"ts":"([^"]+)"/.exec(line)?.[1] : undefined;
+      if (!step || !ts || !(Date.parse(ts) > sinceMs)) continue;
+      seen.add(step);
+      if (step === "daemon.boot") boots++;
+    }
+  } catch {
+    /* no ledger yet — nothing observed, the same reading as countLedgerBootsAfter */
+  }
+  return { boots, seen: BOOT_PROGRESS_STEPS.filter((s) => seen.has(s)) };
 }
 
 /** The `head_sha` on the MOST RECENT `daemon.boot` line — the sha the running daemon loaded at
@@ -1440,6 +1523,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe1.inflightLocks,
     worktree_locks: probe1.worktreeLocks,
     unreadable: probe1.unreadable,
+    boot_settling: probe1.bootSettling === true,
+    blockers: idleBlockers(probe1),
   };
   if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
@@ -1470,6 +1555,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe2.inflightLocks,
     worktree_locks: probe2.worktreeLocks,
     unreadable: probe2.unreadable,
+    boot_settling: probe2.bootSettling === true,
+    blockers: idleBlockers(probe2),
   };
   if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
@@ -1547,11 +1634,14 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
   deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
 
-  const health = assessBootHealth(deps.waitBootHealth(kickstartAt), opts.health);
+  const healthInputs = deps.waitBootHealth(kickstartAt);
+  const health = assessBootHealth(healthInputs, opts.health);
+  // W1-T5722: the verdict row names which boot-progress rows the window saw.
+  const observedRows = healthInputs.rowsSeen ?? [];
   if (health.healthy) {
     deps.clearMarker();
     deps.clearFailure?.();
-    deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
+    deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
     );
@@ -1582,6 +1672,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     failed: short(toHead),
     reason: health.reason,
     rolling_back_to: short(rollbackTo),
+    observed_rows: observedRows,
     // Distinguishes a rollback aimed by observed evidence from one that fell back to the install's
     // own head — the latter is the shape that silently did nothing, so it must be legible in the
     // ledger rather than inferred from two shas happening to match.
@@ -1657,7 +1748,8 @@ export interface RealDeployOpts {
   /** OPTIONAL since impl-EP — omitted ⇒ {@link buildDeployLogger} against `ledgerPath`, which writes
    *  to BOTH stdout and the ledger. Supplied only by tests that want to observe the calls. */
   log?: (step: string, data?: Record<string, unknown>) => void;
-  /** Health window: total ms to watch the daemon after kickstart (default 45s). */
+  /** Health window: total ms to watch the daemon after kickstart (default 45s; a boot observed in
+   *  progress extends it to at least {@link BOOT_IN_PROGRESS_WINDOW_MS}, W1-T5722). */
   healthWindowMs?: number;
   /** Poll pace within the window (default 3s). */
   healthPollMs?: number;
@@ -1762,6 +1854,7 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
 
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
@@ -1790,7 +1883,6 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     }
   };
 
-  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(ledgerPath, sinceMs);
 
   // ── THE RESTART SEAM'S TWO REAL BACKENDS (W1-T3200) ── selected by PROBED capability, never by
   // `process.platform`: a host with launchctl uses it (today's only path, macOS); a host with only
@@ -1878,7 +1970,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
 
   return {
     log,
-    now: () => Date.now(),
+    now: clock,
     fetch: () => {
       fetchWithRefLockRetry();
     },
@@ -2156,11 +2248,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
           return 0;
         }
       };
+      const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
+      const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
+      // Key set only when true, so the probe's shape is unchanged otherwise.
+      const boot = readBootSettling(ledgerPath, clock());
+      if (boot.unreadable) unreadable.push("bootSettling");
       return {
         workers,
-        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks"),
-        worktreeLocks: countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks"),
+        inflightLocks,
+        worktreeLocks,
         unreadable,
+        ...(boot.settling ? { bootSettling: true } : {}),
       };
     },
     kickstartConsole: () => {
@@ -2220,14 +2318,18 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     waitBootHealth: (sinceMs) => {
       let waited = 0;
       let boots = 0;
-      while (waited < windowMs) {
+      let seen: BootProgressStep[] = [];
+      // W1-T5722: a boot in progress with no boot yet earns the backstop; else the ordinary window.
+      const limit = (): number =>
+        boots === 0 && seen.length > 0 ? Math.max(windowMs, BOOT_IN_PROGRESS_WINDOW_MS) : windowMs;
+      while (waited < limit()) {
         sleep(pollMs);
         waited += pollMs;
-        boots = countBootsAfter(sinceMs);
+        ({ boots, seen } = readBootProgressAfter(ledgerPath, sinceMs));
         // Keep watching for the whole window to catch a restart-storm; a single boot
         // that stays is confirmed only once the window has elapsed with boots === 1.
       }
-      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1) };
+      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1), rowsSeen: seen };
     },
     alert: (message, failedHead, kind) => {
       // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the

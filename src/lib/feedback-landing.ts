@@ -202,9 +202,10 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-type LandingSteps = Generator<PlanPrPreflightAsk, LandFeedbackResult, PlanPrPreflightResult>;
+type PreflightSteps<R> = Generator<PlanPrPreflightAsk, R, PlanPrPreflightResult>;
+type LandingSteps = PreflightSteps<LandFeedbackResult>;
 
-function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFeedbackResult {
+function driveLanding<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightFn): R {
   let step = steps.next();
   while (!step.done) {
     let verdict: PlanPrPreflightResult;
@@ -219,7 +220,7 @@ function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFe
   return step.value;
 }
 
-async function driveLandingAsync(steps: LandingSteps, preflight: PlanPrPreflightAsyncFn): Promise<LandFeedbackResult> {
+async function driveLandingAsync<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightAsyncFn): Promise<R> {
   let step = steps.next();
   while (!step.done) {
     let verdict: PlanPrPreflightResult;
@@ -1447,6 +1448,11 @@ export function queuedFeedbackLandings(stateRoot: string): string[] {
   return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
 }
 
+/** The directory queued records sit in; its mtime moves with the queue. */
+export function queuedFeedbackDir(stateRoot: string): string {
+  return join(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR);
+}
+
 export type QueuedFeedbackRecord = Record<string, unknown> & { status: string };
 
 /** W1-T5627: each queued record parsed, by repo path; throws on an unreadable queue or a non-entry record. */
@@ -1464,6 +1470,22 @@ export function readQueuedFeedbackRecords(stateRoot: string): Map<string, Queued
     records.set(rel, parsed as QueuedFeedbackRecord);
   }
   return records;
+}
+
+/** W1-T5627: the queued record's decision fields over the checkout's entry — what the entry reads as until it lands. */
+export function overlayQueuedFeedback<E extends { id: string; status: string }>(entry: E, queued: ReadonlyMap<string, QueuedFeedbackRecord>): E | (E & { landing: "queued" }) {
+  const record = queued.get(`${FEEDBACK_REL_DIR}/${entry.id}.yaml`);
+  if (!record) return entry;
+  const answeredBy = record.answered_by === undefined ? {} : { answered_by: record.answered_by as string | null };
+  return { ...entry, status: record.status as E["status"], ...answeredBy, landing: "queued" };
+}
+
+/** W1-T5730: the one overlay every feedback reader applies, queue-only records appended as `landing: "queued"`; throws on an unreadable queue. */
+export function overlayQueuedFeedbackEntries<E extends { id: string; status: string }>(entries: readonly E[], stateRoot: string): Array<E | (E & { landing: "queued" })> {
+  const queued = readQueuedFeedbackRecords(stateRoot);
+  const listed = new Set(entries.map((entry) => `${FEEDBACK_REL_DIR}/${entry.id}.yaml`));
+  const queueOnly = [...queued].filter(([rel]) => !listed.has(rel)).map(([, record]) => ({ ...record, landing: "queued" }) as unknown as E & { landing: "queued" });
+  return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
 function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
@@ -1613,12 +1635,34 @@ export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
 
-/** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR. */
+/** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR; the daemon awaits the Async form (W1-T5965). */
 export function landCiLearningShards(
   drafts: readonly CiLearningShardDraft[],
   checkoutRoot: string,
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
+  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps));
+}
+
+export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
+  planPrPreflight?: PlanPrPreflightAsyncFn;
+}
+
+export async function landCiLearningShardsAsync(
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: LandCiLearningShardsAsyncOptions,
+): Promise<CiLearningFilingResult> {
+  const { planPrPreflight, ...landOpts } = deps;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr));
+  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, landOpts), preflight);
+}
+
+function* ciLearningLandingSteps(
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight">,
+): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
   const kind = ciLearningLandingKind(checkoutRoot, deps, git);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
@@ -1656,7 +1700,7 @@ export function landCiLearningShards(
   const inputs = readPendingCiLearningInputs(deps.stateRoot, shardRelDir);
   if (inputs.length === 0) return { filed: [], skipped, refused };
 
-  const landing = landContent(checkoutRoot, kind, inputs, deps);
+  const landing = yield* landContentSteps(checkoutRoot, kind, inputs, deps);
   try {
     acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
   } catch {

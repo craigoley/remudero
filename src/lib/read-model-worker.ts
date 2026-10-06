@@ -22,6 +22,7 @@ import { createAgentView } from "./agent-view.js";
 import { createAnalyticsView } from "./analytics-view.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
+import { createHostView, hostViewConfig, type HostViewConfig } from "./host-view.js";
 import { createInboxThreadView } from "./inbox-thread-view.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -217,8 +218,17 @@ export type ReadModelWorkerMessage =
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
   | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" }
+  | ({ type: "view_lane"; view: string } & ReadModelLaneMove)
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer;
+
+export interface ReadModelLaneMove {
+  view?: string;
+  instance?: string;
+  heavy: boolean;
+  dueAt: number;
+  costMs?: number;
+}
 
 export interface ReadModelViewContext {
   now: number;
@@ -359,6 +369,7 @@ export interface ReadModelTickerOptions {
   /** Projects nothing: attaches to the stores the projector thread holds, takes its states from `observe`, and builds view bodies only. */
   viewsOnly?: boolean;
   readers?: ReadModelViewReaders;
+  lane?: "fast" | "heavy";
 }
 
 export interface IntegrityRequest {
@@ -397,7 +408,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
   const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request }, execArgv: process.execArgv });
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -432,7 +443,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request }, execArgv: process.execArgv });
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request } });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -501,7 +512,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -575,6 +586,8 @@ export interface ReadModelTicker {
   want(view: string, key: string): boolean;
   /** Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms. */
   buildNow(view: string): void;
+  lane(move: ReadModelLaneMove): void;
+  peer(entry: ReadModelBodyEntry): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -586,6 +599,7 @@ interface ViewUnit {
   /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
   dueAt: number;
   startedAt?: number;
+  heavy?: boolean;
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -1073,6 +1087,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     unit.costMs = finished - started;
     unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
     if (ready) unit.startedAt = undefined;
+    if (opts.lane && ready && unit.costMs > soloMs !== (opts.lane === "heavy")) {
+      unit.heavy = opts.lane === "fast";
+      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: unit.costMs });
+    }
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? view.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
@@ -1090,7 +1108,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     return builtViews.has(view);
   };
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  const owns = (unit: ViewUnit): boolean => opts.lane === undefined || (unit.heavy === true) === (opts.lane === "heavy");
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
@@ -1124,6 +1143,23 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       deferredLoggedAt = now;
       log("read_model.materialize_deferred", { ms: spent, budgetMs: Math.max(0, left), deferred });
     }
+  }
+
+  function writeSnapshot(write: SourceSnapshotWrite): boolean {
+    const home = slots[0]!;
+    if (viewsOnly && observedAt !== Number.NEGATIVE_INFINITY) attachViews(home, clock.now());
+    const named = { instance: write.instance, ok: write.ok };
+    if (switches.projector !== "on" || home.db === undefined || home.lease === undefined) {
+      log("read_model.source_snapshot_dropped", { ...named, reason: switches.projector !== "on" ? "projector switched off" : "this serve does not hold the home store's lease" });
+      return false;
+    }
+    try {
+      writeSourceSnapshot(home.db, home.lease, write);
+    } catch (error) {
+      log("read_model.source_snapshot_failed", { ...named, error: (error as Error).message });
+      return false;
+    }
+    return true;
   }
 
   const postState = (now: number): void => {
@@ -1204,7 +1240,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
       }
-      for (const unit of units) if (unit.view.name === view && built(view)) materialize(now, now, unit);
+      for (const unit of units) if (unit.view.name === view && owns(unit) && built(view)) materialize(now, now, unit);
       postState(now);
     },
     want(view: string, key: string): boolean {
@@ -1226,20 +1262,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         log("read_model.materialize_failed", { view: built.view, error: (error as Error).message });
       }
     },
+    lane(move: ReadModelLaneMove): void {
+      for (const unit of units) {
+        if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
+        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt }, move.costMs === undefined ? {} : { costMs: move.costMs });
+      }
+    },
+    peer(entry: ReadModelBodyEntry): void {
+      lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
+      latest.set(`${entry.view}\u0000${entry.key}`, entry.body);
+    },
     acceptSnapshot(write: SourceSnapshotWrite): boolean {
-      const home = slots[0]!;
-      if (viewsOnly && observedAt !== Number.NEGATIVE_INFINITY) attachViews(home, clock.now());
-      const named = { instance: write.instance, ok: write.ok };
-      if (switches.projector !== "on" || home.db === undefined || home.lease === undefined) {
-        log("read_model.source_snapshot_dropped", { ...named, reason: switches.projector !== "on" ? "projector switched off" : "this serve does not hold the home store's lease" });
-        return false;
-      }
-      try {
-        writeSourceSnapshot(home.db, home.lease, write);
-      } catch (error) {
-        log("read_model.source_snapshot_failed", { ...named, error: (error as Error).message });
-        return false;
-      }
+      if (opts.lane !== "heavy" && !writeSnapshot(write)) return false;
       for (const unit of units) if (unit.view.snapshotSourced) unit.dueAt = 0;
       return true;
     },
@@ -1282,6 +1316,8 @@ export interface ReadModelViewsData {
   viewsModule?: string;
   /** The inbox root the `inbox-thread` view reads its thread store from; absent, that view reports why it has no body. */
   inboxRoot?: string;
+  lane?: "fast" | "heavy";
+  host?: HostViewConfig;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1291,6 +1327,8 @@ export type ReadModelViewsInput =
   | { type: "bodies"; built: SlowLaneBodies }
   | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
+  | ({ type: "lane" } & ReadModelLaneMove)
+  | { type: "peer"; entry: ReadModelBodyEntry }
   | { type: "stop" };
 
 /**
@@ -1327,6 +1365,8 @@ export function runReadModelViewWorker(
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }
     } else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
+    else if (msg.type === "lane") ticker.lane(msg);
+    else if (msg.type === "peer") ticker.peer(msg.entry);
     else ticker.accept(msg.built);
   };
   port.on("message", handle);
@@ -1349,11 +1389,12 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
+    const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
     const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
-      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1373,9 +1414,9 @@ export interface ReadModelViewLane {
 }
 
 /**
- * Spawns the view thread and relays what it posts. Its watchdog judges a build by the thread's own
- * heartbeat and only reports one that runs past {@link READ_MODEL_STALL_MS}: killing it would only
- * restart the same build from cold. A thread that dies is respawned after a doubling delay.
+ * Spawns the fast view thread, and a heavy one for units over the solo budget (W1-T5885), and relays what they post.
+ * Its watchdog judges each lane by its own heartbeat and reports a build past {@link READ_MODEL_STALL_MS}: killing
+ * it would restart the same build cold. A dead lane is respawned after a doubling delay; the other reclaims its units.
  */
 export function threadViews(opts: {
   data: Omit<ReadModelViewsData, "kind">;
@@ -1386,63 +1427,80 @@ export function threadViews(opts: {
   every?: (run: () => void, ms: number) => () => void;
 }): ReadModelViewLane {
   const clock = opts.clock ?? systemClock;
-  let worker: Worker | undefined;
-  let deaths = 0;
   let closed = false;
-  let respawn: NodeJS.Timeout | undefined;
-  let building: { view: string; instance?: string; since: number; reported: boolean } | undefined;
-  const spawnViews = (): void => {
-    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV });
-    worker = spawned;
-    building = undefined;
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean } }
+  const fast: Lane = { name: "fast", deaths: 0 };
+  const heavy: Lane = { name: "heavy", deaths: 0 };
+  const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
+  const reset: ReadModelViewsInput = { type: "lane", heavy: false, dueAt: 0 };
+  const spawnLane = (lane: Lane): void => {
+    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name };
+    const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
+    lane.worker = spawned;
+    lane.building = undefined;
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (msg.type === "view_lane") {
+        if (!heavy.worker && !heavy.respawn && !closed) spawnLane(heavy);
+        return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
+      }
+      if (msg.type === "body" && lane === heavy) fast.worker?.postMessage({ type: "peer", entry: msg.entry } satisfies ReadModelViewsInput);
       if (msg.type !== "view_unit") return opts.relay(msg);
-      deaths = 0;
-      building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
+      lane.deaths = 0;
+      lane.building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
     });
-    spawned.on("error", (error) => opts.log("read_model.views_failed", { error: String(error?.message ?? error) }));
+    spawned.on("error", (error) => opts.log("read_model.views_failed", { lane: lane.name, error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
-      if (worker !== spawned || closed) return;
-      worker = undefined;
-      deaths++;
-      const delayMs = Math.min(opts.data.tickMs * 2 ** deaths, READ_MODEL_MAX_BACKOFF_MS);
-      opts.log("read_model.views_exited", { code, deaths, respawnInMs: delayMs, ...(building ? { view: building.view } : {}) });
-      respawn = setTimeout(() => {
-        respawn = undefined;
-        if (!closed) spawnViews();
+      if (lane.worker !== spawned || closed) return;
+      lane.worker = undefined;
+      lane.deaths++;
+      other(lane).worker?.postMessage(reset);
+      const delayMs = Math.min(opts.data.tickMs * 2 ** lane.deaths, READ_MODEL_MAX_BACKOFF_MS);
+      opts.log("read_model.views_exited", { lane: lane.name, code, deaths: lane.deaths, respawnInMs: delayMs, ...(lane.building ? { view: lane.building.view } : {}) });
+      lane.respawn = setTimeout(() => {
+        lane.respawn = undefined;
+        if (closed) return;
+        spawnLane(lane);
+        other(lane).worker?.postMessage(reset);
       }, delayMs);
-      respawn.unref();
+      lane.respawn.unref();
     });
   };
   const stopWatch = (opts.every ?? everyUnref)(() => {
-    if (!building || building.reported) return;
-    const ms = clock.now() - building.since;
-    if (ms < READ_MODEL_STALL_MS) return;
-    building.reported = true;
-    opts.log("read_model.view_build_long", { view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms });
+    for (const lane of [fast, heavy]) {
+      const building = lane.building;
+      if (!building || building.reported || clock.now() - building.since < READ_MODEL_STALL_MS) continue;
+      building.reported = true;
+      opts.log("read_model.view_build_long", { lane: lane.name, view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms: clock.now() - building.since });
+    }
   }, READ_MODEL_SWITCH_RECHECK_MS);
-  const send = (msg: ReadModelViewsInput): void => worker?.postMessage(msg);
-  spawnViews();
+  const send = (msg: ReadModelViewsInput, lanes = [fast, heavy]): void => {
+    for (const lane of lanes) lane.worker?.postMessage(msg);
+  };
+  spawnLane(fast);
   return {
     state: (instances) => send({ type: "state", instances }),
-    shadow: (request) => send({ type: "shadow", request }),
-    accept: (built) => send({ type: "bodies", built }),
+    shadow: (request) => send({ type: "shadow", request }, [fast]),
+    accept: (built) => send({ type: "bodies", built }, [fast]),
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
     close: () => {
       closed = true;
       stopWatch();
-      clearTimeout(respawn);
-      const running = worker;
-      worker = undefined;
-      running?.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
-      // The stop lets the thread close its connections; one still mid-build past the bound is terminated.
-      setTimeout(() => void running?.terminate(), READ_MODEL_STOP_WAIT_MS).unref();
+      for (const lane of [fast, heavy]) {
+        clearTimeout(lane.respawn);
+        const running = lane.worker;
+        lane.worker = undefined;
+        running?.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
+        // The stop lets the thread close its connections; one still mid-build past the bound is terminated.
+        setTimeout(() => void running?.terminate(), READ_MODEL_STOP_WAIT_MS).unref();
+      }
     },
   };
 }
+
+const spawnViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
+const spawnHeavyViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
 
 export interface ReadModelWorkerData {
   kind: typeof READ_MODEL_WORKER_KIND;
@@ -1458,6 +1516,11 @@ export interface ReadModelWorkerData {
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
+}
+
+function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
+  const host = hostViewConfig(slowLane);
+  return host ? { host } : {};
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -1476,7 +1539,7 @@ export function runReadModelWorker(
   const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
@@ -1846,7 +1909,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
     };
     // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV });
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();

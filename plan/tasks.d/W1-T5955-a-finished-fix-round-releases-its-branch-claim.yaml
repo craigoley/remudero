@@ -1,0 +1,39 @@
+- id: W1-T5955
+  title: "A FINISHED FIX ROUND RELEASES ITS BRANCH CLAIM — after #9450's fleet fix round ended (fix.done 03:12Z, verdict success, fix_outcome unstated) its fix-branch claim stayed occupied, so every later repair of that PR was declined registered_worktree_owner / live_branch_claim (03:31, 03:36, 03:41) until W1-T5919's bound escalated; the PR sat red with conflicts for over an hour and was repaired by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the fix-branch claim's lifetime; it gates every repair of a PR
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: found while keeping the board green after the stall fixes shipped"
+  plan_refs: [W1-T5918, W1-T5919, W1-T2863, W1-T2952, W1-T5932]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-finished-fix-round-releases-its-branch-claim.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-06, fleet #9450 (W1-T5538, branch run-W1-T5538-1791251630540). The sweep claims the fix
+    branch with acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, branch), { run_id })
+    (src/lib/sweep.ts) before dispatching a fix round. The 03:09Z round pushed cd7e7dfb and ended with
+    fix.done at 03:12:52 (run DAEMON-1791254466681). From 03:31 every dispatch logged
+    sweep.fix.checkout_claim_declined reason registered_worktree_owner, owner_recovery_reason
+    live_branch_claim, worktree /home/node/Remudero/worktrees/sweep-W1-T5538-1791254743002:
+    decideRegisteredFixOwnerRecovery (src/run-task.ts) keeps any owner whose claim reads "occupied". W1-T5918
+    reclaims dead owners and W1-T5919 bounds the declines, so neither helps when the claim itself is never
+    released. Likely shape (to confirm): under detachFixWait the claim is released only on a path the
+    detached round does not reach, or its holder is recorded as the long-lived daemon process so it reads
+    alive forever.
+  design: |
+    Find where the fix-branch claim is released and make every end of a fix round (done, failed, thrown,
+    detached) release it exactly once, in a finally owned by the code that acquired it. Make
+    readRegisteredFixOwnerClaim judge liveness by the round that holds the claim (its run_id has no
+    fix.done/fix.failed yet), not by a process that outlives it, so a leaked claim is recoverable rather
+    than permanent.
+  acceptance:
+    - claim: "a fix round's branch claim is released when the round ends on any path, including a detached dispatch, so the next round on that PR claims the branch, and a claim whose round has already ended reads as clear rather than occupied"
+      proof: "unit test: test/a-finished-fix-round-releases-its-branch-claim.test.ts"
+  falsifier: |
+    Leave the claim held after fix.done: the next round is declined live_branch_claim and the test fails.

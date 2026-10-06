@@ -77,9 +77,21 @@
 #                               above for a ROOT pass (/mnt/scratch, /mnt/scratch/o). A non-root
 #                               pass defaults to NO scratch roots: judging a scratch unit idle
 #                               needs root's lsof view of every user's open files.
+#   RMD_CLEANUP_STATE_PARENTS   colon-separated STATE-DISK parents (W1-T5707): scratch parents whose
+#                               top level also holds live state. Default /mnt/rmd on a root `/`
+#                               pass, otherwise none. A child on STATE_DENY, a symlink, a mount
+#                               point, or one holding a configured janitor path is kept and logged;
+#                               any other child goes through the scratch-unit guards and archive.
+#                               A parent sharing a filesystem with RMD_CLEANUP_ROOT_FS (the disk is
+#                               not mounted) is not swept at all.
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
 #   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
 #   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 720)
+#   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
+#                               symlinks) for `rmd-c-<12 hex>` coverage scratch at ANY depth
+#                               (W1-T5708). Default: the tmp roots, scratch roots and parents, plus
+#                               /mnt/rmd on a `/` pass. Reaped when idle and no lock holds it.
+#   RMD_CLEANUP_COVERAGE_LOCK_DIR  where `rmd-c-<hash>.lock` lives (default /tmp)
 #   RMD_CLEANUP_DOCKER          command for the running-container mount snapshot
 #   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
 #                               both the root and the user cron run, so one path serves both)
@@ -121,7 +133,19 @@ else
   SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-}"
   SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-}"
 fi
+# The state disk's top level is judged child by child; these names are never reaped (W1-T5707).
+STATE_DENY="agent-claude agent-codex archive containerd docker host host-cleanup-archive \
+host-cleanup-worktree-archive lost+found remudero-console-state remudero-site-state site-state state2 tmp"
+if [ -n "${RMD_CLEANUP_STATE_PARENTS+x}" ]; then STATE_PARENTS="$RMD_CLEANUP_STATE_PARENTS"
+elif [ "$RUN_UID" = 0 ] && [ "$ROOT_FS" = / ]; then STATE_PARENTS=/mnt/rmd
+else STATE_PARENTS=""; fi  # a fixture root or a blind (non-root lsof) pass never inherits the host disk
 RUNUSER_CMD="${RMD_CLEANUP_RUNUSER:-runuser}"
+if [ -n "${RMD_CLEANUP_NESTED_COVERAGE_ROOTS+x}" ]; then NESTED_COVERAGE_ROOTS="$RMD_CLEANUP_NESTED_COVERAGE_ROOTS"
+else
+  NESTED_COVERAGE_ROOTS="$TMP_ROOTS:$SCRATCH_ROOTS:$SCRATCH_PARENTS"
+  [ "$ROOT_FS" = / ] && NESTED_COVERAGE_ROOTS="$NESTED_COVERAGE_ROOTS:/mnt/rmd"
+fi
+COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
 SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-720}"
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
@@ -469,7 +493,7 @@ scratch_guard() {
     [ -n "$parent" ] || continue
     parent="${parent%/}"
     case "$parent" in "$p"|"$p"/*) keep_parent "$p"; return 1 ;; esac
-  done < <(printf '%s\n' "$SCRATCH_PARENTS" | tr ':' '\n')
+  done < <(printf '%s\n%s\n' "$SCRATCH_PARENTS" "$STATE_PARENTS" | tr ':' '\n')
   if is_protected_worktree "$p"; then log "KEEP $p: protected by janitor configuration"; return 1; fi
   while IFS= read -r protected; do
     [ -n "$protected" ] || continue
@@ -609,7 +633,7 @@ snapshot_alternates() {
 "
       done <<< "$lines"
     done <<< "$files"
-  done < <(printf '%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" | tr ':' '\n')
+  done < <(printf '%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" | tr ':' '\n'; state_units)
 }
 # Sets SCRATCH_REASON and fails when unit $1 must stay: it borrows from a store that is gone, or a
 # borrower outside it still names it. A borrower removed earlier in this pass no longer holds it.
@@ -697,6 +721,102 @@ sweep_scratch_root() {
     sweep_scratch_unit "$unit"
   done
 }
+# ── W1-T5707: the state disk's top level ──
+# Fails with STATE_REASON when child $1 of state parent $2 must stay whatever its idleness.
+state_child_guard() {
+  local p="$1" parent="$2" a b configured
+  case " $STATE_DENY " in *" ${p##*/} "*) STATE_REASON="state-disk deny-list"; return 1 ;; esac
+  if [ -L "$p" ]; then STATE_REASON="symbolic link"; return 1; fi
+  a="$(fs_id "$p")"; b="$(fs_id "$parent")"
+  if [ -z "$a" ] || [ -z "$b" ]; then STATE_REASON="filesystem probe failed (unknown)"; return 1; fi
+  if [ "$a" != "$b" ]; then STATE_REASON="mount point"; return 1; fi
+  if command -v mountpoint >/dev/null 2>&1 && mountpoint -q -- "$p" 2>/dev/null; then
+    STATE_REASON="mount point"; return 1
+  fi
+  while IFS= read -r configured; do
+    configured="${configured%/}"
+    [ -n "$configured" ] || continue
+    case "$configured" in "$p"|"$p"/*) STATE_REASON="holds janitor path $configured"; return 1 ;; esac
+  done < <(printf '%s\n' "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$TMP_ROOTS" "$SCRATCH_ROOTS" \
+             "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$COVERAGE_LOCK_DIR" "$LOCK_FILE" | tr ':' '\n')
+}
+# Fails with STATE_REASON when state parent $1 is the root disk's own directory (disk not mounted).
+state_parent_ok() {
+  local a b
+  a="$(fs_id "$1")"; b="$(fs_id "$ROOT_FS")"
+  if [ -z "$a" ] || [ -z "$b" ]; then STATE_REASON="filesystem probe failed (unknown)"; return 1; fi
+  [ "$a" != "$b" ] || { STATE_REASON="on the same filesystem as $ROOT_FS (state disk not mounted)"; return 1; }
+}
+# The children a pass may judge, one per line: the alternates scan walks these, never docker/.
+state_units() {
+  local parent unit STATE_REASON
+  while IFS= read -r parent; do
+    parent="${parent%/}"
+    [ -n "$parent" ] && [ -d "$parent" ] && [ ! -L "$parent" ] && [ ! -e "$parent/.rmd-scratch-keep" ] || continue
+    state_parent_ok "$parent" || continue
+    for unit in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+      { [ -e "$unit" ] || [ -L "$unit" ]; } && state_child_guard "$unit" "$parent" && printf '%s\n' "$unit"
+    done
+  done < <(printf '%s\n' "$STATE_PARENTS" | tr ':' '\n')
+}
+sweep_state_parent() {
+  local parent="${1%/}" unit STATE_REASON=""
+  [ -d "$parent" ] || return
+  keep_parent "$parent"
+  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+    log "KEEP $parent: scratch keep marker or symbolic link"; return
+  fi
+  if ! state_parent_ok "$parent"; then log "KEEP $parent: $STATE_REASON"; return; fi
+  for unit in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+    [ -e "$unit" ] || [ -L "$unit" ] || continue
+    if state_child_guard "$unit" "$parent"; then sweep_scratch_unit "$unit"; else log "KEEP $unit: $STATE_REASON"; fi
+  done
+}
+# ── W1-T5708: coverage scratch nested at any depth ──
+# `coverageScratchDir` is `<tmpdir>/rmd-c-<12 hex>` and its gate lock is `/tmp/rmd-c-<hash>.lock`
+# (a directory whose holder.json records pid and host). A SIGKILLed run leaves the scratch behind,
+# and one nested in an ad-hoc checkout's tmp is never reclaimed by a later run of the same repo.
+# Returns 0 when nothing holds the scratch; otherwise 1 with LOCK_REASON saying why.
+coverage_lock_free() {
+  local lock="$COVERAGE_LOCK_DIR/${1##*/}.lock" holder pid host
+  LOCK_REASON=""
+  [ -e "$lock" ] || [ -L "$lock" ] || return 0
+  holder="$lock/holder.json"
+  if [ -L "$lock" ] || [ ! -f "$holder" ]; then LOCK_REASON="its lock $lock is present with no holder record"; return 1; fi
+  pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$holder" 2>/dev/null | head -n 1)"
+  host="$(sed -n 's/.*"host":"\([^"]*\)".*/\1/p' "$holder" 2>/dev/null | head -n 1)"
+  if [ -z "$pid" ] || [ -z "$host" ]; then LOCK_REASON="its lock $lock has an unattributed holder"; return 1; fi
+  if [ "$host" != "$(hostname 2>/dev/null)" ]; then LOCK_REASON="its lock $lock is held from host $host"; return 1; fi
+  if kill -0 "$pid" 2>/dev/null || [ -e "/proc/$pid" ] || ps -p "$pid" >/dev/null 2>&1; then
+    LOCK_REASON="its lock $lock is held by live pid $pid"; return 1
+  fi
+  return 0
+}
+NESTED_COVERAGE_SEEN=""
+sweep_nested_coverage() {
+  local root="${1%/}" p idle_status bytes LOCK_REASON
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES"
+  [ -d "$root" ] && [ ! -L "$root" ] || return
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [[ "${p##*/}" =~ ^rmd-c-[0-9a-f]{12}$ ]] || continue
+    case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
+    NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
+    [ -d "$p" ] && [ ! -L "$p" ] || continue
+    is_idle "$p"; idle_status=$?
+    case "$idle_status" in
+      0) ;;
+      1) log "KEEP $p: written within ${IDLE_MINUTES} min"; continue ;;
+      *) log "KEEP $p: activity probe failed (unknown)"; continue ;;
+    esac
+    if ! coverage_lock_free "$p"; then log "KEEP $p: $LOCK_REASON"; continue; fi
+    if is_open "$p"; then log "KEEP $p: held open by a process"; continue; fi
+    bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
+    log "REMOVE $p: nested coverage scratch with no lock, ${bytes:-unknown} bytes"
+    act rm -rf -- "$p"
+  done < <(find "$root" -xdev -maxdepth 6 \( -name .git -o -name node_modules \) -prune -o \
+             -type d -name 'rmd-c-*' -print -prune 2>/dev/null)
+}
 ARCHIVE_OK=0
 check_archive_root() {
   local a b probe="$ARCHIVE_ROOT"
@@ -770,7 +890,7 @@ before_pct="${before_pct:-0}"; before_avail="${before_avail:-0}"
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 
-if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS" ]; then snapshot_docker; snapshot_alternates; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ]; then snapshot_docker; snapshot_alternates; fi
 while IFS= read -r root; do
   [ -n "$root" ] && sweep_scratch_root "$root"
 done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')
@@ -783,6 +903,9 @@ while IFS= read -r parent; do
   fi
   sweep_scratch_root "$parent"
 done < <(printf '%s\n' "$SCRATCH_PARENTS" | tr ':' '\n')
+while IFS= read -r parent; do
+  [ -n "$parent" ] && sweep_state_parent "$parent"
+done < <(printf '%s\n' "$STATE_PARENTS" | tr ':' '\n')
 
 for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
   [ -d "$root" ] || continue
@@ -794,6 +917,10 @@ for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
     [ -e "$f" ] && sweep_path "$f"
   done
 done
+
+while IFS= read -r root; do
+  [ -n "$root" ] && sweep_nested_coverage "$root"
+done < <(printf '%s\n' "$NESTED_COVERAGE_ROOTS" | tr ':' '\n')
 
 while IFS= read -r coverage; do
   [ -n "$coverage" ] && [ -e "$coverage" ] && sweep_path "$coverage"

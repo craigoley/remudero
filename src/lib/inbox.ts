@@ -326,12 +326,12 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
  * operator decision to clear by hand.
  *
  * ONLY THE ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>`,
- * `verify-human:<taskId>` and `machine-judge:<taskId>` name theirs structurally. Other ids are
- * keyed on a run, a symbol or a content hash, so there is nothing to read and they are left alone
- * rather than guessed at.
+ * `verify-human:<taskId>`, `verify-human-automate:<taskId>` and `machine-judge:<taskId>` name theirs
+ * structurally. Other ids are keyed on a run, a symbol or a content hash, so there is nothing to
+ * read and they are left alone rather than guessed at.
  */
 export function deriveTaskReferent(proposalId: string): string | undefined {
-  const match = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
+  const match = /^(?:verify-human|verify-human-automate|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
   return match?.[1] ?? match?.[2];
 }
 
@@ -1210,7 +1210,7 @@ export function classifyProposal(
         `operator actually decides in; this row stays in the registry as a record, never deleted`,
     };
   }
-  const taskAskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const taskAskId = deriveTaskReferent(proposal.id);
   const taskAsk = taskAskId ? ctx.plan.byId.get(taskAskId) : undefined;
   if (taskAsk?.status === "blocked" && taskAsk.retirement) {
     return {
@@ -1838,6 +1838,34 @@ function draftPlaceholderViolations(
   return out;
 }
 
+// W1-T5827: the executor's `grep:` split (review.ts DIALECT_GREP_PATH_RE) — the pattern is everything before the last
+// ` in <path>`, so `grep: "x" not found in f.md` greps for the literal `"x" not found`, which no file holds.
+/** A drafted `grep:` proof written as an absence can never pass: refuse it, drafts only. The patterns are
+ *  function-local on purpose: the negative-reachability ratchet counts module-scope `_RE` validators. */
+function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintViolation[] {
+  const splitPattern = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+  const absenceSuffix = /\s(?:not found|absent|no longer|is gone|removed)$/i;
+  const absencePrefix = /^(?:no|not)\s+["'`]/i;
+  const out: DraftLintViolation[] = [];
+  for (const [i, criterion] of (task.acceptance ?? []).entries()) {
+    const proof = typeof criterion.proof === "string" ? criterion.proof.trim() : "";
+    const body = /^grep:\s*([\s\S]*)$/i.exec(proof)?.[1];
+    if (body === undefined) continue;
+    const pattern = (splitPattern.exec(body.trim())?.[1] ?? "").trim();
+    if (absenceSuffix.test(pattern) || absencePrefix.test(pattern)) {
+      out.push({
+        check: "draft-absence-proof",
+        severity: "block",
+        message:
+          `${task.id}: criterion ${i + 1} proof ${JSON.stringify(proof.slice(0, 90))} is an absence written as a grep — ` +
+          `the executor greps for the literal ${JSON.stringify(pattern.slice(0, 70))}, which no file holds, so it can never pass. ` +
+          "State the change as a positive proof: a unit test, or a grep for the replacement text",
+      });
+    }
+  }
+  return out;
+}
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(
@@ -1857,6 +1885,7 @@ export function lintDraftedFragment(
   for (const task of tasks) {
     violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, directoryExists));
+    violations.push(...draftAbsenceProofViolations(task));
   }
   if (stampLine !== undefined) {
     violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));

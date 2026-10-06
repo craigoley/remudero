@@ -1,18 +1,23 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, shadowRecord } from "./affected-suites.js";
+import { callerReachableSuites } from "./ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
-import type { GardenerDeps } from "./gardener.js";
+import type { GardenCheckout, GardenCheckoutAsync, GardenerDeps } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { linkWorktreeNodeModules } from "./worker.js";
 import { loadPlan, loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
 import { machineShardHeaderLines } from "./machine-filing.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
-// PRIMARY CONTROL: a rolling 60-run window holds the first-day rate (~20 failures in 40 runs)
-// long enough to require 30 observed failures after repair, across at least 40 complete runs.
+// PRIMARY CONTROL: the live window one pass reads. Since W1-T5925 the verdict folds every stored
+// observation, so this bounds the reads, not the evidence (30 failures in 60 runs needed a ~50% rate).
 export const SELECTOR_SHADOW_RUN_LIMIT = 60;
 export const SELECTOR_SHADOW_SHARDS = 8;
 export const SELECTOR_SHADOW_MIN_FAILURES = 30;
@@ -32,10 +37,18 @@ export interface SelectorShadowRun {
   log: string;
 }
 
+/** W1-T5952: "flake" (affected-suites.ts's shadowRecord, W1-T4462) is a failure caught only because
+ *  recentFailures rescued its suite. It is counted, never scored as a selection or a miss. */
+export type SelectorShadowVerdict = "selected" | "missed" | "flake";
+
+function isSelectorShadowVerdict(value: unknown): value is SelectorShadowVerdict {
+  return value === "selected" || value === "missed" || value === "flake";
+}
+
 export interface SelectorShadowFailure {
   file: string;
-  floor: "selected" | "missed";
-  narrow?: "selected" | "missed";
+  floor: SelectorShadowVerdict;
+  narrow?: SelectorShadowVerdict;
 }
 
 export interface SelectorShadowRecord {
@@ -74,6 +87,8 @@ export interface SelectorShadowReport {
   fullSuiteSize: number;
   floor: SelectorShadowSelectionReport;
   narrow: SelectorShadowSelectionReport;
+  /** W1-T5952: flake verdicts per selection, outside each selection's `failures`. */
+  flakes: { floor: number; narrow: number };
   misses: SelectorShadowMiss[];
   verdict: "misses" | "insufficient" | "ready";
   reason: string;
@@ -101,8 +116,7 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
       if (!entry || typeof entry !== "object") throw new Error("selector shadow: invalid failure");
       const f = entry as Record<string, unknown>;
       if (typeof f.file !== "string" || !/^test\/.*\.test\.ts$/.test(f.file) ||
-          (f.floor !== "selected" && f.floor !== "missed") ||
-          (f.narrow !== undefined && f.narrow !== "selected" && f.narrow !== "missed") ||
+          !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
           (row.narrowSize !== undefined && f.narrow === undefined) ||
           (row.narrowSize === undefined && f.narrow !== undefined) ||
           (row.fullRun && f.floor !== "selected")) {
@@ -116,7 +130,14 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
   return records;
 }
 
-function selectorShadowRunHeaders(response: unknown, limit: number, sinceMs: number, nowMs: number): Array<Omit<SelectorShadowRun, "log">> {
+/** One listed workflow run, validated: the fields both the live window and the replay read. */
+interface SelectorShadowRunRow extends Omit<SelectorShadowRun, "log"> {
+  status: string;
+  conclusion?: string;
+  createdMs: number;
+}
+
+function selectorShadowRunRows(response: unknown): SelectorShadowRunRow[] {
   const body = response as {
     workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; conclusion?: string | null; created_at?: string; pull_requests?: Array<{ number?: number; base?: { sha?: string } }> }>;
   } | null;
@@ -127,29 +148,41 @@ function selectorShadowRunHeaders(response: unknown, limit: number, sinceMs: num
       throw new Error("selector shadow: a workflow run has no id or head SHA");
     }
     if (typeof run.status !== "string") throw new Error("selector shadow: a workflow run has no status");
-    const createdMs = typeof run.created_at === "string" ? Date.parse(run.created_at) : NaN;
-    if (!Number.isFinite(createdMs) || createdMs < sinceMs || createdMs > nowMs + 5 * 60 * 1000) {
-      throw new Error(`selector shadow: workflow run ${run.id} has a missing or stale creation date`);
-    }
-    // A cancelled run (29 of the newest 100 on 2026-09-29, superseded pushes) never has eight
-    // coverage jobs, so counting it as incomplete kept every window short of a verdict.
-    if (run.status !== "completed" || run.conclusion === "cancelled" || run.conclusion === "skipped") return null;
     return {
       id: run.id,
       headSha: run.head_sha,
       ...(typeof run.pull_requests?.[0]?.base?.sha === "string" ? { baseSha: run.pull_requests[0].base.sha } : {}),
       ...(nonnegativeInteger(run.pull_requests?.[0]?.number) ? { prNumber: run.pull_requests![0]!.number } : {}),
+      status: run.status,
+      ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
+      createdMs: typeof run.created_at === "string" ? Date.parse(run.created_at) : NaN,
     };
+  });
+}
+
+function selectorShadowRunHeaders(response: unknown, limit: number, sinceMs: number, nowMs: number): Array<Omit<SelectorShadowRun, "log">> {
+  return selectorShadowRunRows(response).map(({ status, conclusion, createdMs, ...run }) => {
+    if (!Number.isFinite(createdMs) || createdMs < sinceMs || createdMs > nowMs + 5 * 60 * 1000) {
+      throw new Error(`selector shadow: workflow run ${run.id} has a missing or stale creation date`);
+    }
+    // A cancelled run (29 of the newest 100 on 2026-09-29, superseded pushes) never has eight
+    // coverage jobs, so counting it as incomplete kept every window short of a verdict.
+    if (status !== "completed" || conclusion === "cancelled" || conclusion === "skipped") return null;
+    return run;
   }).filter((run): run is Omit<SelectorShadowRun, "log"> => run !== null).slice(0, limit);
 }
 
-function selectorShadowRunListArgs(owner: string, repo: string, limit: number, sinceMs: number): string[] {
+function selectorShadowRunListArgs(owner: string, repo: string, perPage: number, created: string): string[] {
   // The combined event+status query returned only Sept 22-23 runs on Sept 28, while event alone
   // returned today's runs (98 completed in its newest 100). Filter status locally so a stale
   // server-side intersection cannot replace the rolling evidence window with ancient history.
-  const created = encodeURIComponent(`>=${clockFromMillisFn(() => sinceMs).iso()}`);
-  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&per_page=${Math.min(100, Math.max(limit, SELECTOR_SHADOW_RUN_LIMIT) + 40)}&created=${created}`,
+  return ["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=pull_request&per_page=${perPage}&created=${encodeURIComponent(created)}`,
     "--jq", SELECTOR_SHADOW_RUN_FIELDS];
+}
+
+/** The live window's listing: every run created inside the recent window, newest first. */
+function selectorShadowWindowListArgs(owner: string, repo: string, limit: number, sinceMs: number): string[] {
+  return selectorShadowRunListArgs(owner, repo, Math.min(100, Math.max(limit, SELECTOR_SHADOW_RUN_LIMIT) + 40), `>=${clockFromMillisFn(() => sinceMs).iso()}`);
 }
 
 /** The full 100-run page is ~1.3 MB; gh projects it to the six fields read here (~20 KB), so the
@@ -277,7 +310,7 @@ export function readSelectorShadowRuns(
   const readLog = io.readLog ?? ((args: string[]) => ghExec(args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
   const nowMs = (io.clock ?? systemClock).now();
   const sinceMs = nowMs - SELECTOR_SHADOW_RECENT_WINDOW_MS;
-  return selectorShadowRunHeaders(readJson(selectorShadowRunListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs).map((run) => ({
+  return selectorShadowRunHeaders(readJson(selectorShadowWindowListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs).map((run) => ({
     ...run,
     log: readLog(selectorShadowRunLogArgs(owner, repo, run.id)),
   }));
@@ -308,7 +341,7 @@ export async function readSelectorShadowRunsAsync(
   const writeCache = io.writeCache ?? writeAtomic;
   const nowMs = (io.clock ?? systemClock).now();
   const sinceMs = nowMs - SELECTOR_SHADOW_RECENT_WINDOW_MS;
-  const headers = selectorShadowRunHeaders(await readJson(selectorShadowRunListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs);
+  const headers = selectorShadowRunHeaders(await readJson(selectorShadowWindowListArgs(owner, repo, limit, sinceMs)), limit, sinceMs, nowMs);
   type CachedLog = { headSha: string; log: string; fetchedAt: number; complete: boolean; readerVersion: number };
   let cached: Record<string, CachedLog> = {};
   if (io.cachePath) {
@@ -423,67 +456,419 @@ function selectionReport(verdicts: Array<"selected" | "missed">, sizes: number[]
   };
 }
 
-/** Only complete eight-shard runs count. An absent narrow decision cannot inflate its evidence. */
-export function selectorShadowReport(runs: readonly SelectorShadowRun[], fullSuiteSize: number): SelectorShadowReport {
+/** W1-T5925: one complete run's scored evidence, appended once to the ledger and folded by every
+ *  later report. `failures` are those its shard did not recover; a recovered one is only counted. */
+export interface SelectorShadowObservation {
+  runId: number;
+  headSha: string;
+  baseSha?: string;
+  prNumber?: number;
+  source: "live" | "replay";
+  fullRun: boolean;
+  floorSize: number;
+  narrowSize?: number;
+  failures: SelectorShadowFailure[];
+  recovered: number;
+}
+
+type SelectorShadowReading = { kind: "skipped" | "incomplete" } | { kind: "complete"; observation: SelectorShadowObservation };
+
+/** Only complete eight-shard runs are observations. An absent narrow decision cannot inflate its evidence. */
+function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObservation["source"] = "live"): SelectorShadowReading {
+  if (explicitlySkippedRun(run.log)) return { kind: "skipped" };
+  const records = parseSelectorShadowLines(run.log);
+  if (records.length !== SELECTOR_SHADOW_SHARDS) return { kind: "incomplete" };
+  const jobs = shardEvidence(run.log);
+  const shards = run.log.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: "))
+    .map((line) => Number(/^coverage-shard \(([1-8])\/8\)/.exec(line)?.[1]));
+  const failures: SelectorShadowFailure[] = [];
+  let recovered = 0;
+  for (const [index, record] of records.entries()) {
+    // The shard exits non-zero on any failure its retry did not recover (ci.yml's TEST_EXIT), so a
+    // failure inside a job that concluded `success` was a flake no selection could have hidden.
+    // 25 of the first 35 filed "misses" were exactly this (2026-09-29 audit).
+    if (jobs.get(shards[index]!)?.conclusion === "success") recovered += record.failures.length;
+    else failures.push(...record.failures);
+  }
+  // Every shard computes the same selection from the same diff (35 of 35 cached live runs, 2026-10-06).
+  const narrowSize = median(records.flatMap((record) => record.narrowSize === undefined ? [] : [record.narrowSize]));
+  return { kind: "complete", observation: {
+    runId: run.id, headSha: run.headSha,
+    ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
+    ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
+    source, fullRun: records.some((record) => record.fullRun), floorSize: median(records.map((record) => record.floorSize))!,
+    ...(narrowSize === null ? {} : { narrowSize }), failures, recovered,
+  } };
+}
+
+type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "flakes" | "misses">;
+
+function foldSelectorShadowObservations(observations: readonly SelectorShadowObservation[], fullSuiteSize: number): SelectorShadowFold {
   const floorVerdicts: Array<"selected" | "missed"> = [];
   const narrowVerdicts: Array<"selected" | "missed"> = [];
   const floorSizes: number[] = [];
   const narrowSizes: number[] = [];
   const misses: SelectorShadowMiss[] = [];
-  let runsComplete = 0;
-  let runsSkipped = 0;
-  let runsIncomplete = 0;
+  const flakes = { floor: 0, narrow: 0 };
   let recovered = 0;
-  for (const run of runs) {
-    if (explicitlySkippedRun(run.log)) {
-      runsSkipped += 1;
-      continue;
-    }
-    const records = parseSelectorShadowLines(run.log);
-    if (records.length !== SELECTOR_SHADOW_SHARDS) {
-      runsIncomplete += 1;
-      continue;
-    }
-    runsComplete += 1;
-    const jobs = shardEvidence(run.log);
-    const shards = run.log.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: "))
-      .map((line) => Number(/^coverage-shard \(([1-8])\/8\)/.exec(line)?.[1]));
-    for (const [index, record] of records.entries()) {
-      floorSizes.push(record.fullRun ? fullSuiteSize : record.floorSize);
-      if (record.narrowSize !== undefined) narrowSizes.push(record.narrowSize);
-      // The shard exits non-zero on any failure its retry did not recover (ci.yml's TEST_EXIT), so a
-      // failure inside a job that concluded `success` was a flake no selection could have hidden.
-      // 25 of the first 35 filed "misses" were exactly this (2026-09-29 audit).
-      if (jobs.get(shards[index]!)?.conclusion === "success") {
-        recovered += record.failures.length;
-        continue;
-      }
-      for (const failure of record.failures) {
-        floorVerdicts.push(failure.floor);
-        if (failure.narrow !== undefined) narrowVerdicts.push(failure.narrow);
-        for (const selection of ["floor", "narrow"] as const) {
-          if (failure[selection] === "missed") misses.push({
-            runId: run.id, headSha: run.headSha,
-            ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
-            ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
-            selection, file: failure.file,
-          });
-        }
+  for (const run of observations) {
+    floorSizes.push(run.fullRun ? fullSuiteSize : run.floorSize);
+    if (run.narrowSize !== undefined) narrowSizes.push(run.narrowSize);
+    recovered += run.recovered;
+    for (const failure of run.failures) {
+      if (failure.floor === "flake") flakes.floor += 1;
+      else floorVerdicts.push(failure.floor);
+      if (failure.narrow === "flake") flakes.narrow += 1;
+      else if (failure.narrow !== undefined) narrowVerdicts.push(failure.narrow);
+      for (const selection of ["floor", "narrow"] as const) {
+        if (failure[selection] === "missed") misses.push({
+          runId: run.runId, headSha: run.headSha,
+          ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
+          ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
+          selection, file: failure.file,
+        });
       }
     }
   }
-  const floor = selectionReport(floorVerdicts, floorSizes, fullSuiteSize);
-  const narrow = selectionReport(narrowVerdicts, narrowSizes, fullSuiteSize);
-  const verdict = misses.length > 0 ? "misses" :
-    runsIncomplete > 0 || runsComplete < SELECTOR_SHADOW_MIN_RUNS ||
-    narrow.failures < SELECTOR_SHADOW_MIN_FAILURES || narrow.medianSize === null
+  return {
+    runsComplete: observations.length, recovered, flakes, misses,
+    floor: selectionReport(floorVerdicts, floorSizes, fullSuiteSize),
+    narrow: selectionReport(narrowVerdicts, narrowSizes, fullSuiteSize),
+  };
+}
+
+/** The window's verdict also refuses an incomplete run (`runsIncomplete`); the accumulated one counts it. */
+function selectorShadowVerdict(fold: SelectorShadowFold, runsIncomplete?: number): Pick<SelectorShadowReport, "verdict" | "reason"> {
+  const verdict = fold.misses.length > 0 ? "misses" :
+    (runsIncomplete ?? 0) > 0 || fold.runsComplete < SELECTOR_SHADOW_MIN_RUNS ||
+    fold.narrow.failures < SELECTOR_SHADOW_MIN_FAILURES || fold.narrow.medianSize === null
       ? "insufficient" : "ready";
   const reason = verdict === "misses"
-    ? `${misses.length} missed failure(s); repair their selector edges before W1-T4406`
+    ? `${fold.misses.length} missed failure(s); repair their selector edges before W1-T4406`
     : verdict === "ready"
-      ? `${narrow.failures} failures across ${runsComplete} complete runs with zero misses; W1-T4406 may be reviewed for narrowing`
-      : `need ${SELECTOR_SHADOW_MIN_FAILURES} narrow-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs, zero incomplete runs and a measured narrow size`;
-  return { runsRequested: runs.length, runsComplete, runsSkipped, runsIncomplete, recovered, fullSuiteSize, floor, narrow, misses, verdict, reason };
+      ? `${fold.narrow.failures} failures across ${fold.runsComplete} complete runs with zero misses; W1-T4406 may be reviewed for narrowing`
+      : `need ${SELECTOR_SHADOW_MIN_FAILURES} narrow-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs${runsIncomplete === undefined ? "" : ", zero incomplete runs"} and a measured narrow size`;
+  return { verdict, reason };
+}
+
+function selectorShadowWindowReport(readings: readonly SelectorShadowReading[], fullSuiteSize: number): SelectorShadowReport {
+  const fold = foldSelectorShadowObservations(readings.flatMap((r) => r.kind === "complete" ? [r.observation] : []), fullSuiteSize);
+  const runsSkipped = readings.filter((r) => r.kind === "skipped").length;
+  const runsIncomplete = readings.filter((r) => r.kind === "incomplete").length;
+  return { runsRequested: readings.length, runsSkipped, runsIncomplete, fullSuiteSize, ...fold, ...selectorShadowVerdict(fold, runsIncomplete) };
+}
+
+/** The report over one window of runs; only complete eight-shard runs count. */
+export function selectorShadowReport(runs: readonly SelectorShadowRun[], fullSuiteSize: number): SelectorShadowReport {
+  return selectorShadowWindowReport(runs.map((run) => selectorShadowReading(run)), fullSuiteSize);
+}
+
+/** W1-T5925: the durable store. Rotation never archives this step (DECISION_RELEVANT_LEDGER_STEPS),
+ *  so the live ledger holds every observation the fold reads, bounded by MAX_RETAINED_LINES_PER_STEP. */
+export const SELECTOR_SHADOW_OBSERVATION_STEP = "selector-shadow.observation";
+const SELECTOR_SHADOW_OBSERVATION_LINE = /"step":"selector-shadow\.observation"/;
+
+function selectorShadowObservationRow(o: SelectorShadowObservation): Record<string, unknown> {
+  return {
+    ci_run_id: o.runId, head_sha: o.headSha,
+    ...(o.baseSha === undefined ? {} : { base_sha: o.baseSha }),
+    ...(o.prNumber === undefined ? {} : { pr: o.prNumber }),
+    source: o.source, full_run: o.fullRun, floor_size: o.floorSize,
+    ...(o.narrowSize === undefined ? {} : { narrow_size: o.narrowSize }),
+    failures: o.failures, recovered: o.recovered,
+  };
+}
+
+function selectorShadowObservationFromRow(row: Record<string, unknown>): SelectorShadowObservation | undefined {
+  if (!nonnegativeInteger(row.ci_run_id) || typeof row.head_sha !== "string" || (row.source !== "live" && row.source !== "replay") ||
+      typeof row.full_run !== "boolean" || !nonnegativeInteger(row.floor_size) || !nonnegativeInteger(row.recovered) ||
+      (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) || !Array.isArray(row.failures)) return undefined;
+  const failures: SelectorShadowFailure[] = [];
+  for (const entry of row.failures as unknown[]) {
+    const f = entry as Record<string, unknown> | null;
+    if (!f || typeof f.file !== "string" || !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
+        (row.full_run && f.floor !== "selected")) return undefined;
+    failures.push({ file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow as SelectorShadowVerdict }) });
+  }
+  return {
+    runId: row.ci_run_id, headSha: row.head_sha,
+    ...(typeof row.base_sha === "string" ? { baseSha: row.base_sha } : {}),
+    ...(nonnegativeInteger(row.pr) ? { prNumber: row.pr } : {}),
+    source: row.source, fullRun: row.full_run, floorSize: row.floor_size,
+    ...(row.narrow_size === undefined ? {} : { narrowSize: row.narrow_size as number }),
+    failures, recovered: row.recovered,
+  };
+}
+
+/** Every stored observation, the first row per run winning; a row that does not parse is counted. An
+ *  unreadable live ledger throws: a report folded over an empty store would read as less evidence. */
+export function readSelectorShadowObservations(stateDir: string): { observations: SelectorShadowObservation[]; unreadable: number } {
+  // ledger-read-intent: live — the step is retained live across rotation, so no archive is read.
+  const read = readLedgerUnionRecordsSync(stateDir, { pattern: SELECTOR_SHADOW_OBSERVATION_LINE, maxRotations: 0, refuseIncomplete: true });
+  if (!read.ok) throw new Error(`selector shadow: the observation store is unreadable: ${read.unread.join(", ")}`);
+  const observations = new Map<number, SelectorShadowObservation>();
+  let unreadable = read.torn;
+  for (const row of read.rows) {
+    const observation = selectorShadowObservationFromRow(row);
+    if (observation === undefined) unreadable += 1;
+    else if (!observations.has(observation.runId)) observations.set(observation.runId, observation);
+  }
+  return { observations: [...observations.values()], unreadable };
+}
+
+/** BACKSTOP (W1-T5925): historical runs one pass may replay — one job list, eight log reads and one
+ *  recomputed selection each — so a backfill spreads over the gardener's own cadence. */
+export const SELECTOR_SHADOW_REPLAY_RUNS_PER_PASS = 2;
+/** BACKSTOP: replayed observations the store may hold before the backfill stops — half of the
+ *  MAX_RETAINED_LINES_PER_STEP rows rotation keeps of the step, so live rows always have room. */
+export const SELECTOR_SHADOW_REPLAY_MAX_OBSERVATIONS = 100;
+/** BACKSTOP: how far before its first pass the replay walks; GitHub keeps run logs for 90 days. */
+export const SELECTOR_SHADOW_REPLAY_HORIZON_MS = 30 * 24 * 60 * 60 * 1000;
+/** The replay's resumable cursor: the newest creation time it has not yet walked past. */
+export const SELECTOR_SHADOW_REPLAY_STATE_FILE = "selector-shadow-replay.json";
+const SELECTOR_SHADOW_REPLAY_PAGE = 100;
+
+export interface SelectorShadowReplayRun {
+  id: number;
+  headSha: string;
+  baseSha?: string;
+  prNumber?: number;
+}
+
+/** A recomputed selection: the shadow record for the run's failed files, and why it ran what it ran. */
+export interface SelectorShadowReplaySelection {
+  record: { fullRun: boolean; floorSize: number; narrowSize?: number; failures: Array<{ file: string; floor: string; narrow?: string }> };
+  reasons: readonly string[];
+}
+
+/** The replay's reads: GitHub through `gh` and the selection in a checkout, unless injected. */
+export interface SelectorShadowReplay {
+  owner: string;
+  repo: string;
+  readJson?: (args: string[]) => Promise<unknown>;
+  readText?: (args: string[]) => Promise<string>;
+  select?: (run: SelectorShadowReplayRun, failed: readonly string[]) => Promise<SelectorShadowReplaySelection>;
+}
+
+export interface SelectorShadowReplayPass {
+  attempted: number;
+  observed: number;
+  skipped: number;
+  before: string;
+  exhausted: boolean;
+  capped: boolean;
+}
+
+/** The narrow selection CI's shadow step (scripts/select-affected-suites.mjs) makes for the run's diff
+ *  against its base, recomputed by the same functions in `root` checked out at the run's head. */
+export async function selectorShadowReplaySelection(
+  root: string, run: SelectorShadowReplayRun, failed: readonly string[], spawn: PreflightSpawn = defaultPreflightSpawn,
+): Promise<SelectorShadowReplaySelection> {
+  const git = (...args: string[]): string => {
+    const result = spawn("git", args, { cwd: root });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")} exited ${result.status}: ${(result.stderr ?? "").trim().slice(0, 200)}`);
+    return result.stdout;
+  };
+  git("fetch", "--quiet", "origin", run.headSha, ...(run.baseSha === undefined ? [] : [run.baseSha]));
+  git("checkout", "--quiet", "--detach", run.headSha);
+  const range = `${run.baseSha ?? "origin/main"}...${run.headSha}`;
+  const changed = git("diff", "--name-only", range).split("\n").map((line) => line.trim()).filter(Boolean);
+  const selection = affectedSelectionOrFull(changed, () => {
+    const symbols = changedSymbols(git("diff", "-U0", range), (path) => readFileSync(join(root, path), "utf8"));
+    return readAffectedSuitesInput(root, changed, { symbolSuites: callerReachableSuites(symbols, root, spawn).suites });
+  });
+  return { record: shadowRecord(selection, failed), reasons: selection.reasons };
+}
+
+/** The default selection: one gardener checkout per pass, given the daemon's node_modules for tsx. */
+function workspaceReplaySelector(deps: GardenerDeps) {
+  let workspace: GardenCheckout | GardenCheckoutAsync | undefined;
+  return {
+    select: async (run: SelectorShadowReplayRun, failed: readonly string[]) => {
+      if (workspace === undefined) {
+        workspace = await deps.openWorkspace();
+        linkWorktreeNodeModules(deps.repoRoot, workspace.root);
+      }
+      return selectorShadowReplaySelection(workspace.root, run, failed);
+    },
+    dispose: async () => { await workspace?.dispose(); },
+  };
+}
+
+function errorText(error: unknown): string {
+  return String((error as Error)?.message ?? error);
+}
+
+interface SelectorShadowReplayState { before: string; horizon: string; exhausted: boolean }
+
+function readReplayState(deps: GardenerDeps, nowMs: number): SelectorShadowReplayState {
+  const fresh = {
+    before: clockFromMillisFn(() => nowMs - SELECTOR_SHADOW_RECENT_WINDOW_MS).iso(),
+    horizon: clockFromMillisFn(() => nowMs - SELECTOR_SHADOW_REPLAY_HORIZON_MS).iso(),
+    exhausted: false,
+  };
+  try {
+    const raw = readFileIfExists(join(deps.stateDir, SELECTOR_SHADOW_REPLAY_STATE_FILE));
+    if (raw === undefined) return fresh;
+    const state = JSON.parse(raw) as Partial<SelectorShadowReplayState>;
+    if (typeof state.before !== "string" || typeof state.horizon !== "string" || typeof state.exhausted !== "boolean") {
+      throw new Error("invalid replay state");
+    }
+    return { before: state.before, horizon: state.horizon, exhausted: state.exhausted };
+  } catch (error) {
+    // Restarting is safe: the store's run ids keep a re-walked run from being observed twice.
+    deps.log("selector-shadow.replay_state_unreadable", { error: errorText(error) });
+    return fresh;
+  }
+}
+
+type ReplayOutcome = SelectorShadowObservation | { reason: string; detail?: string };
+
+/** One historical failing run: its own failures (from its shadow records, minus recovered shards), and
+ *  whether today's narrow selection for its diff would have run each. */
+async function replaySelectorShadowRun(replay: SelectorShadowReplay, select: NonNullable<SelectorShadowReplay["select"]>, row: SelectorShadowRunRow): Promise<ReplayOutcome> {
+  const run: SelectorShadowReplayRun = {
+    id: row.id, headSha: row.headSha,
+    ...(row.baseSha === undefined ? {} : { baseSha: row.baseSha }),
+    ...(row.prNumber === undefined ? {} : { prNumber: row.prNumber }),
+  };
+  let reading: SelectorShadowReading;
+  try {
+    const log = await readCoverageShardLogsAsync(replay.owner, replay.repo, row.id, { readJson: replay.readJson, readText: replay.readText });
+    reading = selectorShadowReading({ ...run, log }, "replay");
+  } catch (error) {
+    return { reason: "unreadable", detail: errorText(error) };
+  }
+  if (reading.kind !== "complete") return { reason: "no_shadow_record" };
+  const failed = [...new Set(reading.observation.failures.map((f) => f.file))];
+  if (failed.length === 0) return { reason: "recovered" };
+  // W1-T5350: a mass (or base) failure is not selector evidence; replaying it would read as misses.
+  if (failed.length > SELECTOR_SHADOW_MASS_FAILURE_FILES) return { reason: "mass", detail: `${failed.length} failing files, more than K = ${SELECTOR_SHADOW_MASS_FAILURE_FILES}` };
+  let selection: SelectorShadowReplaySelection;
+  try {
+    selection = await select(run, failed);
+  } catch (error) {
+    return { reason: "unselectable", detail: errorText(error) };
+  }
+  // A full run carries no narrow decision; its reason names an input the selector could not read.
+  if (selection.record.fullRun) return { reason: "full_run", detail: selection.reasons[0] };
+  const [record] = parseSelectorShadowLines(`AFFECTED-SUITES-SHADOW: ${JSON.stringify(selection.record)}`);
+  const { id: runId, ...identity } = run;
+  return {
+    runId, ...identity, source: "replay", fullRun: false, floorSize: record!.floorSize,
+    ...(record!.narrowSize === undefined ? {} : { narrowSize: record!.narrowSize }),
+    failures: record!.failures, recovered: reading.observation.recovered,
+  };
+}
+
+/** W1-T5925: one bounded replay pass over pull_request CI runs older than the live window, newest first.
+ *  The cursor is saved after every pass, so the next resumes where this one stopped. */
+async function replaySelectorShadowHistory(
+  deps: GardenerDeps, replay: SelectorShadowReplay, known: ReadonlySet<number>, replayed: number,
+): Promise<{ observations: SelectorShadowObservation[]; pass: SelectorShadowReplayPass }> {
+  const state = readReplayState(deps, (deps.clock ?? systemClock).now());
+  const observations: SelectorShadowObservation[] = [];
+  const pass = { attempted: 0, skipped: 0, capped: replayed >= SELECTOR_SHADOW_REPLAY_MAX_OBSERVATIONS };
+  const summary = () => ({ ...pass, observed: observations.length, before: state.before, exhausted: state.exhausted });
+  if (state.exhausted || pass.capped) return { observations, pass: summary() };
+  const beforeMs = Date.parse(state.before);
+  const horizonMs = Date.parse(state.horizon);
+  const listed = selectorShadowRunRows(await (replay.readJson ?? ghJsonAsync)(
+    selectorShadowRunListArgs(replay.owner, replay.repo, SELECTOR_SHADOW_REPLAY_PAGE, `<${state.before}`)));
+  // A listing that ignored its own created filter answers nothing older than the cursor.
+  const rows = listed.filter((row) => row.createdMs < beforeMs).sort((a, b) => b.createdMs - a.createdMs);
+  const selector = replay.select ? { select: replay.select, dispose: async () => {} } : workspaceReplaySelector(deps);
+  let stopped = false;
+  try {
+    for (const row of rows) {
+      if (row.createdMs < horizonMs) {
+        state.exhausted = true;
+        break;
+      }
+      const eligible = row.status === "completed" && row.conclusion === "failure" && !known.has(row.id);
+      if (eligible && (pass.attempted >= SELECTOR_SHADOW_REPLAY_RUNS_PER_PASS || replayed + observations.length >= SELECTOR_SHADOW_REPLAY_MAX_OBSERVATIONS)) {
+        stopped = true;
+        break;
+      }
+      state.before = clockFromMillisFn(() => row.createdMs).iso();
+      if (!eligible) continue;
+      pass.attempted += 1;
+      const outcome = await replaySelectorShadowRun(replay, selector.select, row);
+      if ("reason" in outcome) {
+        pass.skipped += 1;
+        deps.log("selector-shadow.replay_skipped", { ci_run_id: row.id, reason: outcome.reason, ...(outcome.detail === undefined ? {} : { detail: outcome.detail }) });
+      } else {
+        observations.push(outcome);
+      }
+    }
+  } finally {
+    await selector.dispose();
+  }
+  if (!stopped && (listed.length < SELECTOR_SHADOW_REPLAY_PAGE || rows.length === 0)) state.exhausted = true;
+  writeAtomic(join(deps.stateDir, SELECTOR_SHADOW_REPLAY_STATE_FILE), JSON.stringify(state) + "\n");
+  return { observations, pass: summary() };
+}
+
+export interface SelectorShadowSourceReport {
+  runs: number;
+  floor: SelectorShadowSelectionReport;
+  narrow: SelectorShadowSelectionReport;
+}
+
+/** The report a pass ledgers: the whole store folded, with the live window and each source beside it. */
+export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
+  window: Pick<SelectorShadowReport, "runsRequested" | "runsComplete" | "runsSkipped" | "runsIncomplete" | "verdict">;
+  observations: { live: number; replay: number; appended: number; unreadable: number };
+  live: SelectorShadowSourceReport;
+  replay: SelectorShadowSourceReport;
+  replayPass?: Partial<SelectorShadowReplayPass> & { error?: string };
+}
+
+/** Append each newly complete window run once, replay a bounded slice of history, and fold the whole
+ *  store. An incomplete window run is counted, never stored, and never resets the verdict. */
+async function accumulateSelectorShadow(
+  deps: GardenerDeps, readings: readonly SelectorShadowReading[], window: SelectorShadowReport, replay: SelectorShadowReplay | undefined,
+): Promise<SelectorShadowAccumulatedReport> {
+  const stored = readSelectorShadowObservations(deps.stateDir);
+  const all = new Map(stored.observations.map((o) => [o.runId, o]));
+  let appended = 0;
+  const append = (observation: SelectorShadowObservation): void => {
+    all.set(observation.runId, observation);
+    deps.log(SELECTOR_SHADOW_OBSERVATION_STEP, selectorShadowObservationRow(observation));
+    appended += 1;
+  };
+  for (const reading of readings) {
+    if (reading.kind === "complete" && !all.has(reading.observation.runId)) append(reading.observation);
+  }
+  let replayPass: SelectorShadowAccumulatedReport["replayPass"];
+  if (replay !== undefined) {
+    try {
+      const replayed = [...all.values()].filter((o) => o.source === "replay").length;
+      const result = await replaySelectorShadowHistory(deps, replay, new Set(all.keys()), replayed);
+      for (const observation of result.observations) append(observation);
+      replayPass = result.pass;
+    } catch (error) {
+      deps.log("selector-shadow.replay_failed", { error: errorText(error) });
+      replayPass = { error: errorText(error) };
+    }
+  }
+  const observations = [...all.values()];
+  const fold = foldSelectorShadowObservations(observations, window.fullSuiteSize);
+  const source = (name: SelectorShadowObservation["source"]): SelectorShadowSourceReport => {
+    const of = observations.filter((o) => o.source === name);
+    const part = foldSelectorShadowObservations(of, window.fullSuiteSize);
+    return { runs: of.length, floor: part.floor, narrow: part.narrow };
+  };
+  const live = source("live");
+  const replayed = source("replay");
+  return {
+    runsRequested: window.runsRequested, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete,
+    fullSuiteSize: window.fullSuiteSize, ...fold, ...selectorShadowVerdict(fold),
+    window: { runsRequested: window.runsRequested, runsComplete: window.runsComplete, runsSkipped: window.runsSkipped, runsIncomplete: window.runsIncomplete, verdict: window.verdict },
+    observations: { live: live.runs, replay: replayed.runs, appended, unreadable: stored.unreadable },
+    live, replay: replayed,
+    ...(replayPass === undefined ? {} : { replayPass }),
+  };
 }
 
 /** Count test files with the same suffix the full run selects, from this checkout. */
@@ -659,7 +1044,8 @@ export async function runSelectorShadowGardener(
   planTasks: () => SelectorShadowPlanTask[] = () => selectorShadowPlanTasks(deps.repoRoot),
   isRepaired?: (homeTaskId: string, file: string) => boolean,
   mainFailures?: SelectorShadowMainFailures,
-): Promise<SelectorShadowReport> {
+  options: { replay?: SelectorShadowReplay } = {},
+): Promise<SelectorShadowAccumulatedReport> {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
   const stored = readFileIfExists(path);
   const prior = stored === undefined ? {} : JSON.parse(stored) as {
@@ -674,8 +1060,11 @@ export async function runSelectorShadowGardener(
     const held = edges[file] ?? [];
     if (!held.includes(edge)) edges[file] = [...held, edge].slice(-SELECTOR_SHADOW_EDGES_KEPT);
   };
-  const report = selectorShadowReport(readRuns(), selectorShadowFullSuiteSize(deps.repoRoot));
-  deps.log("selector-shadow.report", { ...report, misses: report.misses.slice(0, 20) });
+  const readings = readRuns().map((run) => selectorShadowReading(run));
+  const report = selectorShadowWindowReport(readings, selectorShadowFullSuiteSize(deps.repoRoot));
+  // W1-T5925: the verdict folds every stored observation; filing below still reads this window's misses.
+  const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay);
+  deps.log("selector-shadow.report", { ...accumulated, misses: accumulated.misses.slice(0, 20) });
   const unseen = await withoutMassFailures(deps, report.misses.filter((m) => !seen.has(selectorShadowMissKey(m))), seen, mainFailures);
   // The plan is read only when there is something new to place, never on an idle pass.
   const planned = new Map<string, { id: string; retired: boolean; structural: boolean }>();
@@ -778,8 +1167,8 @@ export async function runSelectorShadowGardener(
     noteEdge(miss.file, edge);
     deps.log("selector-shadow.miss_filed", { task_id: filed.taskId, pr_url: filed.prUrl, edge });
   }
-  writeAtomic(path, JSON.stringify({ filedKeys: [...seen], causes, edges, structural, report }) + "\n");
-  return report;
+  writeAtomic(path, JSON.stringify({ filedKeys: [...seen], causes, edges, structural, report: accumulated }) + "\n");
+  return accumulated;
 }
 
 /** Run immediately, then on the daemon interval; one pass at a time. */

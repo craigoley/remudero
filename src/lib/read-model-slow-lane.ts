@@ -144,7 +144,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
       const github = githubSource();
       const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
       if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
-      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock), github) }] };
+      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot }, deps.statusGithub, clock), github) }] };
     },
   };
   return [inbox, feedback];
@@ -322,7 +322,7 @@ export function threadSlowLane(opts: {
   let respawn: NodeJS.Timeout | undefined;
   const spawn = (): void => {
     const data: SlowLaneData = { ...opts.config, kind: SLOW_LANE_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
     worker = spawned;
     spawned.unref();
     // Ahead of the lease, so a thread's first pass already knows which views are switched on.

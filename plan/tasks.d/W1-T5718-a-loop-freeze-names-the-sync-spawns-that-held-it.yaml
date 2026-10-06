@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P4, the enabler to build first"
   plan_refs: [W1-T4075, W1-T5689, W1-T5284, W1-T5282, W1-T5283, W1-T4970, W1-T5719]
   files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-freeze-names-the-sync-spawns-that-held-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

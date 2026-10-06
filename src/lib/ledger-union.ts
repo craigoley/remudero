@@ -1,15 +1,44 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
-import { createInterface } from "node:readline";
 import { addAbortSignal, type Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { readFile as nodeReadFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
-import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
+import {
+  LEDGER_CARRIED_PREFIX_SUFFIX,
+  LEDGER_FILENAME,
+  LEDGER_RETAINED_STEPS_SUFFIX,
+  LEDGER_ROTATION_LOCK_SUFFIX,
+  LEDGER_STAGE_TAGS,
+} from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 
 const gunzipAsync = promisify(nodeGunzip);
+
+/**
+ * NDJSON rows from a byte stream, split on LF only (a CR before it is dropped). `node:readline` was
+ * the splitter here, but from Node 24 it also breaks lines on U+2028 and U+2029, which JSON leaves
+ * unescaped, so a valid row carrying either character read as two damaged ones and was dropped from
+ * every union read. The decoder keeps a multi-byte character whole across a chunk boundary.
+ */
+export async function* ndjsonLines(input: AsyncIterable<Buffer | string>): AsyncGenerator<string> {
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  const line = (text: string): string => (text.endsWith("\r") ? text.slice(0, -1) : text);
+  for await (const chunk of input) {
+    pending += typeof chunk === "string" ? chunk : decoder.write(chunk);
+    let start = 0;
+    for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n", start)) {
+      yield line(pending.slice(start, newline));
+      start = newline + 1;
+    }
+    pending = pending.slice(start);
+  }
+  pending += decoder.end();
+  if (pending) yield line(pending);
+}
 
 export interface LedgerGrepFsDeps {
   readdirSync: (dir: string) => string[];
@@ -110,6 +139,17 @@ function sanitizeRegExp(pattern: string): string {
   return pattern;
 }
 
+const LEDGER_STAGE_SUFFIX = new RegExp(`\\.(?:${LEDGER_STAGE_TAGS.join("|")})-\\d+-[0-9a-f-]{36}$`);
+
+// A rotation's own transient files: its lock, and `<ledger file>.<known tag>-<pid>-<uuid>` stages.
+function isRotationOwnFile(name: string): boolean {
+  if (name === `${LEDGER_FILENAME}${LEDGER_ROTATION_LOCK_SUFFIX}`) return true;
+  const m = LEDGER_STAGE_SUFFIX.exec(name);
+  if (!m) return false;
+  const base = name.slice(0, m.index);
+  return base === LEDGER_FILENAME || rotationStampIso(base) !== undefined;
+}
+
 function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "readdirSync">): { rotations: LedgerCorpusEntry[]; unclassified: string[] } {
   let names: string[];
   try {
@@ -123,6 +163,7 @@ function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "rea
   const unclassified = names
     .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
     .filter((n) => n !== `${LEDGER_FILENAME}${LEDGER_CARRIED_PREFIX_SUFFIX}` && n !== `${LEDGER_FILENAME}${LEDGER_RETAINED_STEPS_SUFFIX}`)
+    .filter((n) => !isRotationOwnFile(n))
     .map((n) => join(stateDir, n))
     .filter((p) => !rotationPaths.has(p));
   return { rotations, unclassified };
@@ -351,7 +392,6 @@ export async function* openLedgerUnion(
     let source: Readable | undefined;
     let gunzip: ReturnType<typeof createGunzip> | undefined;
     let input: Readable | undefined;
-    let rl: ReturnType<typeof createInterface> | undefined;
     let archiveUnread = false;
     let rowOrdinal = 0;
     let pendingLiveBad: LedgerMalformedRowFinding | undefined;
@@ -388,8 +428,7 @@ export async function* openLedgerUnion(
         addAbortSignal(opts.signal, source);
         if (gunzip) addAbortSignal(opts.signal, gunzip);
       }
-      rl = createInterface({ input, crlfDelay: Infinity });
-      for await (const raw of rl) {
+      for await (const raw of ndjsonLines(input)) {
         opts.signal?.throwIfAborted();
         rowOrdinal += 1;
         if (pendingLiveBad) {
@@ -442,9 +481,8 @@ export async function* openLedgerUnion(
       if (entry.path !== livePath && archiveUnread) opts.onUnreadArchive?.(entry.path);
       if (entry.path === livePath && archiveUnread) opts.onUnreadLive?.(entry.path);
       // Explicit ownership rather than relying only on async-iterator return semantics: timeout,
-      // server close and stale-code exit all need the active descriptor/gunzip/readline released
-      // before this generator can settle and before another rotation can open.
-      rl?.close();
+      // server close and stale-code exit all need the active descriptor and gunzip released before
+      // this generator can settle and before another rotation can open.
       input?.destroy();
       gunzip?.destroy();
       source?.destroy();
