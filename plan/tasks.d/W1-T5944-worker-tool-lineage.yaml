@@ -15,7 +15,10 @@
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
     - src/lib/worker-tool-lineage.ts
-    - test/worker-tool-lineage.test.ts
+    - test/worker-tool-lineage-joins.test.ts
+    - test/worker-tool-lineage-unknown.test.ts
+    - test/worker-tool-lineage-outcomes.test.ts
+    - test/worker-tool-lineage-redaction.test.ts
     - test/worker-tool-lineage-wiring.test.ts
   status: queued
   attempts: 0
@@ -51,15 +54,15 @@
     analytics labels or production permission changes in this task.
   acceptance:
     - claim: "real IDs join use and result without conflating tools or separate runs"
-      proof: "unit test: test/worker-tool-lineage.test.ts"
+      proof: "unit test: test/worker-tool-lineage-joins.test.ts"
     - claim: "unsupported and incomplete evidence remains explicitly unknown"
-      proof: "unit test: test/worker-tool-lineage.test.ts"
+      proof: "unit test: test/worker-tool-lineage-unknown.test.ts"
     - claim: "observation does not claim admission or verified task completion"
-      proof: "unit test: test/worker-tool-lineage.test.ts"
+      proof: "unit test: test/worker-tool-lineage-outcomes.test.ts"
     - claim: "the actual default assembly observes events and preserves flow on sink failure"
       proof: "unit test: test/worker-tool-lineage-wiring.test.ts"
     - claim: "metadata remains bounded and raw tool payloads never enter durable receipts"
-      proof: "unit test: test/worker-tool-lineage.test.ts"
+      proof: "unit test: test/worker-tool-lineage-redaction.test.ts"
     - claim: "the existing worker stream calls the lineage normalizer in its real assembly"
       proof: "grep: observeWorkerToolLineage( in src/lib/worker.ts"
   falsifier: |
