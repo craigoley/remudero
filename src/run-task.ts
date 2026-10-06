@@ -44866,6 +44866,7 @@ export function buildSweepLightHook(
               // never asks for ("the only new thing a light pass may do is that POST").
               // Undefining both keeps that block a no-op (`ciGateRollup` reads `undefined`,
               // `staleCiGateTransition` reads it false) without touching `src/lib/sweep.ts`.
+              // W1-T5953: blind to the run, a deferred requeue holds here; a full pass retries it.
               readCiGateRollup: undefined,
               reaggregateCiGate: undefined,
               updateBranch: undefined,
