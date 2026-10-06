@@ -1,0 +1,21 @@
+id: host-resource-43c426406f685fd6
+ts: 2026-10-06T16:38:19.337Z
+raw: >-
+  host-resource:azure:swap
+
+
+  Host azure, device swap: 23.6 GB free, falling 521 MB/h (Theil-Sen over 23
+  samples across 5.8 h); projected full in 46.3 h.
+
+  That host's janitor runs about every 1.0 h; the latest pass reclaimed 144 MB.
+
+  The host's heartbeat has gone silent while its samples were falling.
+attachments: []
+origin: incident#43c426406f685fd608e87038651496f7e10d9dff85b91a9580f4444322c8cce1
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

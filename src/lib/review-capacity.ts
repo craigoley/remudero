@@ -37,6 +37,9 @@ export interface ReviewProviderCapacityObservation {
   ageMs?: number;
   /** A fresh, explicit provider-capacity refusal. Missing/stale telemetry is not a refusal. */
   refused?: boolean;
+  /** The router's 60 s cache had lapsed, but the reading was recent enough to be judged fresh by
+   *  {@link REVIEW_PROVIDER_READING_MAX_AGE_MS}. Diagnostic only: nothing branches on it. */
+  cacheLapsed?: boolean;
 }
 
 export interface ReviewSettlementObservation {
@@ -109,6 +112,8 @@ export interface ReviewCapacityEvidence {
   absentHostReadings: readonly string[];
   memoryPsiSomeAvg10Pct?: number;
   providerFresh: boolean;
+  /** True when `providerFresh` was judged on the daemon's cadence after the router cache lapsed. */
+  providerCacheLapsed: boolean;
   providerReadable: boolean;
   providerHeadroomPct?: number;
   providerReservePct?: number;
@@ -311,6 +316,7 @@ export function selectAdaptiveReviewWidth(
     // rather than having to distinguish "complete" from "not recorded".
     absentHostReadings: absentHostReadings(observation),
     providerFresh: observation.provider.fresh,
+    providerCacheLapsed: observation.provider.cacheLapsed === true,
     providerReadable: observation.provider.readable,
     ...(finite(observation.provider.headroomPct) ? { providerHeadroomPct: observation.provider.headroomPct } : {}),
     ...(finite(observation.provider.reservePct) ? { providerReservePct: observation.provider.reservePct } : {}),
@@ -385,10 +391,28 @@ export function readReviewHostObservation(
   };
 }
 
+/** How old a provider-routing reading may be before the review widener stops trusting it: three of
+ *  the daemon's own headroom sampling intervals (`3 * HEADROOM_SAMPLE_MAX_AGE_MS`, src/lib/daemon.ts;
+ *  a test pins the equality, since importing daemon.ts here would close an import ring). It is the
+ *  bound #9370 gave analytics for the same file. The snapshot's `freshUntil` (observedAt + 60 s) is
+ *  the ROUTER's cache validity, and the file is rewritten only when a worker spawns, so between
+ *  spawns it lapses a minute in. MEASURED 2026-10-05/06: `provider-telemetry-unavailable` was the
+ *  commonest `review.capacity` reason (142 of 316 rows) at provider_status_age_ms ~500-800 s, so
+ *  the lane above base could almost never be earned. KIND: PRIMARY CONTROL — every sample consults
+ *  it to decide whether a lapsed reading may authorise the lane above base. */
+export const REVIEW_PROVIDER_READING_MAX_AGE_MS = 900_000;
+
 export function reviewProviderObservation(status: ProviderRoutingStatus, nowMs: number): ReviewProviderCapacityObservation {
   const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
   const ageMs = Number.isFinite(observedMs) ? Math.max(0, nowMs - observedMs) : undefined;
-  const fresh = status.freshness === "fresh";
+  // A lapsed BLOCKED reading stays untrusted, exactly as before: a refusal sheds only while the
+  // router's own cache vouches for it, and an old refusal must not quietly authorise anything.
+  const cacheLapsed =
+    status.freshness === "stale" &&
+    status.state !== "blocked" &&
+    ageMs !== undefined &&
+    ageMs <= REVIEW_PROVIDER_READING_MAX_AGE_MS;
+  const fresh = status.freshness === "fresh" || cacheLapsed;
   if (!fresh) return { fresh: false, readable: false, ...(ageMs !== undefined ? { ageMs } : {}) };
   const reservePct = status.reservePercent;
   const readable = (status.providers ?? []).filter((provider) => provider.readable && provider.windows.length > 0);
@@ -402,6 +426,7 @@ export function reviewProviderObservation(status: ProviderRoutingStatus, nowMs: 
     ...(finite(reservePct) ? { reservePct } : {}),
     ...(ageMs !== undefined ? { ageMs } : {}),
     ...(status.state === "blocked" ? { refused: true } : {}),
+    ...(cacheLapsed ? { cacheLapsed: true } : {}),
   };
 }
 
@@ -503,6 +528,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       // Which host readings were non-finite. Empty whenever telemetry was complete.
       telemetry_absent: result.decision.evidence.absentHostReadings,
       provider_fresh: result.decision.evidence.providerFresh,
+      provider_cache_lapsed: result.decision.evidence.providerCacheLapsed,
       provider_readable: result.decision.evidence.providerReadable,
       provider_headroom_pct: result.decision.evidence.providerHeadroomPct ?? null,
       provider_reserve_pct: result.decision.evidence.providerReservePct ?? null,

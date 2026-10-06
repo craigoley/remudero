@@ -663,6 +663,8 @@ import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
 import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
+import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
+import { planFilesIdentity } from "./lib/thread-plan.js";
 import {
   buildReadyServeServer,
   currentBranch,
@@ -781,7 +783,9 @@ import {
   parseReopenedKeysCache,
   writeReopenedKeys,
   gitGrepAnchorTrue,
-  cachedAnchorGrep,
+  warmAnchorGrepCache,
+  warmedAnchorGrep,
+  gitGrepAnchorTrueAsync,
   createAnchorGrepCache,
   readOriginMainSha,
   inboxDraftPrompt,
@@ -1379,7 +1383,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
-  reviewReservationOwnershipEvidence,
+  reviewReservationOwnershipEvidenceAsync,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -1448,7 +1452,10 @@ import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readA
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
+  releaseDispatchClaimAsync,
   gitDispatchClaimReserver,
+  gitDispatchClaimReserverAsync,
+  gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
   parseClaimAnchorMessage,
@@ -1457,6 +1464,7 @@ import {
   findClaimMintRow,
   releaseReplacedContainerClaims,
   type DispatchClaimReserver,
+  type DispatchClaimReserverAsync,
 } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -1927,6 +1935,23 @@ export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, 
   };
 }
 
+/**
+ * JUDGE AT REVIEW START (operator ruling 2026-10-06). The publication guard (W1-T3337,
+ * `reviewerCodePublicationRefusal`) used to re-read freshness just before posting, so a review-path
+ * merge landing DURING a review withheld a verdict judged by code that was current when it began:
+ * 35 of 51 "materially behind" withholds (2026-09-30..10-06) were fresh or immaterial at start.
+ * A fresh or stale START reading now decides publication; W1-T3337's own case, code already
+ * materially behind when it judged, still withholds. An unreadable or absent start reading proves
+ * nothing, so it keeps the just-in-time read.
+ */
+export function reviewerFreshnessForPublication(
+  atStart: ReviewerCodeFreshness | undefined,
+  justInTime: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness> {
+  if (atStart === undefined || atStart.status === "unreadable") return justInTime;
+  return () => atStart;
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1982,7 +2007,9 @@ export function buildReviewerCodeFreshnessGate(
         log("review.skipped_stale_reviewer_code", stale);
         return 0;
       }
-      return next(prArg, rest, reviewDeps);
+      // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
+      // guard judges against it, so a merge landing mid-review no longer discards the verdict.
+      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
     },
     staleThisPass: () => firstStale,
   };
@@ -2754,6 +2781,7 @@ import {
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
+  asyncGit,
   checkCliFreshness,
   checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
@@ -2850,7 +2878,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -7455,7 +7483,7 @@ async function runReview(args: {
   const diff = diffOutcome.diff;
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
-  const ownership = reviewReservationOwnershipEvidence(diff, args.headRefName, args.headCheckoutDir);
+  const ownership = await reviewReservationOwnershipEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
   });
@@ -12150,10 +12178,11 @@ export async function runFixRung(opts: {
       throw e;
     }
 
-    // W1-T5999: a worker KILLED BY A SIGNAL returned a truncated report, not a refusal. No commit is
-    // attempted, and no `fix.dispatch`/`fix.commit_refused` is written, so `fixRoundTally` counts it
-    // neither as a strike nor toward "refused twice" — the same ledger shape W1-T2402's thrown kill leaves.
-    if (fixWorkerEndedBySignal(fixResult)) {
+    // W1-T5999: a worker KILLED BY A SIGNAL that left NO work (no edits, no commits) is not a refusal: no
+    // `fix.dispatch`/`fix.commit_refused`, so `fixRoundTally` counts neither strike nor "refused twice", as
+    // W1-T2402's thrown kill. One that left work falls through and the harness commits it (W1-T4283, #8973).
+    if (fixWorkerEndedBySignal(fixResult) && !(deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath) &&
+      (roundStartSha === undefined || (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha) === 0)) {
       deps.log("fix.done", {
         ...fixReceipt.ledgerFields(fixResult),
         round_id: roundId,
@@ -15229,7 +15258,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
-  claimReserver?: DispatchClaimReserver;
+  claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
@@ -16157,7 +16186,7 @@ async function runTask(
      * throws (best-effort, caught in the `finally`) deterministically, without a genuine
      * two-writer race against a real git remote.
      */
-    claimReserver?: DispatchClaimReserver;
+    claimReserver?: DispatchClaimReserverAsync;
     /**
      * W1-T1268 coverage seam: overrides the independent remote-head read `worktreeAdd`'s own
      * `assertWorktreeBaseCurrent` performs right after this run's ONE worktree is cut. Default:
@@ -16381,9 +16410,9 @@ async function runTask(
       // `dispatchClaimReserverFor`'s own doc for why `repoDir`, not `repoRoot`. NO TIMER: the
       // only new input is `isMerged`, the identical evidence `decideDispatchClaimRelease`'s
       // one existing call site already reuses -- this hoists ITS reach, never its meaning.
-      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", task.repo));
-      if (staleClaimReserver.holder(task.id) !== undefined) {
-        const released = releaseDispatchClaim(task.id, staleClaimReserver, { evidenceObserved: true });
+      const staleClaimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", task.repo));
+      if ((await staleClaimReserver.holder(task.id)) !== undefined) {
+        const released = await releaseDispatchClaimAsync(task.id, staleClaimReserver, { evidenceObserved: true });
         log("dispatch.claim_released", {
           ref: dispatchClaimRef(task.id),
           arm: released.arm,
@@ -17577,10 +17606,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // both read a PUBLISHED artifact, and neither exists at the moment a second host — or an
   // operator dispatching by hand beside the fleet — starts the SAME task. `repoDir`, not
   // `repoRoot`: see {@link dispatchClaimReserverFor}'s own doc for why.
-  const claimReserver = opts.claimReserver ?? dispatchClaimReserverFor(repoDir);
-  const claimAnchor = claimReserver.mintAnchor();
-  const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
-  const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
+  // AWAITED, never `spawnSync` (2026-10-06): runTask runs inside the daemon process, and this
+  // claim's sync git was the loop's largest holder — 89 loop_lag rows, 1,506 s, up to 106 s each.
+  const claimReserver = opts.claimReserver ?? dispatchClaimReserverAsyncFor(repoDir);
+  const claimAnchor = await claimReserver.mintAnchor();
+  const claimOutcome = await claimReserver.attempt(task.id, claimAnchor);
+  const claimHolder = claimOutcome === "taken" ? await claimReserver.holder(task.id) : undefined;
   // W1-T2552: the failing attempt's OWN git stderr, threaded into the refusal so an unreachable
   // verdict names its cause instead of only its category. Optional on the interface, so a test's
   // fake reserver that does not implement it yields today's wording byte-for-byte.
@@ -17610,19 +17641,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // narrow same-host/predates-boot shape is decidable when general cross-host liveness is
       // not. The probe is a THUNK: `releaseDispatchClaim` only calls it once an anchor has
       // actually parsed, so arms 1 and 2 still cost no /proc read and no git round trip.
-      const released = releaseDispatchClaim(task.id, claimReserver, {
+      // The awaited release hands the probe the anchor it already parsed, so the pid is read from
+      // the SAME git answer that decided the arm — no second fetch + cat-file round trip.
+      const released = await releaseDispatchClaimAsync(task.id, claimReserver, {
         evidenceObserved: isMerged(task),
-        livenessProbe: () => {
+        livenessProbe: (anchor) => {
           const namespaceBootMs = readNamespaceBootMs();
           if (namespaceBootMs === undefined) return undefined; // declines to the operator arm
-          const anchorPid = parseClaimAnchorMessage(claimReserver.anchorMessage?.(task.id))?.pid;
           return {
             localHost: hostname(),
             namespaceBootMs,
             namespaceBootIso: new Date(namespaceBootMs).toISOString(),
-            // No pid parsed ⇒ report PRESENT, which blocks the release. Same fail-closed
-            // direction every other absent input on this path takes.
-            pidPresent: anchorPid === undefined ? true : pidIsPresent(anchorPid),
+            pidPresent: pidIsPresent(anchor.pid),
           };
         },
       });
@@ -17715,7 +17745,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     log("managed_checkout.refresh_refused", { reason: String((e as Error)?.message ?? e) });
     // W1-T4701: above the outer catch, so without this row the deferred run read as in flight forever.
     endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
-    releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
@@ -17752,7 +17782,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
       // before returning, or a stale base on THIS host would strand the claim for an operator
       // to clear even though nothing is actually in flight.
-      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       return refused;
     }
     if (e instanceof WorktreeNodeModulesRefusedError) {
@@ -17773,7 +17803,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
       }
       try {
-        releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+        await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       } catch (releaseErr) {
         // Never replace the typed refusal: a generic throw here would read as a fatal crash, not a deferral.
         log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
@@ -17791,7 +17821,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T5280: drop the claim AFTER the terminal row (W1-T4708), or the next dispatches read
     // `blocked_inflight` until the breaker trips; a throwing release never replaces the add's error.
     try {
-      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     } catch (releaseErr) {
       log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
     }
@@ -19858,7 +19888,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // another lane's. Best-effort, matching `removeRunLock` immediately above: a throw here
     // must never replace whatever verdict this run actually reached.
     try {
-      const released = releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      const released = await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
       log("dispatch.claim_released", {
         ref: dispatchClaimRef(task.id),
         arm: released.arm,
@@ -20687,6 +20717,10 @@ interface ReviewCommandDeps {
   resolveOwnerRepo?: typeof resolveOwnerRepo;
   /** W1-T4933: brings an explicit target's managed checkout install in line with its lockfile before proofs run; default {@link stagedInstall}. */
   refreshSubjectInstall?: (repoDir: string) => void;
+  /** The freshness gate's reading taken immediately before this review began; see
+   *  {@link reviewerFreshnessForPublication}. Absent (operator CLI, fresh-tree child) keeps the
+   *  just-in-time read. */
+  reviewStartFreshness?: ReviewerCodeFreshness;
 }
 
 type ReviewSubjectFailureReason =
@@ -21119,6 +21153,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
   if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed") {
+    // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
+    const closed = raw as RestPullRow;
+    appendLedger(ledgerPathFor(loadConfigDep()), {
+      run_id: `review-PR${closed.number}-${Date.now()}`, task_id: `PR-${closed.number}`, lane: "review",
+      step: "review.skipped_closed_before_review", pr_number: closed.number, pr_url: closed.html_url,
+      head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
+    });
     console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
     return 2;
   }
@@ -21262,7 +21303,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
     // ledger row above already uses) reviews under the default risk and a default hard cap instead of
     // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId) {
+    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
@@ -21320,6 +21361,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // coverage of a latency window unique to this manual/sweep-dispatched path. A throw (e.g. a
   // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
   // best-effort legibility, never a reason this command fails to review the PR at all.
+  // The gate's start reading could not prove freshness: say so, then fall back to the JIT read.
+  if (deps.reviewStartFreshness?.status === "unreadable") {
+    log("review.reviewer_freshness_unreadable_at_start", {
+      pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest,
+      reason: deps.reviewStartFreshness.reason,
+    });
+  }
+  const publicationFreshness = reviewerFreshnessForPublication(deps.reviewStartFreshness, reviewerCodeFreshnessDep);
   try {
     await postReviewPendingDep({
       owner,
@@ -21402,7 +21451,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
-          reviewerCodeFreshness: reviewerCodeFreshnessDep,
+          reviewerCodeFreshness: publicationFreshness,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
           // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
@@ -21433,7 +21482,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      reviewerCodeFreshness: await reviewerCodeFreshnessDep(),
+      reviewerCodeFreshness: await publicationFreshness(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
       fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
         const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
@@ -25911,6 +25960,16 @@ export function dispatchClaimReserverFor(repoDir: string): DispatchClaimReserver
 }
 
 /**
+ * {@link dispatchClaimReserverFor}, AWAITED — the reserver runTask takes its claim through. runTask
+ * runs inside the daemon process, so the sync reserver's `spawnSync` git held the whole loop for each
+ * push/ls-remote (2026-10-06: 89 loop_lag rows, 1,506 s, up to 106 s each). Same `repoDir` binding,
+ * same argv; every call bounded by `DISPATCH_CLAIM_GIT_TIMEOUT_MS`, a timeout reading `unreachable`.
+ */
+export function dispatchClaimReserverAsyncFor(repoDir: string): DispatchClaimReserverAsync {
+  return gitDispatchClaimReserverAsync({ run: gitClaimRunnerAsync(repoDir) });
+}
+
+/**
  * Merged commit subjects on `origin/main`, newest first — the evidence arm's only input.
  *
  * BOUNDED BY CONSTRUCTION. `-n` caps the read because this runs on the losing lane's refusal path,
@@ -28897,11 +28956,69 @@ function retroShippedGithubGateway(): ShippedGithub {
     // every threshold edit; a pure filter over the full corpus does not).
     mergedCommits: () =>
       parseGitLogCitationCommits(
-        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+        execFileSync("git", ["-C", repoRoot, ...RETRO_MERGED_COMMITS_ARGS], {
           encoding: "utf8",
-          maxBuffer: 1 << 26,
+          maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** The retro gateway's full-history merged-commits read: one argv for the sync and async readers. */
+const RETRO_MERGED_COMMITS_ARGS = ["log", "--format=%x1e%aI%x1f%s%x1f%b"];
+const RETRO_MERGED_COMMITS_MAX_BUFFER = 1 << 26;
+
+/** BACKSTOP bound on the awaited merged-commits read. MEASURED 2026-10-06: the sync read held the daemon
+ *  loop up to 54 s per call (6 loop_lag rows, 279 s in 17 h); three times that is still a hang. */
+export const RETRO_MERGED_COMMITS_TIMEOUT_MS = 180_000;
+
+/** The same commits {@link retroShippedGithubGateway}'s `mergedCommits` reads, off the event loop.
+ *  A read past `timeoutMs` is killed and REJECTS naming its bound (boundGitCall) — never `[]`. */
+export async function readRetroMergedCommitsAsync(
+  git: AsyncGitRunner = asyncGit(repoRoot, { maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER }),
+  timeoutMs: number = RETRO_MERGED_COMMITS_TIMEOUT_MS,
+): Promise<GitLogCommit[]> {
+  return parseGitLogCitationCommits(await boundGitCall(git, RETRO_MERGED_COMMITS_ARGS, timeoutMs));
+}
+
+/**
+ * The daemon's retro trigger check: {@link retroTriggerCheck} with the full-history `git log`
+ * read ONCE, awaited, before it runs. The sync check read it on the loop up to three times per
+ * tick (back-off proxy, runless count, `shippedSince`'s trailer dates).
+ *
+ * A FAILED READ IS NOT SWALLOWED: the error is kept and re-thrown by `mergedCommits()` at each
+ * consumption site, exactly where the sync read threw — so a gh-unavailable decline still wins
+ * over a git failure, `shippedSince` still names it as a discrepancy, and the runless count still
+ * throws into the daemon's `daemon.retro_trigger.check_failed` row.
+ */
+export async function retroTriggerCheckAsync(
+  now: Date = new Date(),
+  deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & { readMergedCommits?: () => Promise<GitLogCommit[]> } = {},
+): Promise<RetroTriggerDecision | undefined> {
+  const github = deps.github ?? retroShippedGithubGateway();
+  let read: MergedCommitsRead;
+  try {
+    read = { commits: await (deps.readMergedCommits ?? (() => readRetroMergedCommitsAsync()))() };
+  } catch (error) {
+    // Carried, not erased: mergedCommitsSnapshotGateway re-throws it where the sync read threw.
+    read = { error };
+  }
+  return retroTriggerCheck(now, { config: deps.config, policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) });
+}
+
+/** One awaited merged-commits read: its commits, or the error it failed with. */
+export type MergedCommitsRead = { commits: GitLogCommit[] } | { error: unknown };
+
+/** `github` with `mergedCommits()` answered from `read`: the commits, or a re-throw of its error. */
+export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: MergedCommitsRead): ShippedGithub {
+  return {
+    findMergedByTrailer: (taskId) => github.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => github.headRefName(prUrl),
+    unavailable: () => github.unavailable?.(),
+    mergedCommits: () => {
+      if ("error" in read) throw read.error;
+      return read.commits;
+    },
   };
 }
 
@@ -29654,12 +29771,12 @@ export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number 
 }
 
 export function buildRetroDaemonHooks(deps: {
-  check?: () => RetroTriggerDecision | undefined;
+  check?: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
   config?: Config;
   runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
-  checkRetroTrigger: () => RetroTriggerDecision | undefined;
+  checkRetroTrigger: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
   // per-boot ledger sink), never threaded through `deps` above — that keeps the
   // `buildRetroDaemonHooks()` construction call byte-identical to before W1-T2870 (see
@@ -29670,7 +29787,7 @@ export function buildRetroDaemonHooks(deps: {
     log?: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<void>;
 } {
-  const check = deps.check ?? (() => retroTriggerCheck());
+  const check = deps.check ?? (() => retroTriggerCheckAsync());
   return {
     checkRetroTrigger: () => check(),
     runRetroTrigger: async (decision, log) => {
@@ -34474,12 +34591,24 @@ export function logDiskReclaimRung(
     const enabled = pin.fire && policyBlock.enabled;
     const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
     const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
+    // Every OTHER git store under `<root>/repos` is a managed repo too: the console and site
+    // daemons run this rung with their own root and clone into `repos/remudero-console` and
+    // `repos/remudero-site`, which a lone `repos/remudero` never reached.
+    const reposRoot = join(config.root, "repos");
+    const otherManaged = (existsSync(reposRoot) ? readdirSync(reposRoot) : [])
+      .filter((name) => name !== "remudero" && existsSync(join(reposRoot, name, ".git")))
+      .sort();
     const repos = [
       {
         repo: "managed",
-        dir: (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))(),
+        dir: (deps.objectRepoDir ?? (() => join(reposRoot, "remudero")))(),
         streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
       },
+      ...otherManaged.map((name) => ({
+        repo: `managed:${name}`,
+        dir: join(reposRoot, name),
+        streakPath: join(config.root, "state", `object-reap-refusal-streak-${name}.json`),
+      })),
       ...(existsSync(join(daemonCheckout, ".git"))
         ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
         : []),
@@ -38713,13 +38842,18 @@ export async function serveCommand(
   const ledgerPath = ledgerPathFor(config);
   let plan: Plan;
   let boardPlanReadFailure: string | undefined;
+  // W1-T5639: the read's QUALIFIED outcome travels with the plan. A failed read is not a successfully read empty plan, so
+  // the placeholder below is bound beside an `unavailable` outcome that every plan-derived reader checks before it counts.
+  let planSource: PlanSourceHolder["planSource"];
   try {
     plan = (deps.loadBoardPlan ?? loadPlan)(planPath);
+    planSource = planSourceLoaded(undefined, planFilesIdentity(planPath));
   } catch (error) {
     boardPlanReadFailure = String((error as Error)?.message ?? error);
     // The worker reads the real path and publishes an unavailable board. The assembly still
     // needs a Plan shape to bind cheap routes and auth while that failure is visible.
     plan = { tasks: [], byId: new Map() };
+    planSource = planSourceFailed(undefined, error);
   }
   const tokens = resolveServiceTokens(config.root);
   // W1-T2568: the signed GitHub-event wake's config — resolved here (never inside lib/serve.ts,
@@ -38859,8 +38993,9 @@ export async function serveCommand(
   // the SAME deps back both the real board route below AND the one-shot background precompute
   // that this task adds — one `boardGithub`/`plan`/`ledgerPath` triple, never two independently
   // constructed ones that could drift.
-  const boardDeps: BoardDeps = {
+  const boardDeps: BoardDeps & PlanSourceHolder = {
     plan,
+    planSource,
     ledgerPath,
     github: boardGithub,
     inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId),
@@ -38873,7 +39008,15 @@ export async function serveCommand(
     planPath,
     ledgerPath,
     inflightDir: join(config.root, "state", "inflight"),
-  }, deps.boardProjectionOptions);
+  }, {
+    ...deps.boardProjectionOptions,
+    // The projection thread re-reads the plan every pass and can recover on its own. When the thread publishes a snapshot
+    // while serve is still bound to the placeholder, serve adopts what the thread read, so the two never disagree.
+    onSnapshot: (planIdentity) => {
+      deps.boardProjectionOptions?.onSnapshot?.(planIdentity);
+      adoptPlanSource(boardDeps, () => ({ plan: (deps.loadBoardPlan ?? loadPlan)(planPath), identity: planIdentity }), { log });
+    },
+  });
 
   // W1-T2838: do not bind until Serve's OWN first App-token mint settles. The refresher's
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
@@ -47588,10 +47731,20 @@ export function buildInboxDraftHook(
     runId: string,
     log: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
-  grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
+  grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   github?: GitHub,
+  grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
 ): (tickRead?: TickReadFacts) => Promise<void> {
+  // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
+  // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
+  // that injects only the sync seam warms through that same seam, so its answers are unchanged.
+  const grepAnchorSync = grepAnchor ?? ((ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, ref, anchor));
+  const grepAnchorWarm =
+    grepAnchorAsync ??
+    (grepAnchor
+      ? async (ref: string, anchor: EvidenceAnchor) => grepAnchor(ref, anchor)
+      : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
   let lazyGithub: GitHub | undefined;
   const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
@@ -47659,11 +47812,13 @@ export function buildInboxDraftHook(
           : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
+        const anchors = proposals.flatMap((p) => p.evidenceAnchors);
+        const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftReadiness = {
           plan,
           isMerged,
           depsUnobservable,
-          grepAnchorTrue: (a: EvidenceAnchor) => cachedAnchorGrep(anchorGrepCache, sha, a, grepAnchor),
+          grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),

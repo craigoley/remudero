@@ -573,6 +573,34 @@ hold_revive_on_verdict() {
 PROGRESS_WATCHDOG_LADDER
 }
 
+# tsx caches every transpile under os.tmpdir()/tsx-<uid> and has no cache-dir setting. This
+# launcher's ticks run bin/rmd (tsx) on the HOST: under systemd TMPDIR is unset, so the cache sat
+# in /tmp on the 29 GB root disk -- 2.7 GB on 2026-10-06, ~2 GB/day of fresh entries. Move it to
+# the local scratch disk only when that is a mounted filesystem (a bare /mnt/scratch directory IS
+# the root disk); otherwise, or with TMPDIR already set, leave the default. A cache only: the
+# janitor's /mnt/scratch/tmp root prunes stale tsx entries there too. Literal shell, not expanded.
+render_host_tmpdir() {
+  cat <<'HOST_TMPDIR'
+host_tmpdir_on_scratch() {
+  local root mounts mnt dir
+  [ -z "${TMPDIR:-}" ] || return 0
+  root="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
+  mounts="${RMD_SCRATCH_MOUNTS_FILE:-/proc/mounts}"
+  [ -r "$mounts" ] || return 0
+  while IFS=' ' read -r _ mnt _; do
+    [ "$mnt" = "$root" ] || continue
+    dir="$root/tmp"
+    # Sticky and world-writable like /tmp. `|| true`: the launcher runs under set -e.
+    if [ ! -d "$dir" ]; then { mkdir -p "$dir" && chmod 1777 "$dir"; } 2>/dev/null || true; fi
+    if [ -d "$dir" ] && [ -w "$dir" ]; then export TMPDIR="$dir"; fi
+    return 0
+  done < "$mounts"
+  return 0
+}
+host_tmpdir_on_scratch
+HOST_TMPDIR
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -598,6 +626,8 @@ INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
+
+$(render_host_tmpdir)
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this

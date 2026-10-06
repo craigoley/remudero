@@ -13,7 +13,8 @@
  *   stale with no worker message, exactly as a GET would re-judge it).
  * - `: hb` every 25 s, so an idle proxy never cuts the stream.
  * - `handover` ends every stream when serve drains, and a subscriber stalled past its bound.
- * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07).
+ * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07),
+ *   and each row says so: `sampleEveryMs`, and `unsampled`, the key's events since its last row that no row records.
  * - KILL SWITCH: `"push": "on"` in the read model's switches.json; absent or `off` answers 404 `push_disabled`, and
  *   switching it off ends every open stream (`handover`) within a sweep.
  *
@@ -29,7 +30,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
 import type { Route } from "./service.js";
-import { oldestAsOf, viewEtag, viewMode, type ViewBodyEntry, type ViewSource } from "./views.js";
+import { newestLedgerRow, oldestAsOf, viewEtag, viewMode, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 export const VIEW_EVENTS_PATH = "/v1/views/events";
 export const VIEW_VERSIONS_PATH = "/v1/views/versions";
@@ -99,9 +100,9 @@ interface Judged {
   sources: ViewSource[];
 }
 
-/** The newest row a body reflects: the latest `asOf` among its `ledger:<instance>` sources. */
-function newestLedgerRow(sources: readonly ViewSource[]): string | null {
-  return sources.filter((source) => source.name.startsWith("ledger:") && source.asOf !== null).map((source) => source.asOf!).sort().pop() ?? null;
+/** The newest row a body reflects, with the `rowTs` a decorated body carries for the bodies it was decorated from. */
+function reflectedRow(sources: readonly ViewSource[], entry: ViewBodyEntry): string | null {
+  return newestLedgerRow(sources, entry.rowTs) ?? null;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -122,6 +123,8 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const stallMs = opts.stallMs ?? VIEW_EVENTS_STALL_MS;
   const inlineBytes = opts.inlineBytes ?? VIEW_EVENTS_INLINE_BYTES;
   const sampledAt = new Map<string, number>();
+  /** Per key, the events emitted since its last `view.emitted` row: none of them is ledgered. */
+  const unsampled = new Map<string, number>();
   const subs = new Set<Subscriber>();
   const emitted = new Map<string, string>();
   /** The newest ledger row each key's last event reflected, kept across every event, sampled or not. */
@@ -203,16 +206,19 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     const body = { ...entry.body, stale, asOf, sources };
     const bytes = Buffer.byteLength(JSON.stringify(body));
     const emittedAt = clock.iso();
-    const rowTs = newestLedgerRow(sources);
+    const rowTs = reflectedRow(sources, entry);
     const prevRowTs = reflected.get(id);
     reflected.set(id, rowTs);
     const event = { view: entry.view, key: entry.key, etag, stale, emittedAt, asOf, cause };
     const text = frame("view", bytes <= inlineBytes ? { ...event, body } : event, `${bootId}:${seq}`);
     if (now - (sampledAt.get(id) ?? Number.NEGATIVE_INFINITY) >= VIEW_EMITTED_SAMPLE_MS) {
       sampledAt.set(id, now);
+      const skipped = unsampled.get(id) ?? 0;
+      unsampled.set(id, 0);
       opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs, bytes, inline: bytes <= inlineBytes, subscribers: subs.size,
+        sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: skipped,
         ...(prevRowTs ? { prevRowTs } : {}), ...(entry.buildStartedMs !== undefined ? { buildStartedAt: fixedClock(entry.buildStartedMs).iso() } : {}) });
-    }
+    } else unsampled.set(id, (unsampled.get(id) ?? 0) + 1);
     for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(sub, id, text, now);
   };
 
@@ -236,7 +242,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     reflected.clear();
     for (const [id, judged] of current(clock.now())) {
       emitted.set(id, judged.etag);
-      reflected.set(id, newestLedgerRow(judged.sources));
+      reflected.set(id, reflectedRow(judged.sources, judged.entry));
     }
     const stops = [
       readModel.onBody((entry) => {

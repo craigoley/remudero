@@ -132,6 +132,12 @@ export function viewKey(params: URLSearchParams): string {
     .join("&");
 }
 
+/** The newest row a body reflects: the latest `asOf` among its `ledger:<instance>` sources, and `rowTs` when given. */
+export function newestLedgerRow(sources: readonly ViewSource[], rowTs?: string): string | undefined {
+  const rows = sources.filter((source) => source.name.startsWith("ledger:") && source.asOf !== null).map((source) => source.asOf!);
+  return (rowTs === undefined ? rows : [...rows, rowTs]).sort().pop();
+}
+
 /** One materialized body as the read-model worker stores and posts it. */
 export interface ViewBodyEntry {
   view: string;
@@ -142,6 +148,9 @@ export interface ViewBodyEntry {
   body: ViewBody;
   /** When the build that produced it began (its first bounded step); absent on a stored or slow-lane body. Not persisted. */
   buildStartedMs?: number;
+  /** The newest ledger row it reflects when its own sources do not carry it: a body decorated from other views'
+   *  bodies (serve's nav-badge carries the now bodies' decisions). Not persisted. */
+  rowTs?: string;
 }
 
 /** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */

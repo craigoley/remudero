@@ -49,7 +49,7 @@ function fixture(overrides: Partial<MainHealthRungDeps> = {}) {
       };
     }
     if (path === `repos/${OWNER}/${REPO}/commits/${sha}/status`) return { statuses: [] };
-    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`) {
+    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&per_page=100`) {
       return {
         workflow_runs: [
           { head_sha: sha, conclusion, html_url: `https://github.com/${OWNER}/${REPO}/actions/runs/1` },
@@ -127,7 +127,7 @@ test("main push history retains associated pull-request numbers and both GitHub 
   const fetch = ((args: string[]) => {
     assert.deepEqual(args, [
       "api",
-      `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`,
+      `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&per_page=100`,
     ]);
     return {
       workflow_runs: [

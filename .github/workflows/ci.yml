@@ -1214,9 +1214,12 @@ jobs:
           # W1-T3720: the NAME stays the required context; a failing check is TITLED by the gate(s)
           # that refused (scripts/bundled-gate-report.mjs, `<step-id>=<outcome>` args).
           SETUP_FAILED=""
+          SETUP_OBSERVED=false
           for setup in ${SETUP_OUTCOMES:-}; do
-            case "${setup##*=}" in success|"") ;; *) SETUP_FAILED="${SETUP_FAILED:+$SETUP_FAILED }${setup}" ;; esac
+            SETUP_OBSERVED=true
+            case "${setup##*=}" in success) ;; *) SETUP_FAILED="${SETUP_FAILED:+$SETUP_FAILED }${setup}" ;; esac
           done
+          [ "$SETUP_OBSERVED" = true ] || SETUP_FAILED="setup-outcomes=unavailable"
           report() {
             local check_name="$1"
             shift

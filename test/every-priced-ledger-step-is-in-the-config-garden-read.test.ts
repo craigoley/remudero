@@ -138,6 +138,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "fix.prerequisite_opened": AFTER_PR_OPENED,
   "followup_write_suppressed": AFTER_PR_OPENED,
   "review.cannot_evaluate_escalated": AFTER_PR_OPENED,
+  "review.reviewer_freshness_unreadable_at_start": A_LANE_RUN_ID, // rmd review's own review-PR run id
+  "review.skipped_closed_before_review": A_LANE_RUN_ID, // rmd review's own review-PR run id
   "review.diff_local_fallback": AFTER_PR_OPENED,
   "review.diff_unreadable": AFTER_PR_OPENED,
   "review.finding": AFTER_PR_OPENED,
