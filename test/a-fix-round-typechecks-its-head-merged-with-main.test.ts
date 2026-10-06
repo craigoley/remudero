@@ -81,6 +81,18 @@ test("a head whose merge typechecks is pushed as today", async () => {
   }
 });
 
+test("a precheck that throws is skipped with its reason, never refused", async () => {
+  const result = await mergedHeadTypechecks("/nonexistent", {
+    git: () => { throw new Error("git exploded"); },
+  });
+  assert.deepEqual(result, { outcome: "skipped", reason: "precheck failed: git exploded" });
+  const nonError = await mergedHeadTypechecks("/nonexistent", {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error
+    git: () => { throw "plain string"; },
+  });
+  assert.deepEqual(nonError, { outcome: "skipped", reason: "precheck failed: plain string" });
+});
+
 test("a head that already fails alone is not blamed on the merge, and a head containing main is not probed", async () => {
   const broken = fixture((b) => IMPORT + "export const bad: number = 'x';\n" + b, (b) => b + IMPORT);
   try {
