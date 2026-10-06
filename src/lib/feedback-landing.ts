@@ -202,9 +202,10 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-type LandingSteps = Generator<PlanPrPreflightAsk, LandFeedbackResult, PlanPrPreflightResult>;
+type PreflightSteps<R> = Generator<PlanPrPreflightAsk, R, PlanPrPreflightResult>;
+type LandingSteps = PreflightSteps<LandFeedbackResult>;
 
-function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFeedbackResult {
+function driveLanding<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightFn): R {
   let step = steps.next();
   while (!step.done) {
     let verdict: PlanPrPreflightResult;
@@ -219,7 +220,7 @@ function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFe
   return step.value;
 }
 
-async function driveLandingAsync(steps: LandingSteps, preflight: PlanPrPreflightAsyncFn): Promise<LandFeedbackResult> {
+async function driveLandingAsync<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightAsyncFn): Promise<R> {
   let step = steps.next();
   while (!step.done) {
     let verdict: PlanPrPreflightResult;
@@ -1613,12 +1614,34 @@ export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
 
-/** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR. */
+/** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR; the daemon awaits the Async form (W1-T5965). */
 export function landCiLearningShards(
   drafts: readonly CiLearningShardDraft[],
   checkoutRoot: string,
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
+  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps));
+}
+
+export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
+  planPrPreflight?: PlanPrPreflightAsyncFn;
+}
+
+export async function landCiLearningShardsAsync(
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: LandCiLearningShardsAsyncOptions,
+): Promise<CiLearningFilingResult> {
+  const { planPrPreflight, ...landOpts } = deps;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr));
+  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, landOpts), preflight);
+}
+
+function* ciLearningLandingSteps(
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight">,
+): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
   const kind = ciLearningLandingKind(checkoutRoot, deps, git);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
@@ -1656,7 +1679,7 @@ export function landCiLearningShards(
   const inputs = readPendingCiLearningInputs(deps.stateRoot, shardRelDir);
   if (inputs.length === 0) return { filed: [], skipped, refused };
 
-  const landing = landContent(checkoutRoot, kind, inputs, deps);
+  const landing = yield* landContentSteps(checkoutRoot, kind, inputs, deps);
   try {
     acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
   } catch {
