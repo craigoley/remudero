@@ -38,6 +38,7 @@ import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./d
 import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
+import { overlayQueuedFeedbackEntries, queuedFeedbackDir } from "./feedback-landing.js";
 import { heldDependencyRoots } from "./held-dependency-roots.js";
 import {
   consumeHumanGateCounts,
@@ -834,8 +835,8 @@ export function createNowView(opts: NowViewOptions): {
   const decisionsKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
-    const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
     const stateRoot = dirname(instance.ledgerDir);
+    const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}:${mtimeOf(queuedFeedbackDir(stateRoot)) ?? "-"}` : "none";
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
@@ -934,7 +935,15 @@ export function createNowView(opts: NowViewOptions): {
       reasons.grill = reasons.task_question = "no feedback root is configured";
     } else {
       try {
-        feedbackEntries = projectReconciledFeedback(listGrilling(instance), statusGithub);
+        // W1-T5730: the landing queue overlays the checkout, so a queued answer leaves the list and a queue-only grill joins it.
+        let listed = listGrilling(instance);
+        try {
+          listed = overlayQueuedFeedbackEntries(listed, dirname(instance.ledgerDir));
+        } catch (error) {
+          const reason = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
+          reasons.grill = reason;
+        }
+        feedbackEntries = projectReconciledFeedback(listed, statusGithub);
         all.push(...grillDecisions(instance.name, feedbackEntries));
       } catch (error) {
         reasons.grill = `the feedback store is unreadable: ${(error as Error).message}`;

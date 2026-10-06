@@ -10,6 +10,7 @@
 import { computeFeedbackProjectionSync, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import { systemClock, type Clock } from "./clock.js";
 import { FEEDBACK_STATUSES, type FeedbackEntry } from "./feedback.js";
+import { overlayQueuedFeedbackEntries } from "./feedback-landing.js";
 import { decorateFeedbackDischargeByTasks, projectReconciledFeedback, type PanelGraphDeps, type ReconciledFeedbackEntry } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { GitHub } from "./status.js";
@@ -67,14 +68,29 @@ export function feedbackViewBodies(entries: readonly ReconciledFeedbackEntry[], 
   });
 }
 
-/** The entries projected and paged; the inline projection always answers (only its worker wrapper can refuse). */
-function feedbackBodies(input: FeedbackProjectionInput, github: GitHub, clock: Clock): FeedbackViewBody[] {
-  const { entries, filedTasks } = computeFeedbackProjectionSync(input) as Extract<FeedbackProjectionOutcome, { ok: true }>;
-  return feedbackViewBodies(projectFeedbackEntries(entries, filedTasks ? new Map(filedTasks) : undefined, github), { name: `feedback-store:${FEEDBACK_VIEW_INSTANCE}`, asOf: clock.iso(), state: "fresh" });
+/**
+ * The entries projected and paged; the inline projection always answers (only its worker wrapper can refuse).
+ * W1-T5730: the landing queue under `stateRoot` is overlaid on the checkout's entries (a queued decision reads
+ * its status, a queue-only capture is listed); an unreadable queue serves the checkout's entries and names
+ * the reason in a second, unavailable source (a readable queue adds none) — never "nothing queued".
+ */
+function feedbackBodies(input: FeedbackProjectionInput & { stateRoot: string }, github: GitHub, clock: Clock): FeedbackViewBody[] {
+  const { stateRoot, ...projectionInput } = input;
+  const { entries, filedTasks } = computeFeedbackProjectionSync(projectionInput) as Extract<FeedbackProjectionOutcome, { ok: true }>;
+  const asOf = clock.iso();
+  const sources: ViewSource[] = [{ name: `feedback-store:${FEEDBACK_VIEW_INSTANCE}`, asOf, state: "fresh" }];
+  let overlaid: FeedbackEntry[] = entries;
+  try {
+    overlaid = overlayQueuedFeedbackEntries(entries, stateRoot) as FeedbackEntry[];
+  } catch (error) {
+    sources.push({ name: `feedback-landing-queue:${FEEDBACK_VIEW_INSTANCE}`, asOf: null, state: "unavailable", reason: `the landing queue is unreadable, so queued feedback is not shown: ${String((error as Error)?.message ?? error)}` });
+  }
+  const bodies = feedbackViewBodies(projectFeedbackEntries(overlaid, filedTasks ? new Map(filedTasks) : undefined, github), sources[0]!);
+  return bodies.map((body) => ({ ...body, sources }));
 }
 
 /** One slow-lane pass: read every entry and the plan's filed tasks, project, and page. */
-export function materializeFeedbackView(input: { root: string; planPath: string }, github: GitHub, clock: Clock = systemClock): FeedbackViewBody[] {
+export function materializeFeedbackView(input: { root: string; planPath: string; stateRoot: string }, github: GitHub, clock: Clock = systemClock): FeedbackViewBody[] {
   return feedbackBodies(input, github, clock);
 }
 
@@ -91,7 +107,7 @@ export function feedbackLegacyView(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const status = params.get("status");
       if (status !== null && !(FEEDBACK_STATUSES as readonly string[]).includes(status)) return { error: `status must be one of ${FEEDBACK_STATUSES.join(", ")}` };
       const snapshot = readPlanSnapshot?.();
-      const input = { root: deps.root, planPath: deps.planPath, ...(snapshot ? { taskOrigins: taskOriginsOf(snapshot) } : {}) };
+      const input = { root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot, ...(snapshot ? { taskOrigins: taskOriginsOf(snapshot) } : {}) };
       const body = feedbackBodies(input, deps.statusGithub, clock).find((b) => b.key === viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },
