@@ -54,7 +54,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1417,7 +1417,7 @@ export interface BuildSweepEffectsDeps {
    *  observes the call instead of cutting a real one. */
   worktreeAddImpl?: typeof worktreeAdd;
   /** Same coverage seam for the branch push this rung performs. */
-  gitPushRunBranchImpl?: typeof gitPushRunBranch;
+  gitPushRunBranchImpl?: (worktreePath: string, opts?: Parameters<typeof gitPushRunBranchAsync>[1]) => void | Promise<void>;
   /** Same coverage seam for the two REST calls (dedup probe + PR create) this rung performs.
    *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
    *  spawns `gh`. */
@@ -1829,7 +1829,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     planRepairGitImpl: planRepairGit = defaultPlanRepairGit,
     worktreeAddImpl: worktreeAddForBuild = worktreeAdd,
-    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranch,
+    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranchAsync,
     ghJsonImpl: ghJsonForBuild = ghJson,
     ghBufferImpl: ghBufferForBuild = readMutationVerdictZip,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -2102,7 +2102,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       if (committed.changed !== true || typeof committed.sha !== "string" || committed.sha.length === 0) {
         return decline("generator_commit_empty", { scripts: ratchetScripts });
       }
-      gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
+      await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
       log("sweep.ratchet_repair_executor_applied", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
@@ -2825,8 +2825,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           },
           push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
             expectedHeadSha: sha,
-            capture: (file, args) => planRepairGit(file, args),
-            exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+            capture: (file, args) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, args),
+            exec: async (file, args) => {
+              await (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]);
+            },
           }),
           updateMetadata: async (metadata: { title: string; body: string }) => {
             const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
@@ -3783,7 +3785,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
                 }
-                gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+                await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
                 assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
                 return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
               } finally {
@@ -4106,7 +4108,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
           return true;
         }
-        gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+        await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
         const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
         planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
