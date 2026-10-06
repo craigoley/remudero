@@ -180,7 +180,7 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -279,7 +279,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -35563,6 +35563,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
       return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
     }
+    case "flow":
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot));
     case "evidence-coverage":
       return () => {
         try {
