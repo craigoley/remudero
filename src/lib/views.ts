@@ -52,21 +52,24 @@ export interface ViewSource {
 }
 
 /**
- * A part both sides copy whole from one file a writer rewrites in place: `at` is the path, inside the part, of the
- * reading's own observation time; `verdicts` maps a path judged at read time to the deadline path it is judged
- * against; `viewReadAt` names the body source whose as-of is the instant the view read the file.
+ * A reading both sides copy from one input that moves between their reads: a file a writer rewrites in place, or
+ * the newest ledger row of a step. `at` is the path, inside the part, of the reading's own observation time;
+ * `verdicts` maps a path judged at read time to the deadline path it is judged against; `viewReadAt` names the
+ * body source whose as-of is the instant the view read the input. `fields` narrows the reading to those paths of
+ * the part (each with its children), for a part that carries several readings; absent, it covers the whole part.
  */
 export interface ShadowReadingSpec {
   at: string;
   verdicts?: Readonly<Record<string, string>>;
   viewReadAt: string;
+  fields?: readonly string[];
 }
 
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
-  /** Per data path, the in-place file reading it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
-  shadowReadings?: Readonly<Record<string, ShadowReadingSpec>>;
+  /** Per data path, the reading (or each reading) it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
+  shadowReadings?: Readonly<Record<string, ShadowReadingSpec | readonly ShadowReadingSpec[]>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
   compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
   /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */

@@ -549,8 +549,8 @@ export interface ShadowLegacy {
   derived?: Readonly<Record<string, readonly string[]>>;
   /** What each side was computed from (a plan generation, a probe instant), carried onto the diff row as evidence. */
   inputs?: Readonly<Record<string, unknown>>;
-  /** Per data path, the in-place file reading legacy copied it from ({@link ViewDefinition.shadowReadings}). */
-  readings?: Readonly<Record<string, ShadowReadingSpec>>;
+  /** Per data path, the reading (or each reading) legacy copied it from ({@link ViewDefinition.shadowReadings}). */
+  readings?: Readonly<Record<string, ShadowReadingSpec | readonly ShadowReadingSpec[]>>;
   /** When legacy read and judged those readings: the instant serve rendered it. */
   readAtMs?: number;
   /** Why legacy's own sources say it is not ready ({@link unreadySources}): the sample is skipped, not compared. */
@@ -585,35 +585,44 @@ function valueAt(data: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((at, field) => (at !== null && typeof at === "object" ? (at as Record<string, unknown>)[field] : undefined), data);
 }
 
+/** Whether `path` is `under` itself or one of its children: `<under>.x`, or a keyed `<under>[...]`. */
+function isUnder(path: string, under: string): boolean {
+  return path === under || path.startsWith(`${under}.`) || path.startsWith(`${under}[`);
+}
+
 /**
  * The diff under a {@link ShadowLegacy.readings} part, judged `timing` only on the reading's own times. Two readings
- * are a rewrite between the reads when the side that read LATER holds the newer one and it was observed after the
+ * are a change between the reads when the side that read LATER holds the newer one and it was observed after the
  * earlier read. One reading's verdict differs by time when its deadline falls between the two judging instants.
- * Anything else, a payload over one reading included, is left to {@link classifyShadowDiff}.
+ * A reading with `fields` explains only those paths of its part. Anything else, a payload over one reading
+ * included, is left to {@link classifyShadowDiff}.
  */
 function unreadReading(path: string, legacy: ShadowLegacy, body: { data: unknown; sources?: readonly ViewSource[] }): { classification: ShadowClassification; reason: string } | undefined {
-  for (const [under, spec] of Object.entries(legacy.readings ?? {})) {
-    if (path !== under && !path.startsWith(`${under}.`) && !path.startsWith(`${under}[`)) continue;
-    const viewRead = body.sources?.find((source) => source.name === spec.viewReadAt)?.asOf;
-    const viewAt = viewRead ? Date.parse(viewRead) : Number.NaN;
-    const legacyAt = legacy.readAtMs ?? Number.NaN;
-    const [legacySeen, viewSeen] = [valueAt(legacy.data, `${under}.${spec.at}`), valueAt(body.data, `${under}.${spec.at}`)];
-    const [legacyObserved, viewObserved] = [Date.parse(String(legacySeen)), Date.parse(String(viewSeen))];
-    if (![viewAt, legacyAt, legacyObserved, viewObserved].every(Number.isFinite) || viewAt === legacyAt) return undefined;
-    const [early, late] = [Math.min(viewAt, legacyAt), Math.max(viewAt, legacyAt)];
-    if (legacyObserved !== viewObserved) {
-      const [lateSeen, lateObserved, earlySeen, earlyObserved] = legacyAt > viewAt
-        ? [legacySeen, legacyObserved, viewSeen, viewObserved] : [viewSeen, viewObserved, legacySeen, legacyObserved];
-      if (lateObserved <= earlyObserved || lateObserved <= early || lateObserved > late) return undefined;
-      const [legacyNamed, viewNamed] = legacyAt > viewAt ? [lateSeen, earlySeen] : [earlySeen, lateSeen];
-      return { classification: "timing", reason: `legacy read the ${under} reading observed at ${String(legacyNamed)}, the body the one observed at ${String(viewNamed)}: rewritten between the two reads` };
-    }
-    for (const [verdict, deadlinePath] of Object.entries(spec.verdicts ?? {})) {
-      if (path !== `${under}.${verdict}`) continue;
-      const named = String(valueAt(legacy.data, `${under}.${deadlinePath}`));
-      const deadline = Date.parse(named);
-      if (deadline === Date.parse(String(valueAt(body.data, `${under}.${deadlinePath}`))) && early <= deadline && deadline < late) {
-        return { classification: "timing", reason: `one reading judged either side of its deadline ${named}: the body at ${viewRead}, legacy at ${fixedClock(legacyAt).iso()}` };
+  for (const [under, specs] of Object.entries(legacy.readings ?? {})) {
+    for (const spec of ([] as ShadowReadingSpec[]).concat(specs)) {
+      if (!(spec.fields ? spec.fields.some((field) => isUnder(path, `${under}.${field}`)) : isUnder(path, under))) continue;
+      const named = spec.fields ? `${under}.${spec.at}` : under;
+      const viewRead = body.sources?.find((source) => source.name === spec.viewReadAt)?.asOf;
+      const viewAt = viewRead ? Date.parse(viewRead) : Number.NaN;
+      const legacyAt = legacy.readAtMs ?? Number.NaN;
+      const [legacySeen, viewSeen] = [valueAt(legacy.data, `${under}.${spec.at}`), valueAt(body.data, `${under}.${spec.at}`)];
+      const [legacyObserved, viewObserved] = [Date.parse(String(legacySeen)), Date.parse(String(viewSeen))];
+      if (![viewAt, legacyAt, legacyObserved, viewObserved].every(Number.isFinite) || viewAt === legacyAt) continue;
+      const [early, late] = [Math.min(viewAt, legacyAt), Math.max(viewAt, legacyAt)];
+      if (legacyObserved !== viewObserved) {
+        const [lateSeen, lateObserved, earlySeen, earlyObserved] = legacyAt > viewAt
+          ? [legacySeen, legacyObserved, viewSeen, viewObserved] : [viewSeen, viewObserved, legacySeen, legacyObserved];
+        if (lateObserved <= earlyObserved || lateObserved <= early || lateObserved > late) continue;
+        const [legacyNamed, viewNamed] = legacyAt > viewAt ? [lateSeen, earlySeen] : [earlySeen, lateSeen];
+        return { classification: "timing", reason: `legacy read the ${named} reading observed at ${String(legacyNamed)}, the body the one observed at ${String(viewNamed)}: rewritten between the two reads` };
+      }
+      for (const [verdict, deadlinePath] of Object.entries(spec.verdicts ?? {})) {
+        if (path !== `${under}.${verdict}`) continue;
+        const deadlineNamed = String(valueAt(legacy.data, `${under}.${deadlinePath}`));
+        const deadline = Date.parse(deadlineNamed);
+        if (deadline === Date.parse(String(valueAt(body.data, `${under}.${deadlinePath}`))) && early <= deadline && deadline < late) {
+          return { classification: "timing", reason: `one reading judged either side of its deadline ${deadlineNamed}: the body at ${viewRead}, legacy at ${fixedClock(legacyAt).iso()}` };
+        }
       }
     }
   }
