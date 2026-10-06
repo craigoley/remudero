@@ -5,7 +5,7 @@ import { test } from "node:test";
 import type { Escalation } from "../src/lib/escalate.js";
 import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates } from "../src/lib/plan.js";
 import { withTempDir } from "../src/lib/tmp.js";
-import { createPlanSyncCoalescer, lintPlanCommand, loadDaemonPlan, quarantineReporter, quarantiningPlanSync, syncPlanFromOrigin } from "../src/run-task.js";
+import { createPlanSyncCoalescer, lintPlanCommand, loadDaemonPlan, quarantineReporter, quarantiningPlanSyncAsync, syncPlanFromOrigin } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 // 2026-10-03 — two plan PRs merged 28 s apart each added a `priority:` key to one shard. git merged both, the shard
@@ -76,15 +76,15 @@ test("a shard holding a duplicate key is quarantined and ledgered while every ot
   assert.throws(() => syncPlanFromOrigin(clone, "plan/tasks.yaml"), /Map keys must be unique/);
 });
 
-test("a quarantined shard is escalated once across repeated plan loads", () => {
+test("a quarantined shard is escalated once across repeated plan loads", async () => {
   const clone = originWithBadShardOnMain();
   const r = recorder();
   const report = quarantineReporter(r.log, r.raise);
-  const sync = createPlanSyncCoalescer(join(clone, "plan", "tasks.yaml"), quarantiningPlanSync(report)).sync;
+  const sync = createPlanSyncCoalescer(join(clone, "plan", "tasks.yaml"), quarantiningPlanSyncAsync(report)).sync;
 
   syncPlanFromOrigin(clone, "plan/tasks.yaml", { quarantine: report });
   for (let tick = 0; tick < 3; tick++) {
-    assert.deepEqual(sync({}).plan.tasks.map((t) => t.id), ["W1-T1", "W1-T62"], "every lane gets the quarantined plan");
+    assert.deepEqual((await sync({})).plan.tasks.map((t) => t.id), ["W1-T1", "W1-T62"], "every lane gets the quarantined plan");
   }
 
   assert.equal(r.raised.length, 1, "one escalation for the shard across four loads");
