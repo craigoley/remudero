@@ -4,11 +4,12 @@
 // worker's ticker materializes them over a real ledger into the read model, and the assembled serve
 // server warm-loads and answers them over HTTP.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
+import { AGENT_VIEW_PARTS, createAgentView, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
 import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { analyticsSourceBodies, type AnalyticsViewData } from "../src/lib/analytics-view.js";
 import type { Clock } from "../src/lib/clock.js";
@@ -23,6 +24,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "../src/lib/feedback-view.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "../src/lib/inbox-view.js";
 import type { NeedsYouData } from "../src/lib/needs-you-view.js";
+import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "../src/lib/operator-agent.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -107,7 +109,12 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", agent: "serve" } }));
+  // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
+  appendFileSync(join(stateDir, "ledger.ndjson"), [
+    { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
+    { ts: iso(110_000), step: OPERATOR_AGENT_SETTINGS_STEP, task_id: "operator-agent", settings: { enabled: true, confidenceThreshold: 0.9 }, scope: { kind: "repository", repository: "craigoley/remudero" } },
+  ].map((row) => `${JSON.stringify(row)}\n`).join(""));
   // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
   writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -120,7 +127,8 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   });
   const instances = createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource });
   const workstreams = createWorkstreamsView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", planPath: deps.panelGraph.planPath }], ledgerSource });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams], clock, holder: "schema-test", post: () => {} });
+  const agent = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero" }], ledgerSource });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, agent], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -145,7 +153,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", agent: "?instance=core&part=history" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -183,6 +191,16 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
   const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
+  // W1-T5051: every agent part, not only the one read above, validates against the one AgentView schema.
+  const parts = new Map<string, AgentViewData>();
+  for (const part of Object.keys(AGENT_VIEW_PARTS)) {
+    const body = (await (await fetch(`${url}/v1/views/agent?instance=core&part=${part}`, { headers: READ })).json()) as Record<string, unknown>;
+    assert.deepEqual(violations(body, declaredBody("/v1/views/agent", "GET", 200)), [], `agent part ${part} sent ${JSON.stringify(body)}`);
+    parts.set(part, body.data as AgentViewData);
+  }
+  assert.deepEqual((parts.get("history")!.body as { proposals: Array<{ proposalId: string }> }).proposals.map((p) => p.proposalId), ["operator-agent:schema:fix:slow-runs"]);
+  assert.equal((parts.get("settings")!.scoped as { source: string }).source, "ledger", "the scoped settings read is populated");
+  assert.ok(Array.isArray((parts.get("proposals")!.body as AgentProposalsBody).proposals), "the proposals part read the committed analytics snapshot");
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
   assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 
