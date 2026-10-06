@@ -1,8 +1,4 @@
-# The knowledge gardener's (W1-T4095) RETIRE pass for PR #9542. Each
-# proof executes for real against the post-pass checkout/.
 - claim: this pass is recorded in the garden log
-  proof: "grep: ^## Pass 2026-10-06T10:53:35.712Z$ in docs/knowledge-garden-log.md"
-- claim: the gardener's retire of step-names-come-from-source is marked in its entry
-  proof: "grep: knowledge gardener: retire step-names-come-from-source$ in learnings/architecture.yaml"
-- claim: the gardener's retire of webtools-are-injection-surface is marked in its entry
-  proof: "grep: knowledge gardener: retire webtools-are-injection-surface$ in learnings/platform.yaml"
+  proof: "grep: ^## Pass 2026-10-06T23:10:18.176Z$ in docs/knowledge-garden-log.md"
+- claim: the gardener's retire of daemon-launchd-keepalive-restart is marked in its entry
+  proof: "grep: knowledge gardener: retire daemon-launchd-keepalive-restart$ in learnings/platform.yaml"
