@@ -183,11 +183,14 @@ export function mergeAnalytics(inputs: readonly AnalyticsInstanceInput[], nowMs:
   };
 }
 
-/** Per data path, the source the shadow pairs it with: each instance's entry with its own, the merged parts with the first's. */
-function pairedSources(instanceIds: readonly string[]): Record<string, string> {
-  const first = instanceIds[0];
+/**
+ * Per data path, the sources the shadow pairs it with: each instance's entry with its own, the merged parts with
+ * EVERY instance's, since one instance's later refresh moves the overview and the coverage as much as its entry.
+ */
+function pairedSources(instanceIds: readonly string[]): Record<string, string | string[]> {
+  const all = instanceIds.map((id) => `analytics:${id}`);
   return {
-    ...(first === undefined ? {} : { overview: `analytics:${first}`, coverage: `analytics:${first}` }),
+    ...(all.length === 0 ? {} : { overview: all, coverage: all }),
     ...Object.fromEntries(instanceIds.map((id) => [`instances[instanceId=${id}]`, `analytics:${id}`])),
   };
 }
