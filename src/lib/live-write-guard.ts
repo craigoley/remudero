@@ -294,9 +294,6 @@ export function assertClaimRefPushAllowed(
   refuseClaimRefPushToNetwork(run(["remote", "get-url", "origin"]), ref, env);
 }
 
-/** The awaited twin of {@link assertClaimRefPushAllowed}: the same gate and the same refusal, with its one git
- *  read awaited so a daemon-loop claim never spawns synchronously. The gate is read BEFORE the first await, so a
- *  call made inside `withLiveWritesAllowed` sees that scope exactly as the sync guard does. */
 export async function assertClaimRefPushAllowedAsync(
   run: (args: string[]) => Promise<{ status: number; stdout: string; stderr: string }>,
   ref: string,

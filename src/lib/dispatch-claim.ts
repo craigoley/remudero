@@ -272,8 +272,7 @@ export function decideDispatchClaimRelease(i: {
   };
 }
 
-/** The one I/O seam — every method is a git round trip; every decision above is pure and tested
- *  without one, mirroring `TriageClaimReserver`. */
+/** The one I/O seam: every method is a git round trip; every decision above is pure (as `TriageClaimReserver`). */
 export interface DispatchClaimReserver {
   /** A payload unique to THIS writer — two writers must never produce the same value. */
   mintAnchor(): string;
@@ -283,8 +282,7 @@ export interface DispatchClaimReserver {
   holder(taskId: string): string | undefined;
   /** Delete the claim ref, conditional on `expect` matching the ref's current anchor if given. */
   drop(taskId: string, opts?: { expect?: string }): boolean;
-  /** W1-T2552: git's own stderr from the most recent {@link attempt}, or `undefined` when it
-   *  succeeded or none has run yet. Optional, so every existing fake stays valid.
+  /** W1-T2552: the last {@link attempt}'s git stderr, `undefined` on success or none yet; optional.
    *  Why: docs/forensics/dispatch-claim.md#lastattemptstderr (the missing-credential incident). */
   lastAttemptStderr?(): string | undefined;
   /** W1-T2784: the claim ref's current commit MESSAGE, for {@link parseClaimAnchorMessage} to
@@ -301,9 +299,8 @@ export interface ClaimGitDeps {
   anchor?: () => string;
 }
 
-/** The real reserver: an orphan commit over the empty tree, pushed to the task's own ref — the
- *  same scheme `gitTriageClaimReserver` uses, so two writers' payloads stay unrelated. The
- *  message carries pid+host+time, legible to an operator and doubling as the uniqueness source. */
+/** The real reserver: an orphan empty-tree commit pushed to the task's ref (as `gitTriageClaimReserver`);
+ *  its pid+host+time message is legible to an operator and is the uniqueness source. */
 export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReserver {
   // Closure-scoped to one reserver, cleared on success, so a refusal never echoes an older attempt.
   let lastStderr: string | undefined;
@@ -335,15 +332,12 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     anchorMessage(taskId) {
       const sha = this.holder(taskId);
       if (!sha) return undefined;
-      // Fetch first: this is a parentless commit on a ref no clone tracks, so a bare cat-file on
-      // a fresh checkout would miss it and read as "no identity" on a claim that's genuinely dead.
+      // Fetch first: no clone tracks this parentless ref, so a bare cat-file would read "no identity".
       deps.run(claimFetchArgs(taskId));
       return messageFromCatFile(deps.run(["cat-file", "-p", sha]));
     },
   };
 }
-
-// ── THE SHARED READINGS: one parse per git answer, so the sync and awaited reservers cannot drift ──
 
 type GitAnswer = { status: number; stdout: string; stderr: string };
 
@@ -384,22 +378,13 @@ function claimIdsFromLsRemote(res: GitAnswer): string[] {
 
 function messageFromCatFile(res: GitAnswer): string | undefined {
   if (res.status !== 0) return undefined;
-  // `cat-file -p` on a commit prints headers, a blank line, then the message.
   const blank = res.stdout.indexOf("\n\n");
   return blank === -1 ? undefined : res.stdout.slice(blank + 2).trim();
 }
 
-// ── THE AWAITED RESERVER: the same claim, with every git round trip off the daemon loop ──────
-
-/** A value or a promise of one — what {@link releaseDispatchClaimAsync} and runTask await. */
 type Awaitable<T> = T | Promise<T>;
 
-/**
- * {@link DispatchClaimReserver} with each git round trip awaitable. MEASURED 2026-10-06: the sync
- * reserver's `spawnSync` git was the largest single holder of the daemon loop — 89 `daemon.loop_lag`
- * rows over 17 h, 1,506 s of spawn time, one push or ls-remote up to 106 s. A plain sync reserver is
- * also one of these (each value is awaitable), so a test's scripted fake needs no change.
- */
+/** {@link DispatchClaimReserver}, awaitable (its sync git held the daemon loop up to 106 s); a sync one fits. */
 export interface DispatchClaimReserverAsync {
   mintAnchor(): Awaitable<string>;
   attempt(taskId: string, anchor: string): Awaitable<DispatchClaimOutcome>;
@@ -411,13 +396,10 @@ export interface DispatchClaimReserverAsync {
 }
 
 export interface ClaimGitDepsAsync {
-  /** Runs a git argv off the loop; resolves (never rejects) with its exit status, stdout and stderr. */
   run(args: string[]): Promise<GitAnswer>;
-  /** Overrides the anchor so a test can make two writers distinguishable. */
   anchor?: () => string;
 }
 
-/** {@link gitDispatchClaimReserver}, awaited: the same argv and the same readings, method for method. */
 export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): DispatchClaimReserverAsync {
   let lastStderr: string | undefined;
   const holder = async (taskId: string): Promise<string | undefined> =>
@@ -452,19 +434,11 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
   };
 }
 
-/** How long one claim git call may run before it is killed and read as unreachable. */
-export const DISPATCH_CLAIM_GIT_TIMEOUT_MS = 60_000;
+/** BACKSTOP, above the slowest measured claim spawn (106 s, 2026-10-06); past it the claim is unreachable. */
+export const DISPATCH_CLAIM_GIT_TIMEOUT_MS = 300_000;
 
-/**
- * The real awaited runner: `git -C <repoDir> <args>` through `execFile`, bounded at `timeoutMs`
- * (SIGTERM, then SIGKILL after {@link killAfterGrace}'s grace). It RESOLVES on every outcome, as
- * `spawnSync` did, and each failure is failure-shaped so the reserver fails closed:
- *  - exit N            → status N, git's own stderr (a contended push still reads `taken`);
- *  - killed at the bound → status 1, stderr NAMING the bound — no contention word, so
- *    `classifyPushFailure` reads `unreachable` and the dispatch refuses rather than guesses;
- *  - signalled, or never started (ENOENT) → status 1, with node's error text when git wrote none —
- *    the same status `gitRunAdapter` gives a signalled `spawnSync`, so neither can read as success.
- */
+/** Resolves on every outcome: exit N → N; killed at the bound → 1, stderr NAMING it (so `unreachable`,
+ *  never `taken`); signalled or never started → 1, as `gitRunAdapter` maps a null status. */
 export function gitClaimRunnerAsync(
   repoDir: string,
   opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
@@ -579,19 +553,13 @@ export function releaseDispatchClaim(
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
 }
 
-/**
- * {@link releaseDispatchClaim}, awaited — the same four-arm decision ({@link decideDispatchClaimRelease}),
- * the same gather order (anchor message only off the this-run path, probes only once it parsed) and the
- * same CAS'd drop, so runTask's daemon-loop releases never spawn git synchronously. Accepts a sync
- * reserver too: every value it reads is awaited.
- */
+/** {@link releaseDispatchClaim}, awaited; the liveness probe gets the anchor it parsed, never a re-read. */
 export async function releaseDispatchClaimAsync(
   taskId: string,
   reserver: DispatchClaimReserverAsync,
   i: {
     anchor?: string;
     evidenceObserved?: boolean;
-    /** Handed the anchor identity just parsed — the probe runs only once one has. */
     livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
   } = {},
 ): Promise<DispatchClaimReleaseResult> {
