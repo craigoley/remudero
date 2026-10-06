@@ -1,0 +1,46 @@
+- id: W1-T6090
+  title: "EVERY TEST RUN IN A CONTAINER TAKES THE HOST-WIDE SLOT, NICED AND BOUNDED — the host-wide test slot (PR #9723) lives under the scratch mount but no container binds that directory or is told where it is, so fleet workers each see an empty slot; and the single-file test spawners (review, gate-gardener, census-precheck) run node --test at default priority and default concurrency"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — every fleet-side test spawn shares the one host-wide slot at low priority
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, host load ~33, ranked item 1) follow-up to PR #9723"
+  plan_refs: [W1-T4102, W1-T4106, W1-T4267, W1-T6030]
+  files: [deploy/scratch-mounts.sh, deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/review.ts, src/lib/gate-gardener.ts, scripts/census-precheck.mjs, test/every-test-run-in-a-container-takes-the-host-wide-slot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (research-coverage): host load ~33; no --test-concurrency anywhere in src (node's
+    default runs cores-1 = 7 files at once, each spawning git and tsx); the coverage lock was keyed by a
+    realpath in container-local /tmp, so it was never host-wide. PR #9723 (open, run-unfiled-1791326296271)
+    adds src/lib/test-slot.ts: a slot directory named by RMD_TEST_SLOT_DIR on the scratch mount's host side
+    (/mnt/scratch/rmd), `lowPriorityCommand` (nice -n 10, ionice when present) and `testRunConcurrency`,
+    wired into ci-parity and preflight-author. READ on origin/main: deploy/scratch-mounts.sh binds per-
+    container read-model and worker-home dirs from `$(scratch_root)/rmd` and exports their env vars;
+    RMD_DERIVED_RUNTIME_ENV_VARS is listed in deploy/runtime-env-vars.sh and again as recycle-container.sh's
+    fallback copy; none carries a test-slot dir. src/lib/review.ts (proof runs), src/lib/gate-gardener.ts
+    and scripts/census-precheck.mjs spawn `node --test` on single files with neither nice nor a bound.
+  design: |
+    (1) deploy/scratch-mounts.sh creates `$(scratch_root)/rmd/test-slots` once and binds it into every
+    container at one fixed path, exporting RMD_TEST_SLOT_DIR; add RMD_TEST_SLOT_DIR to the derived-env list
+    in deploy/runtime-env-vars.sh and to recycle-container.sh's fallback copy, so the "running container
+    carries a name the list does not" refusal stays consistent. (2) The single-file spawners in
+    src/lib/review.ts, src/lib/gate-gardener.ts and scripts/census-precheck.mjs (and any other `node --test`
+    spawner a grep finds; list them in the PR) start through test-slot's lowPriorityCommand with an explicit
+    --test-concurrency from testRunConcurrency. A single-file proof run does not wait on the full-run slot;
+    it is niced and bounded only.
+  acceptance:
+    - claim: "every container launch binds the shared test-slot directory and sets RMD_TEST_SLOT_DIR, and the derived-env lists name it; the review, gate-gardener and census-precheck test spawns start under nice with an explicit test concurrency"
+      proof: "unit test: test/every-test-run-in-a-container-takes-the-host-wide-slot.test.ts"
+  falsifier: |
+    Leave the bind out of scratch-mounts.sh: the launch-args fixture has no test-slot volume and the first
+    test fails.
+  note: |
+    DEPENDS ON AN UNFILED PR: #9723 (fix(test-slot)) is a hand PR with no task id, so depends_on cannot
+    name it; build after it merges. deploy/ is a baked path: the bind takes effect at the next recycle.
+    Verify on the host with docker inspect, not from the merge.
