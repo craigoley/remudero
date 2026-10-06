@@ -1,0 +1,65 @@
+- id: W1-T5943
+  title: "EXPLAIN A CAPABILITY DECISION WITHOUT USING IT — read-only inspection and replay through the canonical verifier"
+  repo: remudero
+  depends_on: [W1-T3880, W1-T5882]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2.5
+  budget_usd: 35.00
+  risk: medium
+  band_meaning: span
+  origin: "operator approved Merge platform research follow-ups, 2026-10-05"
+  plan_refs: [W1-T3880, W1-T3853, W1-T5882]
+  files:
+    - src/lib/capability-grant.ts
+    - src/lib/capability-inspection.ts
+    - src/run-task.ts
+    - test/capability-inspection.test.ts
+    - docs/cli-reference.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: capability-grant.ts already implements a pure verifyCapabilityGrant over a
+    canonical store, separate from useCapabilityGrant and secret resolution. Existing replay
+    tests concern nonce rejection, not an operator's batch comparison of candidate requests.
+    Merge's Tool Packs and Rule Tester show the value of scoped tools and pre-activation
+    inspection: https://docs.merge.dev/merge-agent-handler/build/tools/tool-packs and
+    https://docs.merge.dev/merge-agent-handler/secure/rule-tester.
+
+    This is a read-only consumer of the existing verifier, not a new permission engine or
+    authorization to provision credentials. OBSERVED: grants carry repo/instance scope while
+    the current request/verifier checks target, audience, operation, time, revocation, nonce
+    and use count. An explanation must not claim repo/instance enforcement absent a check.
+    Depend on the hand-built compatibility task before CLI wiring; do not dispatch or alter
+    the Node 24 upgrade itself. W1-T3853's promotion contract remains a separate owner.
+  design: |
+    Add a bounded capability-inspection-v1 result and local read-only CLI that drives the
+    actual verifier with an explicit observation time and trusted canonical-store adapter.
+    A supplied grant object is never authoritative. Output checked predicates and the
+    canonical verdict; label declared but unverified context as not-checked. A missing,
+    unreadable or malformed store is unavailable, not an empty set or an authorization.
+
+    Batch replay evaluates each case independently against the same snapshot; it never
+    records a nonce, decrements a use limit, resolves a secret, starts a provider or promotes
+    a policy. Comparison reports verdict changes and incomparable inputs without declaring
+    candidate safety or executing the request. Live execution must still reverify normally.
+    Allowlist the output schema, bound counts and strings, and omit approval prose, raw
+    arguments, credential material and arbitrary upstream errors. Do not add a public endpoint,
+    second credential store, new ordinary-PR gate or automatic policy mutation.
+  acceptance:
+    - claim: "inspection and replay use the canonical verifier and preserve all store state"
+      proof: "unit test: capability inspection uses the real verifier without consuming a grant or resolving a secret"
+    - claim: "allow and refusal controls agree with actual verification at an explicit clock"
+      proof: "unit test: capability replay matches actual allow expiry revocation audience target operation nonce and use-limit decisions"
+    - claim: "unknown input is distinct from refusal and unverified context is not certified"
+      proof: "unit test: capability inspection distinguishes unavailable store and unchecked repository scope from verified authorization"
+    - claim: "output is bounded and does not echo sensitive or attacker-controlled payloads"
+      proof: "unit test: capability inspection bounds cases and redacts secret-bearing inputs and upstream failures"
+    - claim: "the real local command is read-only and never permits execution from a replay receipt"
+      proof: "unit test: capability inspection CLI never executes or promotes and execution reverifies after a changed snapshot"
+  falsifier: |
+    Substitute a caller-provided grant for the stored grant, call record or resolveSecret during
+    inspection, guess that repo/instance scope was checked, treat an unreadable store as empty,
+    echo an input payload, or reuse an inspection receipt to skip live verification. The
+    corresponding positive/negative/unknown control must fail when that defect is introduced.
