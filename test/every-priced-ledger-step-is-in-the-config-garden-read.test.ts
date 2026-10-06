@@ -63,6 +63,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
+  "sweep.check_requeue.deferred": A_LANE_RUN_ID,
   "sweep.ci_gate_reaggregated": A_LANE_RUN_ID,
   "sweep.codeql_blocker.dispatch": A_LANE_RUN_ID,
   "sweep.credit_backfill": A_LANE_RUN_ID,

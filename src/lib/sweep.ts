@@ -5883,7 +5883,7 @@ async function requeueCheckJob(
     const name = `"${check.name}"`;
     if (deferral.escalated) return { kind: "held", note: `${name} requeue deferred ${deferral.count} times, already escalated` };
     if (deferral.count >= CHECK_REQUEUE_DEFERRAL_BACKSTOP) {
-      append(deps.ledgerPath, { ...row, step: CHECK_REQUEUE_DEFERRED_STEP, refusal: deferral.refusal, outcome: "escalated" });
+      append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_DEFERRED_STEP, refusal: deferral.refusal, outcome: "escalated" });
       const escalate = `GitHub refused the job rerun of ${name} ${deferral.count} times while its run was in flight ` +
         `(${deferral.refusal}), the BACKSTOP of ${CHECK_REQUEUE_DEFERRAL_BACKSTOP}`;
       return { kind: "held", note: `${name} requeue deferred ${deferral.count} times — escalated`, escalate };
@@ -5892,10 +5892,10 @@ async function requeueCheckJob(
     if (target.runInFlight) return { kind: "held", note: `${name} deferred requeue waits: its run is still in flight` };
     check = { ...check, jobId: target.jobId ?? check.jobId };
   }
-  append(deps.ledgerPath, { ...row, step: CHECK_REQUEUE_STEP, ...fields, ...(check.jobId ? { job_id: check.jobId } : {}) });
+  append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_STEP, ...fields, ...(check.jobId ? { job_id: check.jobId } : {}) });
   const outcome = jobRequeueOutcome(deps.requeueCheck ? await deps.requeueCheck(pr, check) : false);
   if (outcome.kind !== "deferred") return { kind: outcome.kind };
-  append(deps.ledgerPath, { ...row, step: CHECK_REQUEUE_DEFERRED_STEP, job_id: check.jobId, refusal: outcome.refusal,
+  append(deps.ledgerPath, { ...row, pr_url: pr.prUrl, step: CHECK_REQUEUE_DEFERRED_STEP, job_id: check.jobId, refusal: outcome.refusal,
     outcome: "deferred", error: outcome.error });
   return { kind: "deferred", note: `"${check.name}" requeue deferred (${outcome.refusal})` };
 }
