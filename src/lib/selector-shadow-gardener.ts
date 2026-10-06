@@ -37,10 +37,18 @@ export interface SelectorShadowRun {
   log: string;
 }
 
+/** W1-T5952: "flake" (affected-suites.ts's shadowRecord, W1-T4462) is a failure caught only because
+ *  recentFailures rescued its suite. It is counted, never scored as a selection or a miss. */
+export type SelectorShadowVerdict = "selected" | "missed" | "flake";
+
+function isSelectorShadowVerdict(value: unknown): value is SelectorShadowVerdict {
+  return value === "selected" || value === "missed" || value === "flake";
+}
+
 export interface SelectorShadowFailure {
   file: string;
-  floor: "selected" | "missed";
-  narrow?: "selected" | "missed";
+  floor: SelectorShadowVerdict;
+  narrow?: SelectorShadowVerdict;
 }
 
 export interface SelectorShadowRecord {
@@ -79,6 +87,8 @@ export interface SelectorShadowReport {
   fullSuiteSize: number;
   floor: SelectorShadowSelectionReport;
   narrow: SelectorShadowSelectionReport;
+  /** W1-T5952: flake verdicts per selection, outside each selection's `failures`. */
+  flakes: { floor: number; narrow: number };
   misses: SelectorShadowMiss[];
   verdict: "misses" | "insufficient" | "ready";
   reason: string;
@@ -106,8 +116,7 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
       if (!entry || typeof entry !== "object") throw new Error("selector shadow: invalid failure");
       const f = entry as Record<string, unknown>;
       if (typeof f.file !== "string" || !/^test\/.*\.test\.ts$/.test(f.file) ||
-          (f.floor !== "selected" && f.floor !== "missed") ||
-          (f.narrow !== undefined && f.narrow !== "selected" && f.narrow !== "missed") ||
+          !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
           (row.narrowSize !== undefined && f.narrow === undefined) ||
           (row.narrowSize === undefined && f.narrow !== undefined) ||
           (row.fullRun && f.floor !== "selected")) {
@@ -492,7 +501,7 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
   } };
 }
 
-type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "misses">;
+type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "flakes" | "misses">;
 
 function foldSelectorShadowObservations(observations: readonly SelectorShadowObservation[], fullSuiteSize: number): SelectorShadowFold {
   const floorVerdicts: Array<"selected" | "missed"> = [];
@@ -500,14 +509,17 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
   const floorSizes: number[] = [];
   const narrowSizes: number[] = [];
   const misses: SelectorShadowMiss[] = [];
+  const flakes = { floor: 0, narrow: 0 };
   let recovered = 0;
   for (const run of observations) {
     floorSizes.push(run.fullRun ? fullSuiteSize : run.floorSize);
     if (run.narrowSize !== undefined) narrowSizes.push(run.narrowSize);
     recovered += run.recovered;
     for (const failure of run.failures) {
-      floorVerdicts.push(failure.floor);
-      if (failure.narrow !== undefined) narrowVerdicts.push(failure.narrow);
+      if (failure.floor === "flake") flakes.floor += 1;
+      else floorVerdicts.push(failure.floor);
+      if (failure.narrow === "flake") flakes.narrow += 1;
+      else if (failure.narrow !== undefined) narrowVerdicts.push(failure.narrow);
       for (const selection of ["floor", "narrow"] as const) {
         if (failure[selection] === "missed") misses.push({
           runId: run.runId, headSha: run.headSha,
@@ -519,7 +531,7 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
     }
   }
   return {
-    runsComplete: observations.length, recovered, misses,
+    runsComplete: observations.length, recovered, flakes, misses,
     floor: selectionReport(floorVerdicts, floorSizes, fullSuiteSize),
     narrow: selectionReport(narrowVerdicts, narrowSizes, fullSuiteSize),
   };
@@ -568,15 +580,15 @@ function selectorShadowObservationRow(o: SelectorShadowObservation): Record<stri
 }
 
 function selectorShadowObservationFromRow(row: Record<string, unknown>): SelectorShadowObservation | undefined {
-  const verdict = (v: unknown): v is "selected" | "missed" => v === "selected" || v === "missed";
   if (!nonnegativeInteger(row.ci_run_id) || typeof row.head_sha !== "string" || (row.source !== "live" && row.source !== "replay") ||
       typeof row.full_run !== "boolean" || !nonnegativeInteger(row.floor_size) || !nonnegativeInteger(row.recovered) ||
       (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) || !Array.isArray(row.failures)) return undefined;
   const failures: SelectorShadowFailure[] = [];
   for (const entry of row.failures as unknown[]) {
     const f = entry as Record<string, unknown> | null;
-    if (!f || typeof f.file !== "string" || !verdict(f.floor) || (f.narrow !== undefined && !verdict(f.narrow))) return undefined;
-    failures.push({ file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow as "selected" | "missed" }) });
+    if (!f || typeof f.file !== "string" || !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
+        (row.full_run && f.floor !== "selected")) return undefined;
+    failures.push({ file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow as SelectorShadowVerdict }) });
   }
   return {
     runId: row.ci_run_id, headSha: row.head_sha,
