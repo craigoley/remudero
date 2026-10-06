@@ -97,10 +97,9 @@ function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: stri
   execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
     import { createRequire } from 'node:module';
     import { readFileSync, writeFileSync } from 'node:fs';
-    import { renderCoverageSummary } from './scripts/coverage-merge-ratchet.mjs';
+    import { newTestCoverage, renderCoverageSummary } from './scripts/coverage-merge-ratchet.mjs';
     const { TestCoverage } = createRequire(import.meta.url)('internal/test_runner/coverage');
-    const collector = new TestCoverage('', undefined, process.cwd(), ['test/**'], undefined, true,
-      { line: 0, branch: 0, function: 0 });
+    const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
     const merged = new Map();
     for (const path of process.argv.slice(2)) {
       const report = JSON.parse(readFileSync(path, 'utf8'));
@@ -147,7 +146,7 @@ function realMappedProfile(root: string): { result: Array<{ scriptId: string; ur
     const probe = require(${JSON.stringify(probe)}); test('profile positive control', () => { assert.equal(probe.f0(true), 0); assert.equal(probe.f1(false), -2); });\n`);
   const raw = join(root, 'producer-raw');
   mkdirSync(raw);
-  const tap = execFileSync(process.execPath, ['--enable-source-maps', '--experimental-test-coverage', '--test', producer], {
+  const tap = execFileSync(process.execPath, ['--enable-source-maps', '--experimental-test-coverage', '--test', '--test-reporter=tap', producer], {
     cwd: process.cwd(), env: coverageEnv(raw), encoding: 'utf8', stdio: 'pipe',
   });
   assert.match(tap, /^# tests 1$/m);
@@ -427,15 +426,15 @@ test('coverage merge CLI merges raw V8 ranges before assigning LCOV branch index
     `const assert = require('node:assert/strict');\nconst { test } = require('node:test');\nconst { choose } = require('./opposite-branches.cjs');\ntest('right', () => assert.equal(choose('right'), 'right'));\n`,
   );
 
-  execFileSync(process.execPath, ['--test', '--experimental-test-coverage', leftTest], {
+  execFileSync(process.execPath, ['--test', '--test-reporter=tap', '--experimental-test-coverage', leftTest], {
     env: coverageEnv(leftRaw),
     stdio: 'pipe',
   });
-  execFileSync(process.execPath, ['--test', '--experimental-test-coverage', rightTest], {
+  execFileSync(process.execPath, ['--test', '--test-reporter=tap', '--experimental-test-coverage', rightTest], {
     env: coverageEnv(rightRaw),
     stdio: 'pipe',
   });
-  execFileSync(process.execPath, ['--test', '--experimental-test-coverage', leftTest, rightTest], {
+  execFileSync(process.execPath, ['--test', '--test-reporter=tap', '--experimental-test-coverage', leftTest, rightTest], {
     env: coverageEnv(bothRaw),
     stdio: 'pipe',
   });
@@ -490,6 +489,7 @@ test('compact shard reports defer source-map translation and preserve every LCOV
         '--experimental-test-coverage',
         '--test-coverage-exclude=test/**',
         '--test',
+        '--test-reporter=tap',
         `--test-name-pattern=${namePattern}`,
         '--import',
         'tsx',
@@ -529,7 +529,7 @@ test("W1-T4951: compacted four-shard coverage preserves line and branch totals",
       mkdirSync(rawDirs[index]!);
       execFileSync(process.execPath, [
         '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
-        '--test', `--test-name-pattern=${index % 2 === 0 ? 'provider selector uses the subscription' : 'provider selector excludes an exhausted'}`,
+        '--test', '--test-reporter=tap', `--test-name-pattern=${index % 2 === 0 ? 'provider selector uses the subscription' : 'provider selector excludes an exhausted'}`,
         '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
       ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), stdio: 'pipe' });
       // Full suites carry large test source maps that are excluded from the final ratio.
@@ -594,7 +594,7 @@ test('streamed compact coverage preserves pinned-Node LCOV without writable scra
       for (let run = 0; run < 2; run += 1) {
         const tap = execFileSync(process.execPath, [
           '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
-          '--test', `--test-name-pattern=${pattern}`,
+          '--test', '--test-reporter=tap', `--test-name-pattern=${pattern}`,
           '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
         ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), encoding: 'utf8', stdio: 'pipe' });
         assert.match(tap, /^# tests [1-9]\d*/m, 'the real profile producer must complete tests');

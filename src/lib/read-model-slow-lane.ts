@@ -322,7 +322,7 @@ export function threadSlowLane(opts: {
   let respawn: NodeJS.Timeout | undefined;
   const spawn = (): void => {
     const data: SlowLaneData = { ...opts.config, kind: SLOW_LANE_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
     worker = spawned;
     spawned.unref();
     // Ahead of the lease, so a thread's first pass already knows which views are switched on.

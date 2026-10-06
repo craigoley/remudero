@@ -80,7 +80,7 @@ test("W1-T3525: the default target's test/ node --test argv stays byte-for-byte 
   assert.ok(nodeProof);
   assert.deepEqual(
     nodeProof!.args,
-    ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, "test/deny-floor.test.ts"],
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, "test/deny-floor.test.ts"],
     "node --test argv unchanged by the registry's introduction",
   );
   assert.equal(nodeProof!.nameFiltered, undefined);

@@ -446,6 +446,17 @@ function stepTrigger(input) {
     addsLiteral(input, STEP_LITERAL_RE, 2);
 }
 
+/** W1-T5882: a changed src/, scripts/ or bin/ file that adds a nested `node --test` argv or hands a Worker
+ *  process.execArgv — the two Node 24 behaviours test/node-24-runtime-compatibility.test.ts guards. */
+const NODE24_RUNTIME_RE = /(["'])--test\1|execArgv:\s*process\.execArgv/g;
+const NODE24_SCOPE_RE = /^(?:src|scripts|bin)\/.+\.[cm]?[jt]s$/;
+function node24RuntimeTrigger({ changed, readHead, readBase }) {
+  if (changed.includes("test/node-24-runtime-compatibility.test.ts")) return true;
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  const count = (text) => [...String(text ?? "").matchAll(NODE24_RUNTIME_RE)].length;
+  return changed.filter((path) => NODE24_SCOPE_RE.test(path)).some((path) => count(readHead(path)) > count(readBase(path)));
+}
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
@@ -472,6 +483,8 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
+  { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
+    remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
 ];
 
 /**
