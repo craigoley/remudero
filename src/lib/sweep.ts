@@ -4125,6 +4125,23 @@ export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
 const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
   lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
 
+/** W1-T5956 — does a re-arm after an ejection spend the bound? Not while Actions reads degraded or
+ *  major_outage; an unreadable read is an incident only until the head's unreadable re-arm streak
+ *  is older than W1-T5939's hold BACKSTOP, so a stuck read cannot hide an ejection loop forever. */
+export function rearmSpendsBound(
+  incident: ActionsIncident,
+  rearmsAtHead: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+): boolean {
+  if (incident.state === "degraded" || incident.state === "major_outage") return false;
+  if (incident.state === "operational") return true;
+  let since = nowMs;
+  for (let i = rearmsAtHead.length - 1; i >= 0 && rearmsAtHead[i].actions_status === "unreadable"; i--) {
+    since = Number(rearmsAtHead[i].at_ms);
+  }
+  return nowMs - since >= ACTIONS_INCIDENT_HOLD_BACKSTOP_MS;
+}
+
 /** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
 export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
 
@@ -13311,6 +13328,7 @@ export async function runSweep(
     let dedupStandDownReason: string | undefined;
     let armedIdleDue = false;
     let rearmAfterDisarm: number | undefined;
+    let rearmIncidentFields: Record<string, unknown> = {};
     let queueMembership: MergeQueueMembership | undefined;
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
@@ -13360,9 +13378,18 @@ export async function runSweep(
         const priorArmAtHead = prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         const armedByPriorPass = !armedByGitHub && priorArmAtHead && typeof queueMembership !== "string";
         const disarmedByGitHub = priorArmAtHead && queueMembership === "not-queued";
-        const rearms = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr).length : 0;
-        const rearmExhausted = disarmedByGitHub && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
-        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + 1;
+        const rearmRows = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr) : [];
+        const rearms = rearmRows.filter((line) => line.counted !== false).length;
+        const rearmEscalated = rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true);
+        // W1-T5956: an ejection inside an Actions incident is the outage's, so its re-arm is free.
+        let rearmCounted = true;
+        if (disarmedByGitHub && !rearmEscalated && deps.readActionsStatusSummary) {
+          const incident = await readActionsIncident();
+          rearmCounted = rearmSpendsBound(incident, rearmRows, now);
+          rearmIncidentFields = { counted: rearmCounted, actions_status: incident.state, actions_detail: incident.detail, at_ms: now };
+        }
+        const rearmExhausted = disarmedByGitHub && rearmCounted && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + (rearmCounted ? 1 : 0);
         alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || refused || hold !== undefined;
         if (rearmExhausted && !deps.dryRun &&
             !rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true)) {
@@ -13697,7 +13724,8 @@ export async function runSweep(
               }
               if (rearmAfterDisarm !== undefined) {
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARMED_AFTER_DISARM_STEP,
-                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD });
+                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD,
+                  ...rearmIncidentFields });
               }
               armsInFlight.add(armKey);
               let armResult: Awaited<ReturnType<SweepDeps["arm"]>>;
