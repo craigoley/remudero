@@ -460,3 +460,133 @@ export function readSourceSnapshotBody(db: ReadModelDb, instance: string, name: 
   const body = db.prepare("SELECT body FROM source_snapshot WHERE instance = ? AND name = ?").get(instance, name)?.body;
   return body === null || body === undefined ? undefined : JSON.parse(String(body));
 }
+
+/**
+ * The agent view's fold state per instance (arch Phase 4 §7.1, W1-T5051): `state_json` is the fold of every
+ * `fact` row through `last_seq`, so a restart folds only the rows after it instead of the whole store.
+ */
+export const AGENT_FOLD_DDL = "CREATE TABLE IF NOT EXISTS agent_fold(instance TEXT PRIMARY KEY, last_seq INTEGER NOT NULL, state_json TEXT NOT NULL) WITHOUT ROWID;";
+
+/** One instance's committed fold: the state, and the last fact `seq` it consumed. */
+export interface AgentFoldRecord {
+  lastSeq: number;
+  stateJson: string;
+}
+
+/** The committed fold of `instance`; undefined when none was ever committed (or the store predates the table). */
+export function readAgentFold(db: ReadModelDb, instance: string): AgentFoldRecord | undefined {
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'agent_fold'").get() === undefined) return undefined;
+  const row = db.prepare("SELECT last_seq, state_json FROM agent_fold WHERE instance = ?").get(instance);
+  return row === undefined ? undefined : { lastSeq: Number(row.last_seq), stateJson: String(row.state_json) };
+}
+
+/**
+ * Commits a fold state and the fact position it consumed in one fenced transaction: both land or neither does,
+ * and a writer that lost its lease writes nothing, so the committed pair stays the last whole one.
+ */
+export function writeAgentFold(db: ReadModelDb, lease: ReadModelLease, instance: string, record: AgentFoldRecord): void {
+  withWriteTransaction(db, lease, () => {
+    db.exec(AGENT_FOLD_DDL);
+    db.prepare(`INSERT INTO agent_fold(instance, last_seq, state_json) VALUES(?, ?, ?)
+      ON CONFLICT(instance) DO UPDATE SET last_seq = excluded.last_seq, state_json = excluded.state_json`).run(instance, record.lastSeq, record.stateJson);
+  });
+}
+
+/** Fact `seq` one fold step reads, so a large delta spreads over several passes. */
+export const AGENT_FOLD_CHUNK = 5_000;
+/** A fold still catching up commits at least once per this many chunks, so a restart mid-delta re-reads at most these. */
+export const AGENT_FOLD_COMMIT_CHUNKS = 20;
+const AGENT_FOLD_STATE_VERSION = 1;
+
+interface AgentFoldEntry {
+  tsMs: number;
+  seq: number;
+  row: Record<string, unknown>;
+}
+
+interface AgentFoldState {
+  /** Every fact through this `seq` is folded. */
+  seq: number;
+  entries: AgentFoldEntry[];
+  /** The `seq` of the pair last committed to `agent_fold`, and whether rows were folded since. */
+  committed: number;
+  dirty: boolean;
+}
+
+/** One instance's store as the fold sees it; without a lease the fold advances in memory only. */
+export interface AgentFoldSlot {
+  instance: string;
+  db: ReadModelDb;
+  lease?: ReadModelLease;
+  log?: (step: string, extra: Record<string, unknown>) => void;
+}
+
+/** The `panel.*` facts of each instance, folded incrementally and persisted in `agent_fold` (arch Phase 4 §7.1). */
+export interface AgentFolds {
+  /** Folds one chunk per `more()`; true once the fold holds the store's newest fact. */
+  advance(slot: AgentFoldSlot, more: () => boolean): boolean;
+  /** The folded rows, oldest first (by `ts`, then `seq`), with every remaining fact folded first. */
+  current(slot: AgentFoldSlot): { seq: number; rows: Array<Record<string, unknown>>; newestTsMs: number };
+}
+
+/** The committed fold, or an empty one when none was committed, it has another version, or the store shrank under it. */
+function loadAgentFold(db: ReadModelDb, instance: string, max: number): AgentFoldState {
+  const record = readAgentFold(db, instance);
+  if (record !== undefined && record.lastSeq <= max) {
+    const state = JSON.parse(record.stateJson) as { version?: number; entries?: AgentFoldEntry[] };
+    if (state.version === AGENT_FOLD_STATE_VERSION && Array.isArray(state.entries)) return { seq: record.lastSeq, entries: state.entries, committed: record.lastSeq, dirty: false };
+  }
+  return { seq: 0, entries: [], committed: 0, dirty: false };
+}
+
+/**
+ * The per-store folds. A step reads only facts past the fold's `seq`; the state and the `seq` it consumed are
+ * committed together once caught up, or every {@link AGENT_FOLD_COMMIT_CHUNKS} chunks while catching up. A refused
+ * commit (a lost lease) is logged and the in-memory fold carries on; the committed pair stays the last whole one.
+ * `onStep` sees each step's range and the rows it read.
+ */
+export function createAgentFolds(opts: { chunk?: number; onStep?: (step: { instance: string; from: number; through: number; rows: number }) => void } = {}): AgentFolds {
+  const chunk = opts.chunk ?? AGENT_FOLD_CHUNK;
+  const span = AGENT_FOLD_COMMIT_CHUNKS * chunk;
+  const folds = new WeakMap<ReadModelDb, AgentFoldState>();
+  const foldOf = (slot: AgentFoldSlot): { fold: AgentFoldState; max: number } => {
+    const max = Number(slot.db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m);
+    let fold = folds.get(slot.db);
+    if (!fold || max < fold.seq) folds.set(slot.db, (fold = loadAgentFold(slot.db, slot.instance, max)));
+    return { fold, max };
+  };
+  const step = (slot: AgentFoldSlot, fold: AgentFoldState, through: number, max: number): void => {
+    const fresh = slot.db.prepare("SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND seq <= ? AND step LIKE 'panel.%' ORDER BY seq").all(fold.seq, through);
+    opts.onStep?.({ instance: slot.instance, from: fold.seq, through, rows: fresh.length });
+    for (const fact of fresh) fold.entries.push({ tsMs: Number(fact.ts_ms), seq: Number(fact.seq), row: JSON.parse(String(fact.body)) as Record<string, unknown> });
+    if (fresh.length > 0) fold.entries.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+    fold.seq = through;
+    fold.dirty ||= fresh.length > 0;
+    if (!fold.dirty || slot.lease === undefined || (through < max && through - fold.committed < span)) return;
+    try {
+      writeAgentFold(slot.db, slot.lease, slot.instance, { lastSeq: fold.seq, stateJson: JSON.stringify({ version: AGENT_FOLD_STATE_VERSION, entries: fold.entries }) });
+      fold.committed = fold.seq;
+      fold.dirty = false;
+    } catch (error) {
+      slot.log?.("agent.fold_commit_failed", { instance: slot.instance, seq: fold.seq, committed: fold.committed, error: (error as Error).message });
+    }
+  };
+  return {
+    advance: (slot, more) => {
+      const { fold, max } = foldOf(slot);
+      while (fold.seq < max) {
+        if (!more()) return false;
+        step(slot, fold, Math.min(max, fold.seq + chunk), max);
+      }
+      return true;
+    },
+    current: (slot) => {
+      const { fold, max } = foldOf(slot);
+      if (max > fold.seq) step(slot, fold, max, max);
+      return { seq: fold.seq, rows: fold.entries.map((entry) => entry.row), newestTsMs: fold.entries.at(-1)?.tsMs ?? Number.NEGATIVE_INFINITY };
+    },
+  };
+}
+
+/** The worker's one set of folds, shared by the agent view and the nav badge so neither counts past the other. */
+export const AGENT_FOLDS: AgentFolds = createAgentFolds();
