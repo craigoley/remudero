@@ -1,4 +1,4 @@
-- id: W1-T5997
+- id: W1-T6002
   title: "AUTHOR FIXTURES KEEP THEIR REAL CONTROLS ON BOTH HOSTS — six concrete portability and synthetic credential failures must not prevent real author validation"
   repo: remudero
   depends_on: []
