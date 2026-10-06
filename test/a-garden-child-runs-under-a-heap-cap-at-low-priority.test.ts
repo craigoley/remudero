@@ -125,3 +125,51 @@ test("with no log wired, a priority refusal is still noted, on stderr", async (t
   t.mock.restoreAll();
   assert.ok(written.some((w) => w.includes(registry.GARDEN_PRIORITY_DEGRADED_STEP) && w.includes("EACCES")), written.join(""));
 });
+
+
+test("a real heap-aborted garden child retains its verdict after a long native diagnostic tail", async (t) => {
+  const dir = scratch(t);
+  const hog = join(dir, "heap-hog.mjs");
+  writeFileSync(hog, "const a = []; for (;;) a.push(new Array(1e5).fill(1));\n");
+  const entry = join(dir, "long-heap-trace.mjs");
+  writeFileSync(entry, `
+    import assert from "node:assert/strict";
+    import { spawnSync } from "node:child_process";
+    import { writeSync } from "node:fs";
+    const result = spawnSync(process.execPath, ["--max-old-space-size=32", ${JSON.stringify(hog)}],
+      { encoding: "utf8", timeout: 10000 });
+    assert.equal(result.signal, "SIGABRT", "the bounded child must genuinely exhaust its heap");
+    assert.match(result.stderr, /heap out of memory/);
+    writeSync(2, result.stderr + "x".repeat(16384));
+    process.kill(process.pid, result.signal);
+  `);
+  const spawnPass = registry.childGardenPassSpawn({
+    execPath: process.execPath, execArgv: [], entry, cwd: dir, heapLimitMb: 32,
+  });
+  await assert.rejects(spawnPass("config", [], { stopped: false }),
+    { message: new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`) });
+});
+
+test("a split heap signature survives tail trimming but text without a signal keeps its ordinary exit", async (t) => {
+  const dir = scratch(t);
+  const split = join(dir, "split-heap-trace.mjs");
+  writeFileSync(split, `
+    import { writeSync } from "node:fs";
+    writeSync(2, "heap out ");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    writeSync(2, "of memory");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    writeSync(2, "x".repeat(16384));
+    process.kill(process.pid, "SIGABRT");
+  `);
+  const spawnPass = (entry: string) => registry.childGardenPassSpawn({
+    execPath: process.execPath, execArgv: [], entry, cwd: dir, heapLimitMb: 32,
+  })("config", [], { stopped: false });
+  await assert.rejects(spawnPass(split), { message: new RegExp(`^${registry.GARDEN_HEAP_EXHAUSTED}: .*32 MB heap cap`) });
+  const ordinary = join(dir, "ordinary-heap-text.mjs");
+  writeFileSync(ordinary, 'import { writeSync } from "node:fs"; writeSync(2, "heap out of memory"); process.exit(3);\n');
+  assert.equal(await spawnPass(ordinary), 3, "positive text alone must not invent a heap-aborted verdict");
+  const unrelated = join(dir, "unrelated-signal.mjs");
+  writeFileSync(unrelated, 'import { writeSync } from "node:fs"; writeSync(2, "ordinary diagnostic"); process.kill(process.pid, "SIGTERM");\n');
+  assert.equal(await spawnPass(unrelated), null, "a signal alone must not invent a heap-aborted verdict");
+});

@@ -21262,7 +21262,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
     // ledger row above already uses) reviews under the default risk and a default hard cap instead of
     // skipping the reviewer and letting the keyword floor decide alone.
-    if (!taskId) {
+    if (!taskId || taskId === UNFILED_RUN_SENTINEL) {
       taskRisk ??= DEFAULT_RISK;
       taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
       log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });

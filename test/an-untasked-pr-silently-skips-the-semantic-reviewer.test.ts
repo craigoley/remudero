@@ -11,14 +11,14 @@ import { reviewCommand, UNTASKED_REVIEW_BUDGET_USD } from "../src/run-task.js";
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 
-async function review(body: string) {
+async function review(body: string, headRefName = "codex/not-a-run-branch") {
   const root = mkdtempSync(join(tmpdir(), "rmd-untasked-review-"));
   let captured: Record<string, any> | undefined;
   try {
     const deps = {
       fetchView: () => ({
         headRefOid: HEAD,
-        headRefName: "codex/not-a-run-branch",
+        headRefName,
         body,
         url: "https://github.com/craigoley/remudero/pull/5106",
         number: 5106,
@@ -33,7 +33,7 @@ async function review(body: string) {
       },
       executionMode: "semantic" as const,
     };
-    await reviewCommand("codex/not-a-run-branch", ["--repo", "craigoley/remudero"], deps as never);
+    await reviewCommand(headRefName, ["--repo", "craigoley/remudero"], deps as never);
     assert.ok(captured, "the review command must reach runReview");
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const ledger = existsSync(ledgerPath)
@@ -65,4 +65,26 @@ test("a derived task id whose shard is missing still skips under its own distinc
   assert.equal(args.budgetUsd, undefined);
   const skips = ledger.filter((r) => r.step === "review.reviewer.skipped");
   assert.deepEqual(skips.map((r) => r.reason), ["head-task-metadata-unavailable"]);
+});
+
+const unfiledHead = "run-unfiled-1791211800000";
+
+test("a canonical unfiled run receives bounded semantic review under its own PR identity", async () => {
+  const { args, ledger } = await review("## Acceptance\n- x | grep: review in src/lib/review.ts\n", unfiledHead);
+  assert.equal(args.task.id, "PR-5106");
+  assert.equal(args.spawnReviewer, true);
+  assert.equal(args.task.risk, "medium");
+  assert.equal(args.budgetUsd, UNTASKED_REVIEW_BUDGET_USD);
+  assert.ok(args.reviewerMount);
+  assert.equal(ledger.filter((row) => row.step === "review.reviewer.untasked_defaults").length, 1);
+  assert.ok(!ledger.some((row) => row.step === "review.reviewer.skipped"));
+});
+
+test("an explicit missing plan task on an unfiled branch remains a metadata refusal", async () => {
+  const { args, ledger } = await review("Remudero-Task: W1-T999999", unfiledHead);
+  assert.equal(args.task.id, "W1-T999999");
+  assert.equal(args.spawnReviewer, false);
+  assert.equal(args.budgetUsd, undefined);
+  assert.ok(!ledger.some((row) => row.step === "review.reviewer.untasked_defaults"));
+  assert.equal(ledger.find((row) => row.step === "review.reviewer.skipped")?.reason, "head-task-metadata-unavailable");
 });

@@ -254,3 +254,78 @@ exit 0
     assert.doesNotMatch(calls.join("\n"), /--workdir \/app|\/app\/bin\/rmd/);
   } finally { f.close(); }
 });
+
+test("the installed daily path observes three-form review delivery and self-improvement without inventing efficacy", async () => {
+  const f = fixture();
+  try {
+    const base = { pr_url: "https://github.com/a/b/pull/4", head_sha: "a".repeat(40), review_input_digest: "b".repeat(64) };
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.2026-10-02T09-00-00-000Z.ndjson.gz"), gzipSync(ndjson([
+      { ...base, ts: "2026-10-02T09:00:00Z", step: "sweep.review_eligible" },
+    ])));
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.2026-10-02T10-00-00-000Z.ndjson"), ndjson([
+      { ...base, ts: "2026-10-02T09:01:00Z", step: "sweep.review_admitted" },
+      { ...base, ts: "2026-10-02T09:02:00Z", step: "sweep.post_review.attempt" },
+    ]));
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([
+      { ...base, ts: "2026-10-02T09:03:00Z", step: "review.posted", state: "success", reviewer_outcome: "not_attempted" },
+      { ts: "2026-10-02T09:04:00Z", step: "ci_learning_cadence.ran", status: "backlog", filed: 2, refused: 1,
+        lesson_recurrences: { status: "observed", recurrenceCount: 3 } },
+      { ts: "2026-10-02T09:05:00Z", step: "ci_learning_cadence.run_failed" },
+      { ts: "2026-10-02T09:06:00Z", step: "config.gardener_failed" },
+      { ts: "2026-10-02T09:07:00Z", step: "config.gardener_judged", verdict: "credit" },
+      { ts: "2026-10-02T09:08:00Z", step: "config.gardener_judged", verdict: "debit" },
+      { ts: "2026-10-02T09:09:00Z", step: "goal.unmoved", goal_id: "G-flow", key: "c".repeat(64),
+        baseline: 4, value: 5, tasks: ["W1-T4"], pricedUsd: 0, unpricedRows: 1, priorityAction: "governed-proposal",
+        windowDays: 7, costBasis: "produced-ledger-receipts", costComplete: false, measurement: "pr-flow-minutes" },
+    ]));
+    const result = await dailyRoutingReview({ ...f, asOf });
+    const source = result.snapshot.sources[0];
+    assert.equal(source.reviewFlow.counts.delivered, 1);
+    assert.equal(source.reviewFlow.completedOnly.p95Ms, 180000);
+    assert.equal(source.reviewFlow.semantic.notAttempted, 1);
+    assert.equal(source.reviewFlow.sourceComplete, false);
+    assert.equal(source.selfImprovement.ciLearning.filed, 2);
+    assert.equal(source.selfImprovement.ciLearning.recurredLessons, 3);
+    assert.equal(source.selfImprovement.ciLearningFailures, 1);
+    assert.equal(source.selfImprovement.gardenerFailures, 1);
+    assert.equal(source.selfImprovement.gardenerCredits, 1);
+    assert.equal(source.selfImprovement.gardenerDebits, 1);
+    assert.equal(source.selfImprovement.goals[0].outcome, "goal.unmoved");
+    assert.equal(source.selfImprovement.efficacyClaim, "none");
+    assert.match(result.text, /uncertified retention/);
+    assert.match(result.text, /served identity 0\/0/);
+    assert.deepEqual(JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8")).sources[0].reviewFlow, source.reviewFlow);
+  } finally { f.close(); }
+});
+
+test("daily trial costing preserves explicit subscription notional across a zero-cost terminal restatement", () => {
+  const report = evaluateRoutingExperiment([assignment("1"),
+    { step: "worker.attempt", selection_assignment_id: "a-1", notional_cost_usd: 0.75, billing_mode: "subscription" },
+    { step: "verdict", selection_assignment_id: "a-1", total_cost_usd: 0, success: true },
+  ], epoch, "2026-10-02");
+  const arm = report.arms.find(item => item.arm === "sol61")!;
+  assert.equal(arm.meanNotionalCostUsd, 0.75);
+  assert.equal(arm.meanCashCostUsd, null);
+  assert.equal(arm.costMissingAssignments, 0);
+  assert.equal(arm.receiptCoverage.costKnownAssignments, 1);
+  const invalid = evaluateRoutingExperiment([assignment("1"),
+    { step: "worker.attempt", selection_assignment_id: "a-1", notional_cost_usd: -1, total_cost_usd: 0, billing_mode: "subscription" },
+  ], epoch, "2026-10-02").arms.find(item => item.arm === "sol61")!;
+  assert.equal(invalid.meanNotionalCostUsd, null);
+  assert.equal(invalid.costMissingAssignments, 1);
+});
+
+test("a daily row-budget breach remains partial evidence rather than a healthy zero", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson(Array.from({ length: 100001 }, (_, n) => ({
+      ts: "2026-10-02T10:00:00Z", step: "worker.assignment", task_id: `W1-T${n}`,
+    }))));
+    const source = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0];
+    assert.equal(source.rowsRead, 100001);
+    assert.equal(source.retainedRowsOmitted, 1);
+    assert.equal(source.state, "observed-partial");
+    assert.ok(source.reasons.includes("ledger-retention-row-bound"));
+    assert.equal(source.reports[0].nextAction, "repair-source-evidence");
+  } finally { f.close(); }
+});
