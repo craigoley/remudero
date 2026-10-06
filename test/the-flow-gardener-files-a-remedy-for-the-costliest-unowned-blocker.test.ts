@@ -180,6 +180,22 @@ test("flow measures equal PR-hour windows, distinguishes pending and credit, and
   assert.equal(retry.spec.inventory().next!.rung, 3, "a failed escalation is retried");
 });
 
+test("flow effect fixtures retain credit, pending and debit as wall time advances", (t) => {
+  const key = "escalated:metadata-only body red";
+  const remedy = { id: "W1-T9001", origin: `flow-blocker:${key}`, files: ["src/lib/sweep.ts"], status: "queued", retired: false, mergedAt: iso(-24) };
+  const before = [row(1, -48), row(1, -24)];
+  const specs = [
+    [row(2, -24, "escalated", "plan-only red"), row(2, 0, "escalated", "plan-only red")],
+    [row(2, -1), row(2, 0)],
+    [row(2, -24), row(2, 0)],
+  ].map(after => fixture("/unused", [...before, ...after], { planState: () => ({ tasks: [remedy] }) }).spec);
+  t.mock.method(Date, "now", () => NOW);
+  const expected = specs.map(spec => spec.inventory());
+  assert.deepEqual(expected.map(inv => inv.ladder.find(l => l.cause === key)!.effect!.verdict), ["credit", "pending", "debit"]);
+  t.mock.method(Date, "now", () => NOW + 366 * 24 * HOUR);
+  assert.deepEqual(specs.map(spec => spec.inventory()), expected);
+});
+
 test("flow ownership calibrates the percentile per cause and ties by distinct PRs", () => {
   const records: LedgerRecord[] = [];
   for (let pr = 1; pr <= 10; pr++) records.push(

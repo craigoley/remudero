@@ -222,6 +222,7 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
     if (mine.some(t => !t.retired && !t.mergedAt)) state = "in_progress";
     else if (top?.retired && !top.mergedAt) state = "retired";
     else if (top?.mergedAt) {
+      // expiring-fixture: exempt -- effect fixtures use an injected fixed Clock, independent of wall time
       const merge = Date.parse(top.mergedAt);
       if (!Number.isFinite(merge)) state = "in_progress";
       else {
