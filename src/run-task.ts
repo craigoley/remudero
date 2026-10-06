@@ -2762,6 +2762,7 @@ import {
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
+  asyncGit,
   checkCliFreshness,
   checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
@@ -2858,7 +2859,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -28916,11 +28917,69 @@ function retroShippedGithubGateway(): ShippedGithub {
     // every threshold edit; a pure filter over the full corpus does not).
     mergedCommits: () =>
       parseGitLogCitationCommits(
-        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+        execFileSync("git", ["-C", repoRoot, ...RETRO_MERGED_COMMITS_ARGS], {
           encoding: "utf8",
-          maxBuffer: 1 << 26,
+          maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** The retro gateway's full-history merged-commits read: one argv for the sync and async readers. */
+const RETRO_MERGED_COMMITS_ARGS = ["log", "--format=%x1e%aI%x1f%s%x1f%b"];
+const RETRO_MERGED_COMMITS_MAX_BUFFER = 1 << 26;
+
+/** BACKSTOP bound on the awaited merged-commits read. MEASURED 2026-10-06: the sync read held the daemon
+ *  loop up to 54 s per call (6 loop_lag rows, 279 s in 17 h); three times that is still a hang. */
+export const RETRO_MERGED_COMMITS_TIMEOUT_MS = 180_000;
+
+/** The same commits {@link retroShippedGithubGateway}'s `mergedCommits` reads, off the event loop.
+ *  A read past `timeoutMs` is killed and REJECTS naming its bound (boundGitCall) — never `[]`. */
+export async function readRetroMergedCommitsAsync(
+  git: AsyncGitRunner = asyncGit(repoRoot, { maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER }),
+  timeoutMs: number = RETRO_MERGED_COMMITS_TIMEOUT_MS,
+): Promise<GitLogCommit[]> {
+  return parseGitLogCitationCommits(await boundGitCall(git, RETRO_MERGED_COMMITS_ARGS, timeoutMs));
+}
+
+/**
+ * The daemon's retro trigger check: {@link retroTriggerCheck} with the full-history `git log`
+ * read ONCE, awaited, before it runs. The sync check read it on the loop up to three times per
+ * tick (back-off proxy, runless count, `shippedSince`'s trailer dates).
+ *
+ * A FAILED READ IS NOT SWALLOWED: the error is kept and re-thrown by `mergedCommits()` at each
+ * consumption site, exactly where the sync read threw — so a gh-unavailable decline still wins
+ * over a git failure, `shippedSince` still names it as a discrepancy, and the runless count still
+ * throws into the daemon's `daemon.retro_trigger.check_failed` row.
+ */
+export async function retroTriggerCheckAsync(
+  now: Date = new Date(),
+  deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & { readMergedCommits?: () => Promise<GitLogCommit[]> } = {},
+): Promise<RetroTriggerDecision | undefined> {
+  const github = deps.github ?? retroShippedGithubGateway();
+  let read: MergedCommitsRead;
+  try {
+    read = { commits: await (deps.readMergedCommits ?? (() => readRetroMergedCommitsAsync()))() };
+  } catch (error) {
+    // Carried, not erased: mergedCommitsSnapshotGateway re-throws it where the sync read threw.
+    read = { error };
+  }
+  return retroTriggerCheck(now, { config: deps.config, policy: deps.policy, github: mergedCommitsSnapshotGateway(github, read) });
+}
+
+/** One awaited merged-commits read: its commits, or the error it failed with. */
+export type MergedCommitsRead = { commits: GitLogCommit[] } | { error: unknown };
+
+/** `github` with `mergedCommits()` answered from `read`: the commits, or a re-throw of its error. */
+export function mergedCommitsSnapshotGateway(github: ShippedGithub, read: MergedCommitsRead): ShippedGithub {
+  return {
+    findMergedByTrailer: (taskId) => github.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => github.headRefName(prUrl),
+    unavailable: () => github.unavailable?.(),
+    mergedCommits: () => {
+      if ("error" in read) throw read.error;
+      return read.commits;
+    },
   };
 }
 
@@ -29673,12 +29732,12 @@ export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number 
 }
 
 export function buildRetroDaemonHooks(deps: {
-  check?: () => RetroTriggerDecision | undefined;
+  check?: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
   config?: Config;
   runSubprocess?: typeof runAutomatedRetroSubprocess;
 } = {}): {
-  checkRetroTrigger: () => RetroTriggerDecision | undefined;
+  checkRetroTrigger: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   // The optional `log` is supplied by the CALLER at invocation time (daemonCommand's own
   // per-boot ledger sink), never threaded through `deps` above — that keeps the
   // `buildRetroDaemonHooks()` construction call byte-identical to before W1-T2870 (see
@@ -29689,7 +29748,7 @@ export function buildRetroDaemonHooks(deps: {
     log?: (step: string, extra?: Record<string, unknown>) => void,
   ) => Promise<void>;
 } {
-  const check = deps.check ?? (() => retroTriggerCheck());
+  const check = deps.check ?? (() => retroTriggerCheckAsync());
   return {
     checkRetroTrigger: () => check(),
     runRetroTrigger: async (decision, log) => {
