@@ -159,7 +159,6 @@ export interface PanelGraphDeps {
   planPath: string;
   ledgerPath: string;
   readPlanSnapshot?: () => Plan;
-  /** W1-T5639: how `readPlanSnapshot`'s plan was read. Absent, it is trusted; `unavailable` means it is a placeholder. */
   readPlanSource?: () => PlanSourceOutcome | undefined;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
@@ -712,13 +711,12 @@ function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Pla
   return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
 }
 
-/** W1-T5639: a body qualified by where its plan came from; unchanged when no outcome is tracked. */
 function withPlanSource<B extends object>(deps: PanelGraphDeps, body: B): B | (B & { planSource: PlanSourceOutcome }) {
   const planSource = deps.readPlanSource?.();
   return planSource === undefined ? body : { ...body, planSource };
 }
 
-/** W1-T5639: 503 when the plan was never read, since anything derived from the placeholder would be invented. */
+/** W1-T5639: 503 when `readPlanSource` says the plan was never read; its placeholder would invent counts and decisions. */
 function refusePlanSourceUnavailable(deps: PanelGraphDeps, res: ServerResponse): boolean {
   const planSource = deps.readPlanSource?.();
   if (planSource?.state !== "unavailable") return false;
