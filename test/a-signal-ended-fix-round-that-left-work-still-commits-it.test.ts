@@ -30,8 +30,8 @@ import type { ReviewVerdict } from "../src/lib/review.js";
 
 const TASK = "W1-T6032X";
 const HEAD = "head-a";
-/** The codex runner's subtype for a child whose exit code is null — the signal-terminated shape. */
-const SIGNAL_EXIT = { subtype: "error_exit_null", isError: true };
+/** The codex runner's result for a child a signal ended: subtype `error_exit_null`, and since W1-T6027 the signal's name. */
+const SIGNAL_EXIT = { subtype: "error_exit_null", isError: true, exit: { kind: "signal", signal: "SIGTERM" } } as const;
 
 type Row = { step: string; task_id: string } & Record<string, unknown>;
 
