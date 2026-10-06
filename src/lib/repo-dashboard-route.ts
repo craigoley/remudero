@@ -618,7 +618,7 @@ function startRepoTelemetryWorker(workerUrl: URL): (req: RepoTelemetryRequest) =
     new Promise((resolve) => {
       if (!worker) {
         try {
-          const spawned = new Worker(workerUrl, { workerData: { kind: REPO_TELEMETRY_WORKER_KIND }, execArgv: process.execArgv });
+          const spawned = new Worker(workerUrl, { workerData: { kind: REPO_TELEMETRY_WORKER_KIND } });
           spawned.on("message", (msg: { id: number; outcome: RepoTelemetryOutcome }) => {
             const settle = pending.get(msg.id);
             pending.delete(msg.id);

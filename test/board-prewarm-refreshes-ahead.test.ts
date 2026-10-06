@@ -63,12 +63,14 @@ async function settle(gh: GitHub): Promise<void> {
   }
 }
 
-function boardGateway(ttlMs: number): { gh: GitHub; counterFile: string; clock: { ms: number } } {
+function boardGateway(ttlMs: number): { gh: GitHub; counterFile: string; clock: { ms: number }; opts: { workerUrl?: URL } } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-prewarm-ahead-"));
   const counterFile = join(dir, "calls.log");
   const clock = { ms: 0 };
-  const gh = buildBatchedGithub("o", "r", { ghBin: writeBoardGh(dir, counterFile), ttlMs, prewarmLeadMs: ttlMs, now: () => clock.ms });
-  return { gh, counterFile, clock };
+  // Held by reference: the gateway reads `workerUrl` at each spawn, so a test can make one spawn fail.
+  const opts: Parameters<typeof buildBatchedGithub>[2] & { workerUrl?: URL } = { ghBin: writeBoardGh(dir, counterFile), ttlMs, prewarmLeadMs: ttlMs, now: () => clock.ms };
+  const gh = buildBatchedGithub("o", "r", opts);
+  return { gh, counterFile, clock, opts };
 }
 
 test("a warm on the TTL cadence refreshes before expiry so a later read walks nothing on the serving thread", async () => {
@@ -134,15 +136,16 @@ test("the walk reads every review ref and leaves an unreadable one out rather th
 });
 
 test("a walk that falls back to this thread still lands its review states in the cache", async () => {
-  const { gh, counterFile, clock } = boardGateway(1_000);
+  const { gh, counterFile, clock, opts } = boardGateway(1_000);
   gh.warm?.();
   await settle(gh);
   clock.ms = 999;
-  process.execArgv.push("--not-a-flag-the-worker-allows");
+  // A non-file worker URL makes this one `new Worker(...)` throw synchronously, forcing the fallback.
+  opts.workerUrl = new URL("https://invalid.example/prewarm-worker.js");
   try {
     gh.warm?.();
   } finally {
-    process.execArgv.pop();
+    delete opts.workerUrl;
   }
   const afterWarms = calls(counterFile).length;
   clock.ms = 1_500;

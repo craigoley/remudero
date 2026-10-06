@@ -557,6 +557,8 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "automerge.rearmed_after_disarm",
+  "automerge.rearm_exhausted",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
@@ -639,8 +641,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "sweep.ci_timeout_refresh.attempted",
+  "sweep.ci_timeout_refresh.outcome",
+  "sweep.ci_timeout_refresh.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
+  "sweep.fix.checkout_claim_declined",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
@@ -674,6 +680,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // so losing either one inverts the answer.
   "panel.proposal_restored",
   "fix.dispatch",
+  "fix.retrigger",
   "fix.review",
   // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads "fix.ci_not_green"/"fix.resolved"
   // beside "fix.review"; losing either re-strands the PR against a head nothing will move again.

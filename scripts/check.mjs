@@ -59,6 +59,7 @@ function run(label, file, args) {
 const testCode = run(
   `scoped tests (${targets.length} file${targets.length === 1 ? "" : "s"})`,
   "node",
+  // node-test-reporter: exempt — a person reads this on their terminal, where spec is the right reporter.
   ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...targets],
 );
 

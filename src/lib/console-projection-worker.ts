@@ -97,7 +97,6 @@ export function startConsoleProjectionWorker(options: { workerUrl?: URL } = {}):
     if (worker) return worker;
     const spawned = new Worker(options.workerUrl ?? new URL(import.meta.url), {
       workerData: { kind: CONSOLE_PROJECTION_WORKER_KIND },
-      execArgv: process.execArgv,
     });
     spawned.on("message", (msg: { id: number; outcome: FeedbackProjectionOutcome }) => {
       const settle = pending.get(msg.id);

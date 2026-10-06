@@ -48,12 +48,13 @@ const KNOWN_GAP =
 
 /** Each step the scan finds that the gardener deliberately does not read, and why. */
 const EXEMPT: Readonly<Record<string, string>> = {
-  // The five W1-T5526 removed from the read, and the three other cost-only rows.
+  // The five W1-T5526 removed from the read, and the other cost-only rows.
   "cost.anomaly": DONE_STEPS_PRICE_THE_RUN,
   "containment.probe": DONE_STEPS_PRICE_THE_RUN,
   "isolation.probe": DONE_STEPS_PRICE_THE_RUN,
   "risk_judge.decision": DONE_STEPS_PRICE_THE_RUN,
   "budget.warning": DONE_STEPS_PRICE_THE_RUN,
+  "pr.open_deferred_to_existing": DONE_STEPS_PRICE_THE_RUN, // W1-T5520: the run's restated total, its verdict row follows
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,
   worker_smoke: DONE_STEPS_PRICE_THE_RUN,
   "sweep.plan_round.worker": DONE_STEPS_PRICE_THE_RUN,

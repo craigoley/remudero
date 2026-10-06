@@ -466,15 +466,15 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const testFiles = listTestFiles(root);
 
   const spawnTestFiles = (files) => {
-    const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+    // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
+    // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
+    const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
     const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
     if (durationOutputRaw) {
       const durationOutput = resolve(root, durationOutputRaw);
       mkdirSync(dirname(durationOutput), { recursive: true });
       testArgs.push(
-        "--test-reporter=tap",
         `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
-        "--test-reporter-destination=stdout",
         `--test-reporter-destination=${durationOutput}`,
       );
     }

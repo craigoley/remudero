@@ -120,7 +120,7 @@ const BROKEN_RUNTIME_STDOUT = [
 const PURE_PATH_WP: WhitelistedProof = {
   kind: "test",
   command: "node",
-  args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/pure-path-fixture.test.ts"],
+  args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/pure-path-fixture.test.ts"],
   label: "test/pure-path-fixture.test.ts",
 };
 
@@ -214,6 +214,7 @@ test("W1-T2740 (acceptance 4a): a genuinely ABSENT pure-path target is still a h
     command: "node",
     args: [
       "--test",
+      "--test-reporter=tap",
       "--import",
       "tsx",
       "--import",
