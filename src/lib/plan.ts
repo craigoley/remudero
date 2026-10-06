@@ -1005,8 +1005,24 @@ export type GitBlobRunner = (args: string[], stdin?: string) => string;
  */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const request = relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
-  const raw = runGit(["cat-file", "--batch"], request);
+  return parseBlobBatch(runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+}
+
+/** {@link readBlobsAtRef} through an AWAITED runner: the same one `cat-file --batch`, request and framing. */
+export async function readBlobsAtRefAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  ref: string,
+  relPaths: string[],
+): Promise<string[]> {
+  if (relPaths.length === 0) return [];
+  return parseBlobBatch(await runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+}
+
+function blobBatchRequest(ref: string, relPaths: string[]): string {
+  return relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+}
+
+function parseBlobBatch(raw: string, ref: string, relPaths: string[]): string[] {
   const buf = Buffer.from(raw, "utf8");
   const texts: string[] = [];
   let off = 0;

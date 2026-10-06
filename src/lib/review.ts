@@ -13,10 +13,11 @@ import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, readBlobsAtRef, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
+import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
@@ -414,6 +415,9 @@ export interface ReviewEvidence {
   headRefName?: string;
   /** The reservation read that keyed this decision, so the judge never races a second remote read. */
   reservationOwnership?: TaskIdOwnershipFinding[];
+  /** origin/main's task-id declarations, read AWAITED by runReview ({@link reviewTaskIdEvidenceAsync}); present, the
+   *  judge's collision check uses it instead of a second, synchronous `ls-tree` + `cat-file --batch`. */
+  baseTaskIdDeclarations?: TaskIdDeclaration[];
   /** The implementation worker's full report. Kept distinct from the PR body: body integrity
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
@@ -4440,9 +4444,10 @@ export function judgeReview(
 
   const idDecls = taskIdDeclarationsInDiff(evidence.diff);
   const baseIdDecls =
-    idDecls.added.length > 0 && evidence.headCheckoutDir
+    evidence.baseTaskIdDeclarations ??
+    (idDecls.added.length > 0 && evidence.headCheckoutDir
       ? taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main") // the TIP: #1699 merged after #1695 branched
-      : [];
+      : []);
   const idCollisions = baseIdDecls.length > 0 ? taskIdCollisions(idDecls.added, baseIdDecls, idDecls.removed) : [];
   const idOwnership =
     evidence.reservationOwnership ?? (idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
@@ -6680,17 +6685,85 @@ export function taskIdDeclarationsAtRef(
   let files: string[];
   let texts: string[];
   try {
-    files = runGit(["ls-tree", "-r", "--name-only", ref, "plan/"]).split("\n").filter((f) => SHARD_PATH_RE.test(f));
+    files = planShardPathsIn(runGit(DECLARATIONS_LISTING_ARGS(ref)));
     texts = readBlobsAtRef(runGit, ref, files);
   } catch {
     return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
   }
+  return declarationsInShards(files, texts);
+}
+
+/** {@link taskIdDeclarationsAtRef} through awaited, bounded git: the same listing, batch and parse. A git that
+ *  FAILS declares nothing, exactly as the sync read; one killed at its bound REJECTS with {@link ReviewGitTimeout}. */
+export async function taskIdDeclarationsAtRefAsync(
+  repoDir: string,
+  ref: string,
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
+): Promise<TaskIdDeclaration[]> {
+  let files: string[];
+  let texts: string[];
+  try {
+    files = planShardPathsIn(await runGit(DECLARATIONS_LISTING_ARGS(ref)));
+    texts = await readBlobsAtRefAsync(runGit, ref, files);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as an empty base
+    return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
+  }
+  return declarationsInShards(files, texts);
+}
+
+const DECLARATIONS_LISTING_ARGS = (ref: string): string[] => ["ls-tree", "-r", "--name-only", ref, "plan/"];
+
+function planShardPathsIn(listing: string): string[] {
+  return listing.split("\n").filter((f) => SHARD_PATH_RE.test(f));
+}
+
+function declarationsInShards(files: readonly string[], texts: readonly string[]): TaskIdDeclaration[] {
   return files.flatMap((file, i) =>
     texts[i].split("\n").flatMap((l) => {
       const m = l.match(TASK_ID_LINE_RE);
       return m ? [{ id: m[1], file }] : [];
     }),
   );
+}
+
+/** An awaited {@link GitBlobRunner}: resolves stdout, rejects on any failure. */
+export type AsyncGitBlobRunner = (args: string[], stdin?: string) => Promise<string>;
+
+/** BACKSTOP per git call on the review's base reads (ls-tree, cat-file --batch, show). MEASURED 2026-09-05: one
+ *  batch over 1,079 shards took 208 ms, so this fires only on a hung git, never on a slow healthy one. */
+export const REVIEW_BASE_READ_GIT_TIMEOUT_MS = 120_000;
+
+/** A review base read killed at its bound. Named, so the evidence reads `unknown` and never an empty base. */
+export class ReviewGitTimeout extends RmdError {
+  constructor(message: string) {
+    super("git", GENERIC_EXIT_CODE, message);
+    this.name = "ReviewGitTimeout";
+  }
+}
+
+/** The real {@link AsyncGitBlobRunner}: `git -C <repoDir>` off the event loop, `stdin` piped, killed at its bound
+ *  (SIGTERM, then SIGKILL after grace) and rejecting with {@link ReviewGitTimeout}, which names the bound. */
+export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {}): AsyncGitBlobRunner {
+  const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve(stdout);
+        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
+        reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
+      });
+      // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
 }
 
 /** W1-T4414: an added id whose reservation does not name this PR's head as its holder. */
@@ -6702,12 +6775,36 @@ export type TaskIdOwnershipFinding =
 /** Base-committed, so a PR can never exempt its own ids: `[{ "id": ..., "reason": ... }]`, reasonless rows ignored. */
 export const TASK_ID_RESERVATION_BASELINE = "plan/task-id-reservation-baseline.json";
 
+const BASELINE_SHOW_ARGS = ["show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`];
+
 function reservationBaselineIds(repoDir: string): Set<string> {
+  let text: string;
+  try {
+    text = execFileSync("git", ["-C", repoDir, ...BASELINE_SHOW_ARGS], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+/** {@link reservationBaselineIds} through awaited, bounded git; killed at its bound it REJECTS with {@link ReviewGitTimeout}. */
+async function reservationBaselineIdsAsync(runGit: AsyncGitBlobRunner): Promise<Set<string>> {
+  let text: string;
+  try {
+    text = await runGit(BASELINE_SHOW_ARGS);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as "no baseline"
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+function baselineIdsIn(text: string): Set<string> {
   let rows: unknown;
   try {
-    rows = JSON.parse(execFileSync("git", ["-C", repoDir, "show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    rows = JSON.parse(text);
   } catch {
-    return new Set(); // no baseline (or an unparseable one) exempts nothing — the strict direction
+    return new Set(); // an unparseable baseline exempts nothing — the strict direction
   }
   const ok = (r: unknown): r is { id: string; reason: string } =>
     typeof (r as { id?: unknown })?.id === "string" && typeof (r as { reason?: unknown }).reason === "string" && (r as { reason: string }).reason.trim() !== "";
@@ -6725,8 +6822,8 @@ function recordsHandoff(diff: string, file: string, holder: string, head: string
 }
 
 /** The ids `added` files that neither the base declares nor the baseline exempts, each with its file. */
-function filedTaskIds(added: readonly TaskIdDeclaration[], baseDecls: readonly TaskIdDeclaration[], repoDir: string): Map<string, string> {
-  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
+function filedTaskIds(added: readonly TaskIdDeclaration[], baseDecls: readonly TaskIdDeclaration[], baselineIds: ReadonlySet<string>): Map<string, string> {
+  const exempt = new Set([...baseDecls.map((d) => d.id), ...baselineIds]);
   const filed = new Map<string, string>();
   for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
   return filed;
@@ -6765,7 +6862,7 @@ export function taskIdOwnershipFindings(
       return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? String(r.error ?? "") };
     }),
 ): TaskIdOwnershipFinding[] {
-  const filed = filedTaskIds(added, baseDecls, repoDir);
+  const filed = filedTaskIds(added, baseDecls, reservationBaselineIds(repoDir));
   return judgeTaskIdOwnership(diff, filed, read([...filed.keys()]), headRef);
 }
 
@@ -6778,24 +6875,26 @@ export async function taskIdOwnershipFindingsAsync(
   repoDir: string,
   read: (ids: string[]) => Map<string, ReservationAnchorRead> | Promise<Map<string, ReservationAnchorRead>> = (ids) =>
     readReservationAnchorsAsync(ids, gitReservationRunnerAsync(repoDir)),
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
 ): Promise<TaskIdOwnershipFinding[]> {
-  const filed = filedTaskIds(added, baseDecls, repoDir);
+  const filed = filedTaskIds(added, baseDecls, await reservationBaselineIdsAsync(runGit));
   return judgeTaskIdOwnership(diff, filed, await read([...filed.keys()]), headRef);
 }
 
 type OwnershipEvidenceInputs =
   | { done: true; findings: TaskIdOwnershipFinding[] | undefined }
-  | { done: false; added: TaskIdDeclaration[]; base: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
+  | { done: false; added: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
 
-function ownershipEvidenceInputs(diff: string, headRefName: string | undefined, headCheckoutDir: string | undefined): OwnershipEvidenceInputs {
-  const added = taskIdDeclarationsInDiff(diff).added;
+/** Every prefixed id `added` declares, each read `unknown` for `reason`. */
+function unknownOwnership(added: readonly TaskIdDeclaration[], reason: string): TaskIdOwnershipFinding[] {
+  const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
+  return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason }));
+}
+
+function ownershipEvidenceInputs(added: TaskIdDeclaration[], headRefName: string | undefined, headCheckoutDir: string | undefined): OwnershipEvidenceInputs {
   if (added.length === 0) return { done: true, findings: undefined };
-  if (!headRefName || !headCheckoutDir) {
-    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
-    const reason = !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable";
-    return { done: true, findings: [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason })) };
-  }
-  return { done: false, added, base: taskIdDeclarationsAtRef(headCheckoutDir, "origin/main"), headRefName, headCheckoutDir };
+  if (!headRefName || !headCheckoutDir) return { done: true, findings: unknownOwnership(added, !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable") };
+  return { done: false, added, headRefName, headCheckoutDir };
 }
 
 /** Snapshot the external reservation before decision replay, then reuse this exact read in the judge. */
@@ -6805,19 +6904,60 @@ export function reviewReservationOwnershipEvidence(
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindings>[5],
 ): TaskIdOwnershipFinding[] | undefined {
-  const i = ownershipEvidenceInputs(diff, headRefName, headCheckoutDir);
-  return i.done ? i.findings : taskIdOwnershipFindings(diff, i.added, i.base, i.headRefName, i.headCheckoutDir, read);
+  const i = ownershipEvidenceInputs(taskIdDeclarationsInDiff(diff).added, headRefName, headCheckoutDir);
+  return i.done ? i.findings : taskIdOwnershipFindings(diff, i.added, taskIdDeclarationsAtRef(i.headCheckoutDir, "origin/main"), i.headRefName, i.headCheckoutDir, read);
 }
 
-/** {@link reviewReservationOwnershipEvidence}, awaited: the daemon's runReview takes this one. */
+/** {@link reviewReservationOwnershipEvidence}, awaited: the ownership half of {@link reviewTaskIdEvidenceAsync}. */
 export async function reviewReservationOwnershipEvidenceAsync(
   diff: string,
   headRefName: string | undefined,
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit?: AsyncGitBlobRunner,
 ): Promise<TaskIdOwnershipFinding[] | undefined> {
-  const i = ownershipEvidenceInputs(diff, headRefName, headCheckoutDir);
-  return i.done ? i.findings : taskIdOwnershipFindingsAsync(diff, i.added, i.base, i.headRefName, i.headCheckoutDir, read);
+  return (await reviewTaskIdEvidenceAsync(diff, headRefName, headCheckoutDir, read, runGit)).ownership;
+}
+
+/** What runReview hands the judge: the reservation ownership snapshot, and origin/main's declarations the judge's
+ *  collision check would otherwise re-read synchronously (`undefined` exactly when the judge would not read them). */
+export interface ReviewTaskIdEvidence {
+  ownership: TaskIdOwnershipFinding[] | undefined;
+  baseDeclarations: TaskIdDeclaration[] | undefined;
+}
+
+/**
+ * The daemon's runReview takes this one: every git read of the task-id evidence awaited and bounded — the base
+ * declarations (ls-tree + cat-file --batch), the reservation baseline (show) and the anchors (ls-remote, fetch, log).
+ * Before this, only the anchor read was awaited (#9644): both base reads ran execFileSync and the judge re-read the
+ * declarations. A base read killed at its bound reads every filed id `unknown`, NAMING the timeout, and the judge
+ * sees an empty base, as on any unreadable ref — never a fabricated collision.
+ */
+export async function reviewTaskIdEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(headCheckoutDir ?? "."),
+): Promise<ReviewTaskIdEvidence> {
+  const added = taskIdDeclarationsInDiff(diff).added;
+  const i = ownershipEvidenceInputs(added, headRefName, headCheckoutDir);
+  // The judge reads the base exactly when ids are added and a checkout exists; no checkout is always `done` above.
+  if (added.length === 0 || !headCheckoutDir) return { ownership: i.done ? i.findings : undefined, baseDeclarations: undefined };
+  let base: TaskIdDeclaration[];
+  try {
+    base = await taskIdDeclarationsAtRefAsync(headCheckoutDir, "origin/main", runGit);
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `base-unreadable: ${error.message}`), baseDeclarations: [] };
+  }
+  if (i.done) return { ownership: i.findings, baseDeclarations: base };
+  try {
+    return { ownership: await taskIdOwnershipFindingsAsync(diff, i.added, base, i.headRefName, i.headCheckoutDir, read, runGit), baseDeclarations: base };
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `baseline-unreadable: ${error.message}`), baseDeclarations: base };
+  }
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
