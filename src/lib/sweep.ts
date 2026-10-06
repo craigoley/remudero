@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
@@ -56,7 +56,8 @@ import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js"
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
+import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike } from "./ledger.js";
 import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
@@ -2853,7 +2854,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
-      let branchClaim: InflightLockHandle | undefined;
+      let branchClaim: FixRoundBranchClaim | undefined;
+      const roundEnded = (claimRunId: string): boolean => fixRoundClaimEnded(ledgerPath, claimRunId);
       let recycleTaskId: string | undefined;
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
@@ -3057,6 +3059,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               observedRemoteSha: headRef.headRefOid,
               inflightDir,
               claimKey: fixBranchClaimKey(owner, repo, realBranch),
+              claimRoundEnded: roundEnded,
             });
           } catch (e) {
             return declineClaim({
@@ -3315,8 +3318,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // rounds for the same task share, not the task id alone. A round that loses the race
         // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
         // the sweep is level-triggered, so the next pass simply retries it.
+        const claimKey = fixBranchClaimKey(owner, repo, realBranch);
         try {
-          branchClaim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, realBranch), { run_id: runId });
+          const taken = acquireFixRoundClaim(inflightDir, claimKey, fixRoundClaimId(runId, pr.prNumber, nowMsImpl()), roundEnded);
+          if (taken.endedRunId) {
+            log("sweep.fix.ended_round_claim_reclaimed", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              holder_run_id: taken.endedRunId,
+            });
+          }
+          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it.
+          branchClaim = fixRoundBranchClaim(taken.handle, () => reclaimFixRoundBranch({
+            inflightDir,
+            claimKey,
+            claimRunId: fixRoundClaimId(runId, pr.prNumber, nowMsImpl()),
+            roundEnded,
+            ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
+          }));
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
@@ -3542,6 +3562,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runGeneratorScript: async (script: string, cwd: string) => runNpmScriptViaSpawn(script, cwd),
             commitGeneratorOutput: (o: Parameters<typeof commitGeneratorOutputViaGit>[0]) => commitGeneratorOutputViaGit(o),
             packageScripts: readPackageScriptsFor(worktreePath),
+            branchClaim,
           },
         });
         keepWorktree = rung?.superseded !== undefined;
@@ -3554,7 +3575,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // signal/cost structurally and decides `rethrow` off `dispatchStarted` ALONE, byte-for-byte
         // W1-T1127's existing rule — the signal itself never enters that decision.
         const outcome = dispatchFixCatchOutcome(e, dispatchStarted);
-        log("sweep.fix.error", { pr_number: pr.prNumber, ...outcome.ledgerFields });
+        log("sweep.fix.error", { pr_number: pr.prNumber, ...(branchClaim ? { branch_claim_run_id: branchClaim.last().info.run_id } : {}), ...outcome.ledgerFields });
         // W1-T1127: still ledgered above (nothing is repaired by going quiet) — but a failure
         // that struck BEFORE the worker ran must propagate, not return cleanly, so `runSweep`'s
         // own `catch` (sweep.ts) records `acted: false` instead of seeding the dedup gate against
@@ -3576,7 +3597,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // never strands the claim past this round's own dispatch.
         try {
           if (branchClaim && recycleTaskId) log("inflight.recycle_yield", {
-            lock_key: basename(branchClaim.path, ".lock"), task_id: recycleTaskId, run_id: branchClaim.info.run_id, waiting_on: "ci",
+            lock_key: basename(branchClaim.last().path, ".lock"), task_id: recycleTaskId, run_id: runId, waiting_on: "ci",
           });
         } finally {
           branchClaim?.release();
@@ -9501,6 +9522,90 @@ export function fixCeilingInForce(
 export function fixDispatchBudget(priorStrikes: number, ceiling: number): number | null {
   const remaining = ceiling - priorStrikes;
   return remaining > 0 ? remaining : null;
+}
+
+/** W1-T5955 — a fix round's own claim id. The daemon's pid and run id outlive every round, so a
+ *  claim stamped only with them read live long after its round ended (#9450). */
+export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number): string {
+  return `${runId}:fix-claim:${prNumber}:${nowMs}`;
+}
+
+/** W1-T5955 — true once the round holding `claimRunId` wrote its `fix.done`. A rotated row reads false;
+ *  a thrown round needs no row, its `finally` releases the claim. */
+export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
+  return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+}
+
+/** W1-T5955 — take a branch claim, first clearing one whose round already ended. */
+export function acquireFixRoundClaim(
+  inflightDir: string,
+  claimKey: string,
+  claimRunId: string,
+  roundEnded: (claimRunId: string) => boolean,
+): { handle: InflightLockHandle; endedRunId?: string } {
+  let endedRunId: string | undefined;
+  const cleared = reclaimStaleLock(inflightLockPath(inflightDir, claimKey), {
+    parseHolder: parseInflightLockInfo,
+    isStale: (held) => {
+      if (roundEnded(held.run_id)) endedRunId = held.run_id;
+      return endedRunId !== undefined;
+    },
+  });
+  const handle = acquireInflightLock(inflightDir, claimKey, { run_id: claimRunId });
+  return cleared.outcome === "reclaimed" ? { handle, endedRunId } : { handle };
+}
+
+/** W1-T5955 — re-take a round's claim before its worktree is reused. A later round must reclaim
+ *  this round's worktree to check the branch out, so a lost worktree means the branch moved on. */
+export function reclaimFixRoundBranch(opts: {
+  inflightDir: string;
+  claimKey: string;
+  claimRunId: string;
+  roundEnded: (claimRunId: string) => boolean;
+  ownsWorktree: () => boolean;
+}): InflightLockHandle | string {
+  let owns: boolean;
+  try {
+    owns = opts.ownsWorktree();
+  } catch (e) {
+    return `this round's worktree is unreadable: ${String((e as Error)?.message ?? e)}`;
+  }
+  if (!owns) return "a later round reclaimed this round's worktree";
+  try {
+    return acquireFixRoundClaim(opts.inflightDir, opts.claimKey, opts.claimRunId, opts.roundEnded).handle;
+  } catch (e) {
+    if (e instanceof InflightLockError) return `branch claim held by ${e.holder.run_id}`;
+    throw e;
+  }
+}
+
+/** W1-T5955 — a round's hold on its branch claim: released at `fix.done`, re-taken before reuse. */
+export interface FixRoundBranchClaim {
+  id(): string | undefined;
+  release(): void;
+  /** `undefined` once held; a string is the stand-down reason. */
+  reacquire(): string | undefined;
+  last(): InflightLockHandle;
+}
+
+export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
+  let held: InflightLockHandle | undefined = first;
+  let last = first;
+  return {
+    id: () => held?.info.run_id,
+    release: () => {
+      held?.release();
+      held = undefined;
+    },
+    reacquire: () => {
+      if (held) return undefined;
+      const next = retake();
+      if (typeof next === "string") return next;
+      held = last = next;
+      return undefined;
+    },
+    last: () => last,
+  };
 }
 
 /** The last line in `lines` matching `pred` — append-only files read oldest-first, so the

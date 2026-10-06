@@ -1641,6 +1641,7 @@ import {
   reviewInputLoopFacts,
   hasCapturedMergeConflictEvidence,
   clearedConflictEscalationCause,
+  type FixRoundBranchClaim,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -10631,6 +10632,8 @@ export async function runFixRung(opts: {
      * one input this feature must fail CLOSED on rather than guess.
      */
     packageScripts?: Readonly<Record<string, string>>;
+    /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
+    branchClaim?: FixRoundBranchClaim;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -10659,6 +10662,13 @@ export async function runFixRung(opts: {
     proofDiscriminationEvidenceFromCriteria(review.criteria) !== undefined;
   let strikes = 0;
   let retriggers = 0;
+  const branchClaimLost = (): FixRungOutcome | undefined => {
+    const reason = deps.branchClaim?.reacquire();
+    if (reason === undefined) return undefined;
+    deps.log("fix.stood_down", { site: "rung.branch_claim", strike: strikes, reason });
+    deps.say(`fix rung: standing down — ${reason}`);
+    return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+  };
   const ciHandoff = (ci: CiGateOutcome | "green" | "red" | "timeout"): FixRungOutcome | undefined => {
     if (typeof ci === "string" || ci.state !== "freshness_handoff") return undefined;
     deps.log("fix.ci_not_green", { strike: strikes, ci: ci.state, sha: ci.sha });
@@ -10808,6 +10818,8 @@ export async function runFixRung(opts: {
   // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
   // timer.
   while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
+    const claimLost = branchClaimLost();
+    if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
     // point that stops a strike being SPENT on a PR that went terminal
     // (merged/closed) since the previous round. Read FRESH every round —
@@ -12273,9 +12285,10 @@ export async function runFixRung(opts: {
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
-    const logFixDone = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
+      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
       ...fixClaimFields,
       head_sha: priorHeadSha,
@@ -12298,6 +12311,11 @@ export async function runFixRung(opts: {
       // rather than `undefined` when the spawn configured no cap.
       ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
     });
+    // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
+    const logFixDone = (pushedHeadSha?: string, subtype?: string): void => {
+      logFixDoneRow(pushedHeadSha, subtype);
+      deps.branchClaim?.release();
+    };
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
     // above `runTask`. Design note (i): "EVERY FIX WORKER EXIT" — keyed on `attempt` (this
@@ -12502,6 +12520,8 @@ export async function runFixRung(opts: {
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
+    const claimLostAfterCi = branchClaimLost();
+    if (claimLostAfterCi) return claimLostAfterCi;
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
@@ -41660,12 +41680,15 @@ export interface CaptureRegisteredFixOwnerDeps {
 export function readRegisteredFixOwnerClaim(
   inflightDir: string,
   claimKey: string,
+  roundEnded?: (claimRunId: string) => boolean,
 ): "clear" | "occupied" | "unknown" {
   const raw = readFileIfExists(join(inflightDir, `${claimKey}.lock`));
   if (raw === undefined) return "clear";
   const holder = parseInflightLockInfo(raw);
   if (!holder) return "unknown";
-  return isHolderStale(holder, { isPidAlive: defaultIsPidAlive }) ? "clear" : "occupied";
+  if (isHolderStale(holder, { isPidAlive: defaultIsPidAlive })) return "clear";
+  // W1-T5955: the holder pid is the daemon, which outlives the round; the round's end row decides.
+  return roundEnded?.(holder.run_id) ? "clear" : "occupied";
 }
 
 export function captureRegisteredFixOwnerSnapshot(
@@ -41679,6 +41702,7 @@ export function captureRegisteredFixOwnerSnapshot(
     observedRemoteSha?: string;
     inflightDir: string;
     claimKey: string;
+    claimRoundEnded?: (claimRunId: string) => boolean;
   },
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): RegisteredFixOwnerSnapshot {
@@ -41781,7 +41805,9 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.historyState === "unknown") return snapshot;
 
   try {
-    snapshot.claimState = (deps.readClaim ?? readRegisteredFixOwnerClaim)(args.inflightDir, args.claimKey);
+    snapshot.claimState = deps.readClaim
+      ? deps.readClaim(args.inflightDir, args.claimKey)
+      : readRegisteredFixOwnerClaim(args.inflightDir, args.claimKey, args.claimRoundEnded);
   } catch (e) {
     return { ...snapshot, error: String(e) };
   }
