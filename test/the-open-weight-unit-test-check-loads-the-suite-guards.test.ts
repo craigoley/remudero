@@ -9,14 +9,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 // A NAMESPACE import, so the file still LOADS on a tree without the shared constant and fails by
 // assertion there: a load error would read as an environment gap, not a red.
 import * as workerProvider from "../src/lib/worker-provider.js";
 
-const { OPENWEIGHT_CHECKS } = workerProvider;
+const { OPENWEIGHT_CHECKS, spawnOpenWeightWorker } = workerProvider;
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -56,5 +57,55 @@ test("every relative import the open-weight unit_test check loads resolves from 
   assert.ok(relative.length > 0, "the check must load at least one repo-relative setup file");
   for (const specifier of relative) {
     assert.ok(existsSync(join(repoRoot, specifier)), `${specifier} must exist at the repo root`);
+  }
+});
+
+/** Drive ONE `run_check unit_test` through the real tool loop in `cwd` and return the argv it ran. */
+async function unitTestArgvIn(cwd: string): Promise<readonly string[]> {
+  const seen: string[][] = [];
+  let turn = 0;
+  await spawnOpenWeightWorker(
+    {
+      cwd,
+      workerHome: join(cwd, "wh"),
+      prompt: "run the unit tests",
+      tools: ["Read", "RunCheck"],
+      maxTurns: 3,
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+      runCheck: ({ argv }) => {
+        seen.push([...argv]);
+        return "ok";
+      },
+      fetchImpl: async () => {
+        turn += 1;
+        const body = turn === 1
+          ? { choices: [{ message: { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "unit_test" }) } }] } }] }
+          : { choices: [{ message: { content: "done" } }] };
+        return new Response(JSON.stringify(body), { status: 200 });
+      },
+    },
+    { claudeBin: "/unused/claude", root: cwd, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+    { model: "gpt-oss-120b", effort: "low" },
+  );
+  assert.equal(seen.length, 1, "the loop must have run exactly one check, or there is no argv to compare");
+  return seen[0]!;
+}
+
+test("a unit_test check loads the setup guards only in a tree that carries the setup file", async () => {
+  const consumer = mkdtempSync(join(tmpdir(), "rmd-ow-no-setup-"));
+  const guarded = mkdtempSync(join(tmpdir(), "rmd-ow-with-setup-"));
+  try {
+    mkdirSync(join(guarded, "test", "setup"), { recursive: true });
+    writeFileSync(join(guarded, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+
+    // A consumer repo (no setup file) runs exactly main's argv: a missing --import would fail to load.
+    assert.deepEqual(await unitTestArgvIn(consumer), ["node", "--import", "tsx", "--test", "--test-reporter=tap"]);
+    // A tree that carries the file runs under it, after tsx, as package.json's test:ci does.
+    assert.deepEqual(await unitTestArgvIn(guarded), [
+      "node", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test", "--test-reporter=tap",
+    ]);
+  } finally {
+    rmSync(consumer, { recursive: true, force: true });
+    rmSync(guarded, { recursive: true, force: true });
   }
 });

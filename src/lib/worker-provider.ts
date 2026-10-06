@@ -3297,8 +3297,10 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
 /** The `--import` chain package.json's `test`/`test:ci` scripts load before any suite: tsx, then
  *  test/setup/tmp-hygiene.ts, which installs the temp-dir reaper and the no-live-remote guards. A
  *  `node --test` without it runs every fixture unguarded. The path is relative to the check's cwd,
- *  the worktree root (`--chdir cwd`). Parity with package.json is enforced by test. */
-export const TEST_PROCESS_GUARD_IMPORTS: readonly string[] = ["--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+ *  the worktree root (`--chdir cwd`). Parity with package.json is enforced by test.
+ *  {@link openWeightCheckArgv} drops the setup import in a tree that has no such file. */
+export const TEST_SETUP_IMPORT = "./test/setup/tmp-hygiene.ts";
+export const TEST_PROCESS_GUARD_IMPORTS: readonly string[] = ["--import", "tsx", "--import", TEST_SETUP_IMPORT];
 
 /** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
  *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
@@ -3450,7 +3452,7 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  * under the same setup imports as `test:ci` ({@link TEST_PROCESS_GUARD_IMPORTS}).
  * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
  * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
-export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
+export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
   }
@@ -3459,7 +3461,12 @@ export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   if (paths !== undefined) {
     throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
   }
-  return [...OPENWEIGHT_CHECKS[check]];
+  const argv = [...OPENWEIGHT_CHECKS[check]];
+  // A CONSUMER REPO HAS NO SETUP FILE. Loading a missing `--import` fails before any test runs, so
+  // a tree without it runs exactly what main ran: tsx alone. Remudero's own tree always has it.
+  const at = argv.indexOf(TEST_SETUP_IMPORT);
+  if (cwd !== undefined && at > 0 && !existsSync(join(cwd, TEST_SETUP_IMPORT))) argv.splice(at - 1, 2);
+  return argv;
 }
 
 /** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
@@ -3570,7 +3577,7 @@ async function executeOpenWeightTool(
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
       // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
       // fresh network namespace before it runs.
-      const argv = openWeightCheckArgv(args.check, args.paths);
+      const argv = openWeightCheckArgv(args.check, args.paths, cwd);
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
