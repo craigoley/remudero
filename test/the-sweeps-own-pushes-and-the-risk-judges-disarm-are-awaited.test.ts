@@ -185,7 +185,7 @@ test(`${PROOF}: awaited risk disarm retains every sync disposition and lost-race
     const dispositionDeps = { mergeSha: () => HEAD, ledgerLines: () => [] };
     try {
       const { result } = await observeChild(shim, "--disable-auto", () =>
-        entrypoint.riskJudgeDisarm(ctx, { disposition: dispositionDeps }));
+        entrypoint.riskJudgeDisarm(ctx, undefined, dispositionDeps));
       const sync = disarmAutoMerge(PR_URL, {
         disableAuto: () => { if (stderr) throw Object.assign(new Error(stderr), { stderr }); },
         isMerged: () => merged, say: () => {},
@@ -263,7 +263,7 @@ test(`${PROOF}: both sweep plan filings await push before creating a pr or clean
 test(`${PROOF}: a rejected risk disarm remains a rejected operation`, async () => {
   assert.equal(typeof entrypoint.riskJudgeDisarm, "function");
   const failure = new Error("disarm could not start");
-  await assert.rejects(entrypoint.riskJudgeDisarm(ctx, { disarm: async () => { throw failure; } }),
+  await assert.rejects(entrypoint.riskJudgeDisarm(ctx, async () => { throw failure; }),
     (error) => error === failure);
 });
 

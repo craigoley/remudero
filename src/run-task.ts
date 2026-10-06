@@ -4751,12 +4751,10 @@ export function lostRaceEscalation(input: {
 
 export async function riskJudgeDisarm(
   ctx: Parameters<typeof disposeDisarm>[1],
-  deps: {
-    disarm?: typeof disarmAutoMergeAsync;
-    disposition?: Parameters<typeof disposeDisarm>[2];
-  } = {},
+  disarm: typeof disarmAutoMergeAsync = disarmAutoMergeAsync,
+  disposition: Parameters<typeof disposeDisarm>[2] = {},
 ): Promise<ReturnType<typeof disposeDisarm>> {
-  return disposeDisarm(await (deps.disarm ?? disarmAutoMergeAsync)(ctx.prUrl), ctx, deps.disposition);
+  return disposeDisarm(await disarm(ctx.prUrl), ctx, disposition);
 }
 
 /**
