@@ -1838,6 +1838,34 @@ function draftPlaceholderViolations(
   return out;
 }
 
+// W1-T5827: the executor's `grep:` split (review.ts DIALECT_GREP_PATH_RE) — the pattern is everything before the last
+// ` in <path>`, so `grep: "x" not found in f.md` greps for the literal `"x" not found`, which no file holds.
+const DRAFT_GREP_SPLIT_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+const ABSENCE_SUFFIX_RE = /\s(?:not found|absent|no longer|is gone|removed)$/i;
+const ABSENCE_PREFIX_RE = /^(?:no|not)\s+["'`]/i;
+
+/** A drafted `grep:` proof written as an absence can never pass: refuse it, drafts only. */
+function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintViolation[] {
+  const out: DraftLintViolation[] = [];
+  for (const [i, criterion] of (task.acceptance ?? []).entries()) {
+    const proof = typeof criterion.proof === "string" ? criterion.proof.trim() : "";
+    const body = /^grep:\s*([\s\S]*)$/i.exec(proof)?.[1];
+    if (body === undefined) continue;
+    const pattern = (DRAFT_GREP_SPLIT_RE.exec(body.trim())?.[1] ?? "").trim();
+    if (ABSENCE_SUFFIX_RE.test(pattern) || ABSENCE_PREFIX_RE.test(pattern)) {
+      out.push({
+        check: "draft-absence-proof",
+        severity: "block",
+        message:
+          `${task.id}: criterion ${i + 1} proof ${JSON.stringify(proof.slice(0, 90))} is an absence written as a grep — ` +
+          `the executor greps for the literal ${JSON.stringify(pattern.slice(0, 70))}, which no file holds, so it can never pass. ` +
+          "State the change as a positive proof: a unit test, or a grep for the replacement text",
+      });
+    }
+  }
+  return out;
+}
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(
@@ -1857,6 +1885,7 @@ export function lintDraftedFragment(
   for (const task of tasks) {
     violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, directoryExists));
+    violations.push(...draftAbsenceProofViolations(task));
   }
   if (stampLine !== undefined) {
     violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
