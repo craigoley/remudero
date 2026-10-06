@@ -5,6 +5,10 @@ import type { Config } from "./config.js";
 export const LEDGER_FILENAME = "ledger.ndjson";
 export const LEDGER_CARRIED_PREFIX_SUFFIX = ".carried.json";
 export const LEDGER_RETAINED_STEPS_SUFFIX = ".retained-steps.json";
+export const LEDGER_ROTATION_LOCK_SUFFIX = ".rotate.lock";
+export const LEDGER_ROTATE_STAGE_TAG = "rotate-tmp";
+export const LEDGER_COMPACT_STAGE_TAG = "ledger-compact-tmp";
+export const LEDGER_STAGE_TAGS: readonly string[] = [LEDGER_ROTATE_STAGE_TAG, LEDGER_COMPACT_STAGE_TAG];
 
 /**
  * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
