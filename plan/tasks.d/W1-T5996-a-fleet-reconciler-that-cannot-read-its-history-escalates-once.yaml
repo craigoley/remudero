@@ -1,0 +1,35 @@
+- id: W1-T5996
+  title: "A FLEET RECONCILER THAT CANNOT READ ITS HISTORY ESCALATES ONCE, NOT SILENTLY EVERY PASS — runSweep's W1-T4817 block catches readFleetState's refusal and logs reconcile.unreadable, nothing else, so the fleet-state reconciler (main-commit workflow gaps, deploy and failure-latch repair) has refused on every full pass since 2026-10-04 (the unclassified ~/rmd-state2/state/ledger.ndjson.bak) with no incident, issue or console signal; W1-T5763 fixed one cause of the same silent outage a day earlier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the reconciler's unreadable arm becomes a visible, deduped incident
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: reconcile.unreadable on every full pass since 10-04"
+  plan_refs: [W1-T4817, W1-T5763]
+  files: [src/lib/sweep.ts, test/a-fleet-reconciler-that-cannot-read-its-history-escalates-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only): reconcile.unreadable "fleet reconciliation history unreadable:
+    /home/node/Remudero/state/ledger.ndjson.bak" is written on every full pass (116 rows across the last 40
+    archives plus the live file; 11:28Z and 11:34Z today), and no reconcile.repaired / reconcile.escalated /
+    incident.event row and no GitHub issue names it. The .bak (2.2 MB, 2026-08-20) is an unclassified ledger.*
+    file, which readLedgerUnionRawLinesSync refuses on purpose (W1-T5763 kept that refusal; it only exempted the
+    ledger's own sidecars, after 62 silent refusals 10-04 11:41Z to 10-05 00:00Z). The refusal is right; the
+    silence is the defect: the catch in runSweep's W1-T4817 block (src/lib/sweep.ts) only logs, so main-commit
+    workflow gaps and failed deploys have gone unrepaired for two days and nobody was told.
+  design: |
+    In that catch, after the first refusal for a given reason (dedupe on a hash of the unread/unclassified path
+    list), append one incident.event (kind "invariant", name "reconcile.unreadable", fingerprint of the reason)
+    the way the escalation arm of reconcileFleetState already does, naming the path and the remedy (move the
+    file out of the state dir). Later passes with the same reason log only; a new reason raises a new incident.
+  acceptance:
+    - claim: "a fleet reconciler that cannot read its history raises one incident naming the unreadable path, and repeated passes with the same reason raise no second one"
+      proof: "unit test: test/a-fleet-reconciler-that-cannot-read-its-history-escalates-once.test.ts"
+  falsifier: |
+    Keep the log-only catch: no incident.event is appended for the unreadable history and the test fails.
