@@ -3049,6 +3049,21 @@ export interface components {
         };
       };
     };
+    /** GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for that instance, built by the same function in the read-model worker from the projector's `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until state/read-model/switches.json sets `actions` to `serve`. */
+    ActionsView: {
+      view: "actions";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          results: ExternalActionResultsEnvelope;
+        })[];
+      };
+    };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
       view: "needs-you";
@@ -5352,6 +5367,17 @@ export interface paths {
     get: {
       responses: {
           "200": HostView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/actions": {
+    get: {
+      responses: {
+          "200": ActionsView;
           "304": undefined;
           "401": Error;
           "403": Error;

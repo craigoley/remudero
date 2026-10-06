@@ -364,6 +364,24 @@ instead of a request-time ledger union. The plan half reads what the route reads
 - Shadow side: the route's computation (its memoized ledger union, up to the ring's newest row) over the
   same build's plan half, so a diff is a ring row the union disagrees with.
 
+## `actions` (version 1)
+
+`GET /v1/views/actions`: the actions page, one body across instances (arch Phase 4 §1.1, P4-T13, W1-T5052,
+`src/lib/actions-view.ts`). Schema: `ActionsView`. Dark until `switches.json` sets `actions` to `serve`;
+until then the console reads `/v1/action-results` as before.
+
+`data.instances[]`: `{ instance, results }`, one per projected instance, where `results` is exactly what
+`GET /v1/action-results` answers with no filter (`ExternalActionResultsEnvelope`), built by the same
+`buildActionResultsProjection` over the projector's `external_effect.reconciled` facts (every rotation the
+projector applied) instead of a request-time ledger union. A filtered read (`taskId`, `actionId`,
+`changedSince`, `limit`) stays on the route.
+- Rebuilt only when a reconciled fact is applied: each tick folds the facts past the last `seq` it read.
+- Sources: `ledger:<i>` per instance.
+- Shadow side: the route's computation (its memoized ledger union, torn rows classified as the route does)
+  up to the projector's newest applied row at the build, so a diff is a reconciled row the two disagree on.
+- The facts reach back past the route's union window (`STATUS_BOARD_WINDOW_MS`, at least 24 rotations), so
+  a host holding reconciled rows older than that window shows them here and not on the route.
+
 ## `instances` (version 1)
 
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
