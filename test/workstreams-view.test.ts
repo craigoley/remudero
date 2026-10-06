@@ -2,7 +2,7 @@
 // projector's activity_ring, materialized in the read-model worker and debounced on ring inserts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
@@ -228,5 +228,41 @@ test("unit test: same-millisecond rows of different steps and repositories, appe
   const route = await routeBody(f);
   const ties = (route.items as Array<{ id: string; observedAt: string }>).filter((i) => i.observedAt === at);
   assert.equal(ties.length, tied.length, "positive control: every tied row, and its duplicate once, reaches the route");
+  assert.deepEqual(withoutProjectionTime(activity), withoutProjectionTime(route));
+});
+
+test("unit test: a same-millisecond tie split by a rotation gives the workstreams view the route's body", async (t) => {
+  const f = fixture(t);
+  // The 2026-10-06 console shadow diffs: `sweep.repair_filing_suppressed` then `sweep.summary` at one
+  // millisecond; the rotation at 10:06:52.919Z archived both and carried only the summary into the new live
+  // file. The union reads it live first, the ring in the order the projector first applied the pair.
+  const at = iso(NOW - 30_000);
+  const suppressed = JSON.stringify({ ts: at, run_id: "DAEMON-1", task_id: "DAEMON", step: "sweep.repair_filing_suppressed", id: "fb-repair-blocked-fixable-2961" });
+  const summary = JSON.stringify({ ts: at, run_id: "DAEMON-1", task_id: "DAEMON", step: "sweep.summary", mergeable: 0 });
+  // Two rows of one step, task and millisecond: their `:<n>` numbers must not follow the read order either.
+  const firstTick = JSON.stringify({ ts: at, step: "daemon.tick", n: 1 });
+  const secondTick = JSON.stringify({ ts: at, step: "daemon.tick", n: 2 });
+  const tied = [suppressed, summary, firstTick, secondTick];
+  appendFileSync(f.ledgerPath, tied.map((line) => `${line}\n`).join(""));
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
+  const posted: ReadModelWorkerMessage[] = [];
+  const clock = movingClock(NOW);
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
+  const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
+  t.after(() => ticker.release());
+  ticker.start();
+  ticker.tick();
+  renameSync(f.ledgerPath, join(f.stateDir, "ledger.2026-09-30T11-59-45-000Z.ndjson"));
+  writeFileSync(f.ledgerPath, [summary, secondTick].map((line) => `${line}\n`).join(""));
+  clock.set(NOW + WORKSTREAMS_DEBOUNCE_MS);
+  ticker.tick();
+  clock.set(NOW + 2 * WORKSTREAMS_DEBOUNCE_MS);
+  ticker.tick();
+  const body = bodiesOf(posted).at(-1);
+  const activity = (body!.body.data as WorkstreamsData).instances[0]!.activity as unknown as Record<string, unknown>;
+  const route = await routeBody(f);
+  const ties = (route.items as Array<{ id: string; observedAt: string }>).filter((i) => i.observedAt === at);
+  assert.equal(ties.length, tied.length, "positive control: each tied row reaches the route once, from the live file or the archive");
+  assert.ok(ties.some((i) => i.id === "fb-repair-blocked-fixable-2961"), "positive control: the archived-only partner is in the route's body");
   assert.deepEqual(withoutProjectionTime(activity), withoutProjectionTime(route));
 });
