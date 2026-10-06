@@ -6,6 +6,7 @@
  * healthy window, while direct pressure sheds only future admissions.
  */
 import { readFileSync } from "node:fs";
+import { cpus, loadavg } from "node:os";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 
 export function initialReviewCapacityState(baseWidth: number): ReviewCapacityState {
@@ -46,8 +47,19 @@ export interface ReviewSettlementObservation {
   successes: number;
   failures: number;
   timeouts: number;
+  /** Median wall time of the completed reviews in the long baseline window, EXCLUDING the recent
+   *  set — so the baseline cannot chase the very samples it is compared against. */
   baselineLatencyMs?: number;
+  /** Median wall time of the last {@link REVIEW_LATENCY_RECENT_SAMPLES} completions. */
   recentLatencyMs?: number;
+  recentLatencySamples?: number;
+  baselineLatencySamples?: number;
+  /** The slowest recent review. Diagnostic only: the median above is what decides. */
+  recentLatencyMaxMs?: number;
+  /** The same two medians per review-size unit (1 + executed proofs). Present only when enough
+   *  reviews on both sides carry a size; it can only EXCUSE a raw expansion, never create one. */
+  baselineLatencyPerUnitMs?: number;
+  recentLatencyPerUnitMs?: number;
 }
 
 export interface ReviewCapacityObservation {
@@ -59,6 +71,9 @@ export interface ReviewCapacityObservation {
   /** W1-T2985 — PSI `full`: the starvation signal the CPU shed decides on. */
   cpuPsiFullAvg10Pct?: number;
   memoryPsiSomeAvg10Pct?: number;
+  /** 1-minute load average and core count: attribution only (`pressureSource`), never a gate. */
+  hostLoad1?: number;
+  hostCpuCount?: number;
   provider: ReviewProviderCapacityObservation;
   settlements: ReviewSettlementObservation;
 }
@@ -84,6 +99,9 @@ export type ReviewCapacityReason =
   | "provider-refused"
   | "review-unhealthy"
   | "review-latency-expanded"
+  /** Reviews ran slow, but host PSI is at or below both low watermarks right now: latency is a
+   *  LAGGING symptom, so it blocks the lane above base and cannot shed below base. */
+  | "review-latency-uncorroborated"
   | "telemetry-unavailable"
   /** W1-T2987 — host telemetry read fine; only the PROVIDER snapshot was absent or stale. Distinct
    *  from `telemetry-unavailable`, which means the host itself could not be read. */
@@ -123,6 +141,54 @@ export interface ReviewCapacityEvidence {
   reviewTimeouts: number;
   reviewBaselineLatencyMs?: number;
   reviewRecentLatencyMs?: number;
+  reviewRecentLatencySamples?: number;
+  reviewBaselineLatencySamples?: number;
+  reviewRecentLatencyMaxMs?: number;
+  reviewBaselineLatencyPerUnitMs?: number;
+  reviewRecentLatencyPerUnitMs?: number;
+  /** The ratio the latency arm judged: min(raw, per-unit) when per-unit is known. */
+  reviewLatencyRatio?: number;
+  hostLoad1?: number;
+  hostCpuCount?: number;
+  /** Which class of load a pressure-type decision is attributed to; undefined when none fired. */
+  pressureSource?: ReviewPressureSource;
+}
+
+/** `fleet-budget`: fleet workers fill the host worker budget. `host-load`: the load average exceeds
+ *  cores plus one runnable per fleet worker — load the fleet's own count does not explain (e.g. an
+ *  operator's coverage run). `fleet-load`: the load is within that. `unknown`: no load reading. */
+export type ReviewPressureSource = "fleet-budget" | "host-load" | "fleet-load" | "unknown";
+
+const PRESSURE_REASONS: ReadonlySet<ReviewCapacityReason> = new Set([
+  "cpu-pressure",
+  "memory-pressure",
+  "memory-reserve",
+  "review-latency-expanded",
+  "review-latency-uncorroborated",
+  "host-worker-budget",
+]);
+
+/** Attribution only. Nothing branches on it: the host is shed whoever loads it. */
+export function reviewPressureSource(
+  observation: Pick<ReviewCapacityObservation, "activeWorkers" | "hostLoad1" | "hostCpuCount">,
+  hostWorkerBudget: number,
+): ReviewPressureSource {
+  const active = Math.max(0, Math.trunc(observation.activeWorkers));
+  if (active >= hostWorkerBudget) return "fleet-budget";
+  if (!finite(observation.hostLoad1) || !finite(observation.hostCpuCount)) return "unknown";
+  return observation.hostLoad1 > observation.hostCpuCount + active ? "host-load" : "fleet-load";
+}
+
+/** The latency ratio the governor judges, or undefined when there is no verdict to give. Raw and
+ *  per-unit medians must BOTH have expanded: size can explain a slow window away, never invent one. */
+export function reviewLatencyRatio(settlements: ReviewSettlementObservation): number | undefined {
+  const { baselineLatencyMs, recentLatencyMs, baselineLatencyPerUnitMs, recentLatencyPerUnitMs } = settlements;
+  if (!finite(baselineLatencyMs) || !finite(recentLatencyMs) || baselineLatencyMs <= 0) return undefined;
+  const raw = recentLatencyMs / baselineLatencyMs;
+  if (!finite(baselineLatencyPerUnitMs) || !finite(recentLatencyPerUnitMs) || baselineLatencyPerUnitMs <= 0) {
+    return raw;
+  }
+  return Math.min(raw, recentLatencyPerUnitMs / baselineLatencyPerUnitMs);
 }
 
 export interface ReviewCapacityDecision {
@@ -162,7 +228,10 @@ export function absentHostReadings(
   return absent;
 }
 
-/** Pure AIMD-like controller: additive recovery after hysteresis, one-lane decrease on pressure. */
+/** Pure controller. Direct host pressure sheds one lane per sample; sustained, PSI-corroborated
+ *  review latency sheds PROPORTIONALLY to its expansion; once PSI is back at or below both low
+ *  watermarks a shed width returns to base in ONE sample (the PSI band between low and high is the
+ *  hysteresis). Lanes above base are still earned one at a time by a sustained healthy window. */
 export function selectAdaptiveReviewWidth(
   prior: ReviewCapacityState,
   policy: ReviewCapacityPolicy,
@@ -184,11 +253,22 @@ export function selectAdaptiveReviewWidth(
     reason = nextReason;
   };
 
-  const latencyExpanded =
-    finite(observation.settlements.baselineLatencyMs) &&
-    finite(observation.settlements.recentLatencyMs) &&
-    observation.settlements.baselineLatencyMs > 0 &&
-    observation.settlements.recentLatencyMs / observation.settlements.baselineLatencyMs >= policy.latencyExpansionRatio;
+  const latencyRatio = reviewLatencyRatio(observation.settlements);
+  const latencyExpanded = latencyRatio !== undefined && latencyRatio >= policy.latencyExpansionRatio;
+  // 2026-10-06 — PSI AT OR BELOW BOTH LOW WATERMARKS, and only when both readings exist: an unread
+  // PSI never counts as calm. This is the recovery condition and the latency arm's corroboration.
+  const psiCalm =
+    finite(observation.cpuPsiFullAvg10Pct) &&
+    finite(observation.memoryPsiSomeAvg10Pct) &&
+    observation.cpuPsiFullAvg10Pct <= policy.cpuPsiLowPct &&
+    observation.memoryPsiSomeAvg10Pct <= policy.memoryPsiLowPct;
+  // Back to base in one sample, never past what the host worker budget leaves room for, and never
+  // above base: lanes above it stay earned by the healthy window below.
+  const restoreBase = (): void => {
+    if (!psiCalm || effectiveWidth >= baseWidth) return;
+    const room = Math.trunc(policy.hostWorkerBudget) - Math.max(0, Math.trunc(observation.activeWorkers));
+    effectiveWidth = Math.max(effectiveWidth, Math.min(baseWidth, room));
+  };
 
   // W1-T2985 — DECIDE ON `full`, REPORT `some`. This read `cpuPsiSomeAvg10Pct >= cpuPsiHighPct`.
   // MEASURED on the fleet 2026-09-06, two builds and a retro running healthily: cpu `some
@@ -214,8 +294,18 @@ export function selectAdaptiveReviewWidth(
     observation.settlements.timeouts >= policy.unhealthySettlementThreshold
   ) {
     directPressure("review-unhealthy");
-  } else if (latencyExpanded) {
-    directPressure("review-latency-expanded");
+  } else if (latencyExpanded && !psiCalm) {
+    // MEASURED 2026-10-06 (Azure, base 4): this arm stepped 4 -> 3 -> 2 -> 1 on three samples
+    // whose cpu `full` PSI read 2.18, 0.31 and 0; the third fired on reviews that had run long
+    // during a load spike already gone, and recovery then took 30+ min. Latency is a lagging
+    // symptom, so it sheds only while PSI still shows pressure, and PROPORTIONALLY: the target
+    // is base * ratio / observed, at least one lane under base, and a sustained expansion holds
+    // there instead of ratcheting a lane per sample.
+    const target = Math.floor((baseWidth * policy.latencyExpansionRatio) / latencyRatio!);
+    effectiveWidth = Math.min(effectiveWidth, Math.max(minWidth, Math.min(baseWidth - 1, target)));
+    healthySamples = 0;
+    lastHealthySampleAtMs = undefined;
+    reason = "review-latency-expanded";
   } else if (observation.activeWorkers + effectiveWidth > policy.hostWorkerBudget) {
     directPressure("host-worker-budget");
   } else {
@@ -248,6 +338,13 @@ export function selectAdaptiveReviewWidth(
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "telemetry-unavailable";
+    } else if (latencyExpanded) {
+      // Reached only with PSI calm (the shedding arm above took every other case).
+      effectiveWidth = Math.min(effectiveWidth, baseWidth);
+      restoreBase();
+      healthySamples = 0;
+      lastHealthySampleAtMs = undefined;
+      reason = "review-latency-uncorroborated";
     } else if (!providerTelemetryAvailable) {
       // HOST TELEMETRY ALONE AUTHORISES THE BASE WIDTH; the provider gates only the lane ABOVE it,
       // which policy already calls "temporary capacity earned by a sustained healthy window". The
@@ -257,15 +354,18 @@ export function selectAdaptiveReviewWidth(
       // and never exceeds base on this path. A provider that genuinely REFUSES is unaffected: that
       // is `directPressure("provider-refused")` above, which sheds before this branch is reached.
       effectiveWidth = Math.min(effectiveWidth + 1, baseWidth);
+      restoreBase();
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "provider-telemetry-unavailable";
     } else if (observation.queueDepth <= effectiveWidth) {
       effectiveWidth = Math.min(effectiveWidth, baseWidth);
+      restoreBase();
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "backlog-not-sustained";
     } else if (observation.activeWorkers + Math.min(maxWidth, effectiveWidth + 1) > policy.hostWorkerBudget) {
+      restoreBase();
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
       reason = "host-worker-budget";
@@ -281,10 +381,12 @@ export function selectAdaptiveReviewWidth(
     ) {
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
+      restoreBase();
       reason = "provider-headroom";
     } else if (observation.settlements.successes < policy.minHealthySettlements) {
       healthySamples = 0;
       lastHealthySampleAtMs = undefined;
+      restoreBase();
       reason = "review-history-insufficient";
     } else {
       const sampleDue =
@@ -296,6 +398,7 @@ export function selectAdaptiveReviewWidth(
       if (healthySamples >= policy.healthyWindowSamples && effectiveWidth < maxWidth) {
         effectiveWidth += 1;
       }
+      restoreBase();
       reason = "healthy-window";
     }
   }
@@ -329,6 +432,27 @@ export function selectAdaptiveReviewWidth(
       : {}),
     ...(finite(observation.settlements.recentLatencyMs)
       ? { reviewRecentLatencyMs: observation.settlements.recentLatencyMs }
+      : {}),
+    ...(finite(observation.settlements.recentLatencySamples)
+      ? { reviewRecentLatencySamples: observation.settlements.recentLatencySamples }
+      : {}),
+    ...(finite(observation.settlements.baselineLatencySamples)
+      ? { reviewBaselineLatencySamples: observation.settlements.baselineLatencySamples }
+      : {}),
+    ...(finite(observation.settlements.recentLatencyMaxMs)
+      ? { reviewRecentLatencyMaxMs: observation.settlements.recentLatencyMaxMs }
+      : {}),
+    ...(finite(observation.settlements.baselineLatencyPerUnitMs)
+      ? { reviewBaselineLatencyPerUnitMs: observation.settlements.baselineLatencyPerUnitMs }
+      : {}),
+    ...(finite(observation.settlements.recentLatencyPerUnitMs)
+      ? { reviewRecentLatencyPerUnitMs: observation.settlements.recentLatencyPerUnitMs }
+      : {}),
+    ...(latencyRatio !== undefined ? { reviewLatencyRatio: latencyRatio } : {}),
+    ...(finite(observation.hostLoad1) ? { hostLoad1: observation.hostLoad1 } : {}),
+    ...(finite(observation.hostCpuCount) ? { hostCpuCount: observation.hostCpuCount } : {}),
+    ...(PRESSURE_REASONS.has(reason)
+      ? { pressureSource: reviewPressureSource(observation, policy.hostWorkerBudget) }
       : {}),
   };
   const signature = `${effectiveWidth}:${reason}`;
@@ -368,9 +492,10 @@ function parsePsiFullAvg10(raw: string): number | undefined {
 
 export function readReviewHostObservation(
   read: (path: string, encoding: BufferEncoding) => string = readFileSync,
+  hostLoad: () => { load1: number; cpuCount: number } = () => ({ load1: loadavg()[0]!, cpuCount: cpus().length }),
 ): Pick<
   ReviewCapacityObservation,
-  "memAvailableMib" | "cpuPsiSomeAvg10Pct" | "cpuPsiFullAvg10Pct" | "memoryPsiSomeAvg10Pct"
+  "memAvailableMib" | "cpuPsiSomeAvg10Pct" | "cpuPsiFullAvg10Pct" | "memoryPsiSomeAvg10Pct" | "hostLoad1" | "hostCpuCount"
 > {
   const safeRead = (path: string): string | undefined => {
     try {
@@ -383,7 +508,11 @@ export function readReviewHostObservation(
   const mem = safeRead("/proc/meminfo");
   const cpuPressure = safeRead("/sys/fs/cgroup/cpu.pressure") ?? safeRead("/proc/pressure/cpu");
   const memoryPressure = safeRead("/sys/fs/cgroup/memory.pressure") ?? safeRead("/proc/pressure/memory");
+  const { load1, cpuCount } = hostLoad();
   return {
+    // Attribution only: a non-finite or zero reading is dropped and the source reads `unknown`.
+    ...(finite(load1) ? { hostLoad1: load1 } : {}),
+    ...(finite(cpuCount) && cpuCount > 0 ? { hostCpuCount: cpuCount } : {}),
     ...(mem ? { memAvailableMib: parseMemAvailableMib(mem) } : {}),
     ...(cpuPressure ? { cpuPsiSomeAvg10Pct: parsePsiSomeAvg10(cpuPressure) } : {}),
     ...(cpuPressure ? { cpuPsiFullAvg10Pct: parsePsiFullAvg10(cpuPressure) } : {}),
@@ -437,44 +566,106 @@ function median(values: readonly number[]): number | undefined {
   return ordered.length % 2 === 0 ? (ordered[middle - 1]! + ordered[middle]!) / 2 : ordered[middle];
 }
 
-/** Fold the bounded recent reviewer outcome window already present in the sweep's ledger read. */
+/** How many of the most recent completed reviews the latency verdict takes its median over, and
+ *  the fewest either side of the comparison may hold before a verdict is given at all. A median of
+ *  three cannot be moved by one review: MEASURED 2026-10-06, a single 21-minute review (PR #9702)
+ *  among ~2-4 minute ones read as `recent 1,276 s` against `baseline 223 s` because the old fold
+ *  took the median of TWO samples, i.e. their mean. KIND: PRIMARY CONTROL — every sample's latency
+ *  verdict is the median of this many reviews. */
+export const REVIEW_LATENCY_RECENT_SAMPLES = 5;
+/** KIND: BACKSTOP — fewer samples than this on either side means no latency verdict at all. */
+export const REVIEW_LATENCY_MIN_SAMPLES = 3;
+/** The baseline looks back this many settlement windows (6 x 30 min = 3 h on the fleet), so it moves
+ *  slowly: MEASURED 2026-10-06 the old in-window baseline drifted 92 s -> 223 s in 26 minutes.
+ *  KIND: PRIMARY CONTROL — it sizes the population every latency verdict is compared against. */
+export const REVIEW_LATENCY_BASELINE_WINDOWS = 6;
+
+/** A review's size unit: 1 for the reviewer pass plus one per proof it executed, read from the
+ *  `review.posted` row the review run already writes. Undefined when the row is absent. */
+function reviewSizeUnits(line: Record<string, unknown>): number | undefined {
+  if (!Array.isArray(line.proof_exec)) return undefined;
+  return 1 + line.proof_exec.filter((entry) => typeof entry === "string" && entry.startsWith("executed")).length;
+}
+
+interface CompletedReview {
+  latencyMs: number;
+  units?: number;
+}
+
+/** The median per size unit over `reviews`, or undefined when too few carry a size. */
+function medianPerUnit(reviews: readonly CompletedReview[]): number | undefined {
+  const sized = reviews.filter((review) => review.units !== undefined);
+  if (sized.length < REVIEW_LATENCY_MIN_SAMPLES) return undefined;
+  return median(sized.map((review) => review.latencyMs / review.units!));
+}
+
+/** Fold the reviewer outcome window already present in the sweep's ledger read. Successes, failures
+ *  and timeouts count the settlement window; latency compares the median of the last
+ *  {@link REVIEW_LATENCY_RECENT_SAMPLES} completions with the median of the OTHER completions in a
+ *  window {@link REVIEW_LATENCY_BASELINE_WINDOWS} times longer. */
 export function summarizeReviewSettlements(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowMs: number,
   windowMs: number,
 ): ReviewSettlementObservation {
   const cutoff = nowMs - windowMs;
+  const baselineCutoff = nowMs - windowMs * REVIEW_LATENCY_BASELINE_WINDOWS;
   const attempts = new Map<string, number>();
-  const latencies: number[] = [];
+  const unitsBySha = new Map<string, number>();
+  const completed: Array<CompletedReview & { tsMs: number }> = [];
   let successes = 0;
   let failures = 0;
   let timeouts = 0;
   const recent = lines
     .map((line) => ({ line, tsMs: typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN }))
-    .filter(({ tsMs }) => Number.isFinite(tsMs) && tsMs >= cutoff && tsMs <= nowMs)
+    .filter(({ tsMs }) => Number.isFinite(tsMs) && tsMs >= baselineCutoff && tsMs <= nowMs)
     .sort((a, b) => a.tsMs - b.tsMs);
   for (const { line, tsMs } of recent) {
     const key = `${String(line.pr_number ?? "")}:${String(line.head_sha ?? "")}`;
+    const inWindow = tsMs >= cutoff;
     if (line.step === "sweep.post_review.attempt") {
       attempts.set(key, tsMs);
+    } else if (line.step === "review.posted") {
+      const units = reviewSizeUnits(line);
+      if (units !== undefined && typeof line.head_sha === "string") unitsBySha.set(line.head_sha, units);
     } else if (line.step === "sweep.post_review.done") {
-      successes += 1;
+      if (inWindow) successes += 1;
       const startedAt = attempts.get(key);
-      if (startedAt !== undefined && tsMs >= startedAt) latencies.push(tsMs - startedAt);
+      if (startedAt !== undefined && tsMs >= startedAt) {
+        const units = typeof line.head_sha === "string" ? unitsBySha.get(line.head_sha) : undefined;
+        completed.push({ latencyMs: tsMs - startedAt, tsMs, ...(units !== undefined ? { units } : {}) });
+      }
       attempts.delete(key);
     } else if (line.step === "sweep.post_review.failed") {
-      failures += 1;
-      if (/timeout|timed out|abandon/i.test(String(line.error ?? ""))) timeouts += 1;
+      if (inWindow) {
+        failures += 1;
+        if (/timeout|timed out|abandon/i.test(String(line.error ?? ""))) timeouts += 1;
+      }
       attempts.delete(key);
     }
   }
-  const half = Math.floor(latencies.length / 2);
+  // The recent set is drawn from the settlement window only: a slow spell that has stopped
+  // completing reviews must not keep speaking for the present.
+  const recentSet = completed.filter((review) => review.tsMs >= cutoff).slice(-REVIEW_LATENCY_RECENT_SAMPLES);
+  const baselineSet = completed.slice(0, completed.length - recentSet.length);
+  const verdict = recentSet.length >= REVIEW_LATENCY_MIN_SAMPLES && baselineSet.length >= REVIEW_LATENCY_MIN_SAMPLES;
+  const baselinePerUnit = verdict ? medianPerUnit(baselineSet) : undefined;
+  const recentPerUnit = verdict ? medianPerUnit(recentSet) : undefined;
   return {
     successes,
     failures,
     timeouts,
-    ...(latencies.length >= 4
-      ? { baselineLatencyMs: median(latencies.slice(0, half)), recentLatencyMs: median(latencies.slice(half)) }
+    ...(verdict
+      ? {
+          baselineLatencyMs: median(baselineSet.map((review) => review.latencyMs)),
+          recentLatencyMs: median(recentSet.map((review) => review.latencyMs)),
+          recentLatencySamples: recentSet.length,
+          baselineLatencySamples: baselineSet.length,
+          recentLatencyMaxMs: Math.max(...recentSet.map((review) => review.latencyMs)),
+        }
+      : {}),
+    ...(baselinePerUnit !== undefined && recentPerUnit !== undefined
+      ? { baselineLatencyPerUnitMs: baselinePerUnit, recentLatencyPerUnitMs: recentPerUnit }
       : {}),
   };
 }
@@ -538,6 +729,16 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       review_timeouts: result.decision.evidence.reviewTimeouts,
       review_baseline_latency_ms: result.decision.evidence.reviewBaselineLatencyMs ?? null,
       review_recent_latency_ms: result.decision.evidence.reviewRecentLatencyMs ?? null,
+      // 2026-10-06 — the robust latency verdict's own inputs, so a host reading can prove it.
+      review_recent_latency_samples: result.decision.evidence.reviewRecentLatencySamples ?? null,
+      review_baseline_latency_samples: result.decision.evidence.reviewBaselineLatencySamples ?? null,
+      review_recent_latency_max_ms: result.decision.evidence.reviewRecentLatencyMaxMs ?? null,
+      review_baseline_latency_per_unit_ms: result.decision.evidence.reviewBaselineLatencyPerUnitMs ?? null,
+      review_recent_latency_per_unit_ms: result.decision.evidence.reviewRecentLatencyPerUnitMs ?? null,
+      review_latency_ratio: result.decision.evidence.reviewLatencyRatio ?? null,
+      host_load1: result.decision.evidence.hostLoad1 ?? null,
+      host_cpu_count: result.decision.evidence.hostCpuCount ?? null,
+      pressure_source: result.decision.evidence.pressureSource ?? null,
     });
   }
   return result.decision.effectiveWidth;
