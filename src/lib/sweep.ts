@@ -4349,6 +4349,33 @@ export function classifyCiTimeoutNoVerdict(
   return { notReady, hung };
 }
 
+/** W1-T5934: where a timeout's not-ready list came from. The annotation usually lacks it (the list
+ *  is in the job log), so the fresh rollup fills it; an unreadable or unread rollup is named, never "none". */
+export type CiTimeoutNotReadySource = "annotation" | "rollup" | "rollup-unreadable" | "rollup-unread";
+
+/** Checks whose latest attempt still waits for a runner. */
+const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
+
+export function ciTimeoutNotReadyChecks(
+  annotated: readonly string[],
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
+): { names: string[]; source: CiTimeoutNotReadySource } {
+  if (annotated.length > 0) return { names: [...annotated], source: "annotation" };
+  if (typeof rollup === "string") return { names: [], source: `rollup-${rollup}` };
+  const names = dedupeRollupByLatestAttempt(rollup)
+    .filter((c) => c.context !== REVIEW_CONTEXT && c.name !== REVIEW_CONTEXT && c.name !== CI_GATE_CHECK_NAME)
+    .filter((c) => CI_TIMEOUT_NOT_STARTED.has((c.state ?? c.status ?? "").toUpperCase()))
+    .map((c) => c.name ?? c.context ?? "unknown");
+  return { names, source: "rollup" };
+}
+
+const CI_TIMEOUT_SOURCE_TEXT: Record<CiTimeoutNotReadySource, string> = {
+  annotation: "the gate's annotation",
+  rollup: "queued on the fresh rollup",
+  "rollup-unreadable": "the gate's annotation lists none and the fresh rollup was unreadable",
+  "rollup-unread": "the gate's annotation lists none and this pass reads no fresh rollup",
+};
+
 /** W1-T5954: the `why` a pass without update-branch wrote before it deferred instead. */
 const CI_TIMEOUT_UNWIRED_WHY = "update-branch is not wired";
 
@@ -4397,13 +4424,18 @@ async function applyCiTimeoutRefresh(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView,
   timeout: CiTimeoutNoVerdict,
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
-  const named = (timeout.notReady.length > 0 ? timeout.notReady : timeout.hung).join(", ") || "(unnamed in the gate's annotation)";
-  const head = `ci-gate timed out on never-started check(s) ${named}`;
+  const notReady = ciTimeoutNotReadyChecks(timeout.notReady, rollup);
+  const named = (notReady.names.length > 0 ? notReady.names : timeout.hung).join(", ") || "(unnamed)";
+  const sourceText = notReady.source === "rollup" && notReady.names.length === 0
+    ? "the gate's annotation lists none and the fresh rollup shows none queued"
+    : CI_TIMEOUT_SOURCE_TEXT[notReady.source];
+  const head = `ci-gate timed out on never-started check(s) ${named} [not-ready list: ${sourceText}]`;
   const row = {
     run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
-    head_sha: pr.headSha, not_ready_checks: timeout.notReady, hung_checks: timeout.hung,
+    head_sha: pr.headSha, not_ready_checks: notReady.names, not_ready_source: notReady.source, hung_checks: timeout.hung,
   };
   const escalate = async (why: string): Promise<string> => {
     const reason = `${head}; no new head is possible: ${why}`;
@@ -13907,7 +13939,8 @@ export async function runSweep(
                 ciFailuresForFix, stillRedRequiredNames(pr.redRequiredChecks ?? [], ciGateRollup), cancelledChecks.map((c) => c.name));
               if (timeout) {
                 acted = false;
-                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout);
+                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout,
+                  deps.readCiGateRollup ? ciGateRollup ?? "unreadable" : "unread");
                 break;
               }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
