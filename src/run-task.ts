@@ -1388,7 +1388,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
-  reviewReservationOwnershipEvidenceAsync,
+  reviewTaskIdEvidenceAsync,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -7488,7 +7488,8 @@ async function runReview(args: {
   const diff = diffOutcome.diff;
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
-  const ownership = await reviewReservationOwnershipEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
+  const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
+  const ownership = taskIdEvidence.ownership;
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
   });
@@ -7740,6 +7741,7 @@ async function runReview(args: {
     planLint,
     headRefName: args.headRefName,
     reservationOwnership: ownership,
+    baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
     implementationReport: args.implementationReport,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
