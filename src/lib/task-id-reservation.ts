@@ -1,6 +1,8 @@
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
@@ -349,12 +351,10 @@ export interface RemoteRefReserver {
   /** Create-if-absent of {@link taskIdReservationRef}. Never throws — an unreachable remote is an
    *  OUTCOME, because a thrown error at this seam reads identically to contention at the caller. */
   attempt(taskId: string, anchor: string): RemoteReserveOutcome;
-  /**
-   * Reclaims a taken reservation only when its parsed holder is provably unfileable or its named
-   * branch is absent past {@link RESERVATION_PUSH_GRACE_MS}. A successful repair advances the existing ref to a child commit;
-   * it never deletes or replaces the original claim. An extant foreign branch stays `taken`.
-   */
+  /** Takes over a `main` holder, or one whose branch is absent or unknown past {@link RESERVATION_PUSH_GRACE_MS}, from current
+   *  code only (W1-T6026), as a child commit of the claim, never a delete. A live or fresh holder stays `taken`. */
   reclaim?(taskId: string): RemoteReserveOutcome;
+  takeoverOf?(taskId: string): ReservationTakeover | undefined;
   /** Stderr from the latest failed attempt, retained so a refusal can name the evidence. */
   lastAttemptStderr?(): string | undefined;
   /** OPTIONAL, an optimisation only: the lowest id above every reservation this remote already
@@ -429,6 +429,8 @@ export interface RemoteReserveDeps {
   say?: (line: string) => void;
   /** W1-T5279: the clock a holder's age is read against; defaults to {@link systemClock}. */
   clock?: Clock;
+  /** W1-T6026: anything but `current` refuses a takeover; absent, ungated (next-task-id passes {@link reservationPolicyCurrency}). */
+  policyCurrency?: () => ReservationPolicyCurrency;
 }
 
 export interface ReservationHolderLine {
@@ -443,7 +445,7 @@ export interface ReservationHolderLine {
 export type ParsedReservationHolderLine =
   | { status: "known"; holder: ReservationHolderLine }
   | { status: "legacy" }
-  | { status: "unreadable"; reason: string };
+  | { status: "unreadable"; reason: string; readonly recorded?: ReservationHolderLine };
 
 function holderValue(v: string): string {
   return encodeURIComponent(v).replace(/%20/g, "+");
@@ -508,7 +510,7 @@ export function parseReservationHolderLine(message: string): ParsedReservationHo
     }
   }
   const branch = values.get("branch");
-  if (!branch || branch === "unknown") return { status: "unreadable", reason: "missing branch" };
+  if (!branch || branch === "unknown") return missingBranchHolder(values);
   const pidRaw = values.get("pid");
   const pid = pidRaw === undefined ? undefined : Number(pidRaw);
   if (pidRaw !== undefined && !Number.isInteger(pid)) return { status: "unreadable", reason: "malformed pid" };
@@ -523,6 +525,15 @@ export function parseReservationHolderLine(message: string): ParsedReservationHo
       takenOverFrom: values.get("taken_over_from"),
     },
   };
+}
+
+/** W1-T6026: keeps a branch=unknown holder's started_at, NON-enumerably so the pinned `{ status, reason }` shape holds. */
+function missingBranchHolder(values: Map<string, string>): ParsedReservationHolderLine {
+  const pid = Number(values.get("pid"));
+  const recorded: ReservationHolderLine = { branch: "unknown", pid: Number.isInteger(pid) ? pid : undefined, host: values.get("host"), startedAt: values.get("started_at") };
+  const parsed: ParsedReservationHolderLine = { status: "unreadable", reason: "missing branch" };
+  Object.defineProperty(parsed, "recorded", { value: recorded, enumerable: false });
+  return parsed;
 }
 
 /** The one condition behind repairable reservations. `unreadable` is deliberately separate from
@@ -557,8 +568,61 @@ export function reservationHolderDrift(
     if (branchPresence === "absent") return reservationIsFresh(parsed.holder.startedAt, clock) ? "held" : "reclaimable";
     return "unreadable";
   }
-  if (parsed.status === "unreadable" && parsed.reason === "missing branch") return "unattributable";
+  if (parsed.status === "unreadable" && parsed.reason === "missing branch") {
+    return reservationIsFresh(parsed.recorded?.startedAt, clock) ? "held" : "unattributable";
+  }
   return "unreadable";
+}
+
+export interface ReservationTakeover {
+  from: string;
+  pid?: number;
+  host?: string;
+  startedAt?: string;
+  ageMs?: number;
+}
+
+function reservationTakeover(from: string, parsed: ParsedReservationHolderLine, clock: Clock): ReservationTakeover {
+  const prior = parsed.status === "known" ? parsed.holder : parsed.status === "unreadable" ? parsed.recorded : undefined;
+  const started = prior?.startedAt === undefined ? Number.NaN : Date.parse(prior.startedAt);
+  return { from, pid: prior?.pid, host: prior?.host, startedAt: prior?.startedAt, ageMs: Number.isFinite(started) ? clock.now() - started : undefined };
+}
+
+function reservationAge(ms: number): string {
+  if (ms < 120_000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < 2 * 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+  return `${Math.floor(ms / 3_600_000)}h`;
+}
+
+/** The suffix next-task-id prints ON its RESERVED line, so `| grep RESERVED` cannot drop a takeover. */
+export function describeReservationTakeover(t: ReservationTakeover): string {
+  const age = t.ageMs === undefined ? "age unknown" : `${reservationAge(t.ageMs)} old`;
+  return `TAKEN OVER from ${t.from} (${t.pid ?? "?"}@${t.host ?? "?"}, reserved ${t.startedAt ?? "?"}, ${age})`;
+}
+
+export const RESERVATION_POLICY_PATH = "src/lib/task-id-reservation.ts";
+
+export type ReservationPolicyCurrency =
+  | { status: "current" }
+  | { status: "differs"; loaded: string; main: string }
+  | { status: "unprovable"; reason: string };
+
+/** W1-T6026: is the LOADED module origin/main's blob? W1-T5997 was taken over by code 687 commits behind. */
+export function reservationPolicyCurrency(modulePath: string = fileURLToPath(import.meta.url)): ReservationPolicyCurrency {
+  const git = (args: string[]) => spawnSync("git", ["-C", dirname(modulePath), ...args], { encoding: "utf8" });
+  const loaded = git(["hash-object", modulePath]);
+  if (loaded.status !== 0) return { status: "unprovable", reason: `git hash-object ${modulePath} failed: ${String(loaded.stderr).trim()}` };
+  const main = git(["rev-parse", "--verify", "--quiet", `origin/main:${RESERVATION_POLICY_PATH}`]);
+  if (main.status !== 0) return { status: "unprovable", reason: `origin/main:${RESERVATION_POLICY_PATH} is unreadable` };
+  const [l, m] = [loaded.stdout.trim(), main.stdout.trim()];
+  return l === m ? { status: "current" } : { status: "differs", loaded: l, main: m };
+}
+
+function staleTakeoverRefusal(taskId: string, c: Exclude<ReservationPolicyCurrency, { status: "current" }>): string {
+  const why = c.status === "differs"
+    ? `this reservation module (blob ${c.loaded}) differs from origin/main's (${c.main})`
+    : `this reservation module cannot be proven current (${c.reason})`;
+  return `not taking over ${taskId}: ${why}; advancing to the next id`;
 }
 
 type RemoteHolderBranchRead = { presence: ReservationHolderBranchPresence; reason?: string };
@@ -592,6 +656,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // caller-supplied sha — the only anchors it is safe to fast-forward past are ones this instance
   // itself confirmed it holds.
   const wonAnchors = new Map<string, string>();
+  const takeovers = new Map<string, ReservationTakeover>();
   const filingBranch = () => deps.filingBranch ?? currentBranch(deps.run);
   return {
     filingBranch() {
@@ -660,6 +725,11 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
         lastStderr = branchRead.reason ?? "reservation holder is unreadable; refusing takeover";
         return "unknown";
       }
+      const currency = deps.policyCurrency?.();
+      if (currency && currency.status !== "current") {
+        (deps.say ?? console.log)(staleTakeoverRefusal(taskId, currency));
+        return "taken";
+      }
       const takenOverFrom = parsed.status === "known" ? parsed.holder.branch : "unknown";
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
       const message = formatReservationAnchorMessage({
@@ -680,8 +750,14 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       lastStderr = undefined;
       wonAnchors.set(taskId, amended);
       // W1-T3742: print only when the recorded holder differs from the filer.
-      if (takenOverFrom !== branch) (deps.say ?? console.log)(reservationHandoffNoteLine(takenOverFrom, branch));
+      if (takenOverFrom !== branch) {
+        takeovers.set(taskId, reservationTakeover(takenOverFrom, parsed, deps.clock ?? systemClock));
+        (deps.say ?? console.log)(reservationHandoffNoteLine(takenOverFrom, branch));
+      }
       return "created";
+    },
+    takeoverOf(taskId) {
+      return takeovers.get(taskId);
     },
     recordFilingBranch(taskId, branch) {
       if (!branch || branch === "unknown") return false;
@@ -718,12 +794,17 @@ export interface RemoteReservationHandle {
   readonly ref: string;
   readonly anchor: string;
   readonly attempts: number;
+  readonly takenOver?: ReservationTakeover;
 }
 
 /** The machine-readable fields a {@link TaskIdReservationError} contributes to a ledger row, so an
  *  operator can tell an unreachable origin from an exhausted range from a local fault. `null` keeps the key PRESENT for a later `zgrep`. */
 export function idReservationFailureFields(e: TaskIdReservationError): Record<string, unknown> {
   return { id: e.taskId ?? null, ref: e.ref ?? null, outcome: e.outcome ?? null, error: e.message };
+}
+
+export function reservationTakeoverFields(h: RemoteReservationHandle, t: ReservationTakeover): Record<string, unknown> {
+  return { task_id: h.taskId, ref: h.ref, taken_over_from: t.from, holder_pid: t.pid ?? null, holder_host: t.host ?? null, holder_started_at: t.startedAt ?? null, age_ms: t.ageMs ?? null };
 }
 
 /**
@@ -780,7 +861,10 @@ export function reserveTaskIdRemote(
     attempts++;
     let outcome = reserver.attempt(idFor(n), anchor);
     if (outcome === "taken" && reserver.reclaim) outcome = reserver.reclaim(idFor(n));
-    if (outcome === "created") return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts };
+    if (outcome === "created") {
+      const takenOver = reserver.takeoverOf?.(idFor(n));
+      return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts, ...(takenOver ? { takenOver } : {}) };
+    }
     if (outcome === "unreachable") {
       throw new TaskIdReservationError(
         `cannot reach origin to reserve ${idFor(n)} — refusing to mint rather than minting optimistically, ` +
