@@ -10001,6 +10001,17 @@ function isDetachedFixDispatchFailure(line: Record<string, unknown>): boolean {
   return line.step === "sweep.fix.dispatch_failed" && typeof line.pr_number === "number" && typeof line.head_sha === "string";
 }
 
+/** W1-T5951 — a CodeQL repair is dispatched unless its latest key row is followed by a dispatch failure for that key. */
+function codeqlBlockerDispatched(lines: ReadonlyArray<Record<string, unknown>>, key: string): boolean {
+  let dispatched = false;
+  for (const line of lines) {
+    if (line.dedupe_key !== key) continue;
+    if (line.step === CODEQL_BLOCKER_DISPATCH_STEP) dispatched = true;
+    else if (isDetachedFixDispatchFailure(line)) dispatched = false;
+  }
+  return dispatched;
+}
+
 /** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
  *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
 export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
@@ -11486,8 +11497,8 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
  *  is: the ticker awaits the light pass, which awaits every open PR, and `dispatchFix` waits on CI.
  *  NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY: the dispatch is STARTED and its `acted: true`
- *  row WRITTEN synchronously inside the pass, because that row seeds the dedup. A DETACHED REJECTION
- *  IS SWALLOWED ON PURPOSE. */
+ *  row WRITTEN synchronously inside the pass, because that row seeds the dedup. A fix dispatch's
+ *  rejection is ledgered by `detachFixDispatch` (W1-T5932, W1-T5951); any other is swallowed. */
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
@@ -12576,7 +12587,7 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>): void {
+  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>, dedupeKey?: string): void {
     detachSweepAction(
       work.catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -12584,6 +12595,7 @@ export async function runSweep(
         step: "sweep.fix.dispatch_failed",
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
+        dedupe_key: dedupeKey,
         error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
       })),
       { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
@@ -13308,7 +13320,7 @@ export async function runSweep(
         const codeqlDedupAlert = disposition === "blocked-fixable" ? repairableCodeqlBlocker(pr) : undefined;
         if (codeqlDedupAlert) {
           const key = codeqlBlockerDedupeKey(pr, codeqlDedupAlert);
-          alreadyDone = ledgerLines.some((line) => line.step === CODEQL_BLOCKER_DISPATCH_STEP && line.dedupe_key === key);
+          alreadyDone = codeqlBlockerDispatched(ledgerLines, key);
           if (alreadyDone) {
             dedupStandDownReason = `CodeQL blocker repair already dispatched for ${key} — an unchanged PR, head and alert start no second worker`;
           }
@@ -13669,6 +13681,13 @@ export async function runSweep(
                   standDownReason = hold;
                   break;
                 }
+                const codeqlFailureHold = await holdRepeatedFixDispatchFailure(pr, ledgerLines, deps.escalate);
+                if (codeqlFailureHold) {
+                  extraDisposedFields = { ...extraDisposedFields, ...codeqlFailureHold.fields };
+                  acted = false;
+                  standDownReason = codeqlFailureHold.reason;
+                  break;
+                }
                 const codeqlClaim = claimFixDispatch(pr);
                 if (!codeqlClaim.ok) {
                   acted = false;
@@ -13699,10 +13718,7 @@ export async function runSweep(
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
                 if (deps.detachFixWait) {
-                  detachSweepAction(codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), {
-                    actionKind: "fix-dispatch",
-                    taskId: pr.taskId ?? `PR-${pr.prNumber}`,
-                  });
+                  detachFixDispatch(pr, codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), dedupeKey);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));

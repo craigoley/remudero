@@ -39035,9 +39035,9 @@ function isReviewPostedStep(step: unknown): boolean {
   return step === "review.posted" || step === "review.post_refused";
 }
 
-/** W1-T1015 — the old head a successful sweep update superseded. The three non-success siblings
- * are deliberately read here too so ledger rotation retains their evidence, but they never add a
- * head to the suppression set: a conflict or error minted no replacement head. */
+/** W1-T1015 — the old head a successful sweep update superseded. The non-success siblings (W1-T5949:
+ * head-moved, up-to-date too) are read here so rotation retains their evidence, but they never add a
+ * head to the suppression set: a conflict, error, moved or current head minted no replacement head. */
 function sweepUpdatedHeadsForTask(ledger: Array<Record<string, unknown>>, taskId: string, prUrl?: string): Set<string> {
   const updatedHeads = new Set<string>();
   for (const line of ledger) {
@@ -39046,7 +39046,9 @@ function sweepUpdatedHeadsForTask(ledger: Array<Record<string, unknown>>, taskId
       line.step !== "sweep.update_branch.attempted" &&
       line.step !== "sweep.update_branch.updated" &&
       line.step !== "sweep.update_branch.conflict" &&
-      line.step !== "sweep.update_branch.error"
+      line.step !== "sweep.update_branch.error" &&
+      line.step !== "sweep.update_branch.head-moved" &&
+      line.step !== "sweep.update_branch.up-to-date"
     ) continue;
     if (line.step !== "sweep.update_branch.updated") continue;
     if (typeof line.head_sha !== "string" || line.head_sha.length === 0) continue;

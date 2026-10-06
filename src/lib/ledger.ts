@@ -701,7 +701,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
-  "sweep.check_requeue.deferred",
+  "sweep.check_requeued", // W1-T5935: requeuedCheckKeysFromLedger (sweep.ts) bounds one requeue per head and check.
+  "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",
@@ -807,12 +808,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1212: run-task.ts derives `updatedForWorkflow` from this row's `stale_workflow` field;
   // dropping it re-selects the same stale-gate PR every pass, spending the head for nothing.
   "sweep.update_branch.updated",
-  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. The
-  // attempted/conflict/error siblings are retained with it so rotation cannot erase the evidence
-  // that an update was attempted but did not mint a new head; only `.updated` suppresses an orphan.
+  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. Its
+  // attempted/conflict/error/head-moved/up-to-date siblings (W1-T5949) are kept so rotation cannot
+  // erase evidence that an update ran but minted no new head; only `.updated` suppresses an orphan.
   "sweep.update_branch.attempted",
   "sweep.update_branch.conflict",
   "sweep.update_branch.error",
+  "sweep.update_branch.head-moved",
+  "sweep.update_branch.up-to-date",
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
