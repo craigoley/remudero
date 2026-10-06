@@ -176,10 +176,11 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-s
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
-import { mergedInLastDay } from "./lib/fleet-lane.js";
+import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
+import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -192,7 +193,7 @@ import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, read
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
+import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -1570,6 +1571,7 @@ import {
   type EscalationReconcileSummary,
   type FixClass,
   type FixDispatchEvidence,
+  type FixOwnerResidue,
   type FixDispatchSnapshot,
   type FixSuperseded,
   type InstrumentEntanglementPaths,
@@ -2402,7 +2404,7 @@ export function buildSweepEffects(
       remove: removeAbandonedFixWorktreeOwner,
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
-      preserveTrackedDirty: preserveTrackedDirtyFixOwner,
+      preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -2731,14 +2733,20 @@ import {
   parseBranchCitationHits,
   planReverseBranchDrift,
   pruneDeletableBranches,
+  pruneDeletableBranchesSteps,
   readAutomaticBranchReapState,
   readNamedInSource,
+  readNamedInSourceSteps,
   readRemoteBranchTips,
+  readRemoteBranchTipsSteps,
   readTipInMainMembership,
+  readTipInMainMembershipSteps,
   remoteBranchNames,
+  remoteBranchNamesSteps,
   tipInMainFor,
   writeAutomaticBranchReapState,
   type AutomaticBranchReapState,
+  type BranchReapExec,
   withholdActiveBranches,
   type BranchManifestEntry,
 } from "./lib/branch-reaper.js";
@@ -23081,24 +23089,24 @@ export function foldPrState(
  * unpaginated single call cannot itself be proven complete, returns `"unknown"` rather than
  * silently falling back to `"none"` — the exact collapse this task exists to end.
  */
-function perHeadPrState(
-  exec: (cmd: string, args: string[]) => string,
+function* perHeadPrStateSteps(
+  exec: BranchReapExec,
   owner: string,
   repo: string,
   branch: string,
-): BranchFacts["prState"] {
+): Steps<BranchFacts["prState"]> {
   // `/` is legal, unescaped, in a query-string VALUE (RFC 3986) and GitHub's own `head` examples
   // use it bare against branches like `diag/resume-spawn-enoent` — encode everything else that
   // could otherwise corrupt the query (`&`, `#`, `%`, a literal `:`…) and then restore the slash.
   const head = encodeURIComponent(`${owner}:${branch}`).replace(/%2F/g, "/");
   let raw: string;
   try {
-    raw = exec("gh", [
+    raw = yield* step(() => exec("gh", [
       "api",
       `repos/${owner}/${repo}/pulls?head=${head}&state=all&per_page=100`,
       "--jq",
       '.[]|"\\(.state)\\t\\(.merged_at!=null)"',
-    ]);
+    ]));
   } catch {
     return "unknown"; // the per-head read itself failed — not the same as "confirmed no PR"
   }
@@ -23176,40 +23184,54 @@ function configuredLedgerPathOrUndefined(): string | undefined {
  * read, rather than falling back to a live-file-only match count — the automated form of the
  * positive control nobody writes by hand for this idiom.
  */
-export function reapBranchesCommand(
-  rest: string[],
-  opts: {
-    exec?: (cmd: string, args: string[]) => string;
-    /** Checkout whose `origin`, plan and source guard scan are being reaped. */
-    root?: string;
-    /** Explicit target for daemon sweeps; the CLI keeps resolving its current checkout by default. */
-    ownerRepo?: { owner: string; repo: string };
-    ledgerPath?: string;
-    /** Keep automatic daemon passes out of the terminal while retaining ledger evidence. */
-    quiet?: boolean;
-    /** Carry the daemon's run identity into the reaper's durable rows. */
-    runId?: string;
-    readFile?: (path: string) => string;
-    loadPlan?: (path: string) => Plan;
-    readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
-    /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
-    creditLedgerPath?: string;
-    /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
-     *  A hit at the SAME tip sha skips `perHeadPrState` for that branch entirely; a miss (absent
-     *  name, or a sha that has since moved) falls through to the per-head read exactly as before. */
-    mergedHeadShaCache?: ReadonlyMap<string, string>;
-    /** Fired ONCE, after this pass's facts are known, with the cache design (iii) wants persisted
-     *  ({@link nextMergedHeadCache}) — never written by this function itself, which takes every
-     *  other effect as an injected read too. Omitted ⇒ no caller wants the update. */
-    onMergedHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
-    /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
-    noPrHeadShaCache?: ReadonlyMap<string, string>;
-    onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
-    /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
-     *  reports the cause rather than only the code. */
-    onExitReason?: (reason: string) => void;
-  } = {},
-): number {
+export type ReapBranchesOpts = {
+  exec?: BranchReapExec;
+  /** Checkout whose `origin`, plan and source guard scan are being reaped. */
+  root?: string;
+  /** Explicit target for daemon sweeps; the CLI keeps resolving its current checkout by default. */
+  ownerRepo?: { owner: string; repo: string };
+  ledgerPath?: string;
+  /** Keep automatic daemon passes out of the terminal while retaining ledger evidence. */
+  quiet?: boolean;
+  /** Carry the daemon's run identity into the reaper's durable rows. */
+  runId?: string;
+  readFile?: (path: string) => string;
+  loadPlan?: (path: string) => Plan;
+  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
+  creditLedgerPath?: string;
+  /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
+   *  A hit at the SAME tip sha skips `perHeadPrState` for that branch entirely; a miss (absent
+   *  name, or a sha that has since moved) falls through to the per-head read exactly as before. */
+  mergedHeadShaCache?: ReadonlyMap<string, string>;
+  /** Fired ONCE, after this pass's facts are known, with the cache design (iii) wants persisted
+   *  ({@link nextMergedHeadCache}) — never written by this function itself, which takes every
+   *  other effect as an injected read too. Omitted ⇒ no caller wants the update. */
+  onMergedHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+  /** Heads proven to have no PR at this tip sha ({@link nextNoPrHeadCache}); same contract as above. */
+  noPrHeadShaCache?: ReadonlyMap<string, string>;
+  onNoPrHeadCacheUpdate?: (next: Readonly<Record<string, string>>) => void;
+  /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
+   *  reports the cause rather than only the code. */
+  onExitReason?: (reason: string) => void;
+};
+
+export function reapBranchesCommand(rest: string[], opts: ReapBranchesOpts = {}): number {
+  return runStepsSync(reapBranchesSteps(rest, opts));
+}
+
+export function reapBranchesCommandAsync(rest: string[], opts: ReapBranchesOpts = {}): Promise<number> {
+  const root = opts.root ?? repoRoot;
+  return runStepsAsync(reapBranchesSteps(rest, { ...opts, exec: opts.exec ?? branchReapExec(root) }));
+}
+
+const branchReapExecFile = promisify(execFile);
+
+function branchReapExec(root: string): BranchReapExec {
+  return async (cmd, args) => (await branchReapExecFile(cmd, args, { cwd: root, encoding: "utf8" })).stdout;
+}
+
+function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<number> {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const printError = opts.quiet ? (..._args: unknown[]) => {} : console.error;
   const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
@@ -23224,7 +23246,7 @@ export function reapBranchesCommand(
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
 
-  const names = remoteBranchNames(exec);
+  const names = yield* remoteBranchNamesSteps(exec);
   // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
   // indistinguishable in the answer, and every bucket would read empty either way.
   if (names.length === 0) {
@@ -23282,12 +23304,12 @@ export function reapBranchesCommand(
   for (let page = 1; page <= 8; page++) {
     let raw: string;
     try {
-      raw = exec("gh", [
+      raw = yield* step(() => exec("gh", [
         "api",
         `repos/${owner}/${repo}/pulls?state=all&per_page=100&page=${page}`,
         "--jq",
         '.[]|"\\(.head.ref)\\t\\(.state)\\t\\(.merged_at!=null)"',
-      ]);
+      ]));
     } catch {
       prReadFailed = true;
       break;
@@ -23305,14 +23327,15 @@ export function reapBranchesCommand(
   // never one per branch — and every branch's `tipInMain`/`namedInSource`/manifest sha comes from
   // these three maps/sets from here on. See branch-reaper.ts's own doc on each for the exact
   // per-branch semantics they preserve (including the "name inside a longer name's match" case).
-  const remoteTips = readRemoteBranchTips(exec);
-  const tipInMainMembership = readTipInMainMembership(exec);
-  const namedInSourceSet = readNamedInSource(exec, names, checkoutRoot, (why) =>
+  const remoteTips = yield* readRemoteBranchTipsSteps(exec);
+  const tipInMainMembership = yield* readTipInMainMembershipSteps(exec);
+  const namedInSourceSet = yield* readNamedInSourceSteps(exec, names, checkoutRoot, (why) =>
     printError(`rmd reap-branches: the source-reference scan FAILED (${why}) — every branch is held as named in source`),
   );
   const mergedHeadCache = opts.mergedHeadShaCache;
 
-  const facts: BranchFacts[] = names.map((name) => {
+  const facts: BranchFacts[] = [];
+  for (const name of names) {
     const tipSha = remoteTips.get(name)?.sha;
     // W1-T4476 design (iii): a cached "merged" verdict at the SAME tip sha stands in for
     // `perHeadPrState`'s own call — a stale-sha cache entry (the branch moved) or an absent one
@@ -23328,11 +23351,11 @@ export function reapBranchesCommand(
     // head's own history directly rather than trusting how far the bulk walk got.
     const state: BranchFacts["prState"] = prReadFailed
       ? "open"
-      : (prState.get(name) ?? cachedMerged ?? cachedNone ?? perHeadPrState(exec, owner, repo, name));
+      : (prState.get(name) ?? cachedMerged ?? cachedNone ?? (yield* perHeadPrStateSteps(exec, owner, repo, name)));
     const tipInMain = tipInMainFor(name, remoteTips, tipInMainMembership);
     const namedInSource = namedInSourceSet.has(name);
     const namedTaskId = namedTaskByBranch.get(name);
-    return {
+    facts.push({
       name,
       prState: state,
       tipInMain,
@@ -23341,8 +23364,8 @@ export function reapBranchesCommand(
       ...(namedTaskId === undefined || !creditReadSucceeded
         ? {}
         : { namedTaskCredited: creditedTaskIds.has(namedTaskId) }),
-    };
-  });
+    });
+  }
 
   // W1-T4476 design (iii): report this pass's own confirmed-merged verdicts back to the caller
   // that wants them persisted (the automatic rung), computed from `facts` and the same tip map
@@ -23364,7 +23387,7 @@ export function reapBranchesCommand(
   // that feeds both reverse ones.
   let citationRaw = "";
   try {
-    citationRaw = exec("git", [
+    citationRaw = yield* step(() => exec("git", [
       "grep",
       "-n",
       "-o",
@@ -23375,7 +23398,7 @@ export function reapBranchesCommand(
       "scripts/",
       "deploy/",
       ".github/",
-    ]);
+    ]));
   } catch {
     citationRaw = ""; // git grep exits 1 on no match — a real "nothing cited", not a failure
   }
@@ -23494,7 +23517,7 @@ export function reapBranchesCommand(
    */
   let openHeads: Set<string> | undefined;
   try {
-    const raw = exec("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`, "--jq", ".[].head.ref"]);
+    const raw = yield* step(() => exec("gh", ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`, "--jq", ".[].head.ref"]));
     openHeads = new Set(raw.split("\n").map((l) => l.trim()).filter(Boolean));
   } catch (err) {
     const why = String((err as Error)?.message ?? err);
@@ -23529,7 +23552,7 @@ export function reapBranchesCommand(
   if (screen) print(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
 
   if (prune) {
-    const outcome = pruneDeletableBranches(screen!.proceed, exec);
+    const outcome = yield* pruneDeletableBranchesSteps(screen!.proceed, exec);
     print(`pruned:    ${outcome.deleted.length} deleted, ${outcome.skipped.length} skipped, ` +
       `${outcome.failed.reduce((n, f) => n + f.names.length, 0)} failed`);
     // THE RESTORE LINES ARE THE POINT OF PRINTING A MANIFEST AT ALL (see this verb's own doc): a
@@ -28184,7 +28207,7 @@ const PREFLIGHT_CI_CHECKS: readonly {
       "the fast gate's own step table deliberately excludes it as a cost decision",
     argv: (repoRoot) => ({
       file: process.execPath,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "help-renders-a-summary-not-a-paragraph.test.ts")],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "help-renders-a-summary-not-a-paragraph.test.ts")],
     }),
   },
   {
@@ -28192,7 +28215,7 @@ const PREFLIGHT_CI_CHECKS: readonly {
     predictsCiJob: '"ci" job\'s test:ci suite (test/deps-interface-census.test.ts) — not in any census registry yet',
     argv: (repoRoot) => ({
       file: process.execPath,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "deps-interface-census.test.ts")],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", join(repoRoot, "test", "deps-interface-census.test.ts")],
     }),
   },
 ];
@@ -37004,7 +37027,7 @@ export async function daemonCommand(
                 repoRoot,
                 openWorkspace: () =>
                   knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
+                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJsonAsync),
                 log,
               },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
@@ -37019,14 +37042,14 @@ export async function daemonCommand(
                 // The starter is inert until called, so it is built on every start and dropped
                 // unless opted in.
                 ...[
-                  startSreLane(
-                    daemonSreLaneInput({
+                  startDaemonSreLane(
+                    (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
                       root: repoRoot,
                       ledgerPath,
                       owner: self.owner,
                       repo: self.repo,
-                      mergedLastDay: () => mergedInLastDay(repoRoot),
+                      mergedLastDay: () => mergedLastDay,
                       log,
                       // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
                       runbookPass: daemonSreRunbookPass(
@@ -37040,6 +37063,8 @@ export async function daemonCommand(
                         log,
                       ),
                     }),
+                    () => mergedInLastDayAsync(repoRoot),
+                    log,
                   ),
                 ].filter(() => process.env.RMD_SRE_LANE === "1"),
               ],
@@ -37054,7 +37079,7 @@ export async function daemonCommand(
         fleetLane: {
           stateDir: join(config.root, "state"),
           ledgerPath,
-          mergedLastDay: () => mergedInLastDay(repoRoot),
+          mergedLastDay: () => mergedInLastDayAsync(repoRoot),
           approve: (proposalId) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).approve(proposalId),
         },
         inboxResponder: {
@@ -41800,8 +41825,66 @@ export function preserveTrackedDirtyFixOwner(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
-  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, readTrackedDirtyOwnerPatch(ownerPath, localSha), deps);
+}
+
+/** W1-T5918: the production seam. An empty HEAD-relative diff returns the index/operation residue
+ *  (to be recorded, then reset) instead of throwing; a real diff is preserved exactly as before. */
+export function preserveOrDiscardFixOwnerResidue(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string | FixOwnerResidue {
+  const patch = readTrackedDirtyOwnerPatch(ownerPath, localSha);
+  if (patch.length === 0) return readFixOwnerResidue(ownerPath, localSha);
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
+}
+
+const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
+const FIX_OWNER_OPERATION_MARKERS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] as const;
+
+function nulPaths(raw: string): string[] {
+  return raw.split("\0").filter((path) => path.length > 0);
+}
+
+function readFixOwnerResidue(ownerPath: string, localSha: string): FixOwnerResidue {
+  const gitOut = (args: string[]) =>
+    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  let markerKind: FixOwnerResidue["markerKind"] = null;
+  let markerSha: string | null = null;
+  for (const marker of FIX_OWNER_OPERATION_MARKERS) {
+    let raw: string;
+    try {
+      raw = readFileSync(resolve(ownerPath, gitOut(["rev-parse", "--git-path", marker]).trim()), "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    const markerLine = raw.split("\n")[0].trim();
+    if (!/^[0-9a-f]{40,64}$/i.test(markerLine)) throw new Error(`dirty owner ${marker} is malformed`);
+    markerKind = marker;
+    markerSha = markerLine;
+    break;
+  }
+  const unmerged = [...new Set(nulPaths(gitOut(["diff", "--name-only", "--diff-filter=U", "-z"])))];
+  const unmergedSet = new Set(unmerged);
+  const staged = nulPaths(gitOut(["diff", "--cached", "--name-only", "-z", localSha])).filter((path) => !unmergedSet.has(path));
+  const bound = (paths: string[]) => paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND).map((path) => path.slice(0, 256));
+  return {
+    markerKind,
+    markerSha,
+    unmergedPaths: bound(unmerged),
+    unmergedMore: Math.max(0, unmerged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
+    stagedPaths: bound(staged),
+    stagedMore: Math.max(0, staged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
+    status: gitOut(["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]).slice(0, 512),
+    ...(markerKind === null && staged.length > 0 ? { refusal: "owner_dirty_staged_only_refused" as const } : {}),
+  };
+}
+
+function readTrackedDirtyOwnerPatch(ownerPath: string, localSha: string): string {
   const observedHead = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -41812,13 +41895,24 @@ export function preserveTrackedDirtyFixOwner(
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (untracked.length > 0) throw new Error("dirty owner has untracked paths");
-  const patch = execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
+  return execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
     encoding: "utf8",
     maxBuffer: 1 << 26,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
+}
 
+function preserveTrackedDirtyPatch(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  patch: string,
+  deps: CaptureRegisteredFixOwnerDeps,
+): string {
+  if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
+  const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
+  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
     execFileSync("git", ["-C", ownerPath, "add", "-A"], {
       env,
@@ -43096,7 +43190,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // branch-set fingerprint every tick and only pays for the existing REST classifier on first use,
   // branch-set change, or the six-hour bound. It is deliberately absent from buildSweepLightHook:
   // the delete is a remote git write and must not run beside an active worker.
-  runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, {}, {
+  await runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, {}, {
     prune: !dryRun,
     root: repo === self.repo ? repoRoot : join(config.root, "repos", repo),
   });
@@ -43811,14 +43905,46 @@ export function runAutomaticBranchReapRung(
     root?: string;
     clock?: Pick<Clock, "now">;
     intervalMs?: number;
-    exec?: (cmd: string, args: string[]) => string;
+    exec?: BranchReapExec;
   } = {},
-): void {
+): void | Promise<void> {
+  const root = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
+  const key = `${owner}/${repo}\0${root}`;
+  if (automaticBranchReapsInFlight.has(key)) return;
+  automaticBranchReapsInFlight.add(key);
+  try {
+    const pass = runStepsEager(automaticBranchReapSteps(owner, repo, config, ledgerPath, runId, log, state, { ...opts, root }));
+    if (isPromiseLike(pass)) return Promise.resolve(pass).finally(() => automaticBranchReapsInFlight.delete(key));
+  } catch (error) {
+    automaticBranchReapsInFlight.delete(key);
+    throw error;
+  }
+  automaticBranchReapsInFlight.delete(key);
+}
+
+const automaticBranchReapsInFlight = new Set<string>();
+
+function* automaticBranchReapSteps(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  state: AutomaticBranchReapState,
+  opts: {
+    prune?: boolean;
+    root?: string;
+    clock?: Pick<Clock, "now">;
+    intervalMs?: number;
+    exec?: BranchReapExec;
+  } = {},
+): Steps<void> {
   const checkoutRoot = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
-  const exec = opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
+  const exec = opts.exec ?? branchReapExec(checkoutRoot);
   let names: string[];
   try {
-    names = remoteBranchNames(exec);
+    names = yield* remoteBranchNamesSteps(exec);
   } catch (e) {
     log("branch_reap.sweep.failed", {
       outcome: "unreadable",
@@ -43850,7 +43976,7 @@ export function runAutomaticBranchReapRung(
   let code = 1;
   let exitReason = "unnamed non-zero exit";
   try {
-    code = reapBranchesCommand(opts.prune === false ? [] : ["--prune"], {
+    code = yield* reapBranchesSteps(opts.prune === false ? [] : ["--prune"], {
       onExitReason: (why) => {
         exitReason = why;
       },
@@ -43885,7 +44011,7 @@ export function runAutomaticBranchReapRung(
     // The prune changed the remote branch set. Refresh the cheap fingerprint so the next ordinary
     // poll does not immediately spend another full REST classification on our own deletion.
     try {
-      state.lastBranchFingerprint = branchNamesFingerprint(remoteBranchNames(exec));
+      state.lastBranchFingerprint = branchNamesFingerprint(yield* remoteBranchNamesSteps(exec));
     } catch {
       // Keep the pre-pass fingerprint; a later poll will retry because the remote cannot be proved current.
     }
@@ -44334,7 +44460,7 @@ export function buildSweepHook(
       // Existing direct/test callers predate the resolved target-checkout seam and must remain
       // offline. The real daemon always supplies it from targetCheckoutRoot above.
       if (targetCheckoutRoot) {
-        runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, branchReapState, {
+        await runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, branchReapState, {
           root: targetCheckoutRoot,
         });
         // W1-T4476 design (i)/(iii): persist the cadence fields AND the merged-head cache
@@ -44386,7 +44512,7 @@ export function buildSweepHook(
  * `runSweep` the full sweep hook above uses — never a second, independently
  * built reconciler — but passes `actionable: d => d === "post-review"` so
  * ONLY the deterministic, sha-pinned, mutex-serialized re-post can fire here;
- * dispatchFix/close/escalate/depReview/arm always stand down
+ * dispatchFix/close/escalate/depReview always stand down (arm: W1-T5922)
  * ("deferred to full sweep (light pass)") and re-derive on the next FULL
  * sweep instead, preserving the single-threaded reason those lanes exist
  * for. Deliberately excludes the credit-backfill rung and the inbox-draft
@@ -44450,8 +44576,13 @@ export function lightPassActionable(
   // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
   // change to `fixRungAllowed`'s own meaning.
   requeueLaneOnly: boolean = false,
+  // W1-T5922 — TRUE only on `buildSweepLightHook`'s ordinary pass. An arm is one GitHub call behind
+  // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
+  // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
+  armAllowed: boolean = false,
 ): boolean {
   if (disposition === "post-review") return true;
+  if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
   // `blocked-fixable` alone gains the second admitting arm above; `conflicted`'s sole action is
   // always `dispatchFix` (merge-conflict resolution), so it stays gated on `fixRungAllowed` only
@@ -44651,7 +44782,10 @@ export function buildSweepLightHook(
             // demonstrably waiting rather than working — see `lightPassActionable` and
             // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
             // sees one consistent answer.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed),
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
+            // W1-T5922: the arm's own reads, wired as the full hook wires them.
+            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
             // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N

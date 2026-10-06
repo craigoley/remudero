@@ -1286,7 +1286,7 @@ function parseTestTarget(body: string, target?: SuiteRegistryTarget): Whiteliste
     return {
       kind: "test",
       command: "node",
-      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, trimmed],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, trimmed],
       label: trimmed,
     };
   }
@@ -1309,6 +1309,7 @@ function parseTestTarget(body: string, target?: SuiteRegistryTarget): Whiteliste
       command: "node",
       args: [
         "--test",
+        "--test-reporter=tap",
         "--import",
         "tsx",
         "--import",
@@ -1480,7 +1481,7 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
     return {
       kind: "test",
       command: "node",
-      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, path],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, path],
       label: path,
     };
   }

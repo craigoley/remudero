@@ -3237,7 +3237,7 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
  *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
  *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
 export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
-  unit_test: ["node", "--import", "tsx", "--test"],
+  unit_test: ["node", "--import", "tsx", "--test", "--test-reporter=tap"],
   typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
   // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
   // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not

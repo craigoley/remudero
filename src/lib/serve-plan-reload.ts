@@ -131,7 +131,7 @@ export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: UR
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref }, execArgv: process.execArgv });
+      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       reject(workerFailure(reason));

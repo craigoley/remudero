@@ -1093,6 +1093,17 @@ export interface RegisteredFixOwnerRecoveryDeps {
   resetTrackedDirty?: SweepRuntimeFn;
 }
 
+export interface FixOwnerResidue {
+  markerKind: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | null;
+  markerSha: string | null;
+  unmergedPaths: string[];
+  unmergedMore: number;
+  stagedPaths: string[];
+  stagedMore: number;
+  status: string;
+  refusal?: "owner_dirty_staged_only_refused";
+}
+
 // ── W1-T3691 — STALE-REVIEWER-CODE SKIP RECURRENCE. A `review.skipped_stale_reviewer_code` skip
 // (`buildReviewerCodeFreshnessGate`, src/run-task.ts) is re-derived every sweep and, on its own, is
 // silent and terminal: this tracks whether the SAME code sha keeps recurring across sweeps and
@@ -3059,6 +3070,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             });
           }
           let preservedRecoveryRef: string | undefined;
+          let residue: FixOwnerResidue | undefined;
           if (recovery.kind === "preserve-tracked-dirty") {
             const localSha = snapshot.localSha;
             if (!localSha) {
@@ -3072,19 +3084,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               });
             }
             try {
-              preservedRecoveryRef = String((registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
+              const preserved: unknown = (registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
                 repoDir,
                 registeredOwner,
                 realBranch,
                 localSha,
-              ));
-              log("sweep.fix.checkout_owner_dirty_preserved", {
-                pr_number: pr.prNumber,
-                task_id: task.id,
-                branch: realBranch,
-                local_sha_prefix: localSha.slice(0, 12),
-                recovery_ref: preservedRecoveryRef.slice(0, 512),
-              });
+              );
+              if (typeof preserved === "object" && preserved !== null) {
+                residue = preserved as FixOwnerResidue;
+              } else {
+                preservedRecoveryRef = String(preserved);
+                log("sweep.fix.checkout_owner_dirty_preserved", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  recovery_ref: preservedRecoveryRef.slice(0, 512),
+                });
+              }
             } catch (e) {
               return declineClaim({
                 reason: "registered_worktree_owner",
@@ -3095,6 +3112,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 worktree_path: snapshot.path,
                 local_sha_prefix: localSha.slice(0, 12),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+              });
+            }
+            if (residue?.refusal) {
+              log("sweep.fix.checkout_claim_declined", {
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: residue.refusal,
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                staged_paths: residue.stagedPaths,
+                staged_more: residue.stagedMore,
+              });
+              return;
+            }
+            if (residue) {
+              log("sweep.fix.checkout_owner_residue_discarded", {
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                marker_kind: residue.markerKind,
+                marker_sha: residue.markerSha,
+                unmerged_paths: residue.unmergedPaths,
+                unmerged_more: residue.unmergedMore,
+                staged_paths: residue.stagedPaths,
+                staged_more: residue.stagedMore,
+                status_excerpt: residue.status,
               });
             }
             // The recovery ref above is now durably proven to reproduce this owner's tree. Plain
@@ -3111,13 +3158,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             } catch (e) {
               return declineClaim({
                 reason: "registered_worktree_owner",
-                owner_recovery_reason: "owner_dirty_recovery_reset_failed",
+                owner_recovery_reason: residue ? "owner_residue_reset_failed" : "owner_dirty_recovery_reset_failed",
                 pr_number: pr.prNumber,
                 task_id: task.id,
                 branch: realBranch,
                 worktree_path: snapshot.path,
                 local_sha_prefix: localSha.slice(0, 12),
-                recovery_ref: preservedRecoveryRef.slice(0, 512),
+                recovery_ref: preservedRecoveryRef?.slice(0, 512),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
             }
@@ -3233,6 +3280,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               owner_history_action: recovery.kind,
               local_contained_by_remote: snapshot.historyState === "contained",
               recovery_ref: preservedRecoveryRef?.slice(0, 512),
+              residue_discarded: residue !== undefined,
               no_live_claim: snapshot.claimState === "clear",
               no_process_cwd: snapshot.processState === "clear",
             },
@@ -4211,6 +4259,121 @@ export function classifyCiInfrastructureFailure(
     return ARTIFACT_FINALIZE_INTERMEDIARY_403;
   }
   return undefined;
+}
+
+/** W1-T5921 — BACKSTOP: consecutive ci-gate-timeout base refreshes on one PR before escalating. */
+export const CI_TIMEOUT_REFRESH_BACKSTOP = 3;
+
+export interface CiTimeoutNoVerdict { notReady: string[]; hung: string[] }
+
+/** W1-T5921: a red that is only W1-T312's TIMED OUT gate plus SHARD HANG aggregates or cancellations. */
+export function classifyCiTimeoutNoVerdict(
+  failures: readonly CiFailure[],
+  redNames: readonly string[],
+  cancelledNames: readonly string[],
+): CiTimeoutNoVerdict | undefined {
+  const timedOut = /TIMED OUT waiting for required check\(s\) to complete/;
+  const gate = failures.find((f) => timedOut.test(f.logTail ?? ""));
+  if (!gate) return undefined;
+  const lines = gate.logTail.split("\n").map((l) => l.replace(/^\d{4}-\d\d-\d\dT\S+ ?/, ""));
+  const notReady: string[] = [];
+  for (const line of lines.slice(lines.findIndex((l) => timedOut.test(l)) + 1)) {
+    const item = /^\s*- (\S.*?)\s*$/.exec(line);
+    if (!item) break;
+    notReady.push(item[1]);
+  }
+  const cancelled = new Set(cancelledNames);
+  const hung: string[] = [];
+  for (const f of failures) {
+    const tail = f.logTail ?? "";
+    if (/AssertionError|(?:^|\n)\s*not ok\s+\d+|# fail\s+[1-9]|\berror TS\d{4}\b|diff-coverage: FAIL/i.test(tail)) return undefined;
+    if (f === gate || cancelled.has(f.name)) continue;
+    if (!/SHARD HANG\W+the matrix was cancelled/.test(tail)) return undefined;
+    hung.push(f.name);
+  }
+  const failed = new Set(failures.map((f) => f.name));
+  if (redNames.some((n) => !failed.has(n) && !cancelled.has(n) && !notReady.includes(n))) return undefined;
+  return { notReady, hung };
+}
+
+export type CiTimeoutRefreshDecision = { kind: "refresh" | "await" | "escalated" } | { kind: "escalate"; why: string };
+
+export function ciTimeoutRefreshDecision(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+): CiTimeoutRefreshDecision {
+  let count = 0;
+  let attempted = false;
+  let escalated = false;
+  let outcome: unknown;
+  for (const l of lines) {
+    if (l.pr_number !== pr.prNumber) continue;
+    const here = l.head_sha === pr.headSha;
+    if (l.step === "sweep.ci_timeout_refresh.escalated") {
+      count = 0;
+      escalated ||= here;
+    } else if (l.step === "sweep.disposed" && l.disposition === "blocked-fixable" && l.acted === true) {
+      count = 0;
+    } else if (l.step === "sweep.ci_timeout_refresh.attempted") {
+      count += 1;
+      attempted ||= here;
+    } else if (l.step === "sweep.ci_timeout_refresh.outcome" && here) {
+      outcome = l.outcome;
+    }
+  }
+  if (escalated) return { kind: "escalated" };
+  if (attempted) {
+    return outcome === "updated"
+      ? { kind: "await" }
+      : { kind: "escalate", why: `its refresh at this head returned ${String(outcome ?? "no outcome")}` };
+  }
+  if (count >= CI_TIMEOUT_REFRESH_BACKSTOP) {
+    return { kind: "escalate", why: `${count} consecutive timeout refreshes reached the BACKSTOP of ${CI_TIMEOUT_REFRESH_BACKSTOP}` };
+  }
+  return { kind: "refresh" };
+}
+
+/** W1-T5921: one update-branch per (PR, head), the W1-T2789 live re-read first; returns the stand-down reason. */
+async function applyCiTimeoutRefresh(
+  deps: SweepDeps,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView,
+  timeout: CiTimeoutNoVerdict,
+): Promise<string> {
+  const appendLine = deps.appendLine ?? appendLedger;
+  const named = (timeout.notReady.length > 0 ? timeout.notReady : timeout.hung).join(", ") || "(unnamed in the gate's annotation)";
+  const head = `ci-gate timed out on never-started check(s) ${named}`;
+  const row = {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
+    head_sha: pr.headSha, not_ready_checks: timeout.notReady, hung_checks: timeout.hung,
+  };
+  const escalate = async (why: string): Promise<string> => {
+    const reason = `${head}; no new head is possible: ${why}`;
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.escalated", why });
+    await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    return `${reason} — escalated; no requeue or fix strike`;
+  };
+  const decision = ciTimeoutRefreshDecision(lines, pr);
+  if (decision.kind === "escalated") return `${head}; already escalated at this head — no requeue or fix strike`;
+  if (decision.kind === "await") return `${head}; base refresh already requested at this head — awaiting the new head`;
+  if (decision.kind === "escalate") return escalate(decision.why);
+  if (deps.behindMainByPr?.get(pr.prNumber) === 0) return escalate("the head is not behind main, so update-branch has nothing to merge");
+  if (!deps.updateBranch) return escalate("update-branch is not wired");
+  const live = await deps.readLiveState?.(pr);
+  if (live?.ok !== true) return `${head}; fresh head unreadable — refresh deferred, no requeue or fix strike`;
+  const terminal = terminalStateReason(live.state);
+  if (terminal) return `${head}; refresh refused: ${terminal}`;
+  if (live.headSha !== pr.headSha) return `${head}; refresh refused: head moved to ${live.headSha ?? "an unreadable sha"}`;
+  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.attempted" });
+  let result: { outcome: string; error?: string };
+  try {
+    result = { outcome: await deps.updateBranch(pr) };
+  } catch (e) {
+    result = { outcome: "error", error: String((e as Error)?.message ?? e) };
+  }
+  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", ...result });
+  if (result.outcome !== "updated") return escalate(`update-branch returned ${result.outcome}${result.error ? ` (${result.error})` : ""}`);
+  return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
 }
 
 /** W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
@@ -11480,6 +11643,9 @@ export function readyDraftPullRequest(
 /** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
 export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 
+/** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
+const armsInFlight = new Set<string>();
+
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
 
@@ -12892,7 +13058,9 @@ export async function runSweep(
         }
         const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
         if (!idleEligible) clearIdle(pr);
-        if (idleEligible && !deps.dryRun && (deps.actionable?.("mergeable") ?? true)) {
+        // W1-T5922: idle is measured between FULL passes; a light pass never completes one.
+        if (idleEligible && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+            (deps.actionable?.("mergeable") ?? true)) {
           armedIdleDue = idleHeads.get(pr.prNumber) === pr.headSha;
           if (armedIdleDue) {
             alreadyDone = false;
@@ -13115,7 +13283,9 @@ export async function runSweep(
       } else {
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
-          const liveHead = await deps.readLiveHeadSha?.(pr);
+          // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          const liveHead = deps.repairAdmissionSurface === "light" && disposition !== "mergeable"
+            ? undefined : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
             acted = false;
             standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
@@ -13198,15 +13368,28 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
+              const armKey = `${pr.prNumber}@${pr.headSha}`;
+              if (armsInFlight.has(armKey)) {
+                acted = false;
+                standDownReason = "an arm for this head is already in flight on another sweep pass — not arming twice";
+                break;
+              }
               if (rearmAfterDisarm !== undefined) {
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARMED_AFTER_DISARM_STEP,
                   pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD });
               }
-              const armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
+              armsInFlight.add(armKey);
+              let armResult: Awaited<ReturnType<SweepDeps["arm"]>>;
+              try {
+                armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
+              } finally {
+                armsInFlight.delete(armKey);
+              }
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
-              extraDisposedFields = { ...extraDisposedFields, arm_attempted: true, arm_armed: armOutcomeArmed(armOutcomeName) };
+              extraDisposedFields = { ...extraDisposedFields, arm_attempted: true, arm_armed: armOutcomeArmed(armOutcomeName),
+                ...(deps.repairAdmissionSurface === "light" ? { arm_surface: "light" } : {}) };
               if (typeof armResult === "object" && armResult !== null) {
                 extraDisposedFields = { ...extraDisposedFields, arm_failure_class: armResult.failureClass, arm_error: armResult.error };
               }
@@ -13477,7 +13660,10 @@ export async function runSweep(
               const ciGateRollup =
                 isBlockedCi(pr) && deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
               const staleTransition = staleCiGateTransition(ciGateRollup);
-              if (staleTransition) {
+              const timeoutShape = isBlockedCi(pr)
+                ? classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], (pr.cancelledRequiredChecks ?? []).map((c) => c.name))
+                : undefined;
+              if (staleTransition && (!timeoutShape || timeoutShape.notReady.includes(staleTransition.siblingName))) {
                 const key = ciGateReaggregateKey(pr.headSha, staleTransition);
                 const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
                 if (decision.reaggregate) {
@@ -13520,6 +13706,13 @@ export async function runSweep(
                   standDownReason = `fresh CI rollup: snapshot red checks ${names.join(", ")} are green or in flight — no requeue or fix strike`;
                   break;
                 }
+              }
+              const timeout = classifyCiTimeoutNoVerdict(
+                ciFailuresForFix, stillRedRequiredNames(pr.redRequiredChecks ?? [], ciGateRollup), cancelledChecks.map((c) => c.name));
+              if (timeout) {
+                acted = false;
+                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout);
+                break;
               }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
               // DIFF. Use the SAME job-only effect and durable head/check bound as cancellations,
@@ -14915,6 +15108,13 @@ export async function runSweepLightPass(
         // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
         const laneActionable = scopedDeps.actionable;
         scopedDeps.actionable = (d) => d === "mergeable" || (laneActionable ? laneActionable(d) : true);
+      } else if (pr.isPlanFiling === true && deps.actionable?.("mergeable") === true) {
+        // W1-T5922: the light pass arms code PRs; every other plan PR keeps W1-T5901's one-per-pass bound.
+        const laneActionable = scopedDeps.actionable;
+        const laneReason = scopedDeps.standDownReasonFor;
+        scopedDeps.actionable = (d) => d !== "mergeable" && (laneActionable ? laneActionable(d) : true);
+        scopedDeps.standDownReasonFor = (d) => d === "mergeable"
+          ? "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)" : laneReason?.(d);
       }
       if (spawningNumbers.has(pr.prNumber)) {
         scopedDeps.detachReviewWait = (work) => {

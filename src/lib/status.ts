@@ -5153,7 +5153,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place

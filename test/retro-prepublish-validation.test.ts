@@ -160,6 +160,7 @@ test("retro prepublish runs the dynamically enumerated plan-reading suites throu
       "scripts/test-with-retry.mjs",
       process.execPath,
       "--test",
+      "--test-reporter=tap",
       "--import", "tsx",
       "--import", "./test/setup/tmp-hygiene.ts",
       "test/a.test.ts",
