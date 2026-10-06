@@ -78,18 +78,26 @@ export function setupDirOwnerTag(): string {
 export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env, mainThread = isMainThread): { ghConfigDir?: string } {
   if (!isTestRunner(env)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
-  // A worker keeps an inherited deny root: under SHARE_ENV its env IS the parent's, and one re-derived
-  // from a test's own HOME refused the parent's ledger writes, hanging serve's shutdown (#9160).
-  env[LIVE_LEDGER_DENY_ROOT_ENV] = mainThread ? discoverLiveLedgerRoot(env) : env[LIVE_LEDGER_DENY_ROOT_ENV] ?? discoverLiveLedgerRoot(env);
-  // A worker thread's env already holds the parent's entries; under SHARE_ENV it IS the parent's env.
-  if (mainThread) for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
+  if (!mainThread) {
+    // W1-T5744: a worker's env already holds the parent's containment, and under SHARE_ENV it IS the
+    // parent's env, so it overwrites nothing: a deny root re-derived from a test's own HOME refused the
+    // parent's ledger writes (#9160), and a sentinel written over the GH_TOKEN the daemon refreshed
+    // would starve the read plane. Only a value the env lacks is filled in.
+    env[LIVE_LEDGER_DENY_ROOT_ENV] ??= discoverLiveLedgerRoot(env);
+    env.RMD_SCRATCH_SWITCH ??= DEAD_SCRATCH_SWITCH;
+    env.GIT_TERMINAL_PROMPT ??= "0";
+    env.GH_TOKEN ??= LIVE_WRITE_SENTINEL_TOKEN;
+    env.GITHUB_TOKEN ??= LIVE_WRITE_SENTINEL_TOKEN;
+    return {};
+  }
+  env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
+  for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
   env.RMD_SCRATCH_SWITCH = DEAD_SCRATCH_SWITCH;
   delete env.RMD_SCRATCH;
   env.GIT_TERMINAL_PROMPT = "0";
   env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
   env.GITHUB_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
   for (const name of APP_KEY_ENV) delete env[name];
-  if (!mainThread) return {};
   // W1-T5550: the owning pid is in the name, so a later process can tell this dir's owner is gone.
   const ghConfigDir = mkdtempSync(join(tmpdir(), `rmd-test-gh-config-${setupDirOwnerTag()}`));
   env.GH_CONFIG_DIR = ghConfigDir;
