@@ -301,6 +301,7 @@ test("unreadable inputs are named: the ledger stops the pass, a CI read, the pla
   h.sources.readCi = async (sha) => { if (sha === "9103head0") throw new Error("HTTP 502"); return undefined; };
   h.sources.planTasks = () => { throw new Error("plan/tasks.d: duplicate key"); };
   await writeFile(join(h.deps.stateDir, "flow-gardener.json"), "{not json");
+  assert.equal(flowPassDue(h.deps.stateDir, h.deps.clock), true, "a corrupt state is due, so the pass can name it");
   await runFlowGardener(h.deps, h.sources);
   const named = h.steps("flow.input_unreadable").map((e) => e.extra.input);
   assert.deepEqual(named, ["ledger", "state", "github", "plan"]);
