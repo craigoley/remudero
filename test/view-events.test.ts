@@ -355,6 +355,28 @@ test("an emitted view event is ledgered at most once per minute per key", async 
   assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1, sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: 0 });
 });
 
+test("a sampled view.emitted row names its sampling interval and counts the events it skipped", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<Record<string, unknown>> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void (step === "view.emitted" && rows.push(extra!)) });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  // Two keys sampled apart: site's skipped events never count against core's.
+  for (const [offset, key, n] of [[0, "core", 1], [1_000, "site", 2], [2_000, "core", 3], [3_000, "site", 4], [4_000, "site", 5], [60_000, "core", 6], [61_000, "site", 7]] as const) {
+    at = T0 + offset;
+    rm.post(entry("now", `instance=${key}`, { n }));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  assert.deepEqual(rows.map((r) => [r.key, r.sampleEveryMs, r.unsampled]), [
+    ["instance=core", VIEW_EMITTED_SAMPLE_MS, 0],
+    ["instance=site", VIEW_EMITTED_SAMPLE_MS, 0],
+    ["instance=core", VIEW_EMITTED_SAMPLE_MS, 1],
+    ["instance=site", VIEW_EMITTED_SAMPLE_MS, 2],
+  ], "each key counts only its own unledgered events");
+});
+
 test("a view.emitted row names its sampling and the key's events since its last row that no row records", async (t) => {
   const rm = fakeReadModel({ now: "serve" });
   let at = T0;
