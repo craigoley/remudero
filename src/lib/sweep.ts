@@ -1618,6 +1618,8 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+/** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
+const prFileSources = new Map<string, string>();
 
 /**
  * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
@@ -1654,6 +1656,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "repushAbsent",
   "updateBranch",
   "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
+  "readPrFileSource", // W1-T6022
   "captureRepairFeedback",
   "disarmAutoMerge",
   "stackPrerequisite",
@@ -1720,6 +1723,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repushAbsent"
   | "updateBranch"
   | "mergeQueue"
+  | "readPrFileSource"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -3714,6 +3718,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
+
+    // W1-T6022 — a source at one head never changes, so a read is kept; a failed one is not.
+    readPrFileSource: (pr, path) => {
+      const key = `${owner}/${repo}@${pr.headSha}:${path}`;
+      if (prFileSources.has(key)) return prFileSources.get(key);
+      try {
+        const file = ghJsonForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]) as
+          { content?: unknown; encoding?: unknown } | undefined;
+        if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
+        if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
+        prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
+        return prFileSources.get(key);
+      } catch {
+        return undefined; // unread: the ready arm names it ready-unknown, never "no overlap"
+      }
+    },
 
     readyDraft: (pr) => readyDraftImpl(pr),
 
@@ -8850,7 +8870,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".
     disposition: "mergeable",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "success",
+    when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
     reason: () => "review success, required checks green — arming auto-merge",
   },
@@ -9212,7 +9232,9 @@ export interface ArmedStalledPr {
     | "distance-overlap"
     | "distance-baseline"
     | "distance-ceiling"
-    | "distance-unknown";
+    | "distance-unknown"
+    | "ready-overlap"
+    | "ready-unknown";
   /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
   matchingBaseFiles?: readonly string[];
 }
@@ -9266,6 +9288,47 @@ export function distanceRefreshCause(
   return { reason: undefined, files: [] };
 }
 
+/** P22's "required contexts green, review success": the `mergeable` disposition row's own match. */
+function checksGreenReviewSuccess(pr: Pick<OpenPrView, "checksState" | "reviewState">): boolean {
+  return pr.checksState === "green" && pr.reviewState === "success";
+}
+
+/** W1-T6022 — what the ready refresh reads beyond the PR: W1-T5939's incident hold, the `<pr>@<head>`
+ *  keys W1-T5921's one update per (PR, head) already spent, and a changed file's source at the head
+ *  (`undefined` is unread, never empty). */
+export interface ReadyRefreshFacts {
+  incidentHold?: boolean;
+  spentHeads?: ReadonlySet<string>;
+  readSource?: (pr: OpenPrView, path: string) => string | undefined;
+}
+
+const TEST_FILE_RE = /\.test\.[cm]?[jt]s$/;
+const PATH_LITERAL_RE = /[\w.-]+(?:\/[\w.-]+)+\/?/g;
+
+/** W1-T6022 — W1-T5696's overlap and baseline arms without the distance gate, plus one reach rule: a
+ *  changed test file whose source names a path literal prefixing (at a segment) a main-changed path. */
+function readyRefreshCause(
+  pr: OpenPrView,
+  base: BaseChangedFiles | undefined,
+  readSource: ReadyRefreshFacts["readSource"],
+): { reason: "ready-overlap" | "ready-unknown" | undefined; files: string[] } {
+  const cause = distanceRefreshCause(0, pr.changedFiles, base, Infinity);
+  if (cause.reason === "distance-unknown") return { reason: "ready-unknown", files: [] };
+  if (cause.reason !== undefined) return { reason: "ready-overlap", files: cause.files };
+  let unread = false;
+  const reached = new Set<string>();
+  for (const path of readSource ? (pr.changedFiles ?? []).filter((f) => TEST_FILE_RE.test(f)) : []) {
+    const source = readSource!(pr, path);
+    if (source === undefined) unread = true;
+    const literals = source?.match(PATH_LITERAL_RE) ?? [];
+    for (const f of base?.files ?? []) {
+      if (literals.some((l) => f === l || f.startsWith(l.endsWith("/") ? l : `${l}/`))) reached.add(f);
+    }
+  }
+  if (reached.size > 0) return { reason: "ready-overlap", files: [...reached] };
+  return { reason: unread ? "ready-unknown" : undefined, files: [] };
+}
+
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. `"updated"`: GitHub ACCEPTED
  *  the request, and the update completes asynchronously. `"conflict"`: GitHub refused — a real
  *  conflict, or a diverged head — reported and never retried by this call. W1-T5933: `"head-moved"`
@@ -9303,6 +9366,7 @@ export function openPrsBehindMain(
     Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">>,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready: ReadyRefreshFacts = {},
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
@@ -9326,13 +9390,22 @@ export function openPrsBehindMain(
       pr.checksState === "green" &&
       pr.reviewState === "success" &&
       pr.isDraft !== true;
-    if (!staleBlocked && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
+    // W1-T6022: a READY PR (armed, or the `mergeable` row's match) below the gate whose base files were read.
+    const readyBelowGate = !staleBlocked && behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold &&
+      baseChangedFilesByPr !== undefined && pr.isDraft !== true && (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+    if (!staleBlocked && !readyBelowGate && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
     // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
     // own files and every refresh-relevant path are untouched by main stays put.
     let reason: NonNullable<ArmedStalledPr["updateReason"]> = staleBlocked ? "stale-blocked" : "distance";
     let matching: string[] = [];
-    if (!staleBlocked && baseChangedFilesByPr !== undefined) {
+    if (readyBelowGate) {
+      if (ready.incidentHold === true || ready.spentHeads?.has(`${pr.prNumber}@${pr.headSha}`)) continue;
+      const cause = readyRefreshCause(pr, baseChangedFilesByPr.get(pr.prNumber), ready.readSource);
+      if (cause.reason === undefined) continue;
+      reason = cause.reason;
+      matching = cause.files;
+    } else if (!staleBlocked && baseChangedFilesByPr !== undefined) {
       const cause = distanceRefreshCause(
         behindBy,
         pr.changedFiles,
@@ -9441,8 +9514,10 @@ export function queuedBehindMainSkips(
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
   queued: (pr: ArmedStalledPr) => boolean,
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready?: ReadyRefreshFacts,
 ): ArmedStalledPr[] {
-  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr).filter(queued);
+  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr, ready)
+    .filter((c) => c.updateReason !== "ready-unknown" && queued(c));
 }
 
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
@@ -9460,6 +9535,7 @@ export function selectUpdateBranchTarget(
     Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">> = DEFAULT_SWEEP_POLICY,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready?: ReadyRefreshFacts,
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -9468,7 +9544,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr, ready),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -9478,7 +9554,7 @@ export function selectUpdateBranchTarget(
   const eligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
-    if (view.isDraft === true) return false;
+    if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
@@ -10718,6 +10794,8 @@ export interface SweepDeps {
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
   mergeQueue?: (prUrl: string) => boolean;
+  /** W1-T6022 — a changed file's source at the PR head, for the ready refresh's reach rule. */
+  readPrFileSource?: (pr: OpenPrView, path: string) => string | undefined;
   /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
    *  one safe mechanical repair: rebase that head onto current main and push it back with an
    *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
@@ -15783,6 +15861,15 @@ export async function runSweep(
   if (!deps.dryRun && deps.updateBranch) {
     const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
+    const readyFacts: ReadyRefreshFacts = {
+      incidentHold: deps.readActionsStatusSummary !== undefined &&
+        actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold",
+      spentHeads: new Set(ledgerLines
+        .filter((l) => l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted")
+        .map((l) => `${String(l.pr_number)}@${String(l.head_sha)}`)),
+      readSource: deps.readPrFileSource,
+    };
     // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
     // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
     // reads as "no queue", so the pre-queue refresh is unchanged.
@@ -15795,7 +15882,7 @@ export async function runSweep(
         } catch {
           return false; // a queue read that fails is "no queue": the refresh below is unchanged
         }
-      }, deps.baseChangedFilesByPr);
+      }, deps.baseChangedFilesByPr, readyFacts);
       for (const c of skipped) {
         queuedPrNumbers.add(c.prNumber);
         const already = ledgerLines.some(
@@ -15823,6 +15910,7 @@ export async function runSweep(
       policy,
       queuedPrNumbers,
       deps.baseChangedFilesByPr,
+      readyFacts,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
