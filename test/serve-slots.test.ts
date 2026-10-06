@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listProcesses, type StaleLockReclaimOptions } from "../src/lib/git-lock-reclaim.js";
+import { listProcesses, reclaimStaleGitLocks, type StaleLockReclaimOptions } from "../src/lib/git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 import { createSlotPreparer, linkTree, prepareSlotDeps, runCommand, type RunCommand } from "../src/lib/serve-slots.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -336,4 +336,14 @@ test("the git lock reclaimer's real process list includes this process", async (
   const processes = await listProcesses();
   assert.ok(processes.length > 1, "ps listed more than one process");
   assert.ok(processes.some((entry) => entry.pid === process.pid && entry.args.length > 0), "and this test's own pid among them");
+});
+
+test("a git dir with no refs and an unreadable gc.pid is reclaimed from without throwing", async () => {
+  const gitDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gitdir-`));
+  mkdirSync(join(gitDir, "gc.pid"));
+  const when = new Date(Date.now() - TWO_HOURS_MS);
+  utimesSync(join(gitDir, "gc.pid"), when, when);
+  const result = await reclaimStaleGitLocks(gitDir, noGitRunning);
+  assert.deepEqual(result.removed, [], "no refs dir and a gc.pid that reads as nothing: no crash, no removal");
+  assert.deepEqual(result.failed?.map((f) => f.path), ["gc.pid"], "the attempt is reported, not swallowed");
 });

@@ -20,6 +20,7 @@ import { execFile } from "node:child_process";
 import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join, relative } from "node:path";
+import { type Clock, systemClock } from "./clock.js";
 
 /** A maintenance leftover younger than this is presumed to belong to a live git command. A gc on
  *  serve's repo takes seconds to minutes; the stranding leftovers were a week old. */
@@ -58,7 +59,7 @@ export function parseProcessList(stdout: string): ProcessEntry[] {
 
 export interface StaleLockReclaimOptions {
   ageMs?: number;
-  now?: () => number;
+  clock?: Clock;
   hostname?: () => string;
   listProcesses?: () => Promise<ProcessEntry[]>;
   remove?: (path: string) => Promise<void>;
@@ -79,17 +80,23 @@ export interface StaleLockReclaim {
 }
 
 async function refLocks(gitDir: string): Promise<string[]> {
-  const entries = await readdir(join(gitDir, "refs"), { recursive: true, withFileTypes: true }).catch(() => []);
+  const entries = await readdir(join(gitDir, "refs"), { recursive: true, withFileTypes: true }).catch(() => {
+    // unlistable refs: no ref lock is reclaimed, and a fetch blocked by one still fails loudly on its own
+    return [];
+  });
   return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".lock")).map((entry) => relative(gitDir, join(entry.parentPath, entry.name)));
 }
 
 /** Remove the stale maintenance leftovers in `gitDir` (a repo's COMMON git dir); see the module doc for the rules. */
 export async function reclaimStaleGitLocks(gitDir: string, opts: StaleLockReclaimOptions = {}): Promise<StaleLockReclaim> {
   const ageMs = opts.ageMs ?? STALE_GIT_LOCK_AGE_MS;
-  const now = (opts.now ?? Date.now)();
+  const now = (opts.clock ?? systemClock).now();
   const stale: Array<{ path: string; age_ms: number }> = [];
   for (const path of [...GIT_MAINTENANCE_LEFTOVERS, ...(await refLocks(gitDir))]) {
-    const info = await stat(join(gitDir, path)).catch(() => undefined);
+    const info = await stat(join(gitDir, path)).catch(() => {
+      // absent (the usual case) or unstattable: either way it is not removed, so neither can take a live lock
+      return undefined;
+    });
     if (info !== undefined && now - info.mtimeMs >= ageMs) stale.push({ path, age_ms: Math.round(now - info.mtimeMs) });
   }
   if (stale.length === 0) return { removed: [] };
@@ -105,7 +112,11 @@ export async function reclaimStaleGitLocks(gitDir: string, opts: StaleLockReclai
   const here = (opts.hostname ?? hostname)();
   let gcPidWhy = "";
   if (paths.includes("gc.pid")) {
-    const [pidText = "", owner = ""] = (await readFile(join(gitDir, "gc.pid"), "utf8").catch(() => "")).trim().split(/\s+/);
+    const recorded = await readFile(join(gitDir, "gc.pid"), "utf8").catch(() => {
+      // gone since the stat: no owner is recorded, and the no-live-maintenance-process check above already passed
+      return "";
+    });
+    const [pidText = "", owner = ""] = recorded.trim().split(/\s+/);
     const pid = Number(pidText);
     if (owner === here && processes.some((entry) => entry.pid === pid && /(^|[\s/])git(\s|$)/.test(entry.args))) {
       return { removed: [], refused: { paths, reason: `gc.pid names live git process ${pid} on this host` } };
