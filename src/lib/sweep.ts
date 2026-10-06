@@ -4259,6 +4259,121 @@ export function classifyCiInfrastructureFailure(
   return undefined;
 }
 
+/** W1-T5921 — BACKSTOP: consecutive ci-gate-timeout base refreshes on one PR before escalating. */
+export const CI_TIMEOUT_REFRESH_BACKSTOP = 3;
+
+export interface CiTimeoutNoVerdict { notReady: string[]; hung: string[] }
+
+/** W1-T5921: a red that is only W1-T312's TIMED OUT gate plus SHARD HANG aggregates or cancellations. */
+export function classifyCiTimeoutNoVerdict(
+  failures: readonly CiFailure[],
+  redNames: readonly string[],
+  cancelledNames: readonly string[],
+): CiTimeoutNoVerdict | undefined {
+  const timedOut = /TIMED OUT waiting for required check\(s\) to complete/;
+  const gate = failures.find((f) => timedOut.test(f.logTail ?? ""));
+  if (!gate) return undefined;
+  const lines = gate.logTail.split("\n").map((l) => l.replace(/^\d{4}-\d\d-\d\dT\S+ ?/, ""));
+  const notReady: string[] = [];
+  for (const line of lines.slice(lines.findIndex((l) => timedOut.test(l)) + 1)) {
+    const item = /^\s*- (\S.*?)\s*$/.exec(line);
+    if (!item) break;
+    notReady.push(item[1]);
+  }
+  const cancelled = new Set(cancelledNames);
+  const hung: string[] = [];
+  for (const f of failures) {
+    const tail = f.logTail ?? "";
+    if (/AssertionError|(?:^|\n)\s*not ok\s+\d+|# fail\s+[1-9]|\berror TS\d{4}\b|diff-coverage: FAIL/i.test(tail)) return undefined;
+    if (f === gate || cancelled.has(f.name)) continue;
+    if (!/SHARD HANG\W+the matrix was cancelled/.test(tail)) return undefined;
+    hung.push(f.name);
+  }
+  const failed = new Set(failures.map((f) => f.name));
+  if (redNames.some((n) => !failed.has(n) && !cancelled.has(n) && !notReady.includes(n))) return undefined;
+  return { notReady, hung };
+}
+
+export type CiTimeoutRefreshDecision = { kind: "refresh" | "await" | "escalated" } | { kind: "escalate"; why: string };
+
+export function ciTimeoutRefreshDecision(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: Pick<OpenPrView, "prNumber" | "headSha">,
+): CiTimeoutRefreshDecision {
+  let count = 0;
+  let attempted = false;
+  let escalated = false;
+  let outcome: unknown;
+  for (const l of lines) {
+    if (l.pr_number !== pr.prNumber) continue;
+    const here = l.head_sha === pr.headSha;
+    if (l.step === "sweep.ci_timeout_refresh.escalated") {
+      count = 0;
+      escalated ||= here;
+    } else if (l.step === "sweep.disposed" && l.disposition === "blocked-fixable" && l.acted === true) {
+      count = 0;
+    } else if (l.step === "sweep.ci_timeout_refresh.attempted") {
+      count += 1;
+      attempted ||= here;
+    } else if (l.step === "sweep.ci_timeout_refresh.outcome" && here) {
+      outcome = l.outcome;
+    }
+  }
+  if (escalated) return { kind: "escalated" };
+  if (attempted) {
+    return outcome === "updated"
+      ? { kind: "await" }
+      : { kind: "escalate", why: `its refresh at this head returned ${String(outcome ?? "no outcome")}` };
+  }
+  if (count >= CI_TIMEOUT_REFRESH_BACKSTOP) {
+    return { kind: "escalate", why: `${count} consecutive timeout refreshes reached the BACKSTOP of ${CI_TIMEOUT_REFRESH_BACKSTOP}` };
+  }
+  return { kind: "refresh" };
+}
+
+/** W1-T5921: one update-branch per (PR, head), the W1-T2789 live re-read first; returns the stand-down reason. */
+async function applyCiTimeoutRefresh(
+  deps: SweepDeps,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView,
+  timeout: CiTimeoutNoVerdict,
+): Promise<string> {
+  const appendLine = deps.appendLine ?? appendLedger;
+  const named = (timeout.notReady.length > 0 ? timeout.notReady : timeout.hung).join(", ") || "(unnamed in the gate's annotation)";
+  const head = `ci-gate timed out on never-started check(s) ${named}`;
+  const row = {
+    run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
+    head_sha: pr.headSha, not_ready_checks: timeout.notReady, hung_checks: timeout.hung,
+  };
+  const escalate = async (why: string): Promise<string> => {
+    const reason = `${head}; no new head is possible: ${why}`;
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.escalated", why });
+    await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    return `${reason} — escalated; no requeue or fix strike`;
+  };
+  const decision = ciTimeoutRefreshDecision(lines, pr);
+  if (decision.kind === "escalated") return `${head}; already escalated at this head — no requeue or fix strike`;
+  if (decision.kind === "await") return `${head}; base refresh already requested at this head — awaiting the new head`;
+  if (decision.kind === "escalate") return escalate(decision.why);
+  if (deps.behindMainByPr?.get(pr.prNumber) === 0) return escalate("the head is not behind main, so update-branch has nothing to merge");
+  if (!deps.updateBranch) return escalate("update-branch is not wired");
+  const live = await deps.readLiveState?.(pr);
+  if (live?.ok !== true) return `${head}; fresh head unreadable — refresh deferred, no requeue or fix strike`;
+  const terminal = terminalStateReason(live.state);
+  if (terminal) return `${head}; refresh refused: ${terminal}`;
+  if (live.headSha !== pr.headSha) return `${head}; refresh refused: head moved to ${live.headSha ?? "an unreadable sha"}`;
+  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.attempted" });
+  let result: { outcome: string; error?: string };
+  try {
+    result = { outcome: await deps.updateBranch(pr) };
+  } catch (e) {
+    result = { outcome: "error", error: String((e as Error)?.message ?? e) };
+  }
+  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", ...result });
+  if (result.outcome !== "updated") return escalate(`update-branch returned ${result.outcome}${result.error ? ` (${result.error})` : ""}`);
+  return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
+}
+
 /** W1-T2671/W1-T2789 — the two independently-observed facts required before a red branch may be
  *  refreshed from its base; an optional field is an honest unreadable result, never zero/empty. */
 export interface RedBaseRefreshFacts {
@@ -13441,7 +13556,10 @@ export async function runSweep(
               const ciGateRollup =
                 isBlockedCi(pr) && deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
               const staleTransition = staleCiGateTransition(ciGateRollup);
-              if (staleTransition) {
+              const timeoutShape = isBlockedCi(pr)
+                ? classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], (pr.cancelledRequiredChecks ?? []).map((c) => c.name))
+                : undefined;
+              if (staleTransition && (!timeoutShape || timeoutShape.notReady.includes(staleTransition.siblingName))) {
                 const key = ciGateReaggregateKey(pr.headSha, staleTransition);
                 const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
                 if (decision.reaggregate) {
@@ -13484,6 +13602,13 @@ export async function runSweep(
                   standDownReason = `fresh CI rollup: snapshot red checks ${names.join(", ")} are green or in flight — no requeue or fix strike`;
                   break;
                 }
+              }
+              const timeout = classifyCiTimeoutNoVerdict(
+                ciFailuresForFix, stillRedRequiredNames(pr.redRequiredChecks ?? [], ciGateRollup), cancelledChecks.map((c) => c.name));
+              if (timeout) {
+                acted = false;
+                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout);
+                break;
               }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
               // DIFF. Use the SAME job-only effect and durable head/check bound as cancellations,
