@@ -43,7 +43,9 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  * hand-rolled double that could drift from real git's behavior.
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
-import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
+import { systemClock, type Clock } from "./clock.js";
 
 function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
   return (args, signal, env) =>
@@ -69,6 +71,8 @@ export interface SelfSyncDeps {
   ignoreReentrancyGuard?: boolean;
   gitAsync?: AsyncGitRunner;
   fetchTimeoutMs?: number; // W1-T5282: the awaited fetch's bound; defaults to `GATEWAY_FETCH_TIMEOUT_MS`
+  recentFetchFallback?: boolean; // W1-T6033: the reviewer opts in; the daemon's per-tick read would only wait twice
+  clock?: Clock; // W1-T6033: the clock a recent-fetch ref's age is read against; defaults to `systemClock`
   /**
    * W1-T486: one ledger-shaped line per distinct refusal reason per process, no-op by default.
    * Carries `reason` and the two shas already in `warn()`'s message, plus a dirty-path `count`
@@ -417,7 +421,9 @@ export type ServiceFreshness =
         changes?: AdvanceCommit[];
         logUnreadable?: string;
       } | null;
-    };
+    } & RecentFetchMark;
+
+export type RecentFetchMark = { source?: "recent-fetch"; refAgeMs?: number }; // W1-T6033: set only when a recent ref stood in
 
 export interface AdvanceCommit {
   sha: string;
@@ -491,12 +497,48 @@ export async function checkServiceFreshnessAsync(
 ): Promise<ServiceFreshness> {
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
+  const fetchMain = () => fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs, "main");
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs, "main");
+    await fetchMain();
   } catch (err) {
-    return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
+    const reason = `git fetch origin failed in ${repoDir}: ${String(err)}`;
+    if (!deps.recentFetchFallback || !isStalledHandshake(err)) return { status: "degraded", reason };
+    return retryStalledHandshake(repoDir, deps, fetchMain, reason);
   }
   return assessFetchedService(repoDir, serviceGit(repoDir, deps));
+}
+
+/** W1-T6033 BACKSTOP: the oldest origin/main update that may stand in for two stalled fetches. Derived from the
+ *  daemon's freshness cadence: a healthy view is at most one poll interval plus one fetch bound old, and this check
+ *  has just spent two more bounds (stall and retry). A quiet main writes no reflog entry, so it reads older. */
+export const RECENT_FETCH_MAX_AGE_MS = DEFAULT_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS;
+
+function isStalledHandshake(error: unknown): boolean {
+  const message = String(error);
+  return / exceeded its \d+ms bound /.test(message) && /last trace2 region: fetch\/remote_refs;|still running: [^;]*remote-https/.test(message);
+}
+
+async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchMain: () => Promise<void>, reason: string): Promise<ServiceFreshness> {
+  const git = serviceGit(repoDir, deps);
+  try {
+    await fetchMain();
+    return assessFetchedService(repoDir, git);
+  } catch (retryErr) {
+    const failed = `${reason}; retried once: ${String(retryErr)}`;
+    let updated: RegExpExecArray | null;
+    try {
+      updated = /@\{(\d+)\}$/.exec(git(["reflog", "show", "-n1", "--date=unix", "--format=%gd", "refs/remotes/origin/main"]).trim());
+    } catch (error) {
+      return { status: "degraded", reason: `${failed}; could not read origin/main's reflog: ${String(error)}` };
+    }
+    if (!updated) return { status: "degraded", reason: `${failed}; origin/main has no reflog entry` };
+    const refAgeMs = (deps.clock ?? systemClock).now() - Number(updated[1]) * 1000;
+    if (refAgeMs < 0 || refAgeMs > RECENT_FETCH_MAX_AGE_MS) {
+      return { status: "degraded", reason: `${failed}; origin/main was last updated ${refAgeMs} ms ago, outside ${RECENT_FETCH_MAX_AGE_MS} ms` };
+    }
+    const assessed = assessFetchedService(repoDir, git);
+    return assessed.status === "assessed" ? { ...assessed, source: "recent-fetch", refAgeMs } : assessed;
+  }
 }
 
 function serviceGit(repoDir: string, deps: SelfSyncDeps): GitRunner {
@@ -596,8 +638,8 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
 }
 
 export type ReviewerCodeFreshness =
-  | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
-  | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
+  | ({ status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" } & RecentFetchMark)
+  | ({ status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string } & RecentFetchMark)
   | { status: "unreadable"; reason: string };
 
 export interface ReviewerCodeFreshnessOptions {
@@ -952,6 +994,7 @@ export async function checkReviewerCodeFreshnessAsync(
 ): Promise<ReviewerCodeFreshness> {
   const service = await (deps.checkServiceFreshnessAsync ?? checkServiceFreshnessAsync)(repoDir, env, {
     ...(deps.gitAsync ? { gitAsync: deps.gitAsync } : {}),
+    recentFetchFallback: true,
   });
   return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps));
 }
@@ -969,6 +1012,15 @@ function reviewerFreshnessFromService<G extends ReviewerCodeFreshness | Promise<
   }
   if (service.status === "guarded") return guarded();
 
+  const reading = assessedReviewerFreshness(service, repoDir, deps);
+  return service.source && reading.status !== "unreadable" ? { ...reading, source: service.source, refAgeMs: service.refAgeMs } : reading;
+}
+
+function assessedReviewerFreshness(
+  service: Extract<ServiceFreshness, { status: "assessed" }>,
+  repoDir: string,
+  deps: ReviewerCodeFreshnessOptions,
+): ReviewerCodeFreshness {
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
     return reviewerMainAdvance(reviewerGit(repoDir, deps), oldSha, newSha, changedPaths, diffUnreadable);
