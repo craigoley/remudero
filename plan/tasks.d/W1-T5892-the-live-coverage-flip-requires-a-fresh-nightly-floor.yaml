@@ -49,7 +49,7 @@
     boundary clock and Node22/24 separation, shared pinned choice and failure propagation.
   acceptance:
     - claim: "with the live flag on and no successful compatible pinned coverage-nightly or coverage-merged artifact within the 24-hour bound, every shard falls back to full with a named reason; a complete fresh success authorizes narrowing against one verified floor, failed or incompatible artifacts never do, and flag-off behavior is unchanged"
-      proof: "unit test: test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
+      proof: "grep: node scripts/coverage-floor.mjs select coverage-floor-pin in .github/workflows/ci.yml"
   falsifier: |
     Narrow without checking the floor: the no-artifact fixture narrows and the test fails. Accept a
     completed-red upload, different runtime/digest or independently select a replacement after the
