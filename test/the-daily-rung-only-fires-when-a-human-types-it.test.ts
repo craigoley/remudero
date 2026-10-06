@@ -161,11 +161,9 @@ test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and 
       assert.deepEqual(result.lessonRecurrences.recurrences[0].prs, [42], "the recurrence receipt remains named");
       const exposure = result.lessonRecurrences.exposure;
       assert.equal(exposure.status, "observed", "the real rung supplies the existing read's window");
-      if (exposure.status !== "unavailable") {
-        assert.equal(exposure.window.asOf, NOW.toISOString());
-        assert.equal(exposure.window.prsScanned, 1);
-        assert.deepEqual(exposure.lessons[0].exposedPrs, [42]);
-      }
+      assert.equal(exposure.window.asOf, NOW.toISOString());
+      assert.equal(exposure.window.prsScanned, 1);
+      assert.deepEqual(exposure.lessons[0].exposedPrs, [42]);
     }
 
     const after = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(root));

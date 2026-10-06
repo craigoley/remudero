@@ -47,7 +47,6 @@ test("lesson exposure preserves a gate-specific PR denominator and observed recu
   const input = corpus([pair(9, "g"), pair(9, "g")], [seen(9, "g"), seen(11, "g"), seen(11, "g"), seen(12, "other")]);
   const result = exposureSummary(input);
   assert.equal(result.status, "observed");
-  if (result.status === "unavailable") return;
   assert.deepEqual(result.lessons[0], { findingId: "ci-learning:1:g", gate: "g", watermarkPr: 2,
     exposedPrs: [9, 11], recurredPrs: [9], exposureCount: 2, recurrenceCount: 1, omittedPrCount: 0 });
   assert.equal(result.observedRecurrenceRate, 0.5);
@@ -58,7 +57,6 @@ test("lesson exposure preserves a gate-specific PR denominator and observed recu
 test("partial lesson history retains a definite recurrence but cannot certify a rate or held lesson", () => {
   const result = exposureSummary(corpus([pair(9, "g")], []), undefined, 3, false);
   assert.equal(result.status, "partial");
-  if (result.status === "unavailable") return;
   assert.deepEqual(result.lessons[0].exposedPrs, [9]);
   assert.deepEqual(result.lessons[0].recurredPrs, [9]);
   assert.equal(result.observedRecurrenceRate, null);
@@ -127,7 +125,6 @@ test("legacy, future, duplicate, and forged exposure records stay unavailable in
   for (const value of invalid) assert.equal(readCiLessonExposure(value, exposureWindow.asOf, true).status, "unavailable");
   const unreadable = readCiLessonExposure(valid, exposureWindow.asOf, false);
   assert.equal(unreadable.status, "partial");
-  if (unreadable.status === "unavailable") return;
   assert.equal(unreadable.observedRecurrenceRate, null);
   assert.equal(unreadable.exposureCount, 2);
 });
