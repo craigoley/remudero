@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
 // W1-T5368 — ci.yml's `commitlint` check run is the AND of two UNRELATED steps: the PR-title lint and
 // the `rule-checks` step (the tree-derived census and ratchet suites, W1-T4433). W1-T3720 titles a
@@ -60,7 +61,7 @@ function postedCheck(outcomes: Record<string, string>, reports: Record<string, s
     const run = spawnSync("bash", ["-c", stub + reporter.run], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { ...process.env, ...outcomeEnv, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
+      env: { ...process.env, ...outcomeEnv, SETUP_OUTCOMES: successfulReporterSetupFixture(reporter.env), GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
     });
     assert.equal(run.status, 0, run.stderr);
     return readFileSync(logFile, "utf8")

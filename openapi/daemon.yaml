@@ -1536,6 +1536,8 @@ components:
         array), plus `counts` and, for a list section, `page`.
       required: [counts]
       properties:
+        planSource:
+          $ref: "#/components/schemas/PlanSource"
         ready:
           type: array
           items:
@@ -4935,22 +4937,25 @@ components:
           format: date-time
           description: Present only when `clearPolicy` is `expires`.
         affectedCapabilities:
-          type: array
           description: >
-            The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal
-            string "*" (the default) blocks every capability. This document's OpenAPI subset
-            (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here --
-            a consumer must accept the string "*" as well.
-          items:
-            type: string
+            The capabilities this stop blocks: an allowlist, or the literal string "*" (the default),
+            which blocks every capability (the code's `string[] | "*"`).
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: string
+              enum: ["*"]
         affectedDelegationClasses:
-          type: array
           description: >
-            The delegation classes this stop blocks. The code's type is `string[] | "*"`: the
-            literal string "*" (the default) blocks every class; as for `affectedCapabilities`,
-            only the array arm is typed here and a consumer must accept "*" as well.
-          items:
-            type: string
+            The delegation classes this stop blocks: an allowlist, or the literal string "*" (the
+            default), which blocks every class (the code's `string[] | "*"`).
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: string
+              enum: ["*"]
         incidentReceiptId:
           type: string
           description: The incident record this stop is accountable to; every receipt of its lifecycle links back to it.
@@ -6536,11 +6541,50 @@ components:
         reason:
           type: string
 
+    PlanSource:
+      type: object
+      description: >
+        W1-T5639 (src/lib/serve-plan-reload.ts's `PlanSourceOutcome`): where the plan behind a response came
+        from. `loaded` is a successful read, an intentionally empty plan included. `unavailable` is a plan serve
+        has not yet read: nothing derived from it is evidence, so a count, classification or decision is never
+        served from it. `stale` is a dated last-known-good plan whose latest refresh failed (`failure`); it is
+        never a current generation. `generation` moves only on a successful read. Never inferred from a task count.
+      required: [state, generation]
+      properties:
+        state:
+          type: string
+          enum: [loaded, unavailable, stale]
+        generation:
+          type: integer
+          description: Plans adopted so far; 0 while the first read has not succeeded.
+        identity:
+          type: string
+          description: What was read -- a commit (`ref:<repo>@<sha>`) or the plan files' identity. Absent while unavailable.
+        observedAt:
+          type: string
+          format: date-time
+          description: When the plan this response carries was read. Absent while unavailable.
+        failure:
+          type: object
+          description: The latest failed read, present on `unavailable` and `stale`. The reason is bounded text.
+          required: [reason, failedAt]
+          properties:
+            reason:
+              type: string
+            failedAt:
+              type: string
+              format: date-time
+
     PlanViewResult:
       type: object
-      description: GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection.
+      description: >
+        GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. Under
+        an `unavailable` `planSource` it carries `progress.unknown` with no counts, and empty `sections` and
+        `frontier` that are NOT evidence of an empty plan.
       required: [progress, sections, frontier]
       properties:
+        planSource:
+          $ref: "#/components/schemas/PlanSource"
         progress:
           $ref: "#/components/schemas/PlanProgress"
         sections:
@@ -7642,6 +7686,43 @@ components:
                   additionalProperties:
                     type: string
 
+    ActionsView:
+      type: object
+      description: >
+        GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page
+        as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for
+        that instance, built by the same function in the read-model worker from the projector's
+        `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until
+        state/read-model/switches.json sets `actions` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [actions]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, results]
+                properties:
+                  instance: {type: string}
+                  results:
+                    $ref: "#/components/schemas/ExternalActionResultsEnvelope"
+
     AgentView:
       type: object
       description: >
@@ -7697,6 +7778,76 @@ components:
             scoped:
               description: "The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>."
               $ref: "#/components/schemas/OperatorAgentSettingsResult"
+
+    IncidentsView:
+      type: object
+      description: >
+        GET /v1/views/incidents (docs/views.md, src/lib/incidents-view.ts; W1-T5054, P4-T15): the console's
+        /incidents page as one body across instances. `store` is GET /v1/incidents' list (or the reason it
+        answers 503), re-read when the store file's fingerprint moves. Each instance's `emergency.active` is
+        GET /v1/operator-agent/emergency/status's `active`, computed by the same function over the agent
+        view's persisted `panel.*` fold. `liveness` is a band over the newest projected `daemon.*` row, never
+        the raw heartbeat time. Dark until state/read-model/switches.json sets `incidents` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [incidents]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [store, instances]
+          properties:
+            store:
+              oneOf:
+                - type: object
+                  required: [state, incidents]
+                  properties:
+                    state: {type: string, enum: [ok]}
+                    incidents:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/IncidentRecord"
+                - type: object
+                  required: [state, reason]
+                  properties:
+                    state: {type: string, enum: [unavailable]}
+                    reason:
+                      type: string
+                      description: "`malformed` or `unreadable`, as GET /v1/incidents' 503 names it."
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, emergency, liveness]
+                properties:
+                  instance: {type: string}
+                  emergency:
+                    type: object
+                    required: [active]
+                    properties:
+                      active:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/EmergencyStop"
+                  liveness:
+                    type: object
+                    required: [state]
+                    description: >
+                      A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat
+                      bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any.
+                    properties:
+                      state: {type: string, enum: [up, down, unknown]}
+                      since: {type: string, format: date-time}
 
     AgentProposals:
       type: object
@@ -8934,6 +9085,8 @@ components:
         - drafting
         - notReady
       properties:
+        planSource:
+          $ref: "#/components/schemas/PlanSource"
         ready:
           type: array
           items:
@@ -9133,6 +9286,8 @@ components:
       required:
         - threads
       properties:
+        planSource:
+          $ref: "#/components/schemas/PlanSource"
         threads:
           type: array
           items:
@@ -9189,6 +9344,8 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        planSource:
+          $ref: "#/components/schemas/PlanSource"
         scope:
           type: string
           enum: [core]
@@ -9540,7 +9697,8 @@ components:
         proposal not currently READY -- detail is `refusalReason`), `already_ratified`,
         `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`),
         `seq_ahead` (a read mark past the last message), `thread_store_unreadable`,
-        `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet).
+        `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet),
+        `plan_source_unavailable` (W1-T5639: serve has not read the plan, so nothing is derived from a placeholder).
       required:
         - error
         - detail
@@ -9556,8 +9714,13 @@ components:
             - seq_ahead
             - thread_store_unreadable
             - inbox_not_ready
+            - plan_source_unavailable
         detail:
           type: string
+        planSource:
+          description: "Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason."
+          $ref: "#/components/schemas/PlanSource"
+
 
     EscalationReplyRequest:
       type: object
@@ -14252,6 +14415,33 @@ paths:
         "404":
           description: Kept for the view contract; the legacy computation answers whenever the view has no body.
 
+  /v1/views/actions:
+    get:
+      summary: The actions page for every instance, served from the read model.
+      description: >
+        W1-T5052 (arch Phase 4 design §1.1, P4-T13). Answers what GET /v1/action-results answers with no
+        filter, per instance, without a request-time ledger read; no query parameters. DARK: it answers 404
+        `view_disabled` until state/read-model/switches.json sets `actions` to `serve`, and `shadow`
+        answers 404 `view_shadow` while the worker compares it with the route's own computation. Same ETag
+        and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionsView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
+
   /v1/views/agent:
     get:
       summary: One agent page part for one instance, served from the read model.
@@ -14294,6 +14484,34 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body for that key yet (`view_not_ready`).
+
+  /v1/views/incidents:
+    get:
+      summary: The incidents page -- the incident store, emergency stops and daemon liveness -- in one read.
+      description: >
+        W1-T5054 (arch Phase 4 design §1.1, P4-T15). Answers GET /v1/incidents' list, each instance's
+        GET /v1/operator-agent/emergency/status `active`, and a liveness band per instance, without a
+        request-time read; no query parameters. DARK: it answers 404 `view_disabled` until
+        state/read-model/switches.json sets `incidents` to `serve`, and `shadow` answers 404 `view_shadow`
+        while the worker compares it with the routes' own computation. Same ETag and 304 rules as every
+        view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentsView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
   /v1/views/events:
     get:
@@ -15086,7 +15304,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
-          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet; or `plan_source_unavailable` -- W1-T5639: serve has not read the plan."
           content:
             application/json:
               schema:
@@ -15139,6 +15357,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
+        "503":
+          description: "`plan_source_unavailable` -- W1-T5639: serve has not read the plan, so no thread is listed from a placeholder."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
 
   /v1/inbox/attention-census:
     get:
@@ -15168,7 +15392,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
         "503":
-          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet; or `plan_source_unavailable` -- W1-T5639: serve has not read the plan."
           content:
             application/json:
               schema:
@@ -15214,7 +15438,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
         "503":
-          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet; or `plan_source_unavailable` -- W1-T5639: serve has not read the plan."
           content:
             application/json:
               schema:

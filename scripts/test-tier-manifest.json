@@ -2062,6 +2062,7 @@
     "test/serve-never-writes-the-credit-store.test.ts": 1800,
     "test/serve-orphan-teardown.test.ts": 12000,
     "test/serve-plan-reload.test.ts": 1700,
+    "test/serve-plan-source-default-worker.test.ts": 5000,
     "test/serve-plist.test.ts": 2056,
     "test/serve-prewarm-clientgate.test.ts": 2200,
     "test/serve-reachability.test.ts": 1800,

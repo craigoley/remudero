@@ -18,8 +18,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // PR #8229 declares the drain watchdog's elapsed-time assertion: one file and one site.
 // W1-T5481 declares the daemon cadence phase's loop-lag bound: one declaring file and one site.
 // W1-T5521 declares the sweep's two plan-PR rungs' loop-lag bounds: one declaring file and two sites.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 28;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 46;
+// The off-loop proof runner's kill bound declares its elapsed-time assertion: one file, one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 29;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 47;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
@@ -107,6 +108,9 @@ function gitGrepLines(args: readonly string[]): string[] {
   return out.split("\n").filter(Boolean);
 }
 
+// A bound declared INSIDE a test/helpers/*.ts wrapper is outside both queries' `test/*.test.ts`
+// pathspec. W1-T6031's waitForServeBanner (test/helpers/serve-boot-banner.ts) is one: its two
+// callers import the wrapper, not this helper, so it moved neither recorded count (measured).
 function declaredMemberFiles(): string[] {
   return gitGrepLines(["grep", "-lF", HELPER_IMPORT, "--", "test/*.test.ts"])
     .filter((file) => file !== THIS_FILE)

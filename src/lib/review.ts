@@ -26,8 +26,10 @@ import {
   isCompanionPath,
 } from "./companion-paths.js";
 import {
+  gitReservationRunnerAsync,
   parsePrefixedTaskId,
   readReservationAnchors,
+  readReservationAnchorsAsync,
   reservationHolderBranch,
   taskIdCollisions,
   type ReservationAnchorRead,
@@ -6722,6 +6724,33 @@ function recordsHandoff(diff: string, file: string, holder: string, head: string
   });
 }
 
+/** The ids `added` files that neither the base declares nor the baseline exempts, each with its file. */
+function filedTaskIds(added: readonly TaskIdDeclaration[], baseDecls: readonly TaskIdDeclaration[], repoDir: string): Map<string, string> {
+  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
+  const filed = new Map<string, string>();
+  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
+  return filed;
+}
+
+function judgeTaskIdOwnership(
+  diff: string,
+  filed: ReadonlyMap<string, string>,
+  reads: ReadonlyMap<string, ReservationAnchorRead>,
+  headRef: string,
+): TaskIdOwnershipFinding[] {
+  const findings: TaskIdOwnershipFinding[] = [];
+  for (const [id, file] of filed) {
+    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
+    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
+    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
+    else {
+      const holder = reservationHolderBranch(r.message) ?? "unknown";
+      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
+    }
+  }
+  return findings;
+}
+
 /** Every id this diff ADDS to plan/ that the base does not declare, judged against refs/rmd-id/<id> on
  *  `repoDir`'s origin: absent, or held by a branch other than `headRef`, fails; unreadable is UNKNOWN. */
 export function taskIdOwnershipFindings(
@@ -6736,21 +6765,37 @@ export function taskIdOwnershipFindings(
       return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? String(r.error ?? "") };
     }),
 ): TaskIdOwnershipFinding[] {
-  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
-  const filed = new Map<string, string>();
-  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
-  const reads = read([...filed.keys()]);
-  const findings: TaskIdOwnershipFinding[] = [];
-  for (const [id, file] of filed) {
-    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
-    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
-    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
-    else {
-      const holder = reservationHolderBranch(r.message) ?? "unknown";
-      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
-    }
+  const filed = filedTaskIds(added, baseDecls, repoDir);
+  return judgeTaskIdOwnership(diff, filed, read([...filed.keys()]), headRef);
+}
+
+/** {@link taskIdOwnershipFindings} with an AWAITED, bounded anchor read; a timeout reads `unknown`. */
+export async function taskIdOwnershipFindingsAsync(
+  diff: string,
+  added: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+  headRef: string,
+  repoDir: string,
+  read: (ids: string[]) => Map<string, ReservationAnchorRead> | Promise<Map<string, ReservationAnchorRead>> = (ids) =>
+    readReservationAnchorsAsync(ids, gitReservationRunnerAsync(repoDir)),
+): Promise<TaskIdOwnershipFinding[]> {
+  const filed = filedTaskIds(added, baseDecls, repoDir);
+  return judgeTaskIdOwnership(diff, filed, await read([...filed.keys()]), headRef);
+}
+
+type OwnershipEvidenceInputs =
+  | { done: true; findings: TaskIdOwnershipFinding[] | undefined }
+  | { done: false; added: TaskIdDeclaration[]; base: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
+
+function ownershipEvidenceInputs(diff: string, headRefName: string | undefined, headCheckoutDir: string | undefined): OwnershipEvidenceInputs {
+  const added = taskIdDeclarationsInDiff(diff).added;
+  if (added.length === 0) return { done: true, findings: undefined };
+  if (!headRefName || !headCheckoutDir) {
+    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
+    const reason = !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable";
+    return { done: true, findings: [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason })) };
   }
-  return findings;
+  return { done: false, added, base: taskIdDeclarationsAtRef(headCheckoutDir, "origin/main"), headRefName, headCheckoutDir };
 }
 
 /** Snapshot the external reservation before decision replay, then reuse this exact read in the judge. */
@@ -6760,14 +6805,19 @@ export function reviewReservationOwnershipEvidence(
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindings>[5],
 ): TaskIdOwnershipFinding[] | undefined {
-  const added = taskIdDeclarationsInDiff(diff).added;
-  if (added.length === 0) return undefined;
-  if (!headRefName || !headCheckoutDir) {
-    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
-    return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason: !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable" }));
-  }
-  const base = taskIdDeclarationsAtRef(headCheckoutDir, "origin/main");
-  return taskIdOwnershipFindings(diff, added, base, headRefName, headCheckoutDir, read);
+  const i = ownershipEvidenceInputs(diff, headRefName, headCheckoutDir);
+  return i.done ? i.findings : taskIdOwnershipFindings(diff, i.added, i.base, i.headRefName, i.headCheckoutDir, read);
+}
+
+/** {@link reviewReservationOwnershipEvidence}, awaited: the daemon's runReview takes this one. */
+export async function reviewReservationOwnershipEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+): Promise<TaskIdOwnershipFinding[] | undefined> {
+  const i = ownershipEvidenceInputs(diff, headRefName, headCheckoutDir);
+  return i.done ? i.findings : taskIdOwnershipFindingsAsync(diff, i.added, i.base, i.headRefName, i.headCheckoutDir, read);
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────

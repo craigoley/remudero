@@ -51,13 +51,26 @@ export interface ViewSource {
   budgetMs?: number;
 }
 
+/**
+ * A part both sides copy whole from one file a writer rewrites in place: `at` is the path, inside the part, of the
+ * reading's own observation time; `verdicts` maps a path judged at read time to the deadline path it is judged
+ * against; `viewReadAt` names the body source whose as-of is the instant the view read the file.
+ */
+export interface ShadowReadingSpec {
+  at: string;
+  verdicts?: Readonly<Record<string, string>>;
+  viewReadAt: string;
+}
+
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
+  /** Per data path, the in-place file reading it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
+  shadowReadings?: Readonly<Record<string, ShadowReadingSpec>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
   compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
-  /** Per data path, the one source its value is computed from wholly: the shadow pairs the two sides' reads of it (view-shadow.ts). */
-  shadowSources?: Readonly<Record<string, string>>;
+  /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */
+  shadowSources?: Readonly<Record<string, string | readonly string[]>>;
 }
 
 export interface ViewBody<T = unknown> {

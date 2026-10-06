@@ -6,7 +6,7 @@ import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, 
 import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
-import { threadStrictPlan } from "./thread-plan.js";
+import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -27,7 +27,7 @@ type WorkerInput = {
 type FactRequest = { kind: "fact"; id: number; method: string; args: unknown[] };
 type FactReply = { id: number } & ({ ok: true; value: unknown } | { ok: false; error: string });
 type ProjectionMessage =
-  | { kind: "snapshot"; snapshot: BoardSnapshot }
+  | { kind: "snapshot"; snapshot: BoardSnapshot; planIdentity: string }
   | { kind: "failure"; reason: string };
 
 function projectionGithub(input: WorkerInput): GitHub {
@@ -97,7 +97,9 @@ function runBoardWorker(input: WorkerInput): void {
     busy = true;
     try {
       if (input.delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, input.delayMs);
-      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache) } satisfies ProjectionMessage);
+      // The identity is taken BEFORE the pass reads the plan, so it can only name a plan at least as old as the one projected.
+      const planIdentity = threadPlanPin(input.planPath) || planFilesIdentity(input.planPath);
+      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache), planIdentity } satisfies ProjectionMessage);
     } catch (error) {
       parentPort!.postMessage({ kind: "failure", reason: String((error as Error)?.message ?? error) } satisfies ProjectionMessage);
     } finally {
@@ -109,6 +111,8 @@ function runBoardWorker(input: WorkerInput): void {
 }
 
 export interface BoardProjectionWorker extends BoardSnapshotSource {
+  /** What plan the last published snapshot was projected from (W1-T5639): a commit pin, or the plan files' identity. */
+  planIdentity?(): string | undefined;
   start(): void;
   stop(): void;
   isReady(): boolean;
@@ -117,12 +121,17 @@ export interface BoardProjectionWorker extends BoardSnapshotSource {
 export function createBoardProjectionWorker(
   github: GitHub,
   input: { planPath: string; ledgerPath: string; inflightDir: string },
-  options: { intervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL; clock?: Clock } = {},
+  options: {
+    intervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL; clock?: Clock;
+    /** Told of every snapshot the thread publishes, so serve can reconcile its own plan with the one the thread read. */
+    onSnapshot?: (planIdentity: string) => void;
+  } = {},
 ): BoardProjectionWorker {
   const clock = options.clock ?? systemClock;
   const buildStartedAt = clock.iso();
   let state: BoardSnapshotState = { state: "unavailable", buildStartedAt, checkedAt: buildStartedAt, reason: "not_ready" };
   let thread: Worker | undefined;
+  let planIdentity: string | undefined;
   let replyPort: MessagePort | undefined;
   let stopped = false;
   let mergedLookup: ((taskId: string) => ReturnType<GitHub["findMergedByTrailer"]>) | null = null;
@@ -137,6 +146,7 @@ export function createBoardProjectionWorker(
       return state.state === "unavailable" ? { ...state, checkedAt: clock.iso() } : state;
     },
     isReady: () => handle.current().state === "ready",
+    planIdentity: () => planIdentity,
     start() {
       if (stopped || thread) return;
       const { port1, port2 } = new MessageChannel();
@@ -181,8 +191,11 @@ export function createBoardProjectionWorker(
           Atomics.notify(wake, 0);
           return;
         }
-        if (message.kind === "snapshot") state = { state: "ready", snapshot: message.snapshot };
-        else unavailable(`worker_projection_failed: ${message.reason}`);
+        if (message.kind === "snapshot") {
+          state = { state: "ready", snapshot: message.snapshot };
+          planIdentity = message.planIdentity;
+          options.onSnapshot?.(message.planIdentity);
+        } else unavailable(`worker_projection_failed: ${message.reason}`);
       });
       thread.once("error", (error) => unavailable(`worker_crashed: ${error.message}`));
       thread.once("exit", (code) => {

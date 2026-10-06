@@ -95,7 +95,9 @@ import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
 import { WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
+import { ACTIONS_VIEW_NAME } from "./actions-view.js";
 import { AGENT_VIEW_NAME } from "./agent-view.js";
+import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
@@ -161,7 +163,7 @@ import {
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
-import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -336,7 +338,8 @@ export interface ServeDeps {
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
-  board: BoardDeps;
+  /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
+  board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
   /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
   modelApprovals?: readonly ModelApproval[];
   /**
@@ -2682,7 +2685,7 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2734,7 +2737,7 @@ function assembleServeRoutes(
   // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
   // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
   // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
-  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -2781,7 +2784,8 @@ function assembleServeRoutes(
     ...(readModel ? { panelRows: createOperatorAgentRowsSource(readModel, { instance: deps.instances?.coreInstance ?? CORE_INSTANCE }) } : {}),
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
-      if (state?.state === "unavailable") return undefined;
+      // An unavailable plan source is a placeholder plan, never an empty goal board.
+      if (state?.state === "unavailable" || deps.board.planSource?.state === "unavailable") return undefined;
       return { plan: deps.board.plan, snapshot: state?.snapshot ?? (goalBoard = goalBoardCache.get(deps.board)) };
     },
   });
@@ -2824,7 +2828,7 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME],
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
