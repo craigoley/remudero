@@ -11,8 +11,7 @@
   origin: "operator session 2026-10-05: throughput research ('stuck PRs are the worst case scenario')"
   plan_refs: [W1-T520, W1-T5863, W1-T5839, W1-T5864, W1-T5859, W1-T2860]
   files: [src/lib/sweep.ts, test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts]
-  status: queued
-  priority: 1
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main and the fleet ledger. Every sweep pass writes
@@ -40,3 +39,5 @@
       proof: "unit test: test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts"
   falsifier: |
     Drop the bound check: the 40-minute awaiting-arm fixture raises nothing and the test fails.
+  note: |
+    CREDIT 2026-10-06 (hand flip): shipped as #9386 (head run-W1-T5900-1791224529771, merged 2026-10-05T22:29Z as a979145c1). rmd plan-reconcile names it WINDOW-SHORT (merged outside its credit scan windows) and asks for a hand flip in a plan-only PR, which this is.
