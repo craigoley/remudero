@@ -1,4 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readLedgerLines } from "./status.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -116,5 +119,101 @@ export async function probeOpenPrMerges(
   } catch (e) {
     log(`${MERGE_PROBE_STEP}.error`, { error: String((e as Error)?.message ?? e) });
     return { probed: 0 };
+  }
+}
+
+/** W1-T5658: the bound on one `tsc --noEmit`; past it the precheck is unavailable and the push proceeds. */
+const MERGED_TYPECHECK_TIMEOUT_MS = 10 * 60_000;
+const MERGED_TYPECHECK_TEXT_CAP = 4000;
+
+/** What one `tsc --noEmit` came back with. */
+export type TypecheckRun = { status: number | null; output: string; timedOut: boolean };
+
+/**
+ * The precheck's answer, as distinct values — never collapsed. Only `merged_fails` refuses a push:
+ * `skipped` (not behind, a textual conflict, unreadable git, no tsconfig/node_modules, a timeout) and
+ * `head_fails` (HEAD itself does not compile, so the merge is not what broke it) both let the push
+ * proceed, because a precheck that cannot look must never block.
+ */
+export type MergedTypecheckResult =
+  | { outcome: "passes"; mainSha: string }
+  | { outcome: "merged_fails"; mainSha: string; text: string }
+  | { outcome: "head_fails"; mainSha: string }
+  | { outcome: "skipped"; reason: string };
+
+export type MergedTypecheckPorts = {
+  git?: MergeProbeGit;
+  /** Runs the typecheck in `dir`; the default spawns the worktree's own `tsc` asynchronously. */
+  typecheck?: (dir: string, nodeModules: string) => Promise<TypecheckRun>;
+  /** The ref the head is merged with. */
+  mainRef?: string;
+};
+
+const defaultTypecheck = (dir: string, nodeModules: string): Promise<TypecheckRun> =>
+  new Promise((resolveRun) => {
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    const finish = (status: number | null, extra = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveRun({ status, output: output + extra, timedOut });
+    };
+    const child = spawn(process.execPath, [join(nodeModules, "typescript", "bin", "tsc"), "--noEmit", "-p", "tsconfig.json"], {
+      cwd: dir, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
+    const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };
+    child.stdout.on("data", take);
+    child.stderr.on("data", take);
+    child.on("error", (e) => finish(null, `\nspawn failed: ${e.message}`));
+    child.on("close", (code) => finish(code));
+  });
+
+/**
+ * W1-T5658: would CI's `refs/pull/N/merge` — this head merged with main — still typecheck? Two sides can add
+ * the same import at different lines (#9085: TS2300), which git merges with no textual conflict, so a head that
+ * compiles alone says nothing about the tree CI builds. Run `git merge-tree --write-tree`, materialise a clean
+ * merge in a scratch directory with the worktree's node_modules linked, and run `tsc --noEmit` there — async,
+ * off the daemon's loop. Only when that fails AND the head alone passes is the push refused.
+ */
+export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPorts = {}): Promise<MergedTypecheckResult> {
+  const git = ports.git ?? defaultMergeProbeGit(wt);
+  const mainRef = ports.mainRef ?? "origin/main";
+  let scratch: string | undefined;
+  try {
+    const head = await git(["rev-parse", "HEAD"]);
+    const main = await git(["rev-parse", mainRef]);
+    const headSha = head.stdout.trim();
+    const mainSha = main.stdout.trim();
+    if (head.status !== 0 || main.status !== 0 || headSha === "" || mainSha === "") return { outcome: "skipped", reason: `${mainRef} unreadable` };
+    if (headSha === mainSha) return { outcome: "skipped", reason: "head is main" };
+    // Not behind: main is already an ancestor of the head, so the merge IS the head.
+    if ((await git(["merge-base", "--is-ancestor", mainSha, headSha])).status === 0) return { outcome: "skipped", reason: "head contains main" };
+    const probe = await probeMerge({ headSha, mainSha, git });
+    if (probe.verdict !== "clean") return { outcome: "skipped", reason: `merge ${probe.verdict}` };
+    const nodeModules = join(wt, "node_modules");
+    if (!existsSync(nodeModules) || !existsSync(join(wt, "tsconfig.json"))) return { outcome: "skipped", reason: "no tsconfig or node_modules to typecheck with" };
+    const typecheck = ports.typecheck ?? defaultTypecheck;
+    scratch = mkdtempSync(join(tmpdir(), "rmd-merged-typecheck-"));
+    const tar = join(scratch, "tree.tar");
+    const tree = join(scratch, "tree");
+    mkdirSync(tree);
+    const archived = await git(["archive", "--format=tar", `--output=${tar}`, probe.tree]);
+    if (archived.status !== 0) return { outcome: "skipped", reason: `git archive exited ${archived.status}` };
+    await new Promise<void>((done, fail) => execFile("tar", ["-xf", tar, "-C", tree], (e) => (e ? fail(e) : done())));
+    symlinkSync(realpathSync(nodeModules), join(tree, "node_modules"));
+    const merged = await typecheck(tree, join(tree, "node_modules"));
+    if (merged.timedOut) return { outcome: "skipped", reason: "typecheck timed out" };
+    if (merged.status === 0) return { outcome: "passes", mainSha };
+    const alone = await typecheck(wt, nodeModules);
+    if (alone.timedOut) return { outcome: "skipped", reason: "head typecheck timed out" };
+    if (alone.status !== 0) return { outcome: "head_fails", mainSha };
+    return { outcome: "merged_fails", mainSha, text: merged.output.slice(0, MERGED_TYPECHECK_TEXT_CAP) };
+  } catch (e) {
+    return { outcome: "skipped", reason: `precheck failed: ${String((e as Error)?.message ?? e)}` };
+  } finally {
+    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
   }
 }

@@ -569,7 +569,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { probeOpenPrMerges } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -16717,6 +16717,7 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
+const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
@@ -16734,8 +16735,16 @@ export class FixRoundPushError extends RmdError {
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> = {},
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
 ): Promise<void> {
+  // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
+  // that compiles alone but not merged with main is refused before it leaves the worktree.
+  const merged = await mergedHeadTypechecks(wt, deps.mergedTypecheck);
+  if (merged.outcome === "merged_fails") {
+    const text = `${MERGED_TYPECHECK_PUSH_CHECK}: this head compiles alone but NOT merged with origin/main (${merged.mainSha.slice(0, 9)}), ` +
+      `which is the tree CI builds — merge origin/main into the branch and fix the errors:\n${merged.text}`;
+    throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
+  }
   const capture = deps.capture ?? defaultGitCaptureAsync;
   const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
   try {
