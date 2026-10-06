@@ -78,6 +78,8 @@ export interface BeatOpts {
   env?: Record<string, string>;
   /** A `date` to put on PATH ahead of the real one, for the BSD-branch tests. */
   dateStub?: string;
+  /** Explicit platform for namespace controls; other callers retain the native default. */
+  unameStub?: string;
   /**
    * A container-runtime stub reached through `RMD_HEARTBEAT_DOCKER` (W1-T483). Written to the stub
    * bin dir and named EXPLICITLY rather than shadowing `docker` on PATH, because this host really
@@ -152,6 +154,10 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   if (opts.dateStub) {
     writeFileSync(join(binDir, "date"), opts.dateStub, { mode: 0o755 });
     chmodSync(join(binDir, "date"), 0o755);
+  }
+  if (opts.unameStub) {
+    writeFileSync(join(binDir, "uname"), opts.unameStub, { mode: 0o755 });
+    chmodSync(join(binDir, "uname"), 0o755);
   }
   if (opts.hostnameStub) {
     writeFileSync(join(binDir, "hostname"), opts.hostnameStub, { mode: 0o755 });
