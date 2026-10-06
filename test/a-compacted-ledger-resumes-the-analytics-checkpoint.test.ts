@@ -59,8 +59,10 @@ test("unit test: an analytics checkpoint resumes across a ledger compaction inst
 });
 
 test("unit test: an analytics checkpoint refuses to resume when a vanished archive is unexplained or a compaction took unread rows", async () => {
-  const refusal = async (name: string, mutate: (dir: string) => void, edit?: (checkpoint: analytics.AnalyticsCheckpoint) => void): Promise<string | undefined> => {
+  const refusal = async (name: string, mutate: (dir: string) => void, edit?: (checkpoint: analytics.AnalyticsCheckpoint) => void,
+    before?: (dir: string) => void): Promise<string | undefined> => {
     const dir = corpus();
+    before?.(dir);
     const first = await analytics.deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock);
     const prior = JSON.parse(JSON.stringify(first.checkpoint)) as analytics.AnalyticsCheckpoint;
     edit?.(prior);
@@ -81,6 +83,12 @@ test("unit test: an analytics checkpoint refuses to resume when a vanished archi
   assert.equal(await refusal("rewritten", (dir) => writeFileSync(join(dir, OLD[1]!), gzipSync(`${invoked("zulu", "2026-09-20T10:45:00.000Z")}\n`))), "archive-rewritten");
   assert.equal(await refusal("truncated", (dir) => writeFileSync(join(dir, "ledger.ndjson"), "")), "live-truncated");
   assert.equal(await refusal("live-gone", (dir) => rmSync(join(dir, "ledger.ndjson"))), "live-missing");
+  const archiveOnly = (dir: string): void => rmSync(join(dir, "ledger.ndjson"));
+  assert.equal(await refusal("archive-only", () => {}, () => {}, archiveOnly), "resumed:resume",
+    "an archive-only source that has not changed resumes");
+  assert.equal(await refusal("archive-only-rotated", (dir) => {
+    writeFileSync(join(dir, "ledger.2026-10-06T20-50-00-000Z.ndjson.gz"), gzipSync(`${invoked("hotel", "2026-10-06T20:45:00.000Z")}\n`));
+  }, () => {}, archiveOnly), "live-missing", "with no live file, any change to the rotations is a full scan");
   assert.equal(await refusal("version", () => {}, (checkpoint) => { delete checkpoint.state.goalAccountingVersion; }), "checkpoint-version");
   assert.equal(await refusal("incomplete", () => {}, (checkpoint) => { delete checkpoint.state.workIntegrityRows; }), "checkpoint-incomplete");
   assert.equal(await refusal("corrupt", () => {}, (checkpoint) => { (checkpoint.state as { startsByRun: unknown }).startsByRun = 7; }), "checkpoint-corrupt");
