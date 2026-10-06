@@ -190,7 +190,7 @@ import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommend
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
-import { flowGardenSpec as flowRemedyGardenSpec } from "./lib/flow-remedy-gardener.js";
+import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -35612,7 +35612,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
-      return gardenPass(flowRemedyGardenSpec(d, {
+      return gardenPass(flowGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
