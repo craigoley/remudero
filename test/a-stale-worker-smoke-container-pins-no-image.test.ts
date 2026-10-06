@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -142,7 +142,6 @@ function recycle(rows: Row[], extraEnv: Record<string, string> = {}): Outcome {
   writeFileSync(join(recDir, "images"), imagesOf(rows).map((i) => `${i} 4.0GB`).join("\n") + "\n");
   const cashKeyPath = join(recDir, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
-  chmodSync(cashKeyPath, 0o600);
 
   const r = spawnSync(BASH_BIN, [SCRIPT], {
     encoding: "utf8",
