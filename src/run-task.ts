@@ -922,6 +922,7 @@ import {
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   PrOpenRefusedError,
+  prerunPullRequestProofs,
   readOtherOpenPrForTask,
   recordRefusedPrOpen,
   type OpenPrJsonReader,
@@ -18955,7 +18956,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
-        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+        // The proofs run awaited, off the daemon loop; the sync open below answers from them.
+        const proofRunner = await prerunPullRequestProofs(branch, worktreePath, "origin/main", { owner, repo: task.repo });
+        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath), undefined, proofRunner);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
