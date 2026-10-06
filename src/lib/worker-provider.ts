@@ -3294,11 +3294,17 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
   RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
 };
 
+/** The `--import` chain package.json's `test`/`test:ci` scripts load before any suite: tsx, then
+ *  test/setup/tmp-hygiene.ts, which installs the temp-dir reaper and the no-live-remote guards. A
+ *  `node --test` without it runs every fixture unguarded. The path is relative to the check's cwd,
+ *  the worktree root (`--chdir cwd`). Parity with package.json is enforced by test. */
+export const TEST_PROCESS_GUARD_IMPORTS: readonly string[] = ["--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+
 /** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
  *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
  *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
 export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
-  unit_test: ["node", "--import", "tsx", "--test", "--test-reporter=tap"],
+  unit_test: ["node", ...TEST_PROCESS_GUARD_IMPORTS, "--test", "--test-reporter=tap"],
   typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
   // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
   // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
@@ -3440,7 +3446,8 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
  * reader cannot see either.
  *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite —
+ * under the same setup imports as `test:ci` ({@link TEST_PROCESS_GUARD_IMPORTS}).
  * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
  * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
 export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
