@@ -2,9 +2,9 @@
 // between 20:36Z and 21:29Z and never merged: W1-T5472 updated every behind plan PR
 // (`plan_pr_behind`) and a refreshed plan PR needs ~15 min of checks and review while main moved
 // every few minutes. The hazard W1-T5472 guards is a merged plan that does not load (#8871's
-// joined `priority:` lines). So a behind plan PR now merges as-is when its plan paths are disjoint
-// from main's since its merge base, or when the merged tree loads; otherwise it is refreshed, and
-// past a bound it is escalated to the operator instead of refreshed again.
+// joined `priority:` lines). So a behind plan PR now merges as-is when its merged tree loads (W1-T5780:
+// path disjointness alone no longer counts); otherwise it is refreshed, and past a bound it is
+// escalated to the operator instead of refreshed again.
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -59,9 +59,9 @@ function harness(opts: { readings?: () => unknown; ledger?: Array<Record<string,
   return { deps: deps as unknown as ArmDeps, calls, said };
 }
 
-test("a behind plan PR whose shards are disjoint from main's plan changes merges directly, never updated", () => {
+test("a behind plan PR whose shards are disjoint from main's plan changes and whose merged tree loads merges directly, never updated", () => {
   const { deps, calls, said } = harness({
-    readings: () => ({ prPlanPaths: ["plan/tasks.d/W1-T5730.yaml"], mainPlanPaths: ["plan/tasks.d/W1-T5700.yaml", "plan/tasks.yaml"] }),
+    readings: () => ({ prPlanPaths: ["plan/tasks.d/W1-T5730.yaml"], mainPlanPaths: ["plan/tasks.d/W1-T5700.yaml", "plan/tasks.yaml"], mergedTree: { state: "loads" } }),
   });
   const result = attemptArm(PR, deps, HEAD);
   assert.equal(result.outcome, "direct-merged");
@@ -69,8 +69,8 @@ test("a behind plan PR whose shards are disjoint from main's plan changes merges
   assert.ok(!calls.includes("updateBranch"), "the unconditional plan_pr_behind update would re-head it again");
   assert.ok(!calls.includes("armAuto"), "a plan PR is never armed (W1-T5615)");
   assert.equal(result.directMergePreflight?.remedy, "direct-merge");
-  assert.equal(result.directMergePreflight?.planMergeSafe, "disjoint");
-  assert.match(said.join("\n"), /automerge\.plan_pr_merge_safe \(W1-T5748\): basis=disjoint behind_by=4/);
+  assert.equal(result.directMergePreflight?.planMergeSafe, "merged_tree");
+  assert.match(said.join("\n"), /automerge\.plan_pr_merge_safe \(W1-T5748\): basis=merged_tree behind_by=4/);
 });
 
 test("a behind plan PR that overlaps main but whose merged tree loads and lints merges directly", () => {
@@ -148,11 +148,11 @@ test("decidePlanPrMergeSafety refreshes on every unreadable or unsafe reading", 
   const decide = safety.decidePlanPrMergeSafety as (input: unknown) => { action: string; basis?: string; why?: string };
   const none = { count: 0, heads: [] };
   const why = (readings: unknown) => decide({ readings, refreshes: none }).why ?? "";
-  assert.equal(decide({ readings: { prPlanPaths: ["plan/a"], mainPlanPaths: [] }, refreshes: none }).basis, "disjoint");
+  assert.equal(decide({ readings: { prPlanPaths: ["plan/a"], mainPlanPaths: [], mergedTree: { state: "loads" } }, refreshes: none }).basis, "merged_tree");
   assert.match(why(undefined), /no plan merge-safety reader/);
   assert.match(why({ error: "HTTP 404" }), /HTTP 404/);
   assert.match(why({ prPlanPaths: ["plan/a"] }), /main's plan changes since the merge base were unreadable/);
-  assert.match(why({ prPlanPaths: ["plan/a"], mainPlanPaths: ["plan/a"] }), /overlap .*not read/);
+  assert.match(why({ prPlanPaths: ["plan/a"], mainPlanPaths: ["plan/a"] }), /merged tree was not read/);
   assert.match(why({ mergedTree: { state: "conflict" } }), /conflicts/);
   assert.match(why({ mergedTree: { state: "refused", detail: "depends_on unknown task" } }), /depends_on unknown task/);
   assert.match(why({ mergedTree: { state: "unreadable", error: "no tree" } }), /no tree/);
@@ -171,14 +171,14 @@ test("planPrRefreshesFromLedger counts this PR's plan_pr_behind refreshes and th
 test("logArmAttribution carries the merge-safety basis, the reason and the refreshed heads", () => {
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
-  logArmAttribution(log, "direct-merged", PR, "W1-T5748", "review", {}, undefined, { remedy: "direct-merge", planMergeSafe: "disjoint" } as never);
+  logArmAttribution(log, "direct-merged", PR, "W1-T5748", "review", {}, undefined, { remedy: "direct-merge", planMergeSafe: "merged_tree" } as never);
   logArmAttribution(log, "plan-pr-held", PR, "W1-T5748", "review", {}, undefined, {
     remedy: "retry-later",
     reason: "plan_pr_refresh_bound",
     planMergeUnsafe: "the merged tree conflicts",
     refreshedHeads: ["a", "b"],
   } as never);
-  assert.equal(rows.find((r) => r.step === "automerge.clean_status_direct_merge")?.extra?.plan_pr_merge_safe, "disjoint");
+  assert.equal(rows.find((r) => r.step === "automerge.clean_status_direct_merge")?.extra?.plan_pr_merge_safe, "merged_tree");
   const held = rows.find((r) => r.step === "automerge.plan_pr_held")?.extra;
   assert.equal(held?.reason, "plan_pr_refresh_bound");
   assert.deepEqual(held?.refreshed_heads, ["a", "b"]);
@@ -252,10 +252,10 @@ test("the real reader merges the PR head into main with git and loads the merged
 
     assert.equal(read(3).mergedTree.state, "conflict");
 
-    // Disjoint never runs git at all.
+    // Disjoint paths still read the merged tree (W1-T5780): the paths are evidence, never a basis.
     const disjoint = read(1, [{ filename: "plan/tasks.d/W1-T2.yaml", previous_filename: "plan/tasks.d/W1-T0.yaml" }]);
     assert.deepEqual(disjoint.mainPlanPaths, ["plan/tasks.d/W1-T2.yaml", "plan/tasks.d/W1-T0.yaml"]);
-    assert.equal(disjoint.mergedTree, undefined);
+    assert.equal(disjoint.mergedTree.state, "quarantined");
 
     // Unreadable file lists: an empty or a full (truncated) compare proves nothing.
     assert.equal(read(1, []).mainPlanPaths, undefined);
