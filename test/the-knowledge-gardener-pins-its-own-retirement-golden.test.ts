@@ -18,7 +18,7 @@ import { parse as parseYaml } from "yaml";
 
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
-import { knowledgeGardenSpec, KNOWLEDGE_RETIRE_GOLDEN, type GardenAction, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
+import { fileDiff, knowledgeGardenSpec, KNOWLEDGE_RETIRE_GOLDEN, type GardenAction, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -177,6 +177,27 @@ test("a merge pass folds into the older learning and writes the case with the su
     readFileSync(join(root, KNOWLEDGE_RETIRE_GOLDEN, "checkout/learnings/ci.yaml"), "utf8"),
     "- id: stale-ci-lesson\n  # knowledge gardener: merge stale-ci-lesson\n  lifecycle: superseded\n  superseded_by: keeper\n",
   );
+});
+
+test("fileDiff keeps a line common to both middles out of the hunks and splits the change around it", () => {
+  const before = ["h", "1", "m", "2", "t", ""].join("\n");
+  const after = ["h", "3", "m", "4", "t", ""].join("\n");
+  assert.equal(
+    fileDiff("f.txt", before, after),
+    ["diff --git a/f.txt b/f.txt", "--- a/f.txt", "+++ b/f.txt", "@@ -2,1 +2,1 @@", "-1", "+3", "@@ -4,1 +4,1 @@", "-2", "+4", ""].join("\n"),
+  );
+});
+
+test("fileDiff replaces a middle too large to table with one remove-all/add-all hunk", () => {
+  const lines = (prefix: string): string => Array.from({ length: 2001 }, (_, i) => `${prefix}${i}`).join("\n") + "\n";
+  const diff = fileDiff("big.txt", lines("a"), lines("b"));
+  const rows = diff.split("\n");
+  assert.equal(rows[3], "@@ -1,2001 +1,2001 @@");
+  assert.equal(rows[4], "-a0");
+  assert.equal(rows[4 + 2000], "-a2000");
+  assert.equal(rows[4 + 2001], "+b0");
+  assert.equal(rows[4 + 4001], "+b2000");
+  assert.equal(rows.length, 4 + 4002 + 1);
 });
 
 test("a pass with no retire or merge action writes no golden", () => {
