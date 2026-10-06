@@ -181,7 +181,7 @@ export interface PlanSourceHolder {
   planSource?: PlanSourceOutcome;
 }
 
-/** The longest failure reason a response carries: a reader needs the cause, not an unbounded error text. */
+/** BACKSTOP: the longest failure reason a response carries; a reader needs the cause, not an unbounded error text. */
 export const PLAN_SOURCE_REASON_MAX = 240;
 
 const boundedReason = (reason: unknown): string => String((reason as Error)?.message ?? reason).slice(0, PLAN_SOURCE_REASON_MAX);
@@ -214,6 +214,7 @@ export function adoptPlanSource(
   try {
     loaded = read();
   } catch (err) {
+    // deliberate: the failure is recorded on the outcome itself, which every plan-derived reader reports.
     board.planSource = planSourceFailed(board.planSource, err, options.clock);
     return false;
   }
