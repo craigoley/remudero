@@ -10198,23 +10198,23 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * its own row and the round routes by headroom, never blocks.
  */
 async function fixLearnedArmsFor(
-  deps: { ledgerPath: string; log: (step: string, extra?: Record<string, unknown>) => void;
+  ledger: { ledgerPath: string; log: (step: string, extra?: Record<string, unknown>) => void;
     readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>> },
   strike: { strike: number; round: string },
 ): Promise<FixLearnedArms | undefined> {
   const nowMs = systemClock.now();
   let rows: Array<Record<string, unknown>>;
   try {
-    rows = await (deps.readFixRoutingRows ?? readFixRoutingRows)(dirname(deps.ledgerPath), nowMs);
+    rows = await (ledger.readFixRoutingRows ?? readFixRoutingRows)(dirname(ledger.ledgerPath), nowMs);
   } catch (error) {
-    deps.log("fix.routing_learner_unavailable", { ...strike, reason: "ledger-read-failed", error: String(error) });
+    ledger.log("fix.routing_learner_unavailable", { ...strike, reason: "ledger-read-failed", error: String(error) });
     return undefined;
   }
   const evidence = fixArmEvidence(rows, nowMs);
   return {
     evidence,
     weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed),
-    onDecision: (fields) => deps.log("fix.routing_decision", { ...strike, ...fields }),
+    onDecision: (fields) => ledger.log("fix.routing_decision", { ...strike, ...fields }),
   };
 }
 

@@ -6,6 +6,8 @@ import { test } from "node:test";
 import {
   FIX_ROUTING_HALF_LIFE_MS,
   FIX_ROUTING_LEARNER,
+  clearFixRoutingEvidenceCache,
+  readFixRoutingRows,
   fixArmEvidence,
   fixRoutingDecisionFields,
   fixRoutingWeights,
@@ -313,3 +315,19 @@ async function spawnFix(
   assert.equal(assignments.length, 1);
   return { assignment: assignments[0]!, decisions };
 }
+
+test("W1-T5535: the ledger read is cached for a short time and a failed read is never cached", async () => {
+  clearFixRoutingEvidenceCache();
+  let reads = 0;
+  const rows = [fixDone("codex", "gpt-6-sol", "success")];
+  const read = async () => { reads += 1; return rows; };
+  assert.equal((await readFixRoutingRows("/state", NOW, read)).length, 1);
+  assert.equal((await readFixRoutingRows("/state", NOW + 60_000, read)).length, 1);
+  assert.equal(reads, 1, "a strike inside the TTL reuses the read");
+  await readFixRoutingRows("/state", NOW + 10 * 60_000, read);
+  assert.equal(reads, 2, "an expired read is taken again");
+  const failing = async () => { throw new Error("unreadable"); };
+  await assert.rejects(readFixRoutingRows("/other", NOW, failing), /unreadable/);
+  assert.equal((await readFixRoutingRows("/other", NOW, read)).length, 1, "the failure left nothing in the cache");
+  clearFixRoutingEvidenceCache();
+});

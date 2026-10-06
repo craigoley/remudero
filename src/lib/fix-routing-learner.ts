@@ -1,3 +1,4 @@
+import { fixedClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { betaDraw, DISPATCH_VALUE_PRIOR_WEIGHT } from "./dispatch-value.js";
 
@@ -276,7 +277,7 @@ export function clearFixRoutingEvidenceCache(): void {
  * The fix rows the learner folds, read ASYNC from the ledger union and cached per state dir for a short
  * TTL, so a rung's strikes never re-walk the ledger. A failed read is not cached.
  */
-export function readFixRoutingRows(
+export async function readFixRoutingRows(
   stateDir: string,
   nowMs: number,
   read: (stateDir: string, since: string) => Promise<Row[]> = (dir, since) =>
@@ -284,10 +285,12 @@ export function readFixRoutingRows(
 ): Promise<Row[]> {
   const cached = evidenceCache.get(stateDir);
   if (cached && nowMs - cached.at < EVIDENCE_TTL_MS) return cached.rows;
-  const rows = read(stateDir, new Date(nowMs - FIX_ROUTING_READ_WINDOW_MS).toISOString());
+  const rows = read(stateDir, fixedClock(nowMs - FIX_ROUTING_READ_WINDOW_MS).iso());
   evidenceCache.set(stateDir, { at: nowMs, rows });
-  rows.catch(() => {
+  try {
+    return await rows;
+  } catch (error) {
     if (evidenceCache.get(stateDir)?.rows === rows) evidenceCache.delete(stateDir);
-  });
-  return rows;
+    throw error;
+  }
 }
