@@ -32,10 +32,12 @@ import {
   logArmAttribution,
   mergeDirectViaRest,
   readHeadShaRest as readArmHeadShaRest,
+  readMergeQueueMembership,
   realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
+  type MergeQueueMembership,
   type ArmDeps,
   type ArmLane,
   type ArmOutcome,
@@ -1661,6 +1663,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairPlanPr",
   "dispatchPlanGateRound",
   "strikeLadder",
+  "readMergeQueueMembership",
+  "escalateRearmExhausted",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1711,6 +1715,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readPlanRepairFacts"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
+  | "readMergeQueueMembership"
+  | "escalateRearmExhausted"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2489,6 +2495,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T3194 — a repeated or unaddressable positively identified infrastructure failure is
     // terminal for the deterministic retry lane, but never a source-code worker strike. The
     // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
+    readMergeQueueMembership: (pr) => readMergeQueueMembership(pr.prUrl, readJsonImpl),
+
+    // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
+    escalateRearmExhausted: (pr, rearms, bound) => {
+      return tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: escalationTaskIdFor(pr),
+          runId,
+          headSha: pr.headSha,
+          cause: "ci",
+          summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
+          detail:
+            `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
+            `sweep re-armed it ${rearms} times (bound ${bound}). The merge queue ejecting it on every ` +
+            `group run is the usual cause; the sweep will not re-arm this head again.`,
+          options: [
+            { label: "investigate-queue", detail: "read the PR's merge-queue removal events and the group runs they name." },
+            { label: "re-arm-by-hand", detail: "re-arm auto-merge once the group failure is understood." },
+          ],
+          recommendation: "investigate-queue",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+
     escalateInfrastructureCheck: (pr, check, reason, signature) => {
       tryEscalate(
         {
@@ -2684,7 +2716,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
-      escalate(
+      const file = (context: string): void => { escalate(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -2706,13 +2738,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
-            `The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
+            `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
             `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,
           options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
           recommendation: question.resolutions[0].label,
         },
         { issues, ledgerPath, runId },
-      );
+      ); };
+      if (pr.mergeState !== "dirty") return file("");
+      return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
     },
 
     dispatchPlanGateRound: async (pr) => {
@@ -3995,6 +4029,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
  *  first admission plus one retry; a loop is only provable after the retry also completed. */
 export const REVIEW_INPUT_ADMISSION_BACKSTOP = 2;
 
+/** W1-T5909 — BACKSTOP: re-arms per (PR, head) after GitHub disarmed a sweep arm (W1-T4784's cap).
+ *  A queue that ejects one head this often is failing its group run, not flaking. */
+export const MAX_REARMS_AFTER_DISARM_PER_HEAD = 3;
+export const REARMED_AFTER_DISARM_STEP = "automerge.rearmed_after_disarm";
+export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
+
+const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
+  lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+
+async function observedQueueMembership(deps: SweepDeps, pr: OpenPrView): Promise<MergeQueueMembership | undefined> {
+  if (!deps.readMergeQueueMembership) return undefined;
+  try {
+    return await deps.readMergeQueueMembership(pr);
+  } catch (e) {
+    return { unreadable: true, reason: String((e as Error)?.message ?? e) };
+  }
+}
+
 /** W1-T5863 — the sweep's admissions and the completed posts for ONE exact review input. */
 export interface ReviewInputLoopFacts {
   /** `sweep.review_admitted` rows for this PR url + head + digest. */
@@ -4479,6 +4531,67 @@ export function conflictRefusalCause(
   return undeclared.length > 0
     ? `conflict repair was not admitted for ${undeclared.join(", ")}`
     : "conflict repair was not admitted";
+}
+
+/** W1-T5908 — BACKSTOP: passes a dirty, evidence-less head may wait on `unknown` mergeability before
+ *  escalating; sized above `mergeStateFromRest`'s five observed consecutive `unknown` polls. */
+export const MERGEABILITY_UNKNOWN_WAIT_BACKSTOP = 6;
+
+/** W1-T5908 — the reason code a conflict escalation records as its `**Raised-by:**` line: which
+ *  disposition raised it. Only the no-evidence code is a question a later capture can answer. */
+export const CONFLICT_EVIDENCE_MISSING_REASON_CODE = "conflict-evidence-missing";
+export const CONFLICT_NOT_ADMITTED_REASON_CODE = "conflict-not-admitted";
+
+/** W1-T5908 — the `**Raised-by:**`/`**Base:**` lines {@link conflictEscalationContext} writes. */
+export const RAISED_BY_LINE_RE = /^\*\*Raised-by:\*\*\s*(\S+)\s*$/m;
+export const BASE_SHA_LINE_RE = /^\*\*Base:\*\*\s*(\S+)\s*$/m;
+
+/** W1-T5908 — GitHub's raw `mergeable_state` this pass read `unknown`: the pass cannot tell a
+ *  conflict whose evidence is still computing from one whose evidence will never come. */
+export function mergeabilityReadUnknown(pr: Pick<OpenPrView, "mergeableState">): boolean {
+  return pr.mergeableState === "unknown";
+}
+
+/** W1-T5908 — per PR, passes the CURRENT head spent in the mergeability-unknown wait (`wait` rows
+ *  with the `conflict` blocker), counted over the whole head so an escalation is not re-waited. */
+export function mergeabilityUnknownWaitsFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+): Map<number, { headSha: string; passes: number }> {
+  const out = new Map<number, { headSha: string; passes: number }>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+    const prev = out.get(line.pr_number);
+    const passes = prev?.headSha === line.head_sha ? prev.passes : 0;
+    const waited = line.disposition === "wait" && line.blocker === "conflict";
+    out.set(line.pr_number, { headSha: line.head_sha, passes: passes + (waited ? 1 : 0) });
+  }
+  return out;
+}
+
+/** W1-T5908 — the lines a conflict escalation's body carries beside Head/Cause: the reason code
+ *  of the disposition that raised it and the base it was raised against. */
+export function conflictEscalationContext(pr: Pick<OpenPrView, "mergeConflict">, baseSha: string | undefined): string {
+  const code = hasCapturedMergeConflictEvidence(pr.mergeConflict)
+    ? CONFLICT_NOT_ADMITTED_REASON_CODE
+    : CONFLICT_EVIDENCE_MISSING_REASON_CODE;
+  return `**Raised-by:** ${code}\n${baseSha ? `**Base:** ${baseSha}\n` : ""}\n`;
+}
+
+/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
+ *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
+export function clearedConflictEscalationCause(
+  body: string | undefined,
+  current: { conflictEvidenceCaptured: boolean; baseSha?: string },
+): string | undefined {
+  const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
+    return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
+  }
+  const raisedBase = BASE_SHA_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBase !== undefined && current.baseSha !== undefined && raisedBase !== current.baseSha) {
+    return `raised against base ${raisedBase} — the base has moved to ${current.baseSha}`;
+  }
+  return undefined;
 }
 
 /** W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers a
@@ -7362,6 +7475,9 @@ interface DispositionRule {
 export interface DispositionFacts {
   /** The review claim holds a DELIVERED verdict for this PR's exact current input. */
   reviewVerdictDelivered?: boolean;
+  /** W1-T5908 — passes this head already waited on an unknown mergeability read; see
+   *  {@link mergeabilityUnknownWaitsFromLedger}. Omitted reads as zero. */
+  mergeabilityUnknownPasses?: number;
 }
 
 /** W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
@@ -7991,6 +8107,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `it must inspect actual hunks and a fresh review and CI gate the new head`
       );
     },
+  },
+  {
+    // W1-T5908: no evidence while mergeability reads `unknown` is transient; wait up to the BACKSTOP.
+    disposition: "wait",
+    blocker: "conflict",
+    when: (pr, _policy, _ageDays, _now, facts) => {
+      const taskId = pr.taskId;
+      return (
+        pr.mergeState === "dirty" &&
+        taskId !== undefined &&
+        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
+        !hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+        mergeabilityReadUnknown(pr) &&
+        (facts?.mergeabilityUnknownPasses ?? 0) < MERGEABILITY_UNKNOWN_WAIT_BACKSTOP
+      );
+    },
+    reason: () =>
+      `mergeability-unknown — merge conflict (mergeState dirty) read while GitHub's mergeable_state is ` +
+      `still unknown and no conflicting-file evidence was captured — waiting for a pass that captures ` +
+      `it (escalates after ${MERGEABILITY_UNKNOWN_WAIT_BACKSTOP} passes on this head)`,
   },
   {
     // A dirty contributor, foreign-run branch, an explicit policy disable, or missing evidence
@@ -9061,6 +9197,8 @@ export interface FixDispatchEvidence {
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
   mergeConflict?: MergeConflictEvidence;
+  /** W1-T5908: the main tip this `conflicted` dispatch was derived against. */
+  baseSha?: string;
   /** W1-T2236: see this interface's own doc, above. Populated ONLY when `unmetCriteria` is empty. */
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3172: cold-sweep authority for W1-T2436's prerequisite-worker route. */
@@ -9498,6 +9636,9 @@ export interface SweepDeps {
     mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
+  /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
+  readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
+  escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number) => string | null | Promise<string | null>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
@@ -11489,6 +11630,7 @@ export async function runSweep(
   // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
   // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
+  const mergeabilityUnknownWaits = mergeabilityUnknownWaitsFromLedger(ledgerLines);
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
   let mainRepair: MainRepairEvidence | undefined;
@@ -12335,7 +12477,11 @@ export async function runSweep(
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
-    const dispositionFacts: DispositionFacts = { reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)) };
+    const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
+    const dispositionFacts: DispositionFacts = {
+      reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
+      mergeabilityUnknownPasses: unknownWaits?.headSha === pr.headSha ? unknownWaits.passes : 0,
+    };
     const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
@@ -12546,6 +12692,8 @@ export async function runSweep(
     // stand-down is what two readers independently misread as an unwired action path.
     let dedupStandDownReason: string | undefined;
     let armedIdleDue = false;
+    let rearmAfterDisarm: number | undefined;
+    let queueMembership: MergeQueueMembership | undefined;
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
     }
@@ -12567,8 +12715,32 @@ export async function runSweep(
         const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
         if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
-        const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
-        alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
+        // W1-T5909: a queued PR reads `auto_merge: null` too, so the queue is asked before the
+        // memory is believed. The memory dedups only when that read is unwired or unreadable.
+        const mergeActionable = deps.actionable?.("mergeable") ?? true;
+        queueMembership = !armedByGitHub && !refused && hold === undefined && mergeActionable
+          ? await observedQueueMembership(deps, pr) : undefined;
+        const queued = queueMembership === "queued";
+        const priorArmAtHead = prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
+        const armedByPriorPass = !armedByGitHub && priorArmAtHead && typeof queueMembership !== "string";
+        const disarmedByGitHub = priorArmAtHead && queueMembership === "not-queued";
+        const rearms = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr).length : 0;
+        const rearmExhausted = disarmedByGitHub && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + 1;
+        alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || refused || hold !== undefined;
+        if (rearmExhausted && !deps.dryRun &&
+            !rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true)) {
+          const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARM_EXHAUSTED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, rearms, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD };
+          try {
+            // tryEscalate never throws: a null url is an undelivered issue, retried on the next pass.
+            const issueUrl = await deps.escalateRearmExhausted?.(pr, rearms, MAX_REARMS_AFTER_DISARM_PER_HEAD);
+            appendLine(deps.ledgerPath, { ...row, escalated: typeof issueUrl === "string",
+              ...(typeof issueUrl === "string" ? { issue_url: issueUrl } : {}) });
+          } catch (e) {
+            appendLine(deps.ledgerPath, { ...row, escalated: false, reason: String((e as Error)?.message ?? e) });
+          }
+        }
         const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
         if (!idleEligible) clearIdle(pr);
         // W1-T5922: idle is measured between FULL passes; a light pass never completes one.
@@ -12592,8 +12764,16 @@ export async function runSweep(
               (stackParentWithdrawal.check.detail ?? "declared stack parents are not all merged")
             : idleEligible ? "auto-merge already armed (observed on GitHub) — first idle sighting; awaiting a later pass"
               : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+        } else if (queued) {
+          dedupStandDownReason = "in the merge queue (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
-          dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
+          const memory = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
+          dedupStandDownReason = typeof queueMembership === "object"
+            ? `queue membership unreadable (${queueMembership.reason}) — fell back to the prior-pass arm memory: ${memory}`
+            : memory;
+        } else if (rearmExhausted) {
+          dedupStandDownReason = `GitHub disarmed this head after ${rearms} sweep re-arms (bound ` +
+            `${MAX_REARMS_AFTER_DISARM_PER_HEAD}) — not re-armed; escalated once, see ${REARM_EXHAUSTED_STEP}`;
         } else if (refused) {
           // Carry the SAME `issue_url` the sibling `risk_judge.escalated` row already holds: the
           // pointer exists one row away, and this only moves it to the row a reader reaches first.
@@ -12764,7 +12944,8 @@ export async function runSweep(
     // AND a main tip was read; otherwise `undefined`, so no `main_tip_sha` field is written.
     let baseCausedMainTipSha: string | undefined;
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
-    let extraDisposedFields: Record<string, unknown> | undefined;
+    let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
+      : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
@@ -12827,7 +13008,7 @@ export async function runSweep(
                 (previousAttempt.arm_failure_class === "unknown" ||
                   (previousAttempt.arm_failure_class === undefined && previousAttempt.acted === true));
               const facts = !armedIdleDue ? await deps.readArmFacts?.(pr) : undefined;
-              if (facts) extraDisposedFields = { arm_evidence: facts, arm_evidence_fingerprint: armEvidenceFingerprint(facts) };
+              if (facts) extraDisposedFields = { ...extraDisposedFields, arm_evidence: facts, arm_evidence_fingerprint: armEvidenceFingerprint(facts) };
               if (failedArm && !armedIdleDue) {
                 const publication = armLines.slice(armLines.indexOf(previousAttempt!) + 1).some(line =>
                   line.step === "review.posted" && line.pr_url === pr.prUrl && line.head_sha === pr.headSha &&
@@ -12877,6 +13058,10 @@ export async function runSweep(
                 acted = false;
                 standDownReason = "an arm for this head is already in flight on another sweep pass — not arming twice";
                 break;
+              }
+              if (rearmAfterDisarm !== undefined) {
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARMED_AFTER_DISARM_STEP,
+                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD });
               }
               armsInFlight.add(armKey);
               let armResult: Awaited<ReturnType<SweepDeps["arm"]>>;
@@ -13569,7 +13754,8 @@ export async function runSweep(
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
-              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
+              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
+                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}) };
               // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
               // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
               const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
