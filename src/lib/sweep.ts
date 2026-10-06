@@ -10291,7 +10291,7 @@ export interface SweepDeps {
   readArmTimeline?: (pr: OpenPrView) => ArmTimeline | Promise<ArmTimeline>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
-  judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
+  judgeHandedOffHead?: (pr: OpenPrView, signal?: AbortSignal) => Promise<HandedOffHeadJudgment>;
   /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
    *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
   handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
@@ -10948,14 +10948,18 @@ export interface HandedOffHeadJudgmentPlan {
  *  {@link handedOffHeadAwaitingJudgment} reads back and the escalated row feeds `riskRefused`. An
  *  unavailable judge is reported as such rather than collapsed into proceed or escalate. */
 export function riskJudgeHandedOffHead(
-  planFor: (pr: OpenPrView) => HandedOffHeadJudgmentPlan,
+  planFor: (pr: OpenPrView, signal?: AbortSignal) => HandedOffHeadJudgmentPlan,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
-  return async (pr) => {
-    const { input, orchestrator, config } = planFor(pr);
+  return async (pr, signal) => {
+    const { input, orchestrator, config } = planFor(pr, signal);
     const log = orchestrator.log ?? (() => {});
     const result = await runRiskJudge(
       { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
-      { ...orchestrator, log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }) },
+      {
+        ...orchestrator,
+        signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
+        log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }),
+      },
       { ...config, judgeUnavailableAction: "proceed" },
     );
     if (result.verdict.availability === "unavailable") {
@@ -11003,6 +11007,9 @@ export const HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS = 30 * 60_000;
 /** W1-T5523 — one `pr@head` judgment started off the pass; `settled` is unset while it is in flight. */
 interface HandedOffHeadJudgmentFlight {
   settled?: HandedOffHeadJudgment;
+  /** W1-T5659 — aborted when the pool's bound fires, BEFORE the flight settles, so the abandoned call stops spending
+   *  and writes nothing a later pass could act on. */
+  controller?: AbortController;
 }
 
 /** W1-T5523 — the judgments in flight, keyed `pr@head`, with the cap, the per-judgment bound and the
@@ -11050,7 +11057,8 @@ function logRiskJudgeUnavailable(
 
 /** W1-T5523 — start `judge(pr)` without awaiting it. Its outcome is recorded on the flight and frees
  *  the slot; a throw, a rejection, an `unavailable` answer or an overrun of the pool's bound ledgers
- *  `sweep.risk_judge_unavailable` once. The first outcome wins, so a late answer changes nothing. */
+ *  `sweep.risk_judge_unavailable` once. The first outcome wins; an overrun also ABORTS the judge's signal (W1-T5659),
+ *  so a late answer is never produced rather than merely ignored. */
 function startHandedOffHeadJudgment(
   pr: OpenPrView,
   handoff: string,
@@ -11059,7 +11067,8 @@ function startHandedOffHeadJudgment(
   pool: HandedOffHeadJudgmentPool,
 ): HandedOffHeadJudgmentFlight {
   const key = `${pr.prNumber}@${pr.headSha}`;
-  const flight: HandedOffHeadJudgmentFlight = {};
+  const controller = new AbortController();
+  const flight: HandedOffHeadJudgmentFlight = { controller };
   pool.flights.set(key, flight);
   let cancelBound = () => {};
   const settle = (judgment: HandedOffHeadJudgment): void => {
@@ -11072,11 +11081,12 @@ function startHandedOffHeadJudgment(
   };
   const threw = (error: unknown): void =>
     settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
-  cancelBound = pool.schedule(pool.timeoutMs, () =>
-    settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` }),
-  );
+  cancelBound = pool.schedule(pool.timeoutMs, () => {
+    controller.abort(); // before settle: the aborted call's rejection then reaches `threw`, a no-op once settled
+    settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` });
+  });
   try {
-    judge(pr).then(settle, threw);
+    judge(pr, controller.signal).then(settle, threw);
   } catch (error) {
     threw(error); // a synchronous throw is ledgered unavailable exactly as a rejection is
   }

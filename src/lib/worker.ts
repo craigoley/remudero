@@ -1186,6 +1186,9 @@ export interface SpawnWorkerArgs {
    * never on total run age — and `spawnWorker` throws {@link WorkerAbandonedError} carrying the evidence. run-task.ts wires
    * the real bound at its dispatch-spawn wrapper, never here (Standing rule 14; W1-T1045). */
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
+  /** W1-T5659 — a caller's cancel. Aborting it aborts THIS call's query (chained into the same `options.abortController` the
+   * clock bound uses; one is constructed when only this is set). Omitted leaves behaviour byte-identical. */
+  signal?: AbortSignal;
   /** Observe the per-spawn worker-home reap this teardown already runs. `reapWorkerHome` ALREADY COMPUTES a {@link
    * WorkerHomeReapResult} naming what it removed and why, and that value was discarded in statement position until this.
    * Called on EVERY exit path including a thrown error, never allowed to throw. INSTRUMENTATION ONLY: it observes, it never
@@ -2933,9 +2936,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let abandonment: WorkerAbandonmentEvidence | undefined;
     let stopWatchdog: (() => void) | undefined;
     let streamObserver = args.streamObserver;
-    if (args.clockBound) {
+    let unchainSignal: (() => void) | undefined;
+    if (args.clockBound || args.signal) {
       const controller = new AbortController();
       options.abortController = controller;
+      if (args.signal) {
+        const sig = args.signal;
+        if (sig.aborted) controller.abort();
+        else {
+          const onAbort = (): void => controller.abort();
+          sig.addEventListener("abort", onAbort, { once: true });
+          unchainSignal = () => sig.removeEventListener("abort", onAbort);
+        }
+      }
+    }
+    if (args.clockBound) {
+      const controller = options.abortController as AbortController;
       const watchdog = createWorkerClockBoundWatchdog(args.clockBound);
       streamObserver = (event) => {
         watchdog.observer(event);
@@ -3050,6 +3066,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw err;
     } finally {
       stopWatchdog?.();
+      unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
       await egressProxy?.close();

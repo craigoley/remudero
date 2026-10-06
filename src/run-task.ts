@@ -2571,7 +2571,7 @@ export function handedOffHeadRiskJudge(
   escalateImpl: typeof escalate = escalate,
   readChangeView: (prUrl: string) => RiskJudgeChangeView | Promise<RiskJudgeChangeView> = changeViewAsync,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
-  return riskJudgeHandedOffHead((pr) => {
+  return riskJudgeHandedOffHead((pr, signal) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
     const spend = riskJudgeSpendCollector();
     return {
@@ -2592,7 +2592,7 @@ export function handedOffHeadRiskJudge(
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(
