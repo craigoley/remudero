@@ -4749,6 +4749,14 @@ export function lostRaceEscalation(input: {
   };
 }
 
+export async function riskJudgeDisarm(
+  ctx: Parameters<typeof disposeDisarm>[1],
+  disarm: typeof disarmAutoMergeAsync = disarmAutoMergeAsync,
+  disposition: Parameters<typeof disposeDisarm>[2] = {},
+): Promise<ReturnType<typeof disposeDisarm>> {
+  return disposeDisarm(await disarm(ctx.prUrl), ctx, disposition);
+}
+
 /**
  * W1-T1215 — the WHOLE disposition of one withdrawal attempt, as a pure decision.
  *
@@ -19573,7 +19581,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
       spend: riskJudgeSpend,
-      escalate: (verdict, action) => {
+      escalate: async (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),
         // so there is usually nothing here to withdraw — kept as the same
@@ -19585,7 +19593,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // which GitHub refused because the pull request had ALREADY MERGED — was recorded as a
         // completed withdrawal. Same predicate and same vocabulary `withdrawArmIfVerdictRefuses`
         // already established (W1-T1056); this only applies them at the site that fired.
-        const disposition = disposeDisarm(disarmAutoMerge(prUrl), {
+        const disposition = await riskJudgeDisarm({
           prUrl, taskId, runId, ledgerPath,
           reason: "risk judge escalated — auto-merge refused",
           refusal: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${action.reason}`,
