@@ -2853,7 +2853,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
-    dispatchFix: async (pr, evidence) => {
+    dispatchFix: async (pr, evidence, onPhase) => {
       let worktreePath = "";
       let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
@@ -3501,9 +3501,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
             ),
             waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
-              const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
-              if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
-              return ci;
+              onPhase?.("ci-wait");
+              try {
+                const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
+                if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
+                return ci;
+              } finally {
+                onPhase?.("worker");
+              }
             },
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
@@ -5070,6 +5075,9 @@ export interface SweepPolicy {
    *  press the existing update-branch button. Strictly greater-than: a value of 10 fires at 11, not
    *  at 10, matching the incident split that found red PRs at 10-11 behind and clean PRs at 1-8. */
   reviewWaitingBranchRefreshThreshold: number;
+  /** W1-T5696 — past this many commits behind, a distance refresh no longer needs a main-side change
+   *  that touches the PR. Omitted reads as {@link DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING}. */
+  reviewWaitingBranchRefreshCeiling?: number;
   /** W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
    *  escalates once at this many consecutive rows; {@link repeatDispositionStreaksFromLedger} says
    *  why the key excludes the rendered `reason`. ONCE PER HEAD PER ROTATION WINDOW (W1-T2382):
@@ -9098,7 +9106,66 @@ export interface ArmedStalledPr {
   /** W1-T3277: the main-distance fact that selected this ordinary stale PR, when present. */
   behindBy?: number;
   /** W1-T3277/W1-T1212: why this PR reached the shared update-branch effect. */
-  updateReason?: "armed-stalled" | "stale-gate" | "distance" | "stale-blocked";
+  updateReason?:
+    | "armed-stalled"
+    | "stale-gate"
+    | "distance"
+    | "stale-blocked"
+    | "distance-overlap"
+    | "distance-baseline"
+    | "distance-ceiling"
+    | "distance-unknown";
+  /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
+  matchingBaseFiles?: readonly string[];
+}
+
+/** W1-T5696 — the files `main` changed since a PR head, from the same compare call that measures the
+ *  distance. `truncated` when GitHub capped the list (300), so absence of a path proves nothing. */
+export interface BaseChangedFiles {
+  files: readonly string[];
+  truncated: boolean;
+}
+
+/** W1-T5696 — main-side paths that move a PR's verdict without touching any of the PR's own files:
+ *  recorded baselines, the two CI workflows, and the dependency/compiler manifests. `*` matches within
+ *  one path segment. */
+export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
+  "scripts/*-baseline.json",
+  ".github/workflows/ci.yml",
+  ".github/workflows/ci-gate.yml",
+  "package.json",
+  "package-lock.json",
+  "tsconfig*.json",
+];
+
+/** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. BACKSTOP: the
+ *  primary control is the main-side file intersection; this only catches a PR so far behind that
+ *  an unrelated-looking base is no longer trusted. */
+export const DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING = 60;
+
+/** `*` is the only glob character; every other character in a path glob is literal. */
+function refreshPathMatches(glob: string, path: string): boolean {
+  const parts = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join("[^/]*")}$`).test(path);
+}
+
+/** W1-T5696 — does `main` carry a change this PR must re-run against, and which files say so? A
+ *  missing map entry, unknown PR file list or truncated base list is `distance-unknown`: today's
+ *  refresh is kept. */
+export function distanceRefreshCause(
+  behindBy: number,
+  prFiles: readonly string[] | undefined,
+  base: BaseChangedFiles | undefined,
+  ceiling: number,
+): { reason: "distance-overlap" | "distance-baseline" | "distance-ceiling" | "distance-unknown" | undefined; files: string[] } {
+  if (base === undefined || prFiles === undefined || base.truncated) return { reason: "distance-unknown", files: [] };
+  const own = new Set(prFiles);
+  const overlap = base.files.filter((f) => own.has(f));
+  if (overlap.length > 0) return { reason: "distance-overlap", files: overlap };
+  const relevant = base.files.filter((f) => REFRESH_RELEVANT_BASE_PATHS.some((glob) => refreshPathMatches(glob, f)));
+  if (relevant.length > 0) return { reason: "distance-baseline", files: relevant };
+  if (behindBy > ceiling) return { reason: "distance-ceiling", files: [] };
+  return { reason: undefined, files: [] };
 }
 
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. `"updated"`: GitHub ACCEPTED
@@ -9134,8 +9201,10 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
 export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
-  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> &
+    Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">>,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
@@ -9160,13 +9229,30 @@ export function openPrsBehindMain(
       pr.reviewState === "success" &&
       pr.isDraft !== true;
     if (!staleBlocked && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
+    // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
+    // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
+    // own files and every refresh-relevant path are untouched by main stays put.
+    let reason: NonNullable<ArmedStalledPr["updateReason"]> = staleBlocked ? "stale-blocked" : "distance";
+    let matching: string[] = [];
+    if (!staleBlocked && baseChangedFilesByPr !== undefined) {
+      const cause = distanceRefreshCause(
+        behindBy,
+        pr.changedFiles,
+        baseChangedFilesByPr.get(pr.prNumber),
+        policy.reviewWaitingBranchRefreshCeiling ?? DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING,
+      );
+      if (cause.reason === undefined) continue;
+      reason = cause.reason;
+      matching = cause.files;
+    }
     out.push({
       prNumber: pr.prNumber,
       prUrl: pr.prUrl,
       ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
       headSha: pr.headSha,
       behindBy,
-      updateReason: staleBlocked ? "stale-blocked" : "distance",
+      updateReason: reason,
+      ...(matching.length === 0 ? {} : { matchingBaseFiles: matching }),
     });
   }
   return out;
@@ -9256,8 +9342,9 @@ export function queuedBehindMainSkips(
   behindMainByPr: ReadonlyMap<number, number>,
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
   queued: (pr: ArmedStalledPr) => boolean,
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr[] {
-  return openPrsBehindMain(prs, behindMainByPr, policy).filter(queued);
+  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr).filter(queued);
 }
 
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
@@ -9271,8 +9358,10 @@ export function selectUpdateBranchTarget(
   staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
   updatedForWorkflow: ReadonlySet<string> = new Set(),
   behindMainByPr: ReadonlyMap<number, number> = new Map(),
-  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> = DEFAULT_SWEEP_POLICY,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> &
+    Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">> = DEFAULT_SWEEP_POLICY,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -9281,7 +9370,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -10291,7 +10380,7 @@ export interface SweepDeps {
   readArmTimeline?: (pr: OpenPrView) => ArmTimeline | Promise<ArmTimeline>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
-  judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
+  judgeHandedOffHead?: (pr: OpenPrView, signal?: AbortSignal) => Promise<HandedOffHeadJudgment>;
   /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
    *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
   handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
@@ -10363,6 +10452,7 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
+    onPhase?: (phase: DetachedFixPhase) => void,
   ) => boolean | void | FixClaimDeclined | Promise<boolean | void | FixClaimDeclined>;
   /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
@@ -10554,6 +10644,10 @@ export interface SweepDeps {
    *  data for the ordinary stale-PR refresh rung; omission keeps the rung quiet, so callers that
    *  cannot read the comparison never invent a refresh. */
   behindMainByPr?: ReadonlyMap<number, number>;
+  /** W1-T5696 — per open PR, the files main changed since its head (the same compare call as
+   *  {@link behindMainByPr}). Present, a distance refresh needs a main-side change that touches the
+   *  PR; omitted, the distance refresh is unchanged. */
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>;
   /** W1-T2620 — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip, consulted ONCE before the
    *  per-PR walk; this module never calls gh or git, so the read is the caller's. Feeds
    *  {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind` GitHub
@@ -10948,14 +11042,18 @@ export interface HandedOffHeadJudgmentPlan {
  *  {@link handedOffHeadAwaitingJudgment} reads back and the escalated row feeds `riskRefused`. An
  *  unavailable judge is reported as such rather than collapsed into proceed or escalate. */
 export function riskJudgeHandedOffHead(
-  planFor: (pr: OpenPrView) => HandedOffHeadJudgmentPlan,
+  planFor: (pr: OpenPrView, signal?: AbortSignal) => HandedOffHeadJudgmentPlan,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
-  return async (pr) => {
-    const { input, orchestrator, config } = planFor(pr);
+  return async (pr, signal) => {
+    const { input, orchestrator, config } = planFor(pr, signal);
     const log = orchestrator.log ?? (() => {});
     const result = await runRiskJudge(
       { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
-      { ...orchestrator, log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }) },
+      {
+        ...orchestrator,
+        signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
+        log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }),
+      },
       { ...config, judgeUnavailableAction: "proceed" },
     );
     if (result.verdict.availability === "unavailable") {
@@ -11003,6 +11101,9 @@ export const HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS = 30 * 60_000;
 /** W1-T5523 — one `pr@head` judgment started off the pass; `settled` is unset while it is in flight. */
 interface HandedOffHeadJudgmentFlight {
   settled?: HandedOffHeadJudgment;
+  /** W1-T5659 — aborted when the pool's bound fires, BEFORE the flight settles, so the abandoned call stops spending
+   *  and writes nothing a later pass could act on. */
+  controller?: AbortController;
 }
 
 /** W1-T5523 — the judgments in flight, keyed `pr@head`, with the cap, the per-judgment bound and the
@@ -11050,7 +11151,8 @@ function logRiskJudgeUnavailable(
 
 /** W1-T5523 — start `judge(pr)` without awaiting it. Its outcome is recorded on the flight and frees
  *  the slot; a throw, a rejection, an `unavailable` answer or an overrun of the pool's bound ledgers
- *  `sweep.risk_judge_unavailable` once. The first outcome wins, so a late answer changes nothing. */
+ *  `sweep.risk_judge_unavailable` once. The first outcome wins; an overrun also ABORTS the judge's signal (W1-T5659),
+ *  so a late answer is never produced rather than merely ignored. */
 function startHandedOffHeadJudgment(
   pr: OpenPrView,
   handoff: string,
@@ -11059,7 +11161,8 @@ function startHandedOffHeadJudgment(
   pool: HandedOffHeadJudgmentPool,
 ): HandedOffHeadJudgmentFlight {
   const key = `${pr.prNumber}@${pr.headSha}`;
-  const flight: HandedOffHeadJudgmentFlight = {};
+  const controller = new AbortController();
+  const flight: HandedOffHeadJudgmentFlight = { controller };
   pool.flights.set(key, flight);
   let cancelBound = () => {};
   const settle = (judgment: HandedOffHeadJudgment): void => {
@@ -11072,11 +11175,12 @@ function startHandedOffHeadJudgment(
   };
   const threw = (error: unknown): void =>
     settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
-  cancelBound = pool.schedule(pool.timeoutMs, () =>
-    settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` }),
-  );
+  cancelBound = pool.schedule(pool.timeoutMs, () => {
+    controller.abort(); // before settle: the aborted call's rejection then reaches `threw`, a no-op once settled
+    settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` });
+  });
   try {
-    judge(pr).then(settle, threw);
+    judge(pr, controller.signal).then(settle, threw);
   } catch (error) {
     threw(error); // a synchronous throw is ledgered unavailable exactly as a rejection is
   }
@@ -11865,9 +11969,11 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
+export type DetachedFixPhase = "worker" | "ci-wait";
 
 interface DetachedSweepActionRegistration {
   actionKind: DetachedActionKind; taskId: string; startedAtMs: number;
+  phase: DetachedFixPhase | "best-effort";
 }
 
 export interface DetachedSweepActionDescriptor {
@@ -11875,51 +11981,87 @@ export interface DetachedSweepActionDescriptor {
 }
 
 const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistration>();
+const detachedPhaseListeners = new Set<() => void>();
 
 /** W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
  *  The stored promise is already settled-safe — its rejection is caught here — so a drain can never
  *  itself reject. */
 export function detachSweepAction(
-  work: Promise<unknown>,
-  action: Omit<DetachedSweepActionRegistration, "startedAtMs">,
-): void {
-  const held: Promise<void> = work.then(
+  work: Promise<unknown> | ((onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>),
+  action: Omit<DetachedSweepActionRegistration, "startedAtMs" | "phase"> & { phase?: DetachedFixPhase },
+): (phase: DetachedFixPhase) => void {
+  const registration: DetachedSweepActionRegistration = {
+    ...action, startedAtMs: Date.now(),
+    phase: action.actionKind === "fix-dispatch" ? action.phase ?? "worker" : "best-effort",
+  };
+  const onPhase = (phase: DetachedFixPhase) => {
+    registration.phase = phase;
+    for (const listener of detachedPhaseListeners) listener();
+  };
+  const started = typeof work === "function" ? work(onPhase) : work;
+  const held: Promise<void> = started.then(
     () => undefined,
     () => undefined,
   );
-  detachedSweepActions.set(held, { ...action, startedAtMs: Date.now() });
+  detachedSweepActions.set(held, registration);
   void held.finally(() => detachedSweepActions.delete(held));
+  return onPhase;
 }
 
 /** W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every detached
  *  action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
  *  a phase-local ticker's stop. W1-T2913: a bounded drain reports stragglers. */
 export async function drainDetachedSweepActions(
-  opts: { boundMs: number } = { boundMs: Number.POSITIVE_INFINITY },
+  opts: {
+    boundMs: number;
+    freshness?: boolean;
+    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }) => void;
+  } = { boundMs: Number.POSITIVE_INFINITY },
 ): Promise<DetachedSweepActionDescriptor[]> {
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
+  const released = new Set<Promise<void>>();
+  const waitingActions = () => [...detachedSweepActions].filter(([work, action]) => {
+    if (!opts.freshness || action.phase === "worker") return true;
+    if (!released.has(work)) {
+      released.add(work);
+      opts.onRelease?.({
+        actionKind: action.actionKind, taskId: action.taskId,
+        ageMs: Math.max(0, systemClock.now() - action.startedAtMs), phase: action.phase,
+        reason: action.phase === "best-effort"
+          ? "best-effort cadence is redone after restart"
+          : "pushed fix CI wait is re-derived after restart",
+      });
+    }
+    return false;
+  });
+  let wake: (() => void) | undefined;
+  const phaseChanged = () => wake?.();
+  detachedPhaseListeners.add(phaseChanged);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = Number.isFinite(detachedDrainBoundMs)
     ? new Promise<"bounded">((resolve) => { timer = setTimeout(() => resolve("bounded"), detachedDrainBoundMs); })
     : undefined;
   try {
-    while (detachedSweepActions.size > 0) {
-      const settled = Promise.all([...detachedSweepActions.keys()]).then(() => "settled" as const);
+    while (true) {
+      const changed = new Promise<"changed">((resolve) => { wake = () => resolve("changed"); });
+      const waiting = waitingActions();
+      if (waiting.length === 0) return [];
+      const settled = Promise.all(waiting.map(([work]) => work)).then(() => "settled" as const);
       if (!bound) {
-        await settled;
+        await Promise.race([settled, changed]);
         continue;
       }
-      if (await Promise.race([settled, bound]) === "bounded") {
+      if (await Promise.race([settled, changed, bound]) === "bounded") {
         const observedAtMs = Date.now();
-        return [...detachedSweepActions.values()].map((action) => ({
+        return waitingActions().map(([, action]) => ({
           actionKind: action.actionKind,
           taskId: action.taskId,
           ageMs: Math.max(0, observedAtMs - action.startedAtMs),
         }));
       }
     }
-    return [];
   } finally {
+    detachedPhaseListeners.delete(phaseChanged);
     if (timer) clearTimeout(timer);
   }
 }
@@ -12950,9 +13092,9 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>, dedupeKey?: string): void {
+  function detachFixDispatch(pr: OpenPrView, work: (onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>, dedupeKey?: string): void {
     detachSweepAction(
-      work.catch((e: unknown) => appendLine(deps.ledgerPath, {
+      (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
         step: "sweep.fix.dispatch_failed",
@@ -13932,7 +14074,7 @@ export async function runSweep(
                 extraDisposedFields = { code_scanning_fix_dispatched: true };
                 const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
                 if (deps.detachFixWait) {
-                  detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)), {
+                  detachSweepAction((onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)), {
                     actionKind: "fix-dispatch",
                     taskId: pr.taskId ?? `PR-${pr.prNumber}`,
                   });
@@ -14143,7 +14285,7 @@ export async function runSweep(
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), dedupeKey);
+                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence, onPhase)), dedupeKey);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));
@@ -14705,7 +14847,7 @@ export async function runSweep(
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
+                detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)));
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -14785,7 +14927,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
+                detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase)));
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
@@ -15545,7 +15687,7 @@ export async function runSweep(
         } catch {
           return false; // a queue read that fails is "no queue": the refresh below is unchanged
         }
-      });
+      }, deps.baseChangedFilesByPr);
       for (const c of skipped) {
         queuedPrNumbers.add(c.prNumber);
         const already = ledgerLines.some(
@@ -15572,6 +15714,7 @@ export async function runSweep(
       behindMainByPr,
       policy,
       queuedPrNumbers,
+      deps.baseChangedFilesByPr,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
@@ -15579,7 +15722,10 @@ export async function runSweep(
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
       const staleWorkflowFields = staleWorkflow === undefined ? {} : { stale_workflow: staleWorkflow };
       const behindFields = target.behindBy === undefined ? {} : { behind_by: target.behindBy };
-      const updateReasonFields = target.updateReason === undefined ? {} : { update_reason: target.updateReason };
+      const updateReasonFields = {
+        ...(target.updateReason === undefined ? {} : { update_reason: target.updateReason }),
+        ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+      };
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: target.taskId ?? "SWEEP",

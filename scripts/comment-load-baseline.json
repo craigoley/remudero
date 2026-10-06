@@ -104,7 +104,7 @@
   "src/lib/correct.ts": 29,
   "src/lib/daemon-health.ts": 192,
   "src/lib/daemon.ts": 1750,
-  "src/lib/deployer.ts": 750,
+  "src/lib/deployer.ts": 756,
   "src/lib/digest.ts": 329,
   "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-overlap.ts": 150,

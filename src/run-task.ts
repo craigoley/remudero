@@ -25,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
-  type JobRequeueOutcome } from "./lib/sweep.js";
+  type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -569,7 +569,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { probeOpenPrMerges } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -1508,6 +1508,7 @@ import {
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
   persistVerifiedCredit,
+  isPlanTextDeliverable,
   type RequiredContextsRead,
   type ThrownRunVerdictStage,
   type RefusedRunVerdictStage,} from "./lib/status.js";
@@ -2571,7 +2572,7 @@ export function handedOffHeadRiskJudge(
   escalateImpl: typeof escalate = escalate,
   readChangeView: (prUrl: string) => RiskJudgeChangeView | Promise<RiskJudgeChangeView> = changeViewAsync,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
-  return riskJudgeHandedOffHead((pr) => {
+  return riskJudgeHandedOffHead((pr, signal) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
     const spend = riskJudgeSpendCollector();
     return {
@@ -2592,7 +2593,7 @@ export function handedOffHeadRiskJudge(
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(
@@ -16716,6 +16717,7 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
+const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
@@ -16733,8 +16735,16 @@ export class FixRoundPushError extends RmdError {
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> = {},
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
 ): Promise<void> {
+  // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
+  // that compiles alone but not merged with main is refused before it leaves the worktree.
+  const merged = await mergedHeadTypechecks(wt, deps.mergedTypecheck);
+  if (merged.outcome === "merged_fails") {
+    const text = `${MERGED_TYPECHECK_PUSH_CHECK}: this head compiles alone but NOT merged with origin/main (${merged.mainSha.slice(0, 9)}), ` +
+      `which is the tree CI builds — merge origin/main into the branch and fix the errors:\n${merged.text}`;
+    throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
+  }
   const capture = deps.capture ?? defaultGitCaptureAsync;
   const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
   try {
@@ -18643,7 +18653,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, taskId, resolved, github.changedFiles?.(resolved.url));
+        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
@@ -36037,7 +36047,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       loadPlan: () => plan, projectPlan: () => projection,
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
-    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch);
+    const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch, undefined, baseChangedFilesByPr);
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -36054,7 +36065,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
+      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
   };
 }
 
@@ -38104,19 +38115,34 @@ export function distanceRefreshProbeTargets(
  * compare endpoint rather than `mergeable_state`: the latter is a mergeability label, not a
  * graph-distance guarantee. The pure selector in `sweep.ts` receives only measured distances.
  */
+/** GitHub's compare endpoint lists at most this many files; a list this long may be cut short. */
+const BASE_COMPARE_FILES_CAP = 300;
+
 export function buildBehindMainByPr(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
   fetch: GhApiFetcher = ghJson,
   nowMs: number = Date.now(),
+  baseChangedFilesOut?: Map<number, BaseChangedFiles>,
 ): Map<number, number> {
   const out = new Map<number, number>();
   for (const pr of distanceRefreshProbeTargets(openPrs, nowMs)) {
     try {
-      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as { ahead_by?: unknown };
+      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as {
+        ahead_by?: unknown;
+        files?: unknown;
+      };
       if (typeof compare?.ahead_by === "number" && Number.isFinite(compare.ahead_by)) {
         out.set(pr.prNumber, compare.ahead_by);
+        // W1-T5696: the same response's files[] is the base-side change list (GitHub caps it at 300).
+        // A response without a files array records nothing, which the distance arm reads as unknown.
+        if (baseChangedFilesOut !== undefined && Array.isArray(compare.files)) {
+          const files = compare.files.flatMap((f) =>
+            typeof (f as { filename?: unknown } | null)?.filename === "string" ? [(f as { filename: string }).filename] : [],
+          );
+          baseChangedFilesOut.set(pr.prNumber, { files, truncated: compare.files.length >= BASE_COMPARE_FILES_CAP });
+        }
       }
     } catch {
       // Best-effort distance: an unreadable compare omits this PR from the distance rung.
@@ -41095,18 +41121,18 @@ export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: stri
 export type ReconcileCreditCandidate = CreditCandidate & { creditHasOtherBuildMerge?: boolean };
 
 function creditEvidenceFor(
-  taskId: string,
+  task: Pick<Task, "id" | "files">,
   prNumber: number,
   body: string | undefined,
   mergeSubjects: ReadonlyMap<number, string>,
   mergedPaths: ReadonlyMap<number, readonly string[]>,
 ): Pick<CreditCandidate, "creditIsImplementation" | "creditHasBuildDiff"> {
   const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(prNumber));
-  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, taskId);
+  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, task.id);
   const paths = mergedPaths.get(prNumber);
   let creditHasBuildDiff: boolean | undefined;
   if (prerequisiteOnly === true) creditHasBuildDiff = false;
-  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
+  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths) || isPlanTextDeliverable(task, paths);
   // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
   // the squash commit carries the task trailer. Unreadable body evidence stays with the
   // subject result so this repair can only subtract the measured false credit.
@@ -41121,16 +41147,18 @@ export function creditCandidatesFromProjection(
   mergeBodies: ReadonlyMap<number, string> = new Map(),
   mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
   mergedCreditsFor: (taskId: string) => readonly PrRef[] = () => [],
+  tasksById: ReadonlyMap<string, Pick<Task, "id" | "files">> = new Map(),
 ): ReconcileCreditCandidate[] {
   const candidates: ReconcileCreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
     const id = projection.taskId;
-    const evidence = creditEvidenceFor(id, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
+    const task = tasksById.get(id) ?? { id };
+    const evidence = creditEvidenceFor(task, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
     const candidate: ReconcileCreditCandidate = { taskId: id, prNumber: projection.prNumber, prUrl: projection.prUrl, merged: true, ...evidence };
     const buildsOnMain = (pr: PrRef): boolean =>
       pr.state === "MERGED" && pr.number !== projection.prNumber && (creditsByAnchoredTrailer("MERGED", pr.headRefName, pr.body, id) || taskIdFromRunBranch(pr.headRefName) === id) &&
-      creditIsReconcilable({ merged: true, ...creditEvidenceFor(id, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
+      creditIsReconcilable({ merged: true, ...creditEvidenceFor(task, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
     if (!creditIsReconcilable(candidate) && mergedCreditsFor(id).some(buildsOnMain)) candidate.creditHasOtherBuildMerge = true;
     candidates.push(candidate);
   }
@@ -41208,7 +41236,7 @@ export function buildCreditCandidates(
     }
     return mergedByTask.get(taskId) ?? [];
   };
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor, plan.byId);
 }
 
 /**
@@ -43347,7 +43375,8 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+  const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, baseChangedFilesByPr);
   await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
@@ -43368,6 +43397,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       staleGateWorkflowsByPr,
       updatedForWorkflow,
       behindMainByPr,
+      baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -44616,7 +44646,10 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-      const behindMainByPr = tickRead?.behindMainByPr ?? buildBehindMainByPr(owner, repo, prsForFixRung);
+      const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
+      const behindMainByPr = tickRead?.behindMainByPr
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
+      const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
@@ -44637,6 +44670,7 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
+          baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),

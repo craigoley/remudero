@@ -158,7 +158,8 @@
 
 - id: a-board-wide-plan-red-is-main
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire a-board-wide-plan-red-is-main
+  lifecycle: superseded
   files: ["plan/tasks.d/**", .github/workflows/ci.yml, src/lib/sweep.ts]
   fact: >-
     When lint-plan, claims and every coverage shard go red together on many unrelated PRs, main's
