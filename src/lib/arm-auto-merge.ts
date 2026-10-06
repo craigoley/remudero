@@ -732,6 +732,45 @@ export async function readMergeQueueMembership(
   }
 }
 
+/** W1-T5911 — one arm or enqueue on a PR's timeline, by the login GraphQL names as its actor. */
+export interface ArmTimelineEvent {
+  kind: "AutoMergeEnabledEvent" | "AddedToMergeQueueEvent";
+  actor: string;
+  at: string;
+}
+export type ArmTimeline = { events: ArmTimelineEvent[] } | { unreadable: true; reason: string };
+
+const PR_ARM_EVENTS_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){" +
+  "timelineItems(last:100,itemTypes:[AUTO_MERGE_ENABLED_EVENT,ADDED_TO_MERGE_QUEUE_EVENT]){nodes{__typename " +
+  "...on AutoMergeEnabledEvent{createdAt actor{login}} ...on AddedToMergeQueueEvent{createdAt actor{login}}}}}}}";
+
+/** W1-T5911 — the PR's arms and enqueues. A failed or malformed read is unreadable, never "none". */
+export async function readArmTimeline(prUrl: string, read: (args: string[]) => unknown): Promise<ArmTimeline> {
+  const target = parsePrUrl(prUrl);
+  if (!target) return { unreadable: true, reason: `cannot resolve owner/repo/number from ${prUrl}` };
+  let nodes: unknown;
+  try {
+    const answer = (await read(["api", "graphql", "-f", `query=${PR_ARM_EVENTS_QUERY}`,
+      "-f", `owner=${target.owner}`, "-f", `name=${target.repo}`, "-F", `number=${target.number}`])) as
+      { data?: { repository?: { pullRequest?: { timelineItems?: { nodes?: unknown } } | null } } } | undefined;
+    nodes = answer?.data?.repository?.pullRequest?.timelineItems?.nodes;
+  } catch (e) {
+    return { unreadable: true, reason: `timeline unreadable: ${String((e as Error)?.message ?? e)}` };
+  }
+  if (!Array.isArray(nodes)) return { unreadable: true, reason: "timeline unreadable: the GraphQL answer carried no timelineItems nodes" };
+  const events: ArmTimelineEvent[] = [];
+  for (const node of nodes as Array<{ __typename?: unknown; createdAt?: unknown; actor?: { login?: unknown } | null } | null>) {
+    const kind = node?.__typename;
+    const actor = node?.actor?.login;
+    // An actorless event (a deleted account) cannot be attributed, so it releases nothing.
+    if ((kind !== "AutoMergeEnabledEvent" && kind !== "AddedToMergeQueueEvent") || typeof actor !== "string" ||
+        typeof node?.createdAt !== "string") continue;
+    events.push({ kind, actor, at: node.createdAt });
+  }
+  return { events };
+}
+
 /** W1-T4405 — GitHub's refusal when the PR is ALREADY in the queue: it is armed, not stuck. */
 export function armFailureIsAlreadyQueued(stderrText: string): boolean {
   return /already (?:queued|in (?:the )?merge queue)|already enqueued/i.test(stderrText);

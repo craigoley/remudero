@@ -559,6 +559,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
+  "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
@@ -568,6 +569,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "pr.opened",
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
   "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
+  "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
   "pr.head_provider",
@@ -647,6 +649,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
   "sweep.fix.checkout_claim_declined",
+  "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and

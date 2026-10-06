@@ -32,12 +32,14 @@ import {
   logArmAttribution,
   mergeDirectViaRest,
   readHeadShaRest as readArmHeadShaRest,
+  readArmTimeline,
   readMergeQueueMembership,
   realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
   type MergeQueueMembership,
+  type ArmTimeline,
   type ArmDeps,
   type ArmLane,
   type ArmOutcome,
@@ -1676,6 +1678,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "strikeLadder",
   "readMergeQueueMembership",
   "escalateRearmExhausted",
+  "readArmTimeline",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1728,6 +1731,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchPlanGateRound"
   | "readMergeQueueMembership"
   | "escalateRearmExhausted"
+  | "readArmTimeline"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2507,6 +2511,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // terminal for the deterministic retry lane, but never a source-code worker strike. The
     // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
     readMergeQueueMembership: (pr) => readMergeQueueMembership(pr.prUrl, readJsonImpl),
+    readArmTimeline: (pr) => readArmTimeline(pr.prUrl, readJsonImpl),
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
     escalateRearmExhausted: (pr, rearms, bound) => {
@@ -4081,6 +4086,39 @@ export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
 
 const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
   lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+
+/** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
+export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
+
+/** W1-T970's refusal, cleared for THIS head only by a capped override or an observed hand arm (W1-T219). */
+function riskRefusalStands(lines: ReadonlyArray<Record<string, unknown>>, riskRefused: Map<string, string | undefined>,
+  pr: OpenPrView): boolean {
+  return riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
+    !(pr.taskId !== undefined && cappedOverrideFromLedger(lines, pr.taskId, pr.headSha, pr.prUrl) !== undefined) &&
+    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0;
+}
+
+/** W1-T5911 — the first non-fleet arm or enqueue after this head's latest escalation, or why none counts. */
+async function handArmAfterEscalation(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView): Promise<{ by: string; reason: string } | { stands: string }> {
+  const stamps = rowsAtHead(lines, "risk_judge.escalated", pr).map((line) => String(line.ts));
+  if (!stamps.length || stamps.some((ts) => !Number.isFinite(Date.parse(ts)))) {
+    return { stands: "this head's risk_judge.escalated row carries no readable ts" };
+  }
+  const since = stamps.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+  const escalatedAt = Date.parse(since);
+  let timeline: ArmTimeline;
+  try {
+    timeline = await deps.readArmTimeline!(pr);
+  } catch (e) {
+    timeline = { unreadable: true, reason: String((e as Error)?.message ?? e) };
+  }
+  if ("unreadable" in timeline) return { stands: timeline.reason };
+  const hand = timeline.events.find((event) => !isFleetAppAuthor(event.actor) && Date.parse(event.at) > escalatedAt);
+  return hand
+    ? { by: hand.actor, reason: `${hand.kind} by ${hand.actor} at ${hand.at}, after the risk judge escalated this head at ${since}` }
+    : { stands: `no arm or enqueue by anyone but the fleet App after the escalation at ${since}` };
+}
 
 async function observedQueueMembership(deps: SweepDeps, pr: OpenPrView): Promise<MergeQueueMembership | undefined> {
   if (!deps.readMergeQueueMembership) return undefined;
@@ -7070,9 +7108,10 @@ export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
 }
 
-/** The fleet App, as REST (`remudero-fleet[bot]`) and `gh` (`app/remudero-fleet`) spell it. */
+/** The fleet App, as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL timeline
+ *  actors (`remudero-fleet`, W1-T5911) spell it. */
 export function isFleetAppAuthor(login: string | undefined): boolean {
-  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet";
+  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet" || login === "remudero-fleet";
 }
 
 export interface PlanRepairFacts {
@@ -9784,6 +9823,15 @@ function isOwnerClaimDecline(line: Record<string, unknown>): boolean {
     typeof line.pr_number === "number" && typeof line.head_sha === "string";
 }
 
+/** W1-T5932 — a detached `dispatchFix` that rejected; it voids the dedup as a decline does. */
+function isDetachedFixDispatchFailure(line: Record<string, unknown>): boolean {
+  return line.step === "sweep.fix.dispatch_failed" && typeof line.pr_number === "number" && typeof line.head_sha === "string";
+}
+
+/** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
+ *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
+export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
+
 /** W1-T5919 — BACKSTOP: owner-claim declines per (PR, head) before the sweep stops and escalates once;
  *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
@@ -9795,7 +9843,7 @@ async function holdRepeatedFixClaimDecline(
   escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return undefined;
+  if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return holdRepeatedFixDispatchFailure(pr, lines, escalate);
   const last = declines[declines.length - 1];
   const why = String(last.owner_recovery_reason);
   const reason =
@@ -9806,6 +9854,24 @@ async function holdRepeatedFixClaimDecline(
     l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
   if (!escalated) await escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
   return { reason, fields: { fix_claim_decline_escalated: why } };
+}
+
+/** W1-T5932 — at {@link FIX_DISPATCH_FAILED_BACKSTOP}, the stand-down; escalates once per (PR, head). */
+async function holdRepeatedFixDispatchFailure(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  escalate: SweepDeps["escalate"],
+): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
+  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+  if (failures.length < FIX_DISPATCH_FAILED_BACKSTOP) return undefined;
+  const reason =
+    `detached fix dispatch failed before fix.dispatch ${failures.length} times on #${pr.prNumber} at head ` +
+    `${pr.headSha.slice(0, 7)} (${String(failures[failures.length - 1].error)}) — ` +
+    `FIX_DISPATCH_FAILED_BACKSTOP ${FIX_DISPATCH_FAILED_BACKSTOP} reached, no further dispatch is attempted at this head`;
+  const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
+    l.head_sha === pr.headSha && l.fix_dispatch_failed_escalated === true);
+  if (!escalated) await escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+  return { reason, fields: { fix_dispatch_failed_escalated: true } };
 }
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
@@ -9844,6 +9910,8 @@ export interface SweepDeps {
   /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
   readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
   escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number) => string | null | Promise<string | null>;
+  /** W1-T5911 — read only for a risk-refused head with no override, on a pass that may arm. Omitted: refused. */
+  readArmTimeline?: (pr: OpenPrView) => ArmTimeline | Promise<ArmTimeline>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
@@ -10683,6 +10751,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   const realFixDispatches = new Set<string>();
+  const voidedFixes = new Map<string, string>();
   for (const line of lines) {
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
       const refusal = reviewFreshnessRefusals.get(line.review_key);
@@ -10786,12 +10855,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       continue;
     }
     // W1-T5919: a declined claim voids this head's dedup unless fix.dispatch/fix.retrigger exists at it.
+    // W1-T5932: so does a detached dispatch failure; both apply after the walk, since either can precede its row.
     if ((line.step === "fix.dispatch" || line.step === "fix.retrigger") && typeof line.head_sha === "string") {
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
     }
-    if (isOwnerClaimDecline(line)) {
-      if (!realFixDispatches.has(`${String(line.task_id)}@${String(line.head_sha)}`)) fixed.delete(`${line.pr_number}@${line.head_sha}`);
+    if (isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)) {
+      voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
     }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
@@ -10833,6 +10903,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
+  for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
   return {
     armed,
     fixed,
@@ -12319,6 +12390,22 @@ export async function runSweep(
     return { ok: true, release: () => claimedReviewKeys.delete(reviewKey) };
   }
 
+  /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
+   *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
+  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>): void {
+    detachSweepAction(
+      work.catch((e: unknown) => appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: pr.taskId ?? "SWEEP",
+        step: "sweep.fix.dispatch_failed",
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+      })),
+      { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+    );
+  }
+
   /** W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY, or refuse: the fix-rung twin of the review claim
    *  above. Refuses in exactly two shapes, both SYNCHRONOUS — no `await` ever separates the check
    *  from the claim: a genuinely concurrent second claim, or a strike count RE-READ off the ledger
@@ -12920,9 +13007,7 @@ export async function runSweep(
         // rule's `when` and never in the merge path — the SAME non-action shape every other dedup
         // has. It clears on a NEW head sha or an explicit operator override.
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
-        const refused =
-          prior.riskRefused.has(riskRefusedKey) &&
-          !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha, pr.prUrl) !== undefined);
+        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr);
         // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
         // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push while
         // held changes nothing. No dedup key is seeded, so the pass re-derives whole the moment an
@@ -12930,9 +13015,29 @@ export async function runSweep(
         const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
         if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
+        const mergeActionable = deps.actionable?.("mergeable") ?? true;
+        // W1-T5911: the operator's own arm or enqueue of the held head is its override; a hold outranks it.
+        let handArmStands: string | undefined;
+        if (refused && !armedByGitHub && deps.readArmTimeline && !deps.dryRun && mergeActionable) {
+          const seen = hold !== undefined ? { stands: "an operator merge hold stands over this PR" }
+            : await handArmAfterEscalation(deps, ledgerLines, pr);
+          if ("by" in seen) {
+            const issueUrl = prior.riskRefused.get(riskRefusedKey);
+            try {
+              appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RISK_OVERRIDE_OBSERVED_STEP,
+                pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, by: seen.by, reason: seen.reason,
+                ...(issueUrl ? { issue_url: issueUrl } : {}) });
+              refused = false;
+            } catch (e) {
+              // Refused still: a release the ledger cannot hold would not survive the next pass.
+              handArmStands = `override row not written: ${String((e as Error)?.message ?? e)}`;
+            }
+          } else {
+            handArmStands = seen.stands;
+          }
+        }
         // W1-T5909: a queued PR reads `auto_merge: null` too, so the queue is asked before the
         // memory is believed. The memory dedups only when that read is unwired or unreadable.
-        const mergeActionable = deps.actionable?.("mergeable") ?? true;
         queueMembership = !armedByGitHub && !refused && hold === undefined && mergeActionable
           ? await observedQueueMembership(deps, pr) : undefined;
         const queued = queueMembership === "queued";
@@ -12994,9 +13099,10 @@ export async function runSweep(
           // pointer exists one row away, and this only moves it to the row a reader reaches first.
           // Never widens the override — naming the escape is not taking it.
           const issueUrl = prior.riskRefused.get(riskRefusedKey);
-          dedupStandDownReason = issueUrl
+          dedupStandDownReason = (issueUrl
             ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
-            : "risk judge escalated this head, no operator override recorded";
+            : "risk judge escalated this head, no operator override recorded") +
+            (handArmStands === undefined ? "" : `; no hand arm taken: ${handArmStands}`);
         } else if (hold !== undefined) {
           dedupStandDownReason = "an operator merge hold stands over this PR — refusing to arm until it is released";
         }
@@ -13249,8 +13355,7 @@ export async function runSweep(
               }
               if (failedArm && facts) {
                 const freshLines = readLedger(deps.ledgerPath);
-                const refused = priorActionsFromLedger(freshLines).riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
-                  !(pr.taskId && cappedOverrideFromLedger(freshLines, pr.taskId, pr.headSha, pr.prUrl));
+                const refused = riskRefusalStands(freshLines, priorActionsFromLedger(freshLines).riskRefused, pr);
                 const stack = deps.stackPrerequisite?.(pr);
                 const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
                 if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||
@@ -13955,10 +14060,7 @@ export async function runSweep(
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
-                detachSweepAction(
-                  fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
-                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
-                );
+                detachFixDispatch(pr, fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -14038,10 +14140,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachSweepAction(
-                  conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)),
-                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
-                );
+                detachFixDispatch(pr, conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));

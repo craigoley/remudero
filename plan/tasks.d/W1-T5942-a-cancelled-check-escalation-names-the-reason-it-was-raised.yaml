@@ -1,0 +1,29 @@
+- id: W1-T5942
+  title: "A CANCELLED-CHECK ESCALATION NAMES THE REASON IT WAS RAISED — escalateCancelledCheck's summary always reads 'cancelled twice on the same head', but since W1-T5920 it also fires at CHECK_REQUEUE_DEFERRAL_BACKSTOP after repeated 403 deferrals, so the issue title tells the operator the wrong story"
+  repo: remudero
+  depends_on: [W1-T5920]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low  # one concern — escalation title text
+  band_meaning: span
+  origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
+  plan_refs: [W1-T5920, W1-T1223]
+  files: [src/lib/sweep.ts, test/a-cancelled-check-escalation-names-the-reason-it-was-raised.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5920 (#9438): at the deferral BACKSTOP the escalation goes
+    through escalateCancelledCheck, whose summary says the check was "cancelled twice on the same head".
+    The true reason (GitHub refused the job rerun N times while its run was in flight) is only in the
+    detail, so the issue list misleads.
+  design: |
+    escalateCancelledCheck takes the reason kind (cancelled-twice | requeue-deferral-backstop) and puts it
+    in the summary; the detail is unchanged.
+  acceptance:
+    - claim: "a cancelled-check escalation raised at the requeue-deferral backstop says so in its summary, and one raised for a second cancellation keeps today's summary"
+      proof: "unit test: test/a-cancelled-check-escalation-names-the-reason-it-was-raised.test.ts"
+  falsifier: |
+    Keep the fixed summary: the deferral-backstop escalation reads "cancelled twice" and the test fails.
