@@ -60,14 +60,15 @@ test("W1-T3092: survey and armed share ONE predicate — the survey returns past
   // Driven through the REAL reaper, not a double: a survey that reached different probes would
   // report a disposition nobody will ever act on.
   const repoDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pred-`));
-  const held = { listWorktrees: () => ["/w/live"], listInflightLocks: () => [], openFileCount: () => 0, looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1 };
+  // 2026-10-06 operator ruling: only an open handle under .git still refuses, so that is the held arm.
+  const held = { listWorktrees: () => [], listInflightLocks: () => [], openFileCount: () => 2, looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1 };
   const dry = reapGitObjects(repoDir, "/i", { ...held, dryRun: true, countPrunable: () => 5 });
   const armed = reapGitObjects(repoDir, "/i", { ...held, runPrune: () => assert.fail("refused") });
   assert.equal(dry.refusedBecause, armed.refusedBecause, "both refuse identically, for the same stated cause");
   assert.equal(dry.wouldPrune, undefined, "a REFUSED survey reports no estimate — it never got that far");
 
   // ...and when quiet, the survey counts and the armed path prunes, from the same starting point.
-  const quiet = { ...held, listWorktrees: () => [] };
+  const quiet = { ...held, openFileCount: () => 0 };
   const dry2 = reapGitObjects(repoDir, "/i", { ...quiet, dryRun: true, countPrunable: () => 5 });
   assert.equal(dry2.refusedBecause, undefined);
   assert.equal(dry2.wouldPrune, 5);
