@@ -28935,12 +28935,7 @@ export async function readRetroMergedCommitsAsync(
  */
 export async function retroTriggerCheckAsync(
   now: Date = new Date(),
-  deps: {
-    config?: Config;
-    github?: ShippedGithub;
-    policy?: Policy;
-    readMergedCommits?: () => Promise<GitLogCommit[]>;
-  } = {},
+  deps: NonNullable<Parameters<typeof retroTriggerCheck>[1]> & { readMergedCommits?: () => Promise<GitLogCommit[]> } = {},
 ): Promise<RetroTriggerDecision | undefined> {
   const github = deps.github ?? retroShippedGithubGateway();
   let read: MergedCommitsRead;
