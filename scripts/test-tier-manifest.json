@@ -46,6 +46,7 @@
     "test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts": 690,
     "test/a-changed-resource-policy-reaches-a-running-container.test.ts": 360,
     "test/a-changed-serve-policy-reaches-the-running-console.test.ts": 1400,
+    "test/a-cheap-view-never-waits-behind-an-expensive-one.test.ts": 5000,
     "test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts": 400,
     "test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts": 287,
     "test/a-chronic-evidence-gap-is-still-a-gap.test.ts": 1200,
