@@ -12,6 +12,9 @@
   plan_refs: [W1-T4590, W1-T5689, W1-T5521, W1-T5965, W1-T5964]
   files: [src/lib/pr-open.ts, src/run-task.ts, test/a-pr-opens-proof-run-never-blocks-the-daemon-loop.test.ts]
   status: queued
+  note: |
+    reservation hand-off: file-research-batch-1791299753634 -> file-6034-1791301749469
+    W1-T6034's commit reached its first branch after PR 9603 merged, so it is filed from this branch.
   priority: 1
   attempts: 0
   rationale: |
