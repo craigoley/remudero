@@ -4,10 +4,11 @@
  * refreshed plan PR needs ~15 min of checks and review and main moves faster, so batch 9 (#9138)
  * and batch 10 (#9155) were re-headed again and again on 2026-10-04 and never merged.
  *
- * The hazard is a merged plan that does not load. Two cases cannot produce one: (a) DISJOINT — the
- * PR's plan paths share none with the plan paths main changed since its merge base; (b) MERGED
- * TREE LOADS — `git merge-tree` of the PR head into main's tip is clean and the plan read from
- * that tree's blobs quarantines nothing. Neither, or an unreadable input: refresh, up to
+ * The hazard is a merged plan that does not load. Only one case rules it out: the MERGED TREE LOADS
+ * — `git merge-tree` of the PR head into main's tip is clean and the plan read from that tree's
+ * blobs quarantines nothing. W1-T5780: path DISJOINTNESS is not that (two shards may declare one
+ * new id, or a depends_on may name a task main removed), so it is evidence, never a basis.
+ * Anything else, or an unreadable input: refresh, up to
  * {@link PLAN_PR_REFRESH_BOUND} times, then escalate to the operator.
  */
 import { execFile, spawnSync } from "node:child_process";
@@ -49,12 +50,13 @@ export type MergedTreePlan =
 export interface PlanMergeSafetyReadings {
   prPlanPaths?: string[];
   mainPlanPaths?: string[];
-  /** Read only when the path lists do not already prove the PR disjoint. */
+  /** Read for EVERY behind plan PR (W1-T5780): disjoint paths are evidence, never a merge basis. */
   mergedTree?: MergedTreePlan;
   error?: string;
 }
 
-export type PlanMergeSafeBasis = "disjoint" | "merged_tree";
+/** W1-T5780: the only basis is a merged tree that loads; path disjointness is evidence beside it. */
+export type PlanMergeSafeBasis = "merged_tree";
 
 export interface PlanPrRefreshes {
   count: number;
@@ -62,7 +64,7 @@ export interface PlanPrRefreshes {
 }
 
 export type PlanPrMergeSafetyDecision =
-  | { action: "merge"; basis: PlanMergeSafeBasis }
+  | { action: "merge"; basis: PlanMergeSafeBasis; disjoint: boolean }
   | { action: "refresh"; why: string }
   | { action: "escalate"; why: string; refreshes: number; heads: string[] };
 
@@ -72,8 +74,12 @@ export function decidePlanPrMergeSafety(input: {
   bound?: number;
 }): PlanPrMergeSafetyDecision {
   const r = input.readings;
-  if (r?.prPlanPaths && r.mainPlanPaths && plansDisjoint(r.prPlanPaths, r.mainPlanPaths)) return { action: "merge", basis: "disjoint" };
-  if (r?.mergedTree?.state === "loads") return { action: "merge", basis: "merged_tree" };
+  // Disjoint PATHS do not make a disjoint PLAN: two shards can declare one new id, or a depends_on can
+  // name a task main removed, with no path in common. Only the merged plan loading is a basis.
+  if (r?.mergedTree?.state === "loads") {
+    const disjoint = !!r.prPlanPaths && !!r.mainPlanPaths && plansDisjoint(r.prPlanPaths, r.mainPlanPaths);
+    return { action: "merge", basis: "merged_tree", disjoint };
+  }
   const why = unsafeReason(r);
   if (input.refreshes.count >= (input.bound ?? PLAN_PR_REFRESH_BOUND)) {
     return { action: "escalate", why, refreshes: input.refreshes.count, heads: input.refreshes.heads };
@@ -91,7 +97,7 @@ function unsafeReason(r: PlanMergeSafetyReadings | undefined): string {
   if (tree?.state === "unreadable") return `the merged tree was unreadable: ${tree.error}`;
   if (!r.prPlanPaths) return "the PR's plan paths were unreadable";
   if (!r.mainPlanPaths) return "main's plan changes since the merge base were unreadable";
-  return "the plan paths overlap and the merged tree was not read";
+  return "the merged tree was not read";
 }
 
 export function plansDisjoint(prPaths: readonly string[], mainPaths: readonly string[]): boolean {
@@ -145,7 +151,7 @@ export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
 /**
  * The readings for one PR: its row (base ref, head), `compare/<base>...<head>` (the PR's plan
  * paths, its merge base and main's tip), then `compare/<merge base>...<main tip>` (main's plan
- * paths since). Only when those do not prove it disjoint does git merge the two.
+ * paths since). Git then merges the two for EVERY PR: the path lists are evidence only (W1-T5780).
  */
 export function* readPlanMergeSafetySteps(
   target: { owner: string; repo: string; prNumber: number },
@@ -171,7 +177,6 @@ export function* readPlanMergeSafetySteps(
     const mainCompare = yield* step(() => rest(["api", `${api}/compare/${mergeBase}...${mainTip}`]));
     const mainPlanPaths = comparePlanPaths(mainCompare, plan.planDir);
     const readings = { ...(prPlanPaths ? { prPlanPaths } : {}), ...(mainPlanPaths ? { mainPlanPaths } : {}) };
-    if (prPlanPaths && mainPlanPaths && plansDisjoint(prPlanPaths, mainPlanPaths)) return readings;
     const mergedTree = yield* mergedTreePlanSteps(git, plan, { sha: mainTip, ref: base }, { sha: head, ref: `refs/pull/${target.prNumber}/head` });
     return { ...readings, mergedTree };
   } catch (e) {
