@@ -514,9 +514,26 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
   const merges = new Map<string, string>();
   for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE, "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
     const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map((v) => v.trim()).filter(Boolean)) {
-      // `git log` is newest first, so the last write is the earliest merge naming the task.
-      if (at) merges.set(id, at);
+    for (const id of (ids ?? "").split(",").map((value) => value.trim()).filter(Boolean)) if (at) merges.set(id, at);
+  }
+  // Source registration needs a delivery on main's first-parent history. A feature commit's
+  // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
+  const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
+  let commit: { at: string; revision: string; changed: string[] } | undefined;
+  for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE,
+    "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)%x09%H", "--name-only", "--first-parent", "--diff-merges=first-parent", "--max-count=4096"]).split("\n")) {
+    const [at, ids, revision] = line.split("\t");
+    if (ids === undefined || !at || !Number.isFinite(Date.parse(at))) {
+      if (commit && /^(src|scripts)\//.test(line)) commit.changed.push(line);
+      continue;
+    }
+    commit = revision && /^[0-9a-f]{40}$/.test(revision) ? { at, revision, changed: [] } : undefined;
+    for (const id of ids.split(",").map((v) => v.trim()).filter(Boolean)) {
+      if (commit) {
+        let group = builds.get(id);
+        if (group === undefined) { group = []; builds.set(id, group); }
+        group.push(commit);
+      }
     }
   }
   const tasks: CiFrictionRemedyTask[] = [];
@@ -541,6 +558,28 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     const flips = pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...fallbackPaths]), "oldest");
     for (const task of tasks) {
       if (task.status === "merged" && !task.mergedAt && task.path) task.mergedAt = flips.get(task.path);
+    }
+  }
+  let sourceReads = 0;
+  for (const task of tasks) {
+    const owner = task.files.find((file) => /^(?:src|scripts)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|js|sh)$/.test(file)
+      && !file.endsWith(".test.ts") && !file.split("/").some((part) => part === "." || part === ".."));
+    const build = owner ? [...(builds.get(task.id) ?? [])].reverse().find((entry) => entry.changed.includes(owner)) : undefined;
+    if (!owner || !build) {
+      task.preventionSource = { state: "unavailable", reason: "no-credited-owning-source-build" };
+    } else if (sourceReads >= 32) {
+      task.preventionSource = { state: "unavailable", reason: "source-registration-read-cap" };
+    } else {
+      sourceReads += 1;
+      try {
+        const blob = git(["rev-parse", `${build.revision}:${owner}`]).trim();
+        task.preventionSource = /^[0-9a-f]{40}$/.test(blob)
+          ? { id: task.origin, taskId: task.id, causeKey: parseCiFrictionOrigin(task.origin)!.key,
+            path: owner, blob, mergeRevision: build.revision, mergedAt: build.at, workScope: "fix-worker-attempt" }
+          : { state: "unavailable", reason: "owning-source-blob-invalid" };
+      } catch {
+        task.preventionSource = { state: "unavailable", reason: "owning-source-blob-unreadable" };
+      }
     }
   }
   return tasks;
@@ -741,6 +780,7 @@ export interface CiFrictionCauseLine {
 
 export interface CiFrictionInventory {
   priced: CiFrictionCausePrice[];
+  preventionSources?: { registrations: import("./prevention-source-evidence.js").PreventionSourceRegistration[]; unavailable: number };
   /** The cause this pass would act on, if any. */
   next?: { price: CiFrictionCausePrice; origin: string; rung: number; decision: CiFrictionGardenAction["decision"] };
   /** Where each of the costliest causes stands. */
@@ -922,7 +962,9 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ownerSearch: sources.ownerSearch,
         nowMs: clock.now(),
       });
-      return { priced, rounds, ladder, ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+      const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
+      const preventionSources = { registrations, unavailable: plan.tasks.length - registrations.length };
+      return { priced, rounds, ladder, preventionSources, ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
     },
     // The ladder decides whether work remains — never a recorded fingerprint alone, which a pass that
     // drew no action or failed to land could have left behind.
@@ -932,6 +974,9 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     scorecard: (inv) => {
       appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
       return {
+        prevention_sources: inv.preventionSources?.registrations ?? [],
+        prevention_source_unavailable: inv.preventionSources?.unavailable ?? null,
+        prevention_source_scope: "owning-file-build-not-runtime-or-efficacy",
         causes: inv.priced.length,
         total_minutes: Math.round(inv.priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10,
         // The receipt key: the cause and, above rung 1, its rung — `landedCiFrictionOrigins` reads it back.

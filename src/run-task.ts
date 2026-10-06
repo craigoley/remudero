@@ -1022,12 +1022,15 @@ import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-tr
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
-const workerBoundaryStack: BenchmarkStackEvidence = {
+import { captureImportedModule } from "./lib/prevention-source-evidence.js";
+const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./lib/prevention-source-evidence.js").ImportedModuleEvidence } = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
+workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
@@ -10211,15 +10214,20 @@ export function fixWorkerReceipt(
   log: (step: string, extra?: Record<string, unknown>) => void,
   workerRunId: string,
   work: BenchmarkWorkInput = {},
+  repair?: RepairReceiptContext,
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  joinFields: () => Record<string, unknown>;
   ledgerFields: (result: WorkerResult) => Record<string, unknown>;
 } {
   let assignment: WorkerSelectionAssignment | undefined;
   let receiptFailure: string | undefined;
+  const repairFields = repairReceiptFields(repair);
+  const joinFields = () => ({ ...repairFields, worker_run_id: workerRunId,
+    ...(assignment ? { selection_assignment_id: assignment.id } : {}) });
   const receipt = benchmarkRunLedgerLogger((step, fields) => {
     try {
-      log(step, { ...fields, worker_run_id: workerRunId, worker_rung: "fix" });
+      log(step, { ...fields, ...repairFields, worker_run_id: workerRunId, worker_rung: "fix" });
     } catch (error) {
       receiptFailure ??= `${step}-ledger-write-failed`;
       throw error;
@@ -10251,13 +10259,14 @@ export function fixWorkerReceipt(
     const assignmentId = result.selectionAssignmentId ?? assignment?.id;
     return {
       ...fields,
+      ...repairFields,
       worker_run_id: workerRunId,
       ...(assignmentId ? { selection_assignment_id: assignmentId } : { selection_assignment_unavailable_reason: "assignment-not-observed" }),
       ...(assignment ? { requested_model: assignment.requested.model, selected_model: assignment.selected.model } : {}),
       ...(receiptFailure ? { benchmark_receipt_unavailable_reason: receiptFailure } : {}),
     };
   };
-  return { spawn: receipted, ledgerFields };
+  return { spawn: receipted, ledgerFields, joinFields };
 }
 
 /**
@@ -11959,7 +11968,9 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+        const prerequisiteWorkerId = fixWorkerRunId(opts.runId, "prerequisite", systemClock.now());
+        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, prerequisiteWorkerId, fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+          { prUrl: opts.prUrl, roundId: prerequisiteWorkerId });
         const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
@@ -12340,7 +12351,8 @@ export async function runFixRung(opts: {
     }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
-    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+      { prUrl: opts.prUrl, roundId });
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
@@ -12481,7 +12493,8 @@ export async function runFixRung(opts: {
     if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+        { prUrl: opts.prUrl, roundId });
       const asked = await spawnFixWorkerBounded(
         { ...deps, spawn: askReceipt.spawn },
         {
@@ -12613,6 +12626,7 @@ export async function runFixRung(opts: {
       if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
+        ...fixReceipt.joinFields(),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
