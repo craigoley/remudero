@@ -2884,7 +2884,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -3959,16 +3959,95 @@ export function syncPlanFromOrigin(
   // merged view) to the bytes directly, so the returned Plan is deep-equal to what the temp-file
   // round trip produced; only the LABEL in an error message changes, from a temp path nobody
   // could look up to the `origin/main:<path>` the bytes actually came from.
-  const shards = readOriginShardsAtRef(repoDir, dirname(relPath));
+  return syncedPlanFromBlobs(relPath, blob, readOriginShardsAtRef(repoDir, dirname(relPath)), staleDispatch, opts.quarantine);
+}
+
+/** The merge both plan syncs end in: the monolith and its shards, labelled by the origin/main path they came from. */
+function syncedPlanFromBlobs(
+  relPath: string,
+  blob: string,
+  shards: Array<{ relPath: string; text: string }>,
+  staleDispatch: boolean,
+  quarantine: ((quarantined: QuarantinedTask[]) => void) | undefined,
+): SyncedPlan {
   const blobs = [
     { label: `origin/main:${relPath}`, text: blob },
     ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
   ];
-  if (!opts.quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
+  if (!quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
   // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
   const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
-  opts.quarantine(quarantined);
+  quarantine(quarantined);
   return { plan, staleDispatch };
+}
+
+/** BACKSTOP, per git call of the awaited plan sync (fetch, show, ls-tree, cat-file). MEASURED 2026-10-06: the
+ *  sync shard read held the daemon loop 3.4 s; a call still running at five minutes is hung, not slow. */
+export const PLAN_SYNC_GIT_TIMEOUT_MS = 300_000;
+
+/** An awaited plan-sync git call killed at its bound. Never read as "no shards": the sync refuses, naming it. */
+export class PlanSyncGitTimeoutError extends RmdError {
+  constructor(args: readonly string[], timeoutMs: number) {
+    super("git", GENERIC_EXIT_CODE, `git ${args[0]} timed out after ${timeoutMs}ms and was killed`, { verb: args[0], timeoutMs });
+    this.name = "PlanSyncGitTimeoutError";
+  }
+}
+
+/** {@link GitRunner}, awaited. */
+export type GitRunnerAsync = (args: string[], stdin?: string) => Promise<string>;
+
+/** The real {@link GitRunnerAsync}: `git -C <repoDir>` off the loop, `stdin` piped, SIGTERM then SIGKILL past its
+ *  bound, which rejects with {@link PlanSyncGitTimeoutError}; any other failure rejects with git's own error. */
+export function planSyncGitRunnerAsync(
+  repoDir: string,
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
+): GitRunnerAsync {
+  const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+        clearTimeout(timer);
+        if (timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
+        return err ? reject(err) : resolve(stdout);
+      });
+      // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
+}
+
+/**
+ * {@link syncPlanFromOrigin} through awaited, bounded git, for the daemon's dispatch lanes: the same fetch, the same
+ * `origin/main` blob, the same shard read and merge. A call killed at its bound refuses as a {@link GitFetchError}
+ * naming the timeout (`allowStale` still proceeds past a fetch that failed that way, as it does past any other).
+ */
+export async function syncPlanFromOriginAsync(
+  repoDir: string,
+  relPath: string,
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync } = {},
+): Promise<SyncedPlan> {
+  const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
+  let staleDispatch = false;
+  try {
+    await runGit(["fetch", "--quiet", "origin"]);
+  } catch (err) {
+    if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
+    staleDispatch = true;
+  }
+  let blob: string;
+  try {
+    blob = await runGit(["show", `origin/main:${relPath}`]);
+  } catch (err) {
+    throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
+  }
+  const shards = await readOriginShardsAtRefAsync(repoDir, dirname(relPath), runGit);
+  return syncedPlanFromBlobs(relPath, blob, shards, staleDispatch, opts.quarantine);
 }
 
 /** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
@@ -4004,20 +4083,67 @@ export function readOriginShardsAtRef(
   const shardRelDir = join(planRelDir, "tasks.d");
   let shardListing: string;
   try {
-    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+    shardListing = runGit(shardListingArgs(ref, shardRelDir));
   } catch {
     shardListing = "";
   }
-  const shardRelPaths = shardListing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+  const shardRelPaths = shardPathsFromListing(shardListing);
   if (shardRelPaths.length === 0) return [];
   let texts: string[];
   try {
     texts = readBlobsAtRef(runGit, ref, shardRelPaths);
   } catch (err) {
-    throw new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+    throw shardReadFailure(ref, shardRelDir, repoDir, err);
+  }
+  return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
+}
+
+function shardListingArgs(ref: string, shardRelDir: string): string[] {
+  return ["ls-tree", "--name-only", ref, `${shardRelDir}/`];
+}
+
+function shardPathsFromListing(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+}
+
+function shardReadFailure(ref: string, shardRelDir: string, repoDir: string, err: unknown): GitFetchError {
+  return new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+}
+
+/**
+ * {@link readOriginShardsAtRef} through an awaited runner: the same listing, the same one `cat-file --batch` and
+ * framing (`readBlobsAtRef` parses the bytes the awaited call returned). ONE DIFFERENCE, on purpose: a listing
+ * killed at its bound throws {@link GitFetchError} naming it, where the sync read's catch would call it no shards
+ * and silently drop every shard task from the dispatched plan.
+ */
+export async function readOriginShardsAtRefAsync(
+  repoDir: string,
+  planRelDir: string,
+  runGit: GitRunnerAsync = planSyncGitRunnerAsync(repoDir),
+  ref = "origin/main",
+): Promise<Array<{ relPath: string; text: string }>> {
+  const shardRelDir = join(planRelDir, "tasks.d");
+  let shardListing: string;
+  try {
+    shardListing = await runGit(shardListingArgs(ref, shardRelDir));
+  } catch (err) {
+    if (err instanceof PlanSyncGitTimeoutError) throw new GitFetchError(`git ls-tree ${ref}:${shardRelDir}/ failed in ${repoDir}: ${err.message}`);
+    // No tasks.d/ at the ref (or a ref-dir lookup miss) is the no-shards case, exactly as the sync read reads it.
+    shardListing = "";
+  }
+  const shardRelPaths = shardPathsFromListing(shardListing);
+  if (shardRelPaths.length === 0) return [];
+  let texts: string[];
+  try {
+    const request = shardRelPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+    const raw = await runGit(["cat-file", "--batch"], request);
+    // readBlobsAtRef builds this same request; any drift hands it no bytes, and it fails loud naming the first path.
+    texts = readBlobsAtRef((_args, stdin) => (stdin === request ? raw : ""), ref, shardRelPaths);
+  } catch (err) {
+    throw shardReadFailure(ref, shardRelDir, repoDir, err);
   }
   return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
 }
@@ -4091,28 +4217,58 @@ export function syncPlanOrRefuse(
     const synced = opts.planSnapshot
       ? opts.planSnapshot({ allowStale: opts.allowStale })
       : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine });
-    if (synced.staleDispatch) {
-      opts.log("git.stale_dispatch", { stale_dispatch: true });
-      opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
-    }
-    return synced;
+    return announceStaleDispatch(synced, opts);
   } catch (e) {
-    if (e instanceof GitFetchError) {
-      opts.log("git_fetch_failed", { reason: e.message, allow_stale: opts.allowStale });
-      const hint = opts.allowStale ? "" : " (pass --allow-stale to proceed on the last-fetched refs)";
-      opts.say(`REFUSED: ${e.message}${hint}`);
-      return { error: e.message };
-    }
-    throw e;
+    if (!(e instanceof GitFetchError)) throw e;
+    return refusePlanSync(e, opts);
   }
 }
 
-/** The daemon's per-lane plan sync: {@link syncPlanFromOrigin} with its quarantine, so a bad shard or duplicate id that
- *  boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
-export function quarantiningPlanSync(
+/** {@link syncPlanOrRefuse} for runTask, awaited: no `planSnapshot` ⇒ {@link syncPlanFromOriginAsync}; a supplied one
+ *  may answer sync or awaited. The same announcement, the same refusal, the same rethrow of anything else. */
+export async function syncPlanOrRefuseAsync(
+  planPath: string,
+  opts: Omit<Parameters<typeof syncPlanOrRefuse>[1], "planSnapshot"> & {
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+  },
+): Promise<SyncedPlan | { error: string }> {
+  const repoDir = dirname(dirname(planPath));
+  const relPath = relative(repoDir, planPath);
+  try {
+    const synced = await (opts.planSnapshot
+      ? opts.planSnapshot({ allowStale: opts.allowStale })
+      : syncPlanFromOriginAsync(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine }));
+    return announceStaleDispatch(synced, opts);
+  } catch (e) {
+    if (!(e instanceof GitFetchError)) throw e;
+    return refusePlanSync(e, opts);
+  }
+}
+
+type PlanSyncReporting = Pick<Parameters<typeof syncPlanOrRefuse>[1], "allowStale" | "log" | "say">;
+
+function announceStaleDispatch(synced: SyncedPlan, opts: PlanSyncReporting): SyncedPlan {
+  if (synced.staleDispatch) {
+    opts.log("git.stale_dispatch", { stale_dispatch: true });
+    opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
+  }
+  return synced;
+}
+
+/** A {@link GitFetchError} becomes the named refusal (anything else is the caller's to rethrow). */
+function refusePlanSync(e: GitFetchError, opts: PlanSyncReporting): { error: string } {
+  opts.log("git_fetch_failed", { reason: e.message, allow_stale: opts.allowStale });
+  const hint = opts.allowStale ? "" : " (pass --allow-stale to proceed on the last-fetched refs)";
+  opts.say(`REFUSED: ${e.message}${hint}`);
+  return { error: e.message };
+}
+
+/** The daemon's per-lane plan sync: {@link syncPlanFromOriginAsync} with its quarantine, so a bad shard or duplicate id
+ *  that boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
+export function quarantiningPlanSyncAsync(
   quarantine: (quarantined: QuarantinedTask[]) => void,
-): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan {
-  return (repoDir, relPath, opts) => syncPlanFromOrigin(repoDir, relPath, { ...opts, quarantine });
+): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan> {
+  return (repoDir, relPath, opts) => syncPlanFromOriginAsync(repoDir, relPath, { ...opts, quarantine });
 }
 
 /**
@@ -4145,23 +4301,26 @@ export function quarantiningPlanSync(
  * every lane identically, and a shared `staleDispatch` still prints the WARNING for every lane,
  * exactly as if each had fetched for itself.
  */
-export function createPlanSyncCoalescer(
+export function createPlanSyncCoalescer<R extends SyncedPlan | Promise<SyncedPlan> = SyncedPlan>(
   planPath: string,
-  /** Injectable {@link syncPlanFromOrigin} — a test wraps the real function with a call
-   *  counter to prove the coalescing (real git, real parse, just observed); production never
-   *  overrides this. */
-  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan = syncPlanFromOrigin,
+  /** Injectable {@link syncPlanFromOrigin}. The daemon passes {@link quarantiningPlanSyncAsync}: every lane of a tick
+   *  then shares ONE awaited sync's promise, created by the first lane in the same synchronous `.map()`. */
+  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => R = syncPlanFromOrigin as (
+    repoDir: string,
+    relPath: string,
+    opts: { allowStale?: boolean },
+  ) => R,
 ): {
-  sync: (opts: { allowStale?: boolean }) => SyncedPlan;
+  sync: (opts: { allowStale?: boolean }) => R;
 } {
   const repoDir = dirname(dirname(planPath));
   const relPath = relative(repoDir, planPath);
-  let pending: { key: string; result?: SyncedPlan; error?: unknown } | undefined;
+  let pending: { key: string; result?: R; error?: unknown } | undefined;
   return {
     sync(opts) {
       const key = opts.allowStale ? "stale" : "strict";
       if (!pending || pending.key !== key) {
-        const slot: { key: string; result?: SyncedPlan; error?: unknown } = { key };
+        const slot: { key: string; result?: R; error?: unknown } = { key };
         try {
           slot.result = syncFn(repoDir, relPath, { allowStale: opts.allowStale });
         } catch (e) {
@@ -4180,7 +4339,7 @@ export function createPlanSyncCoalescer(
         });
       }
       if (pending.error !== undefined) throw pending.error;
-      return pending.result as SyncedPlan;
+      return pending.result as R;
     },
   };
 }
@@ -16075,7 +16234,7 @@ async function runTask(
      * caller (`rmd run-task`, `rmd wipe-test`, every existing test) — `runTask` fetches and
      * loads for itself exactly as it always has.
      */
-    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -16368,7 +16527,7 @@ async function runTask(
   if (opts.skipGitSync) {
     plan = loadPlan(planPath);
   } else {
-    const synced = syncPlanOrRefuse(planPath, {
+    const synced = await syncPlanOrRefuseAsync(planPath, {
       allowStale: opts.allowStale ?? false,
       log,
       say,
@@ -36726,7 +36885,7 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSync(reportPlanQuarantine));
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSyncAsync(reportPlanQuarantine));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
