@@ -21337,7 +21337,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
     () =>
-      withMaterialized(worktreePath, subjectRepoDir, () =>
+      withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(runId, () =>
         runReviewDep({
           owner,
           repo,
@@ -21381,7 +21381,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           ledgerPath,
           runId,
           openTaskIds,
-        }),
+        })),
       ),
   );
 
@@ -36132,6 +36132,34 @@ export function buildDaemonReadRefresher(options: {
   };
 }
 
+/** W1-T5998 — run ids of workers this process spawned and has not reaped. A review takes no
+ *  inflight lock, so only this registry tells the orphan sweep its worker is still running. */
+const liveWorkerRunIds = new Set<string>();
+
+/** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
+export async function whileWorkerRunLive<T>(runId: string, spawn: () => Promise<T>): Promise<T> {
+  liveWorkerRunIds.add(runId);
+  try {
+    return await spawn();
+  } finally {
+    liveWorkerRunIds.delete(runId);
+  }
+}
+
+/** W1-T5998 — the orphan sweep's `isRunActive`: this daemon's own run id (its fix workers carry
+ *  it), a run it spawned and has not reaped, or a live lock's run id or its prefix before
+ *  `:fix-claim:`. A previous daemon's id matches none of these, so its strays are still killed. */
+export function orphanSweepRunActive(
+  ownRunId: string,
+  inflightDir: string,
+  isPidAlive?: (pid: number) => boolean,
+): (runId: string) => boolean {
+  return (runId) =>
+    runId === ownRunId ||
+    liveWorkerRunIds.has(runId) ||
+    liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -36691,10 +36719,8 @@ export async function daemonCommand(
   // (design part i/ii) — ONE shared closure wired into BOTH daemonBoot's boot-time param
   // (below) and DaemonDeps.sweepOrphans (the per-poll half, at the deps literal further
   // down), so both halves run the identical attribution/kill/ledger logic rather than two
-  // independently drifting copies. `isRunActive` reads the SAME inflight-lock directory
-  // (state/inflight/*.lock) the drain/daemon dispatch path itself takes before running a
-  // task (see `liveInflightRuns`'s own doc) — a run still holding that lock is never a
-  // stray, no matter how long its process has been alive. Each kill's own
+  // independently drifting copies. `isRunActive` is `orphanSweepRunActive` (W1-T5998): a lock
+  // alone missed this daemon's lockless reviews and its fix workers. Each kill's own
   // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
   // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
   const inflightDir = join(config.root, "state", "inflight");
@@ -36704,7 +36730,7 @@ export async function daemonCommand(
       expectedScope: orphanWorkerScope,
       listCandidates: defaultListCandidates,
       readMarkers: defaultReadMarkers,
-      isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
+      isRunActive: orphanSweepRunActive(runId, inflightDir),
       kill: (pid) => killProcessGroup(pid),
       ledger: orphanWorkerKillLedger(ledgerPath),
     });
