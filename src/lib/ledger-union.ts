@@ -6,7 +6,13 @@ import { StringDecoder } from "node:string_decoder";
 import { readFile as nodeReadFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
-import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
+import {
+  LEDGER_CARRIED_PREFIX_SUFFIX,
+  LEDGER_FILENAME,
+  LEDGER_RETAINED_STEPS_SUFFIX,
+  LEDGER_ROTATION_LOCK_SUFFIX,
+  LEDGER_STAGE_TAGS,
+} from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 
 const gunzipAsync = promisify(nodeGunzip);
@@ -133,6 +139,17 @@ function sanitizeRegExp(pattern: string): string {
   return pattern;
 }
 
+const LEDGER_STAGE_SUFFIX = new RegExp(`\\.(?:${LEDGER_STAGE_TAGS.join("|")})-\\d+-[0-9a-f-]{36}$`);
+
+// A rotation's own transient files: its lock, and `<ledger file>.<known tag>-<pid>-<uuid>` stages.
+function isRotationOwnFile(name: string): boolean {
+  if (name === `${LEDGER_FILENAME}${LEDGER_ROTATION_LOCK_SUFFIX}`) return true;
+  const m = LEDGER_STAGE_SUFFIX.exec(name);
+  if (!m) return false;
+  const base = name.slice(0, m.index);
+  return base === LEDGER_FILENAME || rotationStampIso(base) !== undefined;
+}
+
 function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "readdirSync">): { rotations: LedgerCorpusEntry[]; unclassified: string[] } {
   let names: string[];
   try {
@@ -146,6 +163,7 @@ function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "rea
   const unclassified = names
     .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
     .filter((n) => n !== `${LEDGER_FILENAME}${LEDGER_CARRIED_PREFIX_SUFFIX}` && n !== `${LEDGER_FILENAME}${LEDGER_RETAINED_STEPS_SUFFIX}`)
+    .filter((n) => !isRotationOwnFile(n))
     .map((n) => join(stateDir, n))
     .filter((p) => !rotationPaths.has(p));
   return { rotations, unclassified };
