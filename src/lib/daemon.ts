@@ -3080,10 +3080,8 @@ export async function runDaemon(
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
-    // A freshness restart is the process-lifetime boundary the detached-action registry was built for.
-    // The final pass above may have admitted a fix and detached only its long CI wait; returning before
-    // that settles lets the entrypoint replace this process and kill a useful worker. The caller stops
-    // its interphase clock before the final pass, so nothing races in behind it (W1-T2865).
+    // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
+    // The caller stops its interphase clock before the final pass (W1-T2865).
     const detachedAtFreshness = detachedSweepActionCount();
     // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
     const reviewsAtFreshness = inFlightReviewCount();
@@ -3104,7 +3102,14 @@ export async function runDaemon(
       let reviewPasses = 0;
       try {
         [abandoned, abandonedReviews] = await Promise.all([
-          drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs }),
+          drainDetachedSweepActions({
+            boundMs: sweepWallClockBoundMs,
+            freshness: true,
+            onRelease: (action) => log("daemon.detached_action_released", {
+              action_kind: action.actionKind, task_id: action.taskId,
+              age_ms: action.ageMs, phase: action.phase, reason: action.reason,
+            }),
+          }),
           drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
         ]);
       } finally {

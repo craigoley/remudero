@@ -2853,7 +2853,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
-    dispatchFix: async (pr, evidence) => {
+    dispatchFix: async (pr, evidence, onPhase) => {
       let worktreePath = "";
       let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
@@ -3501,9 +3501,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
             ),
             waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
-              const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
-              if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
-              return ci;
+              onPhase?.("ci-wait");
+              try {
+                const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
+                if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
+                return ci;
+              } finally {
+                onPhase?.("worker");
+              }
             },
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
@@ -10363,6 +10368,7 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
+    onPhase?: (phase: DetachedFixPhase) => void,
   ) => boolean | void | FixClaimDeclined | Promise<boolean | void | FixClaimDeclined>;
   /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
@@ -11865,9 +11871,11 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
+export type DetachedFixPhase = "worker" | "ci-wait";
 
 interface DetachedSweepActionRegistration {
   actionKind: DetachedActionKind; taskId: string; startedAtMs: number;
+  phase: DetachedFixPhase | "best-effort";
 }
 
 export interface DetachedSweepActionDescriptor {
@@ -11875,51 +11883,87 @@ export interface DetachedSweepActionDescriptor {
 }
 
 const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistration>();
+const detachedPhaseListeners = new Set<() => void>();
 
 /** W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
  *  The stored promise is already settled-safe — its rejection is caught here — so a drain can never
  *  itself reject. */
 export function detachSweepAction(
-  work: Promise<unknown>,
-  action: Omit<DetachedSweepActionRegistration, "startedAtMs">,
-): void {
-  const held: Promise<void> = work.then(
+  work: Promise<unknown> | ((onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>),
+  action: Omit<DetachedSweepActionRegistration, "startedAtMs" | "phase"> & { phase?: DetachedFixPhase },
+): (phase: DetachedFixPhase) => void {
+  const registration: DetachedSweepActionRegistration = {
+    ...action, startedAtMs: Date.now(),
+    phase: action.actionKind === "fix-dispatch" ? action.phase ?? "worker" : "best-effort",
+  };
+  const onPhase = (phase: DetachedFixPhase) => {
+    registration.phase = phase;
+    for (const listener of detachedPhaseListeners) listener();
+  };
+  const started = typeof work === "function" ? work(onPhase) : work;
+  const held: Promise<void> = started.then(
     () => undefined,
     () => undefined,
   );
-  detachedSweepActions.set(held, { ...action, startedAtMs: Date.now() });
+  detachedSweepActions.set(held, registration);
   void held.finally(() => detachedSweepActions.delete(held));
+  return onPhase;
 }
 
 /** W1-T2379 — LET WORK ALREADY IN FLIGHT FINISH RATHER THAN ABORTING IT. Awaits every detached
  *  action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
  *  a phase-local ticker's stop. W1-T2913: a bounded drain reports stragglers. */
 export async function drainDetachedSweepActions(
-  opts: { boundMs: number } = { boundMs: Number.POSITIVE_INFINITY },
+  opts: {
+    boundMs: number;
+    freshness?: boolean;
+    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }) => void;
+  } = { boundMs: Number.POSITIVE_INFINITY },
 ): Promise<DetachedSweepActionDescriptor[]> {
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
+  const released = new Set<Promise<void>>();
+  const waitingActions = () => [...detachedSweepActions].filter(([work, action]) => {
+    if (!opts.freshness || action.phase === "worker") return true;
+    if (!released.has(work)) {
+      released.add(work);
+      opts.onRelease?.({
+        actionKind: action.actionKind, taskId: action.taskId,
+        ageMs: Math.max(0, Date.now() - action.startedAtMs), phase: action.phase,
+        reason: action.phase === "best-effort"
+          ? "best-effort cadence is redone after restart"
+          : "pushed fix CI wait is re-derived after restart",
+      });
+    }
+    return false;
+  });
+  let wake: (() => void) | undefined;
+  const phaseChanged = () => wake?.();
+  detachedPhaseListeners.add(phaseChanged);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = Number.isFinite(detachedDrainBoundMs)
     ? new Promise<"bounded">((resolve) => { timer = setTimeout(() => resolve("bounded"), detachedDrainBoundMs); })
     : undefined;
   try {
-    while (detachedSweepActions.size > 0) {
-      const settled = Promise.all([...detachedSweepActions.keys()]).then(() => "settled" as const);
+    while (true) {
+      const changed = new Promise<"changed">((resolve) => { wake = () => resolve("changed"); });
+      const waiting = waitingActions();
+      if (waiting.length === 0) return [];
+      const settled = Promise.all(waiting.map(([work]) => work)).then(() => "settled" as const);
       if (!bound) {
-        await settled;
+        await Promise.race([settled, changed]);
         continue;
       }
-      if (await Promise.race([settled, bound]) === "bounded") {
+      if (await Promise.race([settled, changed, bound]) === "bounded") {
         const observedAtMs = Date.now();
-        return [...detachedSweepActions.values()].map((action) => ({
+        return waitingActions().map(([, action]) => ({
           actionKind: action.actionKind,
           taskId: action.taskId,
           ageMs: Math.max(0, observedAtMs - action.startedAtMs),
         }));
       }
     }
-    return [];
   } finally {
+    detachedPhaseListeners.delete(phaseChanged);
     if (timer) clearTimeout(timer);
   }
 }
@@ -12950,9 +12994,9 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>, dedupeKey?: string): void {
+  function detachFixDispatch(pr: OpenPrView, work: (onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>, dedupeKey?: string): void {
     detachSweepAction(
-      work.catch((e: unknown) => appendLine(deps.ledgerPath, {
+      (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
         step: "sweep.fix.dispatch_failed",
@@ -13932,7 +13976,7 @@ export async function runSweep(
                 extraDisposedFields = { code_scanning_fix_dispatched: true };
                 const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
                 if (deps.detachFixWait) {
-                  detachSweepAction(fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)), {
+                  detachSweepAction((onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)), {
                     actionKind: "fix-dispatch",
                     taskId: pr.taskId ?? `PR-${pr.prNumber}`,
                   });
@@ -14143,7 +14187,7 @@ export async function runSweep(
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), dedupeKey);
+                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence, onPhase)), dedupeKey);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));
@@ -14705,7 +14749,7 @@ export async function runSweep(
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
+                detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)));
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -14785,7 +14829,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
+                detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase)));
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
