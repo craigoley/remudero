@@ -8,8 +8,12 @@ import { join } from "node:path";
 import * as sweepModule from "../src/lib/sweep.js";
 import * as restModule from "../src/lib/open-prs-rest.js";
 import * as riskModule from "../src/lib/risk-judge.js";
+import * as runTaskModule from "../src/run-task.js";
 import type { CodeScanningJudgment, OpenPrView, SweepDeps } from "../src/lib/sweep.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T5633 — GitHub's `CodeQL` results check failed on #9034 ("1 new alert including 1 high") and the PR
@@ -320,4 +324,177 @@ test("the failing codeql check is read deduped by its latest attempt, and only h
     return [row()];
   });
   assert.deepEqual([...hydrated.keys()], [1], "a failed read leaves that head unobserved, never judged");
+});
+
+test("an escalated unfixable head whose next view carries no alert observation is held, not armed", async () => {
+  // The hydration skips a settled head (its fix-dispatch row, here the escalated one), so the next pass
+  // sees this head with no alert observation at all; it must hold on that row, never arm unobserved.
+  const elsewhere = { headRefName: "someone-elses-branch", taskId: undefined };
+  const h = harness(async () => ({ ruling: "fix", reason: "real" }));
+  try {
+    await sweepModule.runSweep([pr(elsewhere)], h.deps);
+    assert.equal(h.escalated.length, 1);
+    await sweepModule.runSweep([pr({ ...elsewhere, codeqlHeadAlerts: undefined })], h.deps);
+    assert.deepEqual(h.armed, [], "a head with a code-scanning fix-dispatch row is never armed unobserved");
+    assert.deepEqual(h.judged, [N], "no second judgment is started");
+    assert.equal(h.escalated.length, 1, "no second escalation");
+    const disposed = rows(h, "sweep.disposed").at(-1);
+    assert.match(String(disposed?.stand_down_reason), /code-scanning fix was already dispatched for this head/);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("a fix ruling the fleet cannot admit now holds the head without dispatching, and a detached fix wait still dispatches", async () => {
+  const refusals: Array<[string, Partial<SweepDeps>, RegExp]> = [
+    ["fleet hold", { workerAdmissionHold: () => "fleet paused by the operator" }, /fleet paused by the operator/],
+    ["admission refused", { claimFixAdmission: () => ({ admitted: false, reason: "no repair slot free this pass" }) }, /no repair slot free/],
+  ];
+  for (const [label, over, reason] of refusals) {
+    const h = harness(async () => ({ ruling: "fix", reason: "real" }), over);
+    try {
+      await sweepModule.runSweep([pr()], h.deps);
+      assert.equal(h.fixes.length, 0, `${label}: no fix is dispatched`);
+      assert.deepEqual(h.armed, [], `${label}: the head is not armed`);
+      assert.equal(rows(h, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).length, 0, `${label}: no dispatch row is written`);
+      assert.match(String(rows(h, "sweep.disposed").at(-1)?.stand_down_reason), reason);
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+
+  // A concurrent sweep (its own ledger) already dispatching this task@head's fix: the claim refuses.
+  let release: (() => void) | undefined;
+  const first = harness(async () => ({ ruling: "fix", reason: "real" }), {
+    dispatchFix: () => new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+  });
+  const second = harness(async () => ({ ruling: "fix", reason: "real" }));
+  try {
+    const inFlight = sweepModule.runSweep([pr()], first.deps);
+    for (let i = 0; i < 50 && release === undefined; i++) await settleTurns();
+    assert.ok(release !== undefined, "the first sweep is inside its fix dispatch");
+    await sweepModule.runSweep([pr()], second.deps);
+    assert.equal(second.fixes.length, 0, "the concurrent sweep dispatches no duplicate fix");
+    assert.match(String(rows(second, "sweep.disposed").at(-1)?.stand_down_reason), /duplicate fix-dispatch key/);
+    release!();
+    await inFlight;
+  } finally {
+    rmSync(first.dir, { recursive: true, force: true });
+    rmSync(second.dir, { recursive: true, force: true });
+  }
+
+  const detached = harness(async () => ({ ruling: "fix", reason: "real" }), { detachFixWait: true });
+  try {
+    await sweepModule.runSweep([pr()], detached.deps);
+    await sweepModule.drainDetachedSweepActions();
+    assert.equal(detached.fixes.length, 1, "a detached fix wait still dispatches the fix lane");
+    assert.equal(rows(detached, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).length, 1);
+    assert.deepEqual(detached.armed, []);
+  } finally {
+    rmSync(detached.dir, { recursive: true, force: true });
+  }
+});
+
+test("a head is settled for hydration only by its own false-positive or fix-dispatch row", () => {
+  const settled = sweepModule.codeScanningHeadSettled;
+  const fp = { step: sweepModule.CODE_SCANNING_FALSE_POSITIVE_STEP, pr_number: N, head_sha: HEAD };
+  const dispatched = { step: sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP, pr_number: N, head_sha: HEAD };
+  assert.equal(settled([fp], N, HEAD), true, "a false-positive ruling settles the head");
+  assert.equal(settled([dispatched], N, HEAD), true, "a fix dispatch settles the head");
+  assert.equal(settled([{ ...fp, head_sha: "newer" }], N, HEAD), false, "another head's ruling does not");
+  assert.equal(settled([{ ...dispatched, pr_number: N + 1 }], N, HEAD), false, "another PR's dispatch does not");
+  assert.equal(settled([{ step: sweepModule.CODE_SCANNING_FIX_STEP, pr_number: N, head_sha: HEAD }], N, HEAD), false, "a fix ruling alone is not settled");
+  assert.equal(settled([], N, HEAD), false);
+});
+
+test("the code-scanning prompt states the deterministic security finding when credential-shaped text was scrubbed", () => {
+  const prompt = riskModule.buildRiskJudgePrompt({
+    change: { description: "fix the thing" },
+    gatesState: {},
+    planContext: {},
+    codeScanning: { alerts: [{ ...ALERT, hunk: "@@ -1 +1 @@\n+fetch(u, { headers: { Authorization: 'Bearer abcdefghijklmnopqrstuvwxyz012345' } })" }] },
+  });
+  assert.match(prompt, /DETERMINISTIC SECURITY FINDING: credential-shaped material was removed/);
+  assert.doesNotMatch(prompt, /abcdefghijklmnopqrstuvwxyz012345/, "the credential itself never reaches the judge");
+  const clean = riskModule.buildRiskJudgePrompt({
+    change: { description: "fix the thing" },
+    gatesState: {},
+    planContext: {},
+    codeScanning: { alerts: [{ ...ALERT }] },
+  });
+  assert.doesNotMatch(clean, /DETERMINISTIC SECURITY FINDING/);
+});
+
+test("the daemon's code-scanning judge reads the PR's diff hunks, drives the real judge spawn, and maps its verdict", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5633-daemon-`));
+  try {
+    const task = { id: `W1-T${N}`, title: "the codeql judge", type: "implement", files: ["src/lib/gate-gardener.ts"] } as unknown as Task;
+    const plan: Plan = { tasks: [task], byId: new Map([[task.id, task]]) };
+    const config = { claudeBin: "/bin/true", root, installRoot: process.cwd() } as unknown as Parameters<typeof runTaskModule.codeScanningJudgeDeps>[2];
+    const reads: string[][] = [];
+    const prompts: string[] = [];
+    const logged: Array<Record<string, unknown>> = [];
+    const deps = runTaskModule.codeScanningJudgeDeps(
+      "craigoley",
+      "remudero",
+      config,
+      plan,
+      "SWEEP-5633",
+      (step, extra) => logged.push({ step, ...extra }),
+      async (args) => {
+        prompts.push(String(args.prompt));
+        return { text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: the replaced input is a constant", costUsd: 0, numTurns: 1 } as unknown as WorkerResult;
+      },
+      async (args) => {
+        reads.push(args);
+        return [
+          { filename: ALERT.path, patch: "@@ -40,1 +40,1 @@\n+const safe = KNOWN.replace('x', 'y');" },
+          { filename: "src/other.ts" },
+          { patch: "@@ orphan" },
+        ];
+      },
+    );
+    const judgment = await deps.judgeCodeScanningAlerts!(pr(), [ALERT, { ...ALERT, alertNumber: 312, path: "src/unpatched.ts" }]);
+    assert.equal(judgment.ruling, "false_positive", "a confident low verdict is a false positive");
+    assert.deepEqual(reads, [["api", `repos/craigoley/remudero/pulls/${N}/files?per_page=100`]], "the PR's file patches are read once");
+    assert.equal(prompts.length, 1, "one real judge spawn");
+    assert.match(prompts[0], /CODE-SCANNING JUDGE/);
+    assert.match(prompts[0], /KNOWN\.replace\('x', 'y'\)/, "the alert's own file hunk is shown");
+    assert.match(prompts[0], /no diff hunk could be read/, "an alert in an unpatched file says so");
+    assert.match(prompts[0], /the codeql judge/, "the task title describes the change");
+    assert.ok(logged.some((r) => r.code_scanning_pr === N && r.code_scanning_head === HEAD), "judge rows name the PR and head");
+
+    const unparseable = runTaskModule.codeScanningJudgeDeps(
+      "craigoley", "remudero", config, { tasks: [], byId: new Map() }, "SWEEP-5633", () => {},
+      async () => ({ text: "RISK_VERDICT: high\nRISK_CONFIDENCE: 0.9\nRISK_REASON: real", costUsd: 0, numTurns: 1 }) as unknown as WorkerResult,
+      async () => {
+        throw new Error("an unparseable PR URL must not be read");
+      },
+    );
+    const fix = await unparseable.judgeCodeScanningAlerts!(pr({ prUrl: "not a pr url", taskId: undefined }), [ALERT]);
+    assert.equal(fix.ruling, "fix", "a high verdict is a fix, with no file read for an unresolvable URL");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the daemon's code-scanning ruling is posted as a PR comment through gh", () => {
+  const shim = ghShim([], { kind: "w1-t5633-comment" });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  try {
+    const deps = runTaskModule.codeScanningJudgeDeps(
+      "craigoley", "remudero", { claudeBin: "/bin/true", root: shim.dir, installRoot: process.cwd() } as unknown as Parameters<typeof runTaskModule.codeScanningJudgeDeps>[2],
+      { tasks: [], byId: new Map() }, "SWEEP-5633", () => {},
+    );
+    deps.postCodeScanningRuling!(pr(), "CodeQL alert #311 ruled a false positive");
+    const calls = shim.calls();
+    assert.equal(calls.length, 1, "one gh invocation");
+    assert.match(calls[0], new RegExp(`pr comment https://github.com/craigoley/remudero/pull/${N} --repo craigoley/remudero --body CodeQL alert #311 ruled a false positive`));
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
 });
