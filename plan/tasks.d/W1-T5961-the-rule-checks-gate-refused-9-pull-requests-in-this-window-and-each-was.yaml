@@ -1,0 +1,19 @@
+- id: W1-T5961
+  title: "THE rule-checks GATE REFUSED 9 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:9276:rule-checks"
+  ci_learning_prs: [9276, 9301, 9337, 9358, 9362, 9369, 9380, 9382, 9388]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the rule-checks gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:9276:rule-checks in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:9276:rule-checks. The rule-checks gate went red on #9276 and was repaired; the repair touched test/census-precheck-runs-the-admitted-census-suites.test.ts, doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md, plan/tasks.d/W1-T5050-the-workstreams-view.yaml, plan/tasks.d/W1-T5071-the-analytics-run-detail-route.yaml, plan/tasks.d/W1-T5897-serves-main-thread-never-classifies-the-inbox.yaml, plan/tasks.d/W1-T5908-a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.yaml, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts, test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts, test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts, test/analytics-view.test.ts, test/author-preflight.test.ts, test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts, test/doctrine-and-root-markdown-are-docs.test.ts, test/human-gate-operator-items.test.ts, test/measurement-cadence.test.ts, test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts, test/the-reap-and-garden-reads-never-block-the-loop.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."

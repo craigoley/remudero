@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
@@ -56,7 +56,8 @@ import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js"
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
+import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike } from "./ledger.js";
 import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
@@ -2855,7 +2856,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
-      let branchClaim: InflightLockHandle | undefined;
+      let branchClaim: FixRoundBranchClaim | undefined;
+      const roundEnded = (claimRunId: string): boolean => fixRoundClaimEnded(ledgerPath, claimRunId);
       let recycleTaskId: string | undefined;
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
@@ -3059,6 +3061,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               observedRemoteSha: headRef.headRefOid,
               inflightDir,
               claimKey: fixBranchClaimKey(owner, repo, realBranch),
+              claimRoundEnded: roundEnded,
             });
           } catch (e) {
             return declineClaim({
@@ -3317,8 +3320,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // rounds for the same task share, not the task id alone. A round that loses the race
         // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
         // the sweep is level-triggered, so the next pass simply retries it.
+        const claimKey = fixBranchClaimKey(owner, repo, realBranch);
         try {
-          branchClaim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, realBranch), { run_id: runId });
+          const taken = acquireFixRoundClaim(inflightDir, claimKey, fixRoundClaimId(runId, pr.prNumber, nowMsImpl()), roundEnded);
+          if (taken.endedRunId) {
+            log("sweep.fix.ended_round_claim_reclaimed", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              holder_run_id: taken.endedRunId,
+            });
+          }
+          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it.
+          branchClaim = fixRoundBranchClaim(taken.handle, () => reclaimFixRoundBranch({
+            inflightDir,
+            claimKey,
+            claimRunId: fixRoundClaimId(runId, pr.prNumber, nowMsImpl()),
+            roundEnded,
+            ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
+          }));
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
@@ -3544,6 +3564,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runGeneratorScript: async (script: string, cwd: string) => runNpmScriptViaSpawn(script, cwd),
             commitGeneratorOutput: (o: Parameters<typeof commitGeneratorOutputViaGit>[0]) => commitGeneratorOutputViaGit(o),
             packageScripts: readPackageScriptsFor(worktreePath),
+            branchClaim,
           },
         });
         keepWorktree = rung?.superseded !== undefined;
@@ -3556,7 +3577,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // signal/cost structurally and decides `rethrow` off `dispatchStarted` ALONE, byte-for-byte
         // W1-T1127's existing rule — the signal itself never enters that decision.
         const outcome = dispatchFixCatchOutcome(e, dispatchStarted);
-        log("sweep.fix.error", { pr_number: pr.prNumber, ...outcome.ledgerFields });
+        log("sweep.fix.error", { pr_number: pr.prNumber, ...(branchClaim ? { branch_claim_run_id: branchClaim.last().info.run_id } : {}), ...outcome.ledgerFields });
         // W1-T1127: still ledgered above (nothing is repaired by going quiet) — but a failure
         // that struck BEFORE the worker ran must propagate, not return cleanly, so `runSweep`'s
         // own `catch` (sweep.ts) records `acted: false` instead of seeding the dedup gate against
@@ -3578,7 +3599,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // never strands the claim past this round's own dispatch.
         try {
           if (branchClaim && recycleTaskId) log("inflight.recycle_yield", {
-            lock_key: basename(branchClaim.path, ".lock"), task_id: recycleTaskId, run_id: branchClaim.info.run_id, waiting_on: "ci",
+            lock_key: basename(branchClaim.last().path, ".lock"), task_id: recycleTaskId, run_id: runId, waiting_on: "ci",
           });
         } finally {
           branchClaim?.release();
@@ -4351,6 +4372,33 @@ export function classifyCiTimeoutNoVerdict(
   return { notReady, hung };
 }
 
+/** W1-T5934: where a timeout's not-ready list came from. The annotation usually lacks it (the list
+ *  is in the job log), so the fresh rollup fills it; an unreadable or unread rollup is named, never "none". */
+export type CiTimeoutNotReadySource = "annotation" | "rollup" | "rollup-unreadable" | "rollup-unread";
+
+/** Checks whose latest attempt still waits for a runner. */
+const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
+
+export function ciTimeoutNotReadyChecks(
+  annotated: readonly string[],
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
+): { names: string[]; source: CiTimeoutNotReadySource } {
+  if (annotated.length > 0) return { names: [...annotated], source: "annotation" };
+  if (typeof rollup === "string") return { names: [], source: `rollup-${rollup}` };
+  const names = dedupeRollupByLatestAttempt(rollup)
+    .filter((c) => c.context !== REVIEW_CONTEXT && c.name !== REVIEW_CONTEXT && c.name !== CI_GATE_CHECK_NAME)
+    .filter((c) => CI_TIMEOUT_NOT_STARTED.has((c.state ?? c.status ?? "").toUpperCase()))
+    .map((c) => c.name ?? c.context ?? "unknown");
+  return { names, source: "rollup" };
+}
+
+const CI_TIMEOUT_SOURCE_TEXT: Record<CiTimeoutNotReadySource, string> = {
+  annotation: "the gate's annotation",
+  rollup: "queued on the fresh rollup",
+  "rollup-unreadable": "the gate's annotation lists none and the fresh rollup was unreadable",
+  "rollup-unread": "the gate's annotation lists none and this pass reads no fresh rollup",
+};
+
 /** W1-T5954: the `why` a pass without update-branch wrote before it deferred instead. */
 const CI_TIMEOUT_UNWIRED_WHY = "update-branch is not wired";
 
@@ -4399,13 +4447,18 @@ async function applyCiTimeoutRefresh(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView,
   timeout: CiTimeoutNoVerdict,
+  rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
-  const named = (timeout.notReady.length > 0 ? timeout.notReady : timeout.hung).join(", ") || "(unnamed in the gate's annotation)";
-  const head = `ci-gate timed out on never-started check(s) ${named}`;
+  const notReady = ciTimeoutNotReadyChecks(timeout.notReady, rollup);
+  const named = (notReady.names.length > 0 ? notReady.names : timeout.hung).join(", ") || "(unnamed)";
+  const sourceText = notReady.source === "rollup" && notReady.names.length === 0
+    ? "the gate's annotation lists none and the fresh rollup shows none queued"
+    : CI_TIMEOUT_SOURCE_TEXT[notReady.source];
+  const head = `ci-gate timed out on never-started check(s) ${named} [not-ready list: ${sourceText}]`;
   const row = {
     run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
-    head_sha: pr.headSha, not_ready_checks: timeout.notReady, hung_checks: timeout.hung,
+    head_sha: pr.headSha, not_ready_checks: notReady.names, not_ready_source: notReady.source, hung_checks: timeout.hung,
   };
   const escalate = async (why: string): Promise<string> => {
     const reason = `${head}; no new head is possible: ${why}`;
@@ -5951,22 +6004,24 @@ const rollupRunId = (c: RollupCheckEntry): number | undefined =>
   c.workflowRunId ?? (Number(c.detailsUrl?.match(/\/actions\/runs\/(\d+)\//)?.[1]) || undefined);
 
 /** W1-T5920 — the fresh rollup's CURRENT job id for `name`, and whether another job of its run is
- *  still in flight. No run identity proves nothing in flight. */
-export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } {
-  const entry = dedupeRollupByLatestAttempt(rollup ?? []).find((c) => (c.name ?? c.context) === name);
+ *  still in flight. No run identity proves nothing in flight; no rollup proves nothing (W1-T5953). */
+export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } | undefined {
+  if (!rollup) return undefined;
+  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === name);
   if (!entry) return { runInFlight: false };
   const run = rollupRunId(entry);
   return {
     jobId: entry.jobId ?? checkJobId(entry),
-    runInFlight: run !== undefined && (rollup ?? []).some((c) => rollupRunId(c) === run && (c.status ?? "COMPLETED") !== "COMPLETED"),
+    runInFlight: run !== undefined && rollup.some((c) => rollupRunId(c) === run && (c.status ?? "COMPLETED") !== "COMPLETED"),
   };
 }
 
 type CheckJobRequeue = { kind: JobRequeueOutcome["kind"] | "held"; note?: string; escalate?: string };
 
-/** W1-T5920 — one job requeue for runSweep. A previously deferred one waits for its run, re-resolves
- *  the current attempt's job, and at the BACKSTOP escalates once instead. The bounding row is
- *  written BEFORE the POST (W1-T1223); a deferral row after it voids it. */
+/** W1-T5920 — one job requeue for runSweep. A previously deferred one waits for its run (a pass
+ *  blind to it holds, W1-T5953), re-resolves the current attempt's job, and at the BACKSTOP
+ *  escalates once instead. The bounding row is written BEFORE the POST (W1-T1223); a deferral row
+ *  after it voids it. */
 async function requeueCheckJob(
   deps: SweepDeps,
   pr: OpenPrView,
@@ -5988,6 +6043,7 @@ async function requeueCheckJob(
       return { kind: "held", note: `${name} requeue deferred ${deferral.count} times — escalated`, escalate };
     }
     const target = deferredRequeueTarget(rollup, check.name);
+    if (!target) return { kind: "held", note: `${name} deferred requeue held: this pass cannot see its run` };
     if (target.runInFlight) return { kind: "held", note: `${name} deferred requeue waits: its run is still in flight` };
     check = { ...check, jobId: target.jobId ?? check.jobId };
   }
@@ -9509,6 +9565,90 @@ export function fixDispatchBudget(priorStrikes: number, ceiling: number): number
   return remaining > 0 ? remaining : null;
 }
 
+/** W1-T5955 — a fix round's own claim id. The daemon's pid and run id outlive every round, so a
+ *  claim stamped only with them read live long after its round ended (#9450). */
+export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number): string {
+  return `${runId}:fix-claim:${prNumber}:${nowMs}`;
+}
+
+/** W1-T5955 — true once the round holding `claimRunId` wrote its `fix.done`. A rotated row reads false;
+ *  a thrown round needs no row, its `finally` releases the claim. */
+export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
+  return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+}
+
+/** W1-T5955 — take a branch claim, first clearing one whose round already ended. */
+export function acquireFixRoundClaim(
+  inflightDir: string,
+  claimKey: string,
+  claimRunId: string,
+  roundEnded: (claimRunId: string) => boolean,
+): { handle: InflightLockHandle; endedRunId?: string } {
+  let endedRunId: string | undefined;
+  const cleared = reclaimStaleLock(inflightLockPath(inflightDir, claimKey), {
+    parseHolder: parseInflightLockInfo,
+    isStale: (held) => {
+      if (roundEnded(held.run_id)) endedRunId = held.run_id;
+      return endedRunId !== undefined;
+    },
+  });
+  const handle = acquireInflightLock(inflightDir, claimKey, { run_id: claimRunId });
+  return cleared.outcome === "reclaimed" ? { handle, endedRunId } : { handle };
+}
+
+/** W1-T5955 — re-take a round's claim before its worktree is reused. A later round must reclaim
+ *  this round's worktree to check the branch out, so a lost worktree means the branch moved on. */
+export function reclaimFixRoundBranch(opts: {
+  inflightDir: string;
+  claimKey: string;
+  claimRunId: string;
+  roundEnded: (claimRunId: string) => boolean;
+  ownsWorktree: () => boolean;
+}): InflightLockHandle | string {
+  let owns: boolean;
+  try {
+    owns = opts.ownsWorktree();
+  } catch (e) {
+    return `this round's worktree is unreadable: ${String((e as Error)?.message ?? e)}`;
+  }
+  if (!owns) return "a later round reclaimed this round's worktree";
+  try {
+    return acquireFixRoundClaim(opts.inflightDir, opts.claimKey, opts.claimRunId, opts.roundEnded).handle;
+  } catch (e) {
+    if (e instanceof InflightLockError) return `branch claim held by ${e.holder.run_id}`;
+    throw e;
+  }
+}
+
+/** W1-T5955 — a round's hold on its branch claim: released at `fix.done`, re-taken before reuse. */
+export interface FixRoundBranchClaim {
+  id(): string | undefined;
+  release(): void;
+  /** `undefined` once held; a string is the stand-down reason. */
+  reacquire(): string | undefined;
+  last(): InflightLockHandle;
+}
+
+export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
+  let held: InflightLockHandle | undefined = first;
+  let last = first;
+  return {
+    id: () => held?.info.run_id,
+    release: () => {
+      held?.release();
+      held = undefined;
+    },
+    reacquire: () => {
+      if (held) return undefined;
+      const next = retake();
+      if (typeof next === "string") return next;
+      held = last = next;
+      return undefined;
+    },
+    last: () => last,
+  };
+}
+
 /** The last line in `lines` matching `pred` — append-only files read oldest-first, so the
  *  last match is the NEWEST record. Shared by both halves of {@link operatorVerdictEvidence}. */
 function lastMatching<T extends Record<string, unknown>>(lines: ReadonlyArray<T>, pred: (l: T) => boolean): T | undefined {
@@ -9985,6 +10125,17 @@ function isOwnerClaimDecline(line: Record<string, unknown>): boolean {
 /** W1-T5932 — a detached `dispatchFix` that rejected; it voids the dedup as a decline does. */
 function isDetachedFixDispatchFailure(line: Record<string, unknown>): boolean {
   return line.step === "sweep.fix.dispatch_failed" && typeof line.pr_number === "number" && typeof line.head_sha === "string";
+}
+
+/** W1-T5951 — a CodeQL repair is dispatched unless its latest key row is followed by a dispatch failure for that key. */
+function codeqlBlockerDispatched(lines: ReadonlyArray<Record<string, unknown>>, key: string): boolean {
+  let dispatched = false;
+  for (const line of lines) {
+    if (line.dedupe_key !== key) continue;
+    if (line.step === CODEQL_BLOCKER_DISPATCH_STEP) dispatched = true;
+    else if (isDetachedFixDispatchFailure(line)) dispatched = false;
+  }
+  return dispatched;
 }
 
 /** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
@@ -11641,8 +11792,8 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
  *  is: the ticker awaits the light pass, which awaits every open PR, and `dispatchFix` waits on CI.
  *  NOT FIRE-AND-FORGET, WHICH IS THE WHOLE DIFFICULTY: the dispatch is STARTED and its `acted: true`
- *  row WRITTEN synchronously inside the pass, because that row seeds the dedup. A DETACHED REJECTION
- *  IS SWALLOWED ON PURPOSE. */
+ *  row WRITTEN synchronously inside the pass, because that row seeds the dedup. A fix dispatch's
+ *  rejection is ledgered by `detachFixDispatch` (W1-T5932, W1-T5951); any other is swallowed. */
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
@@ -12731,7 +12882,7 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>): void {
+  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>, dedupeKey?: string): void {
     detachSweepAction(
       work.catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -12739,6 +12890,7 @@ export async function runSweep(
         step: "sweep.fix.dispatch_failed",
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
+        dedupe_key: dedupeKey,
         error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
       })),
       { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
@@ -13453,7 +13605,7 @@ export async function runSweep(
         const codeqlDedupAlert = disposition === "blocked-fixable" ? repairableCodeqlBlocker(pr) : undefined;
         if (codeqlDedupAlert) {
           const key = codeqlBlockerDedupeKey(pr, codeqlDedupAlert);
-          alreadyDone = ledgerLines.some((line) => line.step === CODEQL_BLOCKER_DISPATCH_STEP && line.dedupe_key === key);
+          alreadyDone = codeqlBlockerDispatched(ledgerLines, key);
           if (alreadyDone) {
             dedupStandDownReason = `CodeQL blocker repair already dispatched for ${key} — an unchanged PR, head and alert start no second worker`;
           }
@@ -13875,6 +14027,13 @@ export async function runSweep(
                   standDownReason = hold;
                   break;
                 }
+                const codeqlFailureHold = await holdRepeatedFixDispatchFailure(pr, ledgerLines, deps.escalate);
+                if (codeqlFailureHold) {
+                  extraDisposedFields = { ...extraDisposedFields, ...codeqlFailureHold.fields };
+                  acted = false;
+                  standDownReason = codeqlFailureHold.reason;
+                  break;
+                }
                 const codeqlClaim = claimFixDispatch(pr);
                 if (!codeqlClaim.ok) {
                   acted = false;
@@ -13905,10 +14064,7 @@ export async function runSweep(
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
                 if (deps.detachFixWait) {
-                  detachSweepAction(codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), {
-                    actionKind: "fix-dispatch",
-                    taskId: pr.taskId ?? `PR-${pr.prNumber}`,
-                  });
+                  detachFixDispatch(pr, codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence)), dedupeKey);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));
@@ -14125,7 +14281,8 @@ export async function runSweep(
                 ciFailuresForFix, stillRedRequiredNames(pr.redRequiredChecks ?? [], ciGateRollup), cancelledChecks.map((c) => c.name));
               if (timeout) {
                 acted = false;
-                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout);
+                standDownReason = await applyCiTimeoutRefresh(deps, ledgerLines, pr, timeout,
+                  deps.readCiGateRollup ? ciGateRollup ?? "unreadable" : "unread");
                 break;
               }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE

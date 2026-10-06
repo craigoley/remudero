@@ -1,0 +1,33 @@
+- id: W1-T5958
+  title: "EVERY STEP A LEDGER FOLD READS BACK SURVIVES ROTATION — W1-T5935's census found seven steps read by a *FromLedger fold that DECISION_RELEVANT_LEDGER_STEPS does not retain (listed in its shrink-only KNOWN_UNRETAINED_FOLD_READS), plus sweep.codeql_blocker.dispatch read inline for the CodeQL dedupe; a rotation that drops any of them silently resets the bound or history that fold enforces"
+  repo: remudero
+  depends_on: [W1-T5935]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: span — one registration list plus the census allowlist; one concern, retention of read-back steps
+  band_meaning: span
+  origin: "operator session 2026-10-06: found while building W1-T5955 and W1-T5935"
+  plan_refs: [W1-T5935, W1-T5949, W1-T5951, W1-T5534]
+  files: [src/lib/ledger.ts, test/a-spent-check-requeue-survives-ledger-rotation.test.ts, test/every-step-a-ledger-fold-reads-back-survives-rotation.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 by W1-T5935's new census (#9466): main.run_gap.dispatched (mainRunGapHistoryFromLedger),
+    refusal_amendment.drafted (noPrVerdictRowsFromLedger), sre.governor (governorTiersFromLedger),
+    sweep.ci_gate_reaggregated (reaggregatedCiGateKeysFromLedger, a once-per-head bound like the requeue),
+    sweep.plan_repair (planRepairHistoryFromLedger), plan_repair.dispatch (priorPlanRepairStrikesFromLedger,
+    a strike count) and sweep.missing_task_trailer_repaired (priorActionsFromLedger). W1-T5951 (#9461)
+    noted sweep.codeql_blocker.dispatch, read inline by the CodeQL dedupe, is unretained too.
+  design: |
+    Register all eight in DECISION_RELEVANT_LEDGER_STEPS (rewording comments in place; ledger.ts is at its
+    ceiling), empty KNOWN_UNRETAINED_FOLD_READS, and add a guard that each now survives a real rotation.
+    If any one is deliberately transient, keep it listed with a reason instead.
+  acceptance:
+    - claim: "each of the eight read-back steps survives a real ledger rotation and the shrink-only unretained allowlist is empty or names a reason for every entry"
+      proof: "unit test: test/every-step-a-ledger-fold-reads-back-survives-rotation.test.ts"
+  falsifier: |
+    Leave sweep.ci_gate_reaggregated unregistered: after a rotation its once-per-head key is gone and the
+    test fails.
