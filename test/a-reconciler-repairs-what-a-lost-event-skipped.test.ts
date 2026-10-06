@@ -544,7 +544,7 @@ test("W1-T4840: the default latch adapter names malformed dates and removal fail
     mkdirSync(failedHead);
     await reconcileFleetState(snapshot.rows, snapshot.history, (e) => events.push(e));
     assert.equal(events[0]?.step, "reconcile.repair_failed");
-    assert.match(String(events[0]?.reason), /EISDIR/);
+    assert.match(String(events[0]?.reason), process.platform === "darwin" ? /EPERM/ : /EISDIR/);
     assert.equal(existsSync(failure), true);
     rmSync(failedHead, { recursive: true });
     await reconcileFleetState(snapshot.rows, [], (e) => events.push(e));
