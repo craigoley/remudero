@@ -270,13 +270,18 @@ test("unit test: a same-millisecond tie split by a rotation gives the workstream
   assert.deepEqual(withoutProjectionTime(activity), withoutProjectionTime(route));
 });
 
-/** A gateway over merged PRs: A credited off its run branch, D's run-branch merge refused by an override, B named in prose. */
+/** A gateway over merged PRs: A credited off its run branch, D's run-branch merge refused by an override. */
 function creditedGateway(): ReturnType<NonNullable<Parameters<typeof createWorkstreamsView>[0]["github"]>> {
   const pr = (number: number, headRefName: string, title: string): BatchedPr => ({ number, url: `https://github.com/${REPO}/pull/${number}`, state: "MERGED", headRefName, title, body: `${title}\n` });
   const github = buildBatchedGithub("craigoley", "remudero", {
     ttlMs: Number.MAX_SAFE_INTEGER,
-    fetchAll: () => [pr(11, "run-A-1700000000000", "build A"), pr(12, "run-D-1700000000000", "build D"), pr(13, "feature-x", "mentions B in prose")],
+    fetchAll: () => [pr(11, "run-A-1700000000000", "build A"), pr(12, "run-D-1700000000000", "build D"), pr(13, "feature-x", "an unrelated change")],
+    fetchAllIssues: () => [],
     commitTrailerIndex: () => new Map(),
+    // A credit's plan-only check asks for a PR's changed files: this fixture's own refusal, not the shared stub's.
+    exec: () => {
+      throw new Error("offline: this fixture answers no GitHub read");
+    },
   });
   return { github, source: { asOf: iso(NOW), state: "fresh" } };
 }
