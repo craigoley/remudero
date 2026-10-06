@@ -1399,7 +1399,7 @@ export function runReadModelViewWorker(
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
-    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, clock, log });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
