@@ -819,13 +819,14 @@ export interface DirectMergePreflightEvidence {
   priorHeadSha?: string;
   behindBy?: number;
   mergeable?: string;
-  remedy: "direct-merge" | "update-branch" | "retry-later";
+  remedy: "direct-merge" | "update-branch" | "retry-later" | "mergeability-unknown" | "operator";
   error?: string;
   /** W1-T5472 — set only when the plan-touch read ran (a behind PR GitHub would merge as-is). */
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound";
+  mergeabilityUnknownElapsedMs?: number;
   /** W1-T5748 — why a behind plan PR was safe to merge as-is. */
   planMergeSafe?: PlanMergeSafeBasis;
   /** W1-T5748 — why it was not, when it was refreshed or escalated instead. */
@@ -914,7 +915,7 @@ export function armAutoMergeDetailed(
  * armAutoMergeAtOpen} share the EXACT same completion logic rather than duplicating it.
  */
 type DirectMergePreflightDeps = Pick<ArmDeps<true>, "say"> &
-  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety">>;
+  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync">>;
 
 type DirectMergePreflightDecision =
   | { proceed: true; evidence?: DirectMergePreflightEvidence }
@@ -1327,6 +1328,27 @@ function* mergeDirectAfterPreflightSteps(
   }
 }
 
+/** BACKSTOP: re-read only while GitHub has not computed plan-PR mergeability. */
+export const PLAN_PR_UNKNOWN_MAX_REREADS = 3;
+
+/** BACKSTOP: a head still unknown after ten minutes needs an operator, not another silent hold. */
+export const PLAN_PR_UNKNOWN_HOLD_BOUND_MS = 10 * 60_000;
+
+function planPrMergeabilityUnknown(facts: ArmMergeFacts): boolean {
+  return facts.mergeableState === "unknown" || facts.mergeable === "UNKNOWN";
+}
+
+function planPrUnknownElapsedMs(rows: Array<Record<string, unknown>>, prUrl: string, head: string, now: number): number {
+  let firstHeldAt = now;
+  for (const row of rows) {
+    if (row.step !== "automerge.plan_pr_held" || row.pr_url !== prUrl || row.prior_head_sha !== head ||
+        row.remedy !== "mergeability-unknown" || typeof row.ts !== "string") continue;
+    const at = Date.parse(row.ts);
+    if (Number.isFinite(at) && at <= now) firstHeldAt = Math.min(firstHeldAt, at);
+  }
+  return now - firstHeldAt;
+}
+
 /**
  * W1-T5615 — a plan-touching (or unreadable) PR, never armed. GitHub's `mergeable_state` reads
  * `clean` or `behind` only once the required checks pass: then the direct path merges a current
@@ -1346,12 +1368,17 @@ function* attemptPlanPrMergeSteps(
   } else {
     try {
       facts = deps.readMergeFacts(prUrl);
+      for (let retry = 0; retry < PLAN_PR_UNKNOWN_MAX_REREADS && planPrMergeabilityUnknown(facts); retry++) {
+        deps.sleepSync?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS);
+        facts = deps.readMergeFacts(prUrl);
+      }
     } catch (e) {
       // held, and the read failure rides on the result and the say line below.
       error = String((e as Error)?.message ?? e);
     }
   }
-  if (error === undefined && (facts.mergeableState === "clean" || facts.mergeableState === "behind")) {
+  const unknown = error === undefined && planPrMergeabilityUnknown(facts);
+  if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind")) {
     const fresh = facts;
     const preflight = yield* directMergePreflightSteps(
       prUrl,
@@ -1360,6 +1387,33 @@ function* attemptPlanPrMergeSteps(
     );
     if (!preflight.proceed) return preflight.result;
     return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
+  }
+  let head = priorHeadSha;
+  let elapsedMs = 0;
+  if (unknown) {
+    if (!head && deps.headSha) {
+      try {
+        head = deps.headSha(prUrl);
+      } catch (e) {
+        // The hold remains unknown, but cannot be aged without an attributable head.
+        error = String((e as Error)?.message ?? e);
+      }
+    }
+    if (head) elapsedMs = planPrUnknownElapsedMs(deps.ledgerLines?.() ?? [], prUrl, head, systemClock.now());
+    if (elapsedMs >= PLAN_PR_UNKNOWN_HOLD_BOUND_MS) {
+      deps.say(
+        `automerge.plan_pr_mergeability_unknown_escalated (W1-T5733): head=${head} elapsed_ms=${elapsedMs}` +
+          ` — mergeability remains unknown; left for the operator: ${prUrl}`,
+      );
+      return {
+        outcome: "direct-merge-preflight-refused",
+        directMergePreflight: {
+          priorHeadSha: head, mergeable: facts.mergeable, mergeableState: facts.mergeableState,
+          planTouch, remedy: "operator", reason: "plan_pr_mergeability_unknown_bound",
+          mergeabilityUnknownElapsedMs: elapsedMs,
+        },
+      };
+    }
   }
   deps.say(
     `automerge.plan_pr_held (W1-T5615): plan_touch=${planTouch} mergeable_state=${String(facts.mergeableState)}` +
@@ -1371,7 +1425,8 @@ function* attemptPlanPrMergeSteps(
       ...(facts.behindBy !== undefined ? { behindBy: facts.behindBy } : {}),
       ...(facts.mergeable !== undefined ? { mergeable: facts.mergeable } : {}),
       ...(facts.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
-      remedy: "retry-later",
+      remedy: unknown ? "mergeability-unknown" : "retry-later",
+      ...(unknown ? { priorHeadSha: head, mergeabilityUnknownElapsedMs: elapsedMs } : {}),
       planTouch,
       ...(error !== undefined ? { error } : {}),
     },
@@ -1579,6 +1634,7 @@ export function logArmAttribution(
         ...(directMergePreflight.error !== undefined ? { remedy_error: directMergePreflight.error } : {}),
         ...(directMergePreflight.planTouch !== undefined ? { plan_touch: directMergePreflight.planTouch } : {}),
         ...(directMergePreflight.mergeableState !== undefined ? { mergeable_state: directMergePreflight.mergeableState } : {}),
+        ...(directMergePreflight.mergeabilityUnknownElapsedMs !== undefined ? { mergeability_unknown_elapsed_ms: directMergePreflight.mergeabilityUnknownElapsedMs } : {}),
         ...(directMergePreflight.planMergeSafe !== undefined ? { plan_pr_merge_safe: directMergePreflight.planMergeSafe } : {}),
         ...(directMergePreflight.planMergeUnsafe !== undefined ? { plan_merge_unsafe: directMergePreflight.planMergeUnsafe } : {}),
         ...(directMergePreflight.refreshedHeads !== undefined ? { refreshed_heads: directMergePreflight.refreshedHeads } : {}),
@@ -1603,7 +1659,9 @@ export function logArmAttribution(
     });
   }
   const preflightStep =
-    outcome === "direct-merge-updated"
+    directMergePreflight?.reason === "plan_pr_mergeability_unknown_bound"
+      ? "automerge.plan_pr_mergeability_unknown_escalated"
+      : outcome === "direct-merge-updated"
       ? "automerge.direct_merge_updated"
       : outcome === "direct-merge-preflight-refused"
         ? "automerge.direct_merge_preflight_refused"
