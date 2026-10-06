@@ -27,7 +27,7 @@ const DAY_MS = 24 * 60 * MIN_MS;
 export const FLOW_REPORT_STEP = "flow.report";
 export const FLOW_REGRESSION_FILED_STEP = "flow.regression_filed";
 export const FLOW_REGRESSION_OPEN_STEP = "flow.regression_open";
-export const FLOW_FILING_BOUNDED_STEP = "flow.filing_bounded";
+export const FLOW_FILING_DEFERRED_STEP = "flow.filing_deferred";
 export const FLOW_FILING_FAILED_STEP = "flow.filing_failed";
 export const FLOW_INPUT_UNREADABLE_STEP = "flow.input_unreadable";
 export const FLOW_GARDENER_FAILED_STEP = "flow.gardener_failed";
@@ -452,7 +452,7 @@ async function fileRegressions(
       continue;
     }
     if (filings.filter((f) => f.day === at.day).length >= FLOW_FILINGS_PER_DAY_MAX) {
-      deps.log(FLOW_FILING_BOUNDED_STEP, { key: stat.key, bound: FLOW_FILINGS_PER_DAY_MAX });
+      deps.log(FLOW_FILING_DEFERRED_STEP, { key: stat.key, bound: FLOW_FILINGS_PER_DAY_MAX });
       continue;
     }
     try {

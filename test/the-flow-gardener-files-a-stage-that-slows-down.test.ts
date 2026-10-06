@@ -279,8 +279,8 @@ test("the per-day bound caps filings and names what it held back", async (t) => 
   assert.equal(h.steps("flow.report")[0]!.extra.regressions instanceof Array, true);
   assert.equal((h.steps("flow.report")[0]!.extra.regressions as string[]).length, 3);
   assert.equal(h.landed.length, 2);
-  assert.equal(h.steps("flow.filing_bounded").length, 1);
-  assert.equal(h.steps("flow.filing_bounded")[0]!.extra.bound, FLOW_FILINGS_PER_DAY_MAX);
+  assert.equal(h.steps("flow.filing_deferred").length, 1);
+  assert.equal(h.steps("flow.filing_deferred")[0]!.extra.bound, FLOW_FILINGS_PER_DAY_MAX);
   // The next day the held-back stage is filed; the two filed ones are open.
   h.setClock(NOW + 13 * HOUR);
   await runFlowGardener(h.deps, h.sources);
