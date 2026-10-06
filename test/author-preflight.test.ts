@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -275,4 +275,62 @@ test('author preflight records spawn errors and incomplete summaries instead of 
   assert.equal(step.diagnostics.mayBeIncomplete, true);
   assert.match(readFileSync(join(f.root, step.diagnostics.stdout), 'utf8'), /partial diagnostic witness/);
   assert.match(readFileSync(join(f.root, step.diagnostics.stderr), 'utf8'), /buffer limit witness/);
+});
+
+test('author preflight leaves a running receipt and live private logs when its waiting parent is killed', async () => {
+  const f = fixture();
+  const release = join(f.root, 'coverage/release');
+  writeFileSync(join(f.root, 'src/run-task.ts'), `import {existsSync} from 'node:fs'; console.log('live static witness'); console.error('live static stderr'); const timer=setInterval(()=>{if(existsSync(${JSON.stringify(release)})){clearInterval(timer);process.exitCode=7}},10);\n`);
+  f.git('add', '.'); f.git('commit', '-m', 'test: hold native static step');
+  const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import {main} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], {root:${JSON.stringify(f.root)}}));`],
+  { cwd: ROOT, stdio: 'ignore' });
+  const closed = new Promise<string | null>((resolve) => parent.once('close', (_code, signal) => resolve(signal)));
+  const waitFor = async (predicate: () => boolean) => {
+    for (let turn = 0; turn < 1000 && !predicate(); turn++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(predicate(), 'bounded native author witness never arrived');
+  };
+  let logRoot = '';
+  try {
+    await waitFor(() => {
+      const coverage = join(f.root, 'coverage');
+      if (!existsSync(coverage)) return false;
+      const name = readdirSync(coverage).find((entry) => entry.startsWith('rmd-author-'));
+      if (!name) return false;
+      logRoot = join(coverage, name);
+      const log = join(logRoot, 'static-preflight.stdout.log');
+      return existsSync(log) && readFileSync(log, 'utf8').includes('live static witness');
+    });
+    const before = JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8'));
+    assert.equal(before.verdict, 'running');
+    assert.equal(before.currentStep.name, 'static-preflight');
+    assert.equal(before.currentStep.outputLimitBytes, 100 * 1024 * 1024);
+    assert.equal(before.headSha, f.git('rev-parse', 'HEAD'));
+    assert.equal(statSync(logRoot).mode & 0o077, 0);
+    assert.equal(parent.kill('SIGKILL'), true);
+    assert.equal(await closed, 'SIGKILL');
+    writeFileSync(release, 'release');
+    const native = join(logRoot, 'static-preflight.native-result.json');
+    await waitFor(() => existsSync(native));
+    assert.equal(JSON.parse(readFileSync(native, 'utf8')).status, 7);
+    assert.equal(JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8')).verdict, 'running');
+    assert.equal(existsSync(join(logRoot, 'receipt.json')), false, 'loss of the author cannot certify a completed gate');
+    assert.match(readFileSync(join(logRoot, 'static-preflight.stderr.log'), 'utf8'), /live static stderr/);
+  } finally {
+    mkdirSync(join(f.root, 'coverage'), { recursive: true });
+    writeFileSync(release, 'release');
+    if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL');
+  }
+});
+
+test('author preflight cannot publish a passed progress receipt when the authoritative receipt write fails', () => {
+  const f = fixture();
+  mkdirSync(join(f.root, 'coverage/preflight-author.json'), { recursive: true });
+  assert.equal(mod.main([], { root: f.root }), 1);
+  const coverage = join(f.root, 'coverage');
+  const name = readdirSync(coverage).find((entry) => entry.startsWith('rmd-author-'))!;
+  const progress = JSON.parse(readFileSync(join(coverage, name, 'progress.json'), 'utf8'));
+  assert.notEqual(progress.verdict, 'passed', 'native success is not successful authoritative receipt publication');
+  assert.equal(progress.verdict, 'refused');
+  assert.match(progress.error, /receipt could not be written/);
 });

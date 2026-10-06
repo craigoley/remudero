@@ -3096,12 +3096,15 @@ function readEmergencyControlState(rows: readonly Record<string, unknown>[]): Em
   return { stops, clearedIds };
 }
 
-/** The currently ACTIVE stops — already filtered by {@link isEmergencyStopActive} — this task's
- *  admission call sites pass straight to {@link checkEmergencyStop}. */
-function activeEmergencyStops(deps: OperatorAgentRouteDependencies, rows = emergencyStopRows(deps.ledgerPath)): EmergencyStop[] {
+/** The stops active at `now` among emergency `rows`: the status route's `active` and the incidents view's (W1-T5054). */
+export function activeEmergencyStopsAt(rows: readonly Record<string, unknown>[], now: number): EmergencyStop[] {
   const { stops, clearedIds } = readEmergencyControlState(rows);
-  const now = deps.now?.() ?? Date.now();
   return [...stops.values()].filter((stop) => isEmergencyStopActive(stop, clearedIds, now));
+}
+
+/** The currently ACTIVE stops, which admission call sites pass straight to {@link checkEmergencyStop}. */
+function activeEmergencyStops(deps: OperatorAgentRouteDependencies, rows = emergencyStopRows(deps.ledgerPath)): EmergencyStop[] {
+  return activeEmergencyStopsAt(rows, deps.now?.() ?? Date.now());
 }
 
 /** POST /v1/operator-agent/emergency/stop — issue a bounded, incident-linked emergency stop. */

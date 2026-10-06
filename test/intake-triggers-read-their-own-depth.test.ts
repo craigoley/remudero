@@ -100,7 +100,7 @@ test("acceptance 2 — the SAME reader against a real repoRoot-shaped plan/feedb
 
 test("acceptance 2 — run-task.ts's autoTriageCheck wires BOTH readers off repoRoot, never config.root", () => {
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  const start = src.indexOf("export function autoTriageCheck(");
+  const start = src.indexOf("export async function autoTriageCheck(");
   const end = src.indexOf("export function buildRetroDaemonHooks(");
   assert.ok(start > 0 && end > start, "both anchors must be found, or this test proves nothing");
   const fn = src.slice(start, end);

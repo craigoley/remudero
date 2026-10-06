@@ -67,10 +67,10 @@ function tmpConfig(): { config: Config; cleanup: () => void } {
   };
 }
 
-test("an injected disabled policy governs, whatever the checked-in policy says", () => {
+test("an injected disabled policy governs, whatever the checked-in policy says", async () => {
   const { config, cleanup } = tmpConfig();
   try {
-    const decision = autoTriageCheck({
+    const decision = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -85,13 +85,13 @@ test("an injected disabled policy governs, whatever the checked-in policy says",
   }
 });
 
-test("an injected enabled policy is not refused for being disabled", () => {
+test("an injected enabled policy is not refused for being disabled", async () => {
   // The other direction, and the one that matters: with the seam absent, this assertion's outcome
   // would be decided by the checked-in file rather than the fixture. It may still refuse for a
   // legitimate local reason — an empty candidate list on a throwaway root — but never for the flag.
   const { config, cleanup } = tmpConfig();
   try {
-    const decision = autoTriageCheck({
+    const decision = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -109,7 +109,7 @@ test("an injected enabled policy is not refused for being disabled", () => {
   }
 });
 
-test("the injected maxPerDay bound is the one enforced", () => {
+test("the injected maxPerDay bound is the one enforced", async () => {
   // A bound, not just the flag — so the seam is proven to carry the whole row rather than one field.
   // Marker pre-seeded with two fires inside the window; a cap of 2 must refuse and a cap of 9 must
   // not, off the SAME state, with only the injected policy differing.
@@ -122,7 +122,7 @@ test("the injected maxPerDay bound is the one enforced", () => {
     ];
     writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: recent }));
 
-    const capped = autoTriageCheck({
+    const capped = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -133,7 +133,7 @@ test("the injected maxPerDay bound is the one enforced", () => {
     assert.equal(capped.fire, false);
     assert.match(capped.reason, /daily cap reached \(2\/2/, "the INJECTED cap of 2 is the one enforced");
 
-    const roomy = autoTriageCheck({
+    const roomy = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -147,14 +147,14 @@ test("the injected maxPerDay bound is the one enforced", () => {
   }
 });
 
-test("the injected minIntervalMinutes bound is the one enforced", () => {
+test("the injected minIntervalMinutes bound is the one enforced", async () => {
   const { config, cleanup } = tmpConfig();
   try {
     const now = new Date("2026-08-01T12:00:00.000Z");
     const tenMinutesAgo = new Date(now.getTime() - 10 * 60_000).toISOString();
     writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: [tenMinutesAgo] }));
 
-    const tooSoon = autoTriageCheck({
+    const tooSoon = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -165,7 +165,7 @@ test("the injected minIntervalMinutes bound is the one enforced", () => {
     assert.equal(tooSoon.fire, false);
     assert.match(tooSoon.reason, /minInterval 60m/, "the INJECTED interval is the one enforced");
 
-    const longEnough = autoTriageCheck({
+    const longEnough = await autoTriageCheck({
       deferralPending: true,
     dispatchCount: 1,
     laneBudget: 1,
@@ -179,7 +179,7 @@ test("the injected minIntervalMinutes bound is the one enforced", () => {
   }
 });
 
-test("the daemon hook builder forwards an injected policy to the check it wires", () => {
+test("the daemon hook builder forwards an injected policy to the check it wires", async () => {
   // The seam is only useful if it survives the layer the daemon actually consumes. Without the
   // forward in buildAutoTriageDaemonHooks, an injected policy would be silently dropped and the
   // wired hook would fall back to the checked-in file — the original defect, one level up.
@@ -189,7 +189,7 @@ test("the daemon hook builder forwards an injected policy to the check it wires"
       config,
       policy: policyFixture({ enabled: false, minIntervalMinutes: 60, maxPerDay: 4 }),
     });
-    const decision = hooks.checkAutoTriage({ deferralPending: true, dispatchCount: 1, laneBudget: 1 });
+    const decision = await hooks.checkAutoTriage({ deferralPending: true, dispatchCount: 1, laneBudget: 1 });
 
     assert.equal(decision.fire, false);
     assert.match(decision.reason, /disabled/, "the injected policy reached the wired hook");
@@ -198,13 +198,13 @@ test("the daemon hook builder forwards an injected policy to the check it wires"
   }
 });
 
-test("production passes no policy, so the checked-in file still governs", () => {
+test("production passes no policy, so the checked-in file still governs", async () => {
   // The seam must not change what the fleet does. With nothing injected the decision is derived from
   // the repo's own plan/policy.yaml exactly as before — asserted by agreeing with that file rather
   // than with a number, so this test cannot itself become the coupling it was written to remove.
   const { config, cleanup } = tmpConfig();
   try {
-    const decision = autoTriageCheck({ config });
+    const decision = await autoTriageCheck({ config });
     const shipped = loadPolicy(policyPath(REPO_ROOT)).values.autoTriage;
 
     if (!shipped.enabled) {

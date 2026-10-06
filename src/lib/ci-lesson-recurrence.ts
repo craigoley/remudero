@@ -32,6 +32,8 @@ export interface CiLessonEfficacy {
   recurredPrs: number[];
   /** How many later pull requests existed at all — the denominator `held` is meaningless without. */
   laterPrsSeen: number;
+  /** Sorted gate-specific terminal exposures, including definite recurrences on partial PRs. */
+  laterPrs: number[];
   verdict: "held" | "recurred" | "unmeasurable";
 }
 
@@ -70,6 +72,7 @@ export function judgeCiLessonEfficacy(
       watermarkPr: lesson.watermarkPr,
       recurredPrs,
       laterPrsSeen: laterPrs.size,
+      laterPrs: [...laterPrs].sort((a, b) => a - b),
       verdict,
     };
   });
@@ -108,13 +111,130 @@ export type CiLessonRecurrenceObservation =
       /** Newest recurrences first, bounded; counts above remain complete. */
       recurrences: CiLessonRecurrenceSummary[];
       omittedRecurrenceCount: number;
+      exposure: CiLessonExposureObservation;
     };
+
+export interface CiLessonExposureWindow {
+  /** Requested updated-PR lookback, not a gate completion-time cohort or certified retention. */
+  windowStart: string;
+  asOf: string;
+  complete: boolean;
+  prsScanned: number;
+}
+
+export interface CiLessonExposure {
+  findingId: string;
+  gate: string;
+  watermarkPr: number;
+  exposedPrs: number[];
+  recurredPrs: number[];
+  exposureCount: number;
+  recurrenceCount: number;
+  omittedPrCount: number;
+}
+
+export type CiLessonExposureObservation =
+  | { status: "unavailable"; reason: string }
+  | {
+      status: "observed" | "partial";
+      window: CiLessonExposureWindow;
+      basis: "lesson-gate-pr";
+      retention: "uncertified";
+      lessons: CiLessonExposure[];
+      omittedLessonCount: number;
+      /** Counts cover only retained identity records; omitted identities never enter a rate. */
+      exposureCount: number;
+      recurrenceCount: number;
+      observedRecurrenceRate: number | null;
+    };
+
+function summarizeExposure(efficacy: readonly CiLessonEfficacy[], ceiling: number, window?: CiLessonExposureWindow): CiLessonExposureObservation {
+  if (!window) return { status: "unavailable", reason: "observation-window-missing" };
+  if (!Number.isSafeInteger(ceiling) || ceiling < 1 || ceiling > 100) throw new Error("invalid lesson exposure ceiling");
+  if (!Number.isFinite(Date.parse(window.windowStart)) || !Number.isFinite(Date.parse(window.asOf))
+    || Date.parse(window.windowStart) > Date.parse(window.asOf) || !Number.isSafeInteger(window.prsScanned)
+    || window.prsScanned < 0) throw new Error("invalid lesson exposure window");
+  const byLesson = new Map<string, CiLessonEfficacy>();
+  for (const row of efficacy) {
+    const key = JSON.stringify([row.findingId, row.gate]);
+    const prior = byLesson.get(key);
+    if (!prior || row.watermarkPr > prior.watermarkPr) byLesson.set(key, row);
+    else if (row.watermarkPr === prior.watermarkPr) byLesson.set(key, { ...row,
+      laterPrs: [...new Set([...prior.laterPrs, ...row.laterPrs])].sort((a, b) => a - b),
+      recurredPrs: [...new Set([...prior.recurredPrs, ...row.recurredPrs])].sort((a, b) => a - b) });
+  }
+  const ordered = [...byLesson.values()].sort((a, b) =>
+    (b.laterPrs.at(-1) ?? b.watermarkPr) - (a.laterPrs.at(-1) ?? a.watermarkPr)
+    || a.findingId.localeCompare(b.findingId) || a.gate.localeCompare(b.gate));
+  const lessons = ordered.slice(0, ceiling).map(row => {
+    const exposedPrs = row.laterPrs.slice(-ceiling);
+    const recurredPrs = row.recurredPrs.filter(pr => exposedPrs.includes(pr));
+    return { findingId: row.findingId, gate: row.gate, watermarkPr: row.watermarkPr,
+      exposedPrs, recurredPrs, exposureCount: exposedPrs.length, recurrenceCount: recurredPrs.length,
+      omittedPrCount: Math.max(0, row.laterPrs.length - exposedPrs.length) };
+  });
+  const omittedLessonCount = ordered.length - lessons.length;
+  const partial = !window.complete || omittedLessonCount > 0 || lessons.some(row => row.omittedPrCount > 0);
+  const exposureCount = lessons.reduce((sum, row) => sum + row.exposureCount, 0);
+  const recurrenceCount = lessons.reduce((sum, row) => sum + row.recurrenceCount, 0);
+  return { status: partial ? "partial" : "observed", window: { ...window }, basis: "lesson-gate-pr", retention: "uncertified",
+    lessons, omittedLessonCount, exposureCount, recurrenceCount,
+    observedRecurrenceRate: !partial && exposureCount > 0 ? recurrenceCount / exposureCount : null };
+}
+
+/** Validate the durable producer object before the existing daily reader preserves it. Repeated
+ * snapshots are never added: one latest firing is one observation, with its own window. */
+export function readCiLessonExposure(value: unknown, asOf: string, sourceReadable: boolean): CiLessonExposureObservation {
+  if (!value || typeof value !== "object") return { status: "unavailable", reason: "producer-exposure-missing" };
+  const v = value as Record<string, unknown>;
+  if (v.status === "unavailable" && typeof v.reason === "string") return { status: "unavailable", reason: v.reason.slice(0, 200) };
+  const invalid = (): CiLessonExposureObservation => ({ status: "unavailable", reason: "producer-exposure-invalid" });
+  if ((v.status !== "observed" && v.status !== "partial") || v.basis !== "lesson-gate-pr" || v.retention !== "uncertified"
+    || !v.window || typeof v.window !== "object" || !Array.isArray(v.lessons) || v.lessons.length > 100) return invalid();
+  const w = v.window as Record<string, unknown>;
+  const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+  if (typeof w.windowStart !== "string" || typeof w.asOf !== "string" || typeof w.complete !== "boolean"
+    || !count(w.prsScanned) || !Number.isFinite(Date.parse(w.windowStart)) || !Number.isFinite(Date.parse(w.asOf))
+    || !Number.isFinite(Date.parse(asOf)) || Date.parse(w.windowStart) > Date.parse(w.asOf)
+    || Date.parse(w.asOf) > Date.parse(asOf) || !count(v.omittedLessonCount)) return invalid();
+  const lessons: CiLessonExposure[] = [], seen = new Set<string>();
+  for (const raw of v.lessons) {
+    if (!raw || typeof raw !== "object") return invalid();
+    const r = raw as Record<string, unknown>;
+    if (typeof r.findingId !== "string" || !r.findingId || r.findingId.length > 2048
+      || typeof r.gate !== "string" || !r.gate || r.gate.length > 2048
+      || !count(r.watermarkPr) || r.watermarkPr === 0 || !count(r.omittedPrCount)
+      || !Array.isArray(r.exposedPrs) || !Array.isArray(r.recurredPrs)
+      || r.exposedPrs.length > 100 || r.recurredPrs.length > 100) return invalid();
+    const exposedPrs = r.exposedPrs as unknown[], recurredPrs = r.recurredPrs as unknown[];
+    if (!exposedPrs.every((pr, i) => count(pr) && pr > (r.watermarkPr as number) && (i === 0 || pr > (exposedPrs[i - 1] as number)))
+      || !recurredPrs.every((pr, i) => exposedPrs.includes(pr) && (i === 0 || (pr as number) > (recurredPrs[i - 1] as number)))
+      || r.exposureCount !== exposedPrs.length || r.recurrenceCount !== recurredPrs.length) return invalid();
+    const key = JSON.stringify([r.findingId, r.gate]);
+    if (seen.has(key)) return invalid();
+    seen.add(key);
+    lessons.push({ findingId: r.findingId, gate: r.gate, watermarkPr: r.watermarkPr,
+      exposedPrs: exposedPrs as number[], recurredPrs: recurredPrs as number[], exposureCount: exposedPrs.length,
+      recurrenceCount: recurredPrs.length, omittedPrCount: r.omittedPrCount });
+  }
+  const exposureCount = lessons.reduce((sum, row) => sum + row.exposureCount, 0);
+  const recurrenceCount = lessons.reduce((sum, row) => sum + row.recurrenceCount, 0);
+  if (v.exposureCount !== exposureCount || v.recurrenceCount !== recurrenceCount) return invalid();
+  const partial = !w.complete || v.omittedLessonCount > 0 || lessons.some(row => row.omittedPrCount > 0);
+  const rate = !partial && exposureCount > 0 ? recurrenceCount / exposureCount : null;
+  if (v.status !== (partial ? "partial" : "observed") || v.observedRecurrenceRate !== rate) return invalid();
+  return { status: partial || !sourceReadable ? "partial" : "observed", basis: "lesson-gate-pr", retention: "uncertified",
+    window: { windowStart: w.windowStart, asOf: w.asOf, complete: w.complete, prsScanned: w.prsScanned }, lessons,
+    omittedLessonCount: v.omittedLessonCount, exposureCount, recurrenceCount,
+    observedRecurrenceRate: sourceReadable ? rate : null };
+}
 
 /** Compress positive recurrence receipts into one bounded ledger-safe object. `held` and
  * `unmeasurable` are deliberately absent: this caller's daily window cannot prove lifetime success. */
 export function summarizeCiLessonRecurrences(
   efficacy: readonly CiLessonEfficacy[],
   detailCeiling: number,
+  window?: CiLessonExposureWindow,
 ): CiLessonRecurrenceObservation {
   const recurred = efficacy
     .filter((row) => row.verdict === "recurred")
@@ -135,6 +255,7 @@ export function summarizeCiLessonRecurrences(
     recurrenceCount: recurred.length,
     recurrences,
     omittedRecurrenceCount: Math.max(0, recurred.length - detailCeiling),
+    exposure: summarizeExposure(efficacy, detailCeiling, window),
   };
 }
 

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
 // W1-T3720 — A BUNDLED JOB REPORTED UNDER ONE GATE'S NAME WHILE ANOTHER GATE REFUSED. MEASURED
 // 2026-09-17 on five PRs: the `comment-load-ratchet` check run was red while comment-load-ratchet
@@ -44,12 +45,13 @@ function runReporter(outcomes: Record<string, string>, reports: Record<string, s
     for (const [id, text] of Object.entries(reports)) writeFileSync(join(root, `${id}.log`), text);
     const stub = `gh() { printf '%s\\n' "$*" >> "$GH_LOG_FILE"; }\nsleep() { :; }\n`;
     const outcomeEnv = Object.fromEntries(Object.keys(reporter.env).filter((k) => k.startsWith("OUTCOME_")).map((k) => [k, outcomes[k] ?? "success"]));
+    const setupOutcomes = successfulReporterSetupFixture(reporter.env);
     const logFile = join(root, "calls");
     writeFileSync(logFile, "");
     const run = spawnSync("bash", ["-c", stub + reporter.run], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { ...process.env, ...outcomeEnv, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
+      env: { ...process.env, ...outcomeEnv, SETUP_OUTCOMES: setupOutcomes, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
     });
     const calls = readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => ({
       name: /-f name=(\S+) /.exec(line)?.[1] ?? "",

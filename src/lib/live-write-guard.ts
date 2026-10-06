@@ -31,10 +31,8 @@
  * runner, not to the invocation. Tested for PRESENCE, not for a specific value, so a
  * future node release that renames `child-v8` cannot silently disarm it.
  *
- * WHAT IT DOES NOT DO. Worker subprocesses do not inherit this variable —
- * `buildWorkerEnv` (lib/env.ts) builds every child env from a closed allowlist. That
- * is fine and deliberate: the guard's job is to refuse the outward call in the
- * process that would make it, which is the test process itself.
+ * WHAT IT DOES NOT DO. Worker subprocesses do not inherit this variable (`buildWorkerEnv`'s closed
+ * allowlist); the guard refuses the outward call in the test process itself.
  *
  * ── CORRECTION (2026-07-30): SOME TESTS DO NEED AN EXEMPTION ────────────────────
  * An earlier revision of this file asserted "today NO test needs it — no test in this
@@ -49,13 +47,11 @@
  * fires before the stub is ever consulted. So its old "Inject a stub" advice was
  * actively misleading to a test that had already injected one. Those suites must wrap
  * the specific section that drives the boundary in {@link withLiveWritesAllowed}.
- * Narrowing the guard to refuse only when the target resolves to the live repo is the
- * more correct durable shape and is filed as follow-up work; it needs the target
- * threaded to every call site, and a site missed there would have NO guard and fail
- * silently, so it is deliberately not attempted here.
+ * Refusing only a live-repo TARGET is filed as follow-up: it needs the target threaded to
+ * every call site, and a missed site would fail silently with no guard.
  */
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo as osUserInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
@@ -124,16 +120,42 @@ function canonicalCandidate(path: string, depth = 0): string {
   }
 }
 
-export function assertLedgerPathNotLive(path: string, env: NodeJS.ProcessEnv = process.env): void {
+const HOME_AT_LOAD = process.env.HOME;
+
+/** W1-T6029: the account's home, which a fixture redirecting env.HOME cannot move. A uid with no
+ *  passwd entry (or an empty homedir) falls to the HOME captured at module load, before any fixture
+ *  ran; with neither, refuse by name rather than read the redirected HOME. */
+export function operatorHomeFrom(userInfo: () => { homedir: string }, homeAtLoad: string | undefined): string {
+  let home: string | undefined;
+  try {
+    home = userInfo().homedir;
+  } catch (error) {
+    if (!homeAtLoad) throw new Error("W1-T6029: no operator home: os.userInfo() failed and HOME was unset at load", { cause: error });
+  }
+  if (home) return home;
+  if (homeAtLoad) return homeAtLoad;
+  throw new Error("W1-T6029: no operator home: os.userInfo() gave an empty homedir and HOME was unset at load");
+}
+
+export function assertLedgerPathNotLive(
+  path: string,
+  env: NodeJS.ProcessEnv = process.env,
+  { operatorHome = () => operatorHomeFrom(osUserInfo, HOME_AT_LOAD) }: { operatorHome?: () => string } = {},
+): void {
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return;
-  const deny = env[LIVE_LEDGER_DENY_ROOT_ENV] ?? (isTestRunner(env) ? discoverLiveLedgerRoot(env) : undefined);
+  const pinned = env[LIVE_LEDGER_DENY_ROOT_ENV];
+  const deny = pinned ?? (isTestRunner(env) ? discoverLiveLedgerRoot({ HOME: operatorHome() }) : undefined);
   if (!deny) return;
   const root = canonicalCandidate(join(deny, ".rmd-deny-probe"));
   const canonicalRoot = dirname(root);
   const candidate = canonicalCandidate(path);
   const rel = relative(canonicalRoot, candidate);
   if (rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) {
-    throw new LiveWriteBlockedError("ledger-append", `W1-T4923: ${candidate} is inside the operator state root ${canonicalRoot}`);
+    const why = pinned === undefined
+      ? `; ${LIVE_LEDGER_DENY_ROOT_ENV} is unset, so this run did not load test/setup/tmp-hygiene.ts and the root came ` +
+        `from the account home; a scratch HOME alone is not the fix (W1-T6029)`
+      : "";
+    throw new LiveWriteBlockedError("ledger-append", `W1-T4923: ${candidate} is inside the operator state root ${canonicalRoot}${why}`);
   }
 }
 

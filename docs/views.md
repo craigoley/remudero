@@ -364,6 +364,28 @@ instead of a request-time ledger union. The plan half reads what the route reads
 - Shadow side: the route's computation (its memoized ledger union, up to the ring's newest row) over the
   same build's plan half, so a diff is a ring row the union disagrees with.
 
+## `actions` (version 1)
+
+`GET /v1/views/actions`: the actions page, one body across instances (arch Phase 4 §1.1, P4-T13, W1-T5052,
+`src/lib/actions-view.ts`). Schema: `ActionsView`. Dark until `switches.json` sets `actions` to `serve`;
+until then the console reads `/v1/action-results` as before.
+
+`data.instances[]`: `{ instance, results }`, one per projected instance, where `results` is exactly what
+`GET /v1/action-results` answers with no filter (`ExternalActionResultsEnvelope`), built by the same
+`buildActionResultsProjection` over the projector's `external_effect.reconciled` facts (every rotation the
+projector applied) instead of a request-time ledger union. A filtered read (`taskId`, `actionId`,
+`changedSince`, `limit`) stays on the route.
+- Rebuilt only when a reconciled fact is applied: each tick folds the facts past the last `seq` it read.
+- Sources: `ledger:<i>` per instance.
+- Shadow side: the route's computation (its memoized ledger union, torn rows classified as the route does)
+  up to the projector's newest applied row at the build, so a diff is a reconciled row the two disagree on.
+- The route's window applies: its union reads only the rotations within `STATUS_BOARD_WINDOW_MS` of the newest
+  (at least `STATUS_BOARD_MIN_ROTATIONS`). No rotation retains a reconciled row, so each sits in one file at or
+  before its stamp, and the view keeps the facts stamped after the newest rotation the window leaves out
+  (`rotationWindowExcludedThroughMs`, the union's own selection). A window move rebuilds the body.
+- A torn row is not seen: the projector keeps no text of it to classify. Where the route answers
+  `ledger-partial`, the view answers the rows it holds, and the shadow shows that diff.
+
 ## `agent` (version 1)
 
 `GET /v1/views/agent?instance=&part=`: the agent pages' reads, one body per (instance, part) (arch Phase 4
@@ -385,6 +407,24 @@ a first analytics refresh or for an instance with no repository, never an empty 
 - Sources: `ledger:<i>`; `proposals` adds `analytics:<i>`.
 - Shadow side: the routes' computation over the ledger union read the routes' way, up to the fold's newest row.
 - Not yet a part: `capabilities` (core serves no such route). `/context` stays a direct keyed GET.
+
+## `incidents` (version 1)
+
+`GET /v1/views/incidents`: the /incidents page, one body across instances (arch Phase 4 §1.1, P4-T15, W1-T5054,
+`src/lib/incidents-view.ts`). Schema: `IncidentsView`. Dark until `switches.json` sets `incidents` to `serve`;
+until then the console reads `/v1/incidents`, each instance's emergency status and daemon health as before.
+
+`data`: `{ store, instances[] }`.
+- `store`: `{ state: "ok", incidents }`, exactly `GET /v1/incidents`' list (`incidentsNewestFirst`), or
+  `{ state: "unavailable", reason }` where that route answers 503. Re-read only when the store file's fingerprint
+  (size, mtime, inode) moves. Source: `incidents-store:<home>`, as of the file's mtime.
+- `instances[].emergency.active`: `GET /v1/operator-agent/emergency/status`'s `active`, by the same
+  `activeEmergencyStopsAt`, over the agent view's persisted `panel.*` fold (no ledger read). Source: `ledger:<i>`.
+- `instances[].liveness`: a band over the newest projected `daemon.*` row (`instanceLiveness`, as `instances`
+  carries it). The raw heartbeat time is never carried, so a beat inside the band does not move the ETag.
+- Shadow side: `GET /v1/incidents` over a fresh store read (paired with the body's store as-of, so a write in
+  between is `timing`), and each emergency status route over the ledger union read the routes' way, up to the
+  fold's newest row at the build. Liveness is the body's own reading: no route bands a heartbeat.
 
 ## `instances` (version 1)
 

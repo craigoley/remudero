@@ -48,10 +48,11 @@ export const VIEW_EVENTS_RETRY_MS = 3_000;
  *  refetch (design §4.2 lever 1: nav-badge is ~1.5 KB; `now`, ~100 KB, is refetched). */
 export const VIEW_EVENTS_INLINE_BYTES = 4 * 1024;
 /** One `view.emitted` ledger row per key at most this often: a latency sample, not a log of every event. Its
- *  `rowTs` (the newest ledger row the body reflects) and `emittedAt` time the host-side hops on one clock.
- *  `rowTs` is read when the build STARTS, so `emittedAt - rowTs` omits a row's wait for that start: `prevRowTs`
- *  (the newest row the key's previous event reflected) bounds it, since the oldest row this body is the first
- *  to show is the first after `prevRowTs`, and `buildStartedAt` splits the wait from the build. */
+ *  `rowTs` (the newest ledger row the body was built from) and `emittedAt` time the host-side hops on one clock.
+ *  It comes from the body's own build sources (`builtRow`), so `emittedAt - rowTs` omits a row's wait for that build:
+ *  `prevRowTs` (the build row of the key's previous event) bounds it, since the oldest row this body is the first
+ *  to show is the first after `prevRowTs`, and `buildStartedAt` splits the wait from the build. `judgedRowTs` is the
+ *  ledger head the emit-time judgement saw, logged apart: as `rowTs` it faked 60-200 s "late start" gaps. */
 export const VIEW_EMITTED_SAMPLE_MS = 60_000;
 
 /** One served view's version per key, and the views whose switch is not `serve`. */
@@ -100,8 +101,22 @@ interface Judged {
   sources: ViewSource[];
 }
 
-/** The newest row a body reflects, with the `rowTs` a decorated body carries for the bodies it was decorated from. */
-function reflectedRow(sources: readonly ViewSource[], entry: ViewBodyEntry): string | null {
+/** Why a body names no ledger row it was built from: its build sources carry no `ledger:` row and nothing decorated it with one. */
+export type BuiltRowAbsent = "no_ledger_row_in_build_sources";
+
+/**
+ * The newest ledger row a body was BUILT from: its own `body.sources`, as the build stamped them, with the `rowTs` a
+ * decorated body carries for the bodies it was decorated from. Never the emit-time judgement: `judge` re-reads each
+ * `ledger:` source at the ledger's current head, so a row judged at emit time can postdate the build that made the body.
+ * A body naming no row says why, so a reader can never take a missing row for a measured one.
+ */
+export function builtRow(entry: ViewBodyEntry): { rowTs: string } | { rowTs: null; rowTsAbsent: BuiltRowAbsent } {
+  const rowTs = newestLedgerRow(entry.body.sources, entry.rowTs);
+  return rowTs === undefined ? { rowTs: null, rowTsAbsent: "no_ledger_row_in_build_sources" } : { rowTs };
+}
+
+/** The newest ledger row the emit-time judgement of a body's sources names: `judgedRowTs`, kept beside the build row. */
+function judgedRow(sources: readonly ViewSource[], entry: ViewBodyEntry): string | null {
   return newestLedgerRow(sources, entry.rowTs) ?? null;
 }
 
@@ -206,16 +221,17 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     const body = { ...entry.body, stale, asOf, sources };
     const bytes = Buffer.byteLength(JSON.stringify(body));
     const emittedAt = clock.iso();
-    const rowTs = reflectedRow(sources, entry);
+    const built = builtRow(entry);
+    const judgedRowTs = judgedRow(sources, entry);
     const prevRowTs = reflected.get(id);
-    reflected.set(id, rowTs);
+    reflected.set(id, built.rowTs);
     const event = { view: entry.view, key: entry.key, etag, stale, emittedAt, asOf, cause };
     const text = frame("view", bytes <= inlineBytes ? { ...event, body } : event, `${bootId}:${seq}`);
     if (now - (sampledAt.get(id) ?? Number.NEGATIVE_INFINITY) >= VIEW_EMITTED_SAMPLE_MS) {
       sampledAt.set(id, now);
       const skipped = unsampled.get(id) ?? 0;
       unsampled.set(id, 0);
-      opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs, bytes, inline: bytes <= inlineBytes, subscribers: subs.size,
+      opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, ...built, judgedRowTs, bytes, inline: bytes <= inlineBytes, subscribers: subs.size,
         sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: skipped,
         ...(prevRowTs ? { prevRowTs } : {}), ...(entry.buildStartedMs !== undefined ? { buildStartedAt: fixedClock(entry.buildStartedMs).iso() } : {}) });
     } else unsampled.set(id, (unsampled.get(id) ?? 0) + 1);
@@ -242,7 +258,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     reflected.clear();
     for (const [id, judged] of current(clock.now())) {
       emitted.set(id, judged.etag);
-      reflected.set(id, reflectedRow(judged.sources, judged.entry));
+      reflected.set(id, builtRow(judged.entry).rowTs);
     }
     const stops = [
       readModel.onBody((entry) => {

@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import type { ClaimGitDeps } from "./dispatch-claim.js";
+import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
 import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
-import { assertClaimRefPushAllowed } from "./live-write-guard.js";
+import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -61,7 +61,10 @@ export interface TriageClaimDecision {
  * two unmergeable verdicts for the same entry.
  * Why: docs/forensics/auto-triage.md#decidetriageclaim (#2452/#2462).
  */
-export function decideTriageClaim(outcome: TriageClaimOutcome, ctx: { feedbackId: string; holder?: string }): TriageClaimDecision {
+export function decideTriageClaim(
+  outcome: TriageClaimOutcome,
+  ctx: { feedbackId: string; holder?: string; stderr?: string },
+): TriageClaimDecision {
   if (outcome === "created") return { proceed: true, reason: `claimed ${triageClaimRef(ctx.feedbackId)} for this run` };
   if (outcome === "taken") {
     // Name the holder, not just "someone else": a ref and an anchor an operator can inspect.
@@ -78,7 +81,8 @@ export function decideTriageClaim(outcome: TriageClaimOutcome, ctx: { feedbackId
     proceed: false,
     reason:
       `cannot reach origin to claim ${triageClaimRef(ctx.feedbackId)} — refusing rather than triaging ` +
-      `optimistically, which is the behaviour that spent two Architect calls on verdicts that could not merge`,
+      `optimistically, which is the behaviour that spent two Architect calls on verdicts that could not merge` +
+      (ctx.stderr?.trim() ? `; git said: ${ctx.stderr.trim()}` : ""),
   };
 }
 
@@ -291,6 +295,58 @@ export interface TriageClaimReserver {
   /** W1-T4769: every feedback id currently claimed, with its ref sha, from ONE `ls-remote` of
    *  `refs/rmd-triage/*`. `undefined` when the namespace is unreadable — NOT an empty map. */
   claimedIds?(): ReadonlyMap<string, string> | undefined;
+  /** The last mint's or attempt's git stderr, `undefined` on success or none yet; optional. */
+  lastAttemptStderr?(): string | undefined;
+}
+
+/** {@link TriageClaimReserver}, awaitable: its sync git held the daemon loop (~543 s per 17 h,
+ *  2026-10-06). Every composite below awaits each value, so a sync reserver still fits. */
+export interface TriageClaimReserverAsync {
+  mintAnchor(): Awaitable<string>;
+  attempt(feedbackId: string, anchor: string): Awaitable<TriageClaimOutcome>;
+  holder(feedbackId: string): Awaitable<string | undefined>;
+  drop(feedbackId: string, opts?: { expect?: string }): Awaitable<boolean>;
+  holderMessage?(feedbackId: string): Awaitable<string | undefined>;
+  claimedIds?(): Awaitable<ReadonlyMap<string, string> | undefined>;
+  lastAttemptStderr?(): string | undefined;
+}
+
+function triageAnchorMessage(): string {
+  return `rmd-triage claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+}
+
+function triagePushArgs(feedbackId: string, anchor: string): string[] {
+  return ["push", "origin", `${anchor}:${triageClaimRef(feedbackId)}`];
+}
+
+function triageDropArgs(feedbackId: string, expect: string | undefined): string[] {
+  const ref = triageClaimRef(feedbackId);
+  return expect ? ["push", `--force-with-lease=${ref}:${expect}`, "origin", `:${ref}`] : ["push", "origin", `:${ref}`];
+}
+
+function triageAttemptOutcome(res: GitAnswer): TriageClaimOutcome {
+  return res.status === 0 ? "created" : classifyPushFailure(res.stderr);
+}
+
+function messageFromFetchHeadLog(res: GitAnswer): string | undefined {
+  return res.status === 0 ? res.stdout : undefined;
+}
+
+function triageIdsFromLsRemote(res: GitAnswer): ReadonlyMap<string, string> | undefined {
+  if (res.status !== 0) return undefined;
+  const out = new Map<string, string>();
+  for (const line of res.stdout.split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (sha && ref?.startsWith(TRIAGE_CLAIM_NAMESPACE)) out.set(ref.slice(TRIAGE_CLAIM_NAMESPACE.length), sha);
+  }
+  return out;
+}
+
+/** The anchor commit, or `""` with the failing step's stderr: an empty anchor pushed as
+ *  `:<ref>` would DELETE the ref, so {@link claimTriage} refuses it as `unreachable`. */
+function anchorFromCommitTree(res: GitAnswer): { anchor: string; stderr?: string } {
+  if (res.status === 0) return { anchor: res.stdout.trim() };
+  return { anchor: "", stderr: `minting the claim anchor failed: ${res.stderr.trim()}` };
 }
 
 /**
@@ -299,47 +355,71 @@ export interface TriageClaimReserver {
  * The commit message carries pid+host+time for an operator inspecting a stuck claim.
  */
 export function gitTriageClaimReserver(deps: ClaimGitDeps): TriageClaimReserver {
+  let lastStderr: string | undefined;
   return {
+    lastAttemptStderr: () => lastStderr,
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
-      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const msg = `rmd-triage claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
-      return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]);
+      const minted = anchorFromCommitTree(tree.status === 0 ? deps.run(["commit-tree", tree.stdout.trim(), "-m", triageAnchorMessage()]) : tree);
+      lastStderr = minted.stderr;
+      return minted.anchor;
     },
     attempt(feedbackId, anchor) {
       assertClaimRefPushAllowed(deps.run, triageClaimRef(feedbackId));
-      const res = deps.run(["push", "origin", `${anchor}:${triageClaimRef(feedbackId)}`]);
-      if (res.status === 0) return "created";
-      return classifyPushFailure(res.stderr);
+      const res = deps.run(triagePushArgs(feedbackId, anchor));
+      lastStderr = res.status === 0 ? undefined : res.stderr;
+      return triageAttemptOutcome(res);
     },
     holder(feedbackId) {
-      const res = deps.run(["ls-remote", "origin", triageClaimRef(feedbackId)]);
-      if (res.status !== 0) return undefined;
-      const sha = res.stdout.trim().split(/\s+/)[0];
-      return sha ? sha : undefined;
+      return holderFromLsRemote(deps.run(["ls-remote", "origin", triageClaimRef(feedbackId)]));
     },
     holderMessage(feedbackId) {
       if (deps.run(["fetch", "origin", triageClaimRef(feedbackId)]).status !== 0) return undefined;
-      const res = deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
-      return res.status === 0 ? res.stdout : undefined;
+      return messageFromFetchHeadLog(deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]));
     },
     claimedIds() {
-      const res = deps.run(["ls-remote", "origin", `${TRIAGE_CLAIM_NAMESPACE}*`]);
-      if (res.status !== 0) return undefined;
-      const out = new Map<string, string>();
-      for (const line of res.stdout.split("\n")) {
-        const [sha, ref] = line.trim().split(/\s+/);
-        if (sha && ref?.startsWith(TRIAGE_CLAIM_NAMESPACE)) out.set(ref.slice(TRIAGE_CLAIM_NAMESPACE.length), sha);
-      }
-      return out;
+      return triageIdsFromLsRemote(deps.run(["ls-remote", "origin", `${TRIAGE_CLAIM_NAMESPACE}*`]));
     },
     drop(feedbackId, opts = {}) {
-      const ref = triageClaimRef(feedbackId);
-      const args = opts.expect
-        ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
-        : ["push", "origin", `:${ref}`];
-      assertClaimRefPushAllowed(deps.run, ref);
-      return deps.run(args).status === 0;
+      assertClaimRefPushAllowed(deps.run, triageClaimRef(feedbackId));
+      return deps.run(triageDropArgs(feedbackId, opts.expect)).status === 0;
+    },
+  };
+}
+
+/** {@link gitTriageClaimReserver}, awaited: the same argv and the same parse of every git answer,
+ *  so the two cannot drift; run it through `gitClaimRunnerAsync`, whose timeout reads `unreachable`. */
+export function gitTriageClaimReserverAsync(deps: ClaimGitDepsAsync): TriageClaimReserverAsync {
+  let lastStderr: string | undefined;
+  return {
+    lastAttemptStderr: () => lastStderr,
+    async mintAnchor() {
+      if (deps.anchor) return deps.anchor();
+      const tree = await deps.run(["hash-object", "-t", "tree", "/dev/null"]);
+      const minted = anchorFromCommitTree(tree.status === 0 ? await deps.run(["commit-tree", tree.stdout.trim(), "-m", triageAnchorMessage()]) : tree);
+      lastStderr = minted.stderr;
+      return minted.anchor;
+    },
+    async attempt(feedbackId, anchor) {
+      await assertClaimRefPushAllowedAsync(deps.run, triageClaimRef(feedbackId));
+      const res = await deps.run(triagePushArgs(feedbackId, anchor));
+      lastStderr = res.status === 0 ? undefined : res.stderr;
+      return triageAttemptOutcome(res);
+    },
+    async holder(feedbackId) {
+      return holderFromLsRemote(await deps.run(["ls-remote", "origin", triageClaimRef(feedbackId)]));
+    },
+    async holderMessage(feedbackId) {
+      if ((await deps.run(["fetch", "origin", triageClaimRef(feedbackId)])).status !== 0) return undefined;
+      return messageFromFetchHeadLog(await deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]));
+    },
+    async claimedIds() {
+      return triageIdsFromLsRemote(await deps.run(["ls-remote", "origin", `${TRIAGE_CLAIM_NAMESPACE}*`]));
+    },
+    async drop(feedbackId, opts = {}) {
+      await assertClaimRefPushAllowedAsync(deps.run, triageClaimRef(feedbackId));
+      return (await deps.run(triageDropArgs(feedbackId, opts.expect))).status === 0;
     },
   };
 }
@@ -355,20 +435,23 @@ export interface TriageClaimResult extends TriageClaimDecision {
 /**
  * Takes the claim for `feedbackId`, or refuses. On contention this also runs the release's
  * evidence arm, since the losing lane holds fresh proof of whether the entry is already done —
- * a stale claim is dropped for the next lane instead of blocking it either way.
+ * a stale claim is dropped for the next lane instead of blocking it either way. An empty anchor
+ * (a failed mint) is refused as `unreachable` and never pushed: `:<ref>` would delete the ref.
  */
-export function claimTriage(
+export async function claimTriage(
   feedbackId: string,
-  reserver: TriageClaimReserver,
+  reserver: TriageClaimReserverAsync,
   opts: { mergedSubjects?: () => readonly string[] } = {},
-): TriageClaimResult {
-  const anchor = reserver.mintAnchor();
-  const outcome = reserver.attempt(feedbackId, anchor);
+): Promise<TriageClaimResult> {
+  const anchor = await reserver.mintAnchor();
+  if (!anchor) return decideTriageClaim("unreachable", { feedbackId, stderr: reserver.lastAttemptStderr?.() ?? "the claim anchor came back empty" });
+  const outcome = await reserver.attempt(feedbackId, anchor);
   if (outcome === "created") return { ...decideTriageClaim(outcome, { feedbackId }), anchor };
-  const decision = decideTriageClaim(outcome, { feedbackId, holder: outcome === "taken" ? reserver.holder(feedbackId) : undefined });
+  const holder = outcome === "taken" ? await reserver.holder(feedbackId) : undefined;
+  const decision = decideTriageClaim(outcome, { feedbackId, holder, stderr: reserver.lastAttemptStderr?.() });
   if (outcome !== "taken") return decision;
   const observed = feedbackOutcomeObserved(opts.mergedSubjects?.() ?? [], feedbackId);
-  const released = releaseTriageClaim(feedbackId, reserver, { outcomeObserved: observed });
+  const released = await releaseTriageClaim(feedbackId, reserver, { outcomeObserved: observed });
   return { ...decision, reason: `${decision.reason} ${released.reason}`, staleReleased: released.dropped };
 }
 
@@ -382,11 +465,11 @@ export interface TriageClaimReleaseResult extends TriageClaimReleaseDecision {
  * decision falls to the evidence arm then the operator. {@link decideTriageClaimRelease} owns
  * the decision; this performs only the I/O it authorises.
  */
-export function releaseTriageClaim(
+export async function releaseTriageClaim(
   feedbackId: string,
-  reserver: TriageClaimReserver,
+  reserver: TriageClaimReserverAsync,
   i: { anchor?: string; outcomeObserved?: boolean; liveness?: TriageClaimLiveness; heldSha?: string } = {},
-): TriageClaimReleaseResult {
+): Promise<TriageClaimReleaseResult> {
   const decision = decideTriageClaimRelease({
     heldByThisRun: i.anchor !== undefined,
     outcomeObserved: i.outcomeObserved === true,
@@ -397,7 +480,7 @@ export function releaseTriageClaim(
   // The liveness arm deletes conditionally on the sha it judged, so a claim that changed hands
   // between the judgement and the delete is never dropped.
   const expect = i.anchor ?? (decision.arm === "liveness" ? i.heldSha : undefined);
-  return { ...decision, dropped: reserver.drop(feedbackId, expect !== undefined ? { expect } : {}) };
+  return { ...decision, dropped: await reserver.drop(feedbackId, expect !== undefined ? { expect } : {}) };
 }
 
 /** What {@link sweepTriageClaims} learned. `held` is `undefined` when the claim namespace was
@@ -414,9 +497,9 @@ export interface TriageClaimSweep {
  * claim is already past the window (a young claim needs no ledger to be `alive`). A reserver
  * without the optional methods yields `held: undefined` — today's behaviour.
  */
-export function sweepTriageClaims(
+export async function sweepTriageClaims(
   candidates: readonly string[],
-  reserver: TriageClaimReserver,
+  reserver: TriageClaimReserverAsync,
   o: {
     now: Date;
     /** Rows stamped at or after `sinceIso`, or `undefined` when the ledger union was unreadable. */
@@ -424,8 +507,8 @@ export function sweepTriageClaims(
     log: (step: string, extra?: Record<string, unknown>) => void;
     mergedSubjects?: () => readonly string[];
   },
-): TriageClaimSweep {
-  const claimed = reserver.claimedIds?.();
+): Promise<TriageClaimSweep> {
+  const claimed = await reserver.claimedIds?.();
   if (claimed === undefined) return { held: undefined, released: [] };
   const held: string[] = [];
   const released: string[] = [];
@@ -434,7 +517,7 @@ export function sweepTriageClaims(
   for (const id of candidates) {
     const sha = claimed.get(id);
     if (sha === undefined) continue;
-    const holder = parseTriageClaimAnchorMessage(reserver.holderMessage?.(id) ?? "");
+    const holder = parseTriageClaimAnchorMessage((await reserver.holderMessage?.(id)) ?? "");
     let liveness = assessTriageClaimLiveness({ holder, rows: undefined, now: o.now });
     if (liveness.verdict !== "alive" && holder !== undefined) {
       if (!rowsRead) {
@@ -443,7 +526,7 @@ export function sweepTriageClaims(
       }
       liveness = assessTriageClaimLiveness({ holder, rows, now: o.now });
     }
-    const result = releaseTriageClaim(id, reserver, {
+    const result = await releaseTriageClaim(id, reserver, {
       outcomeObserved: feedbackOutcomeObserved(o.mergedSubjects?.() ?? [], id),
       liveness,
       heldSha: sha,
@@ -471,13 +554,13 @@ export function sweepTriageClaims(
 
 /** {@link claimTriage} plus the one durable ledger row every caller needs, so every arm stays
  *  reachable from a unit test while the `run-task.ts` lane body only carries the call. */
-export function claimTriageWithLogging(
+export async function claimTriageWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
   feedbackId: string,
-  reserver: TriageClaimReserver,
+  reserver: TriageClaimReserverAsync,
   opts: { mergedSubjects?: () => readonly string[] } = {},
-): TriageClaimResult {
-  const result = claimTriage(feedbackId, reserver, opts);
+): Promise<TriageClaimResult> {
+  const result = await claimTriage(feedbackId, reserver, opts);
   log("triage.claim", {
     feedback_id: feedbackId,
     ref: triageClaimRef(feedbackId),
@@ -493,15 +576,15 @@ export function claimTriageWithLogging(
  * throw here must never replace the lane's real outcome with a release failure — the cost of
  * swallowing is one ref an operator drops by hand.
  */
-export function releaseTriageClaimWithLogging(
+export async function releaseTriageClaimWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
   feedbackId: string,
-  reserver: TriageClaimReserver,
+  reserver: TriageClaimReserverAsync,
   anchor: string,
-): TriageClaimReleaseResult {
+): Promise<TriageClaimReleaseResult> {
   let result: TriageClaimReleaseResult;
   try {
-    result = releaseTriageClaim(feedbackId, reserver, { anchor });
+    result = await releaseTriageClaim(feedbackId, reserver, { anchor });
   } catch (e) {
     result = {
       arm: "holder",

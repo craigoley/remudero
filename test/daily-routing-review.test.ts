@@ -329,3 +329,36 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
     assert.equal(source.reports[0].nextAction, "repair-source-evidence");
   } finally { f.close(); }
 });
+
+
+test("the installed daily collector preserves lesson exposure identities from one latest firing over all ledger forms", async () => {
+  const { judgeCiLessonEfficacy, summarizeCiLessonRecurrences } = await import("../src/lib/ci-lesson-recurrence.js");
+  const f = fixture();
+  try {
+    const summary = summarizeCiLessonRecurrences(judgeCiLessonEfficacy({
+      pairs: [{ pr: 9, gate: "ci-gate", redSha: "red", state: "open" }],
+      fullyObservedGatePrs: [{ pr: 9, gate: "ci-gate" }, { pr: 11, gate: "ci-gate" }, { pr: 12, gate: "other" }],
+    }, [{ findingId: "ci-learning:1:ci-gate", gate: "ci-gate", watermarkPr: 2 }]), 3, {
+      windowStart: "2026-10-01T12:00:00Z", asOf: "2026-10-02T12:00:00Z", complete: true, prsScanned: 3,
+    });
+    const firing = { ts: "2026-10-02T12:01:00Z", step: "ci_learning_cadence.ran", run_id: "cadence1", lesson_recurrences: summary };
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([firing]));
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.2026-10-02T10-00-00-000Z.ndjson"), ndjson([firing]));
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(ndjson([firing])));
+    const first = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0].selfImprovement.ciLearning.lessonExposure;
+    assert.equal(first.status, "observed");
+    assert.deepEqual(first.lessons[0].exposedPrs, [9, 11]);
+    assert.deepEqual(first.lessons[0].recurredPrs, [9]);
+    assert.equal(first.exposureCount, 2); assert.equal(first.recurrenceCount, 1); assert.equal(first.observedRecurrenceRate, 0.5);
+    assert.equal(first.retention, "uncertified");
+    // Overlapping daily snapshots preserve this same firing; they never sum a prior day's rate/count.
+    const next = (await dailyRoutingReview({ ...f, asOf: "2026-10-03T11:00:00Z" })).snapshot.sources[0].selfImprovement.ciLearning.lessonExposure;
+    assert.deepEqual(next, first);
+    const persisted = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
+    assert.deepEqual(persisted.sources[0].selfImprovement.ciLearning.lessonExposure, first);
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([firing]) + "invalid JSON\n");
+    const partial = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0].selfImprovement.ciLearning.lessonExposure;
+    assert.equal(partial.status, "partial"); assert.equal(partial.observedRecurrenceRate, null);
+    assert.equal(partial.exposureCount, 2);
+  } finally { f.close(); }
+});

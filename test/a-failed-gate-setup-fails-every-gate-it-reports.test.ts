@@ -19,9 +19,10 @@ import { parse as parseYaml } from "yaml";
 
 import { ghShim } from "./helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-type Step = { id?: string; run?: string; env?: Record<string, string> };
+type Step = { id?: string; run?: string; env?: Record<string, string>; if?: string };
 const ciYml = parseYaml(readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
   jobs: Record<string, { steps: Step[] }>;
 };
@@ -35,7 +36,7 @@ function resolve(template: string, facts: Record<string, string>): string {
 }
 
 /** Runs the reporter with the given step outcomes; returns each posted check run's conclusion and title. */
-function report(outcomes: Record<string, string>): Map<string, { conclusion: string; title: string }> {
+function report(outcomes: Record<string, string>, setupOutcomes?: string | null): Map<string, { conclusion: string; title: string }> {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5858-`));
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin", "node"), '#!/usr/bin/env bash\necho "$2"\n', { mode: 0o755 });
@@ -50,6 +51,10 @@ function report(outcomes: Record<string, string>): Map<string, { conclusion: str
   };
   for (const [id, outcome] of Object.entries(outcomes)) facts[`steps.${id}.outcome`] = outcome;
   const env = Object.fromEntries(Object.entries(reporter.env ?? {}).map(([k, v]) => [k, resolve(String(v), facts)]));
+  if (setupOutcomes !== undefined) {
+    if (setupOutcomes === null) delete env.SETUP_OUTCOMES;
+    else env.SETUP_OUTCOMES = setupOutcomes;
+  }
   writeFileSync(join(dir, "reporter.sh"), reporter.run!);
   const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", join(dir, "reporter.sh")], {
     cwd: dir,
@@ -77,6 +82,42 @@ function gates(outcome: string, setup: Record<string, string>): Record<string, s
 }
 
 const GREEN_SETUP = { checkout: "success", "setup-node": "success", classify: "success", install: "success" };
+
+test("successful reporter setup fixture refuses unavailable or unresolved context templates", () => {
+  assert.throws(() => successfulReporterSetupFixture({}), /template must exist/);
+  assert.throws(() => successfulReporterSetupFixture({ SETUP_OUTCOMES: "checkout=success" }), /reference real step outcomes/);
+  assert.throws(() => successfulReporterSetupFixture({ SETUP_OUTCOMES: "checkout=${{ steps.checkout.outcome }} classify=${{ unknown.context }}" }), /explicitly resolved/);
+  assert.equal(successfulReporterSetupFixture(reporter.env!), "checkout=success setup-node=success classify=success install=success");
+});
+
+test("bundled gate reporter refuses missing outcomes from unconditional setup steps", () => {
+  for (const id of SETUP_IDS) {
+    const actual = ciYml.jobs.commitlint!.steps.find((step) => step.id === id);
+    assert.ok(actual, `positive control: the workflow really wires ${id}`);
+    assert.equal(actual.if, undefined, `${id} is unconditional, not a legitimately fast-laned setup skip`);
+    assert.ok(reporter.env!.SETUP_OUTCOMES!.includes(`steps.${id}.outcome`), `${id} must be represented in the actual report`);
+    const posts = report(gates("skipped", { ...GREEN_SETUP, [id]: "" }));
+    assert.ok(posts.size > 0, "the actual reporter posted its required contexts");
+    for (const [name, post] of posts) {
+      assert.equal(post.conclusion, "failure", `${name}: an unavailable ${id} outcome is not successful setup`);
+      assert.ok(post.title.includes(`${id}=`), `${name}: the unavailable setup step remains named`);
+    }
+  }
+});
+
+test("bundled gate reporter refuses an absent or blank setup collection and preserves fast-lane skips", () => {
+  for (const unavailable of [null, "", " \t "]) {
+    const posts = report(gates("skipped", GREEN_SETUP), unavailable);
+    assert.ok(posts.size > 0, "the actual reporter posted its required contexts");
+    for (const [name, post] of posts) {
+      assert.equal(post.conclusion, "failure", `${name}: an empty collection cannot certify setup`);
+      assert.match(post.title, /setup-outcomes=unavailable/);
+    }
+  }
+  const fastLane = report(gates("skipped", GREEN_SETUP));
+  assert.ok(fastLane.size > 0, "positive control: valid fast-lane reports exist");
+  for (const [name, post] of fastLane) assert.equal(post.conclusion, "success", `${name}: valid gate skips stay green`);
+});
 
 test("W1-T5858: a failed install posts every gate as failure naming the setup step", () => {
   const posts = report(gates("skipped", { ...GREEN_SETUP, install: "failure" }));

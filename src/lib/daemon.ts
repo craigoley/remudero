@@ -1277,7 +1277,7 @@ export interface DaemonDeps {
     deferralPending: boolean;
     dispatchCount: number;
     laneBudget: number;
-  }) => AutoTriageDecision;
+  }) => AutoTriageDecision | Promise<AutoTriageDecision>;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /** The auto-triage rung's own in-flight guard, symmetric with `isOpenPr` but keyed on feedback id. Why: a feedback
@@ -3600,6 +3600,16 @@ export async function runDaemon(
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
     }
 
+    // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
+    // Start, don't await: a slow review must not serialize the background full sweep behind it.
+    const bootReviewPass = bootGateTrigger === undefined ? (async () => {
+      try {
+        await deps.sweepLight?.({ reviewOnly: true });
+      } catch (e) {
+        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+      }
+    })() : undefined;
+
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
     // Best-effort in code, not just prose: this loop's only try/catch wraps the dispatch below, so an
@@ -3709,11 +3719,7 @@ export async function runDaemon(
     };
 
     if (bootGateTrigger === undefined) {
-      try {
-        await deps.sweepLight?.({ reviewOnly: true });
-      } catch (e) {
-        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
-      }
+      await bootReviewPass;
       for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
       await bootGateOpened;
     }
@@ -4603,7 +4609,7 @@ export async function runDaemon(
     if (deps.checkAutoTriage) {
       let decision: AutoTriageDecision | undefined;
       try {
-        decision = deps.checkAutoTriage({
+        decision = await deps.checkAutoTriage({
             deferralPending: deferredPairings > 0,
             dispatchCount: dispatchSet.length,
             laneBudget,

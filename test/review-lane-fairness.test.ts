@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   DEFAULT_SWEEP_POLICY,
   orderPendingReviews,
@@ -172,12 +175,28 @@ test("W1-T1218: the review budget and its floor are unchanged", () => {
   // one, which is why main went red; both are updated together here. Kept as a LITERAL on purpose:
   // reading the row here would assert a value against itself and guard nothing, so an unintended
   // budget change must still redden this.
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "the shipped budget is what policy.yaml commits");
-  assert.equal(validateReviewLanesRow({ value: 3, origin: "net-new", min: 1, max: 3 }), 3);
-  assert.throws(() => validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 3 }), /reviewLanes/i,
+  // 2026-10-06: 3 -> 4, max 3 -> 5, by operator ruling ("width 4, max 5").
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 4, "the shipped budget is what policy.yaml commits");
+  assert.equal(validateReviewLanesRow({ value: 4, origin: "net-new", min: 1, max: 5 }), 4);
+  assert.throws(() => validateReviewLanesRow({ value: 6, origin: "net-new", min: 1, max: 5 }), /reviewLanes/i,
     "a value past the bound is still a PolicyError — the ceiling still refuses");
   assert.equal(orderPendingReviews.length, 1, "the ordering takes ONE argument — the jobs — and no policy");
   // The floor is `Math.max(1, policy.reviewLanes)`: a misconfigured 0 must still mean one lane,
   // never "review nothing". Ordering cannot affect it, and this pins the arithmetic either way.
   assert.equal(Math.max(1, 0), 1, "a zero budget still floors to one lane");
+});
+
+test("operator ruling 2026-10-06: the review width ships at four with room to earn five", () => {
+  // Reads the committed row itself, not the loaded constant alone, so the earnable ceiling is pinned
+  // too: a value of 4 under the old max of 3 would fail to load, and a max left at 3 would leave
+  // the widener nothing to earn.
+  const raw = parseYaml(readFileSync(join(process.cwd(), "plan", "policy.yaml"), "utf8")) as {
+    sweep: { reviewLanes: { value: number; min: number; max: number } };
+  };
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 4, "the shipped budget");
+  assert.deepEqual(
+    { value: raw.sweep.reviewLanes.value, min: raw.sweep.reviewLanes.min, max: raw.sweep.reviewLanes.max },
+    { value: 4, min: 1, max: 5 },
+    "plan/policy.yaml sweep.reviewLanes",
+  );
 });
