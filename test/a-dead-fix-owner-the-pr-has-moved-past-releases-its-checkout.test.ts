@@ -218,7 +218,7 @@ test("a dead fix owner whose staged-only residue sits on a head the PR has moved
     const stagedTree = git(f.ownerPath, "write-tree").trim();
     const logs: Log[] = [];
     const order: string[] = [];
-    const outcome = await withGh(f, prHead, () =>
+    const outcome = await withGh(f, prHead, async () =>
       effectsFor(f, prHead, logs, order).dispatchFix(view(prHead) as never, { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "red" }] } as never),
     );
     assert.equal(typeof outcome === "object" && outcome !== null && "claimDeclined" in outcome, false, "the claim is not declined");
