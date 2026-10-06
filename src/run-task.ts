@@ -2415,6 +2415,7 @@ export function buildSweepEffects(
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
+      preserveStagedResidue: preserveStagedFixOwnerResidue,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -41932,6 +41933,26 @@ export function preserveOrDiscardFixOwnerResidue(
   return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
 }
 
+/** W1-T5974: a staged-only residue on a head the PR has moved past, preserved from the owner's
+ *  INDEX (`git diff --cached --binary <localSha>`) into the same immutable recovery-ref shape, the
+ *  ref's tree proven equal to the owner's own index tree before the caller resets anything. */
+export function preserveStagedFixOwnerResidue(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  readTrackedDirtyOwnerPatch(ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
+  const gitOut = (args: string[]) =>
+    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] });
+  const patch = gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
+  const ownerIndex = resolve(ownerPath, gitOut(["rev-parse", "--git-path", "index"]).trim());
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps, () =>
+    temporaryIndexTree(ownerPath, localSha, () => {}, ownerIndex),
+  );
+}
+
 const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
 const FIX_OWNER_OPERATION_MARKERS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] as const;
 
@@ -41999,11 +42020,12 @@ function preserveTrackedDirtyPatch(
   localSha: string,
   patch: string,
   deps: CaptureRegisteredFixOwnerDeps,
+  ownerTreeOf?: () => string,
 ): string {
   if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
-  const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
+  const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
     execFileSync("git", ["-C", ownerPath, "add", "-A"], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
