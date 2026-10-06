@@ -3,10 +3,12 @@ import { execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { boundGitCall, LATE_TIMER_SLACK_MS, type AsyncGitRunner } from "../src/lib/git-fetch-retry.js";
+import { boundGitCall, type AsyncGitRunner } from "../src/lib/git-fetch-retry.js";
 
 const MAIN_FETCH = ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"];
 const execFileAsync = promisify(execFile);
+/** Comfortably past LATE_TIMER_SLACK_MS (1 s), kept literal so the file still loads against a base without it. */
+const LATE_BY_MS = 1_500;
 
 /** Hold the event loop the way a synchronous spawn on the daemon loop does (the 143 s block of 2026-10-06). */
 function blockLoop(ms: number): void {
@@ -25,7 +27,7 @@ test("test/a-fetch-that-finished-during-a-loop-block-is-not-a-timeout.test.ts", 
     const runner: AsyncGitRunner = async () => (await execFileAsync(process.execPath, ["-e", "process.stdout.write('fetched')"])).stdout;
     const call = boundGitCall(runner, MAIN_FETCH, 200);
     await startRunner();
-    blockLoop(200 + LATE_TIMER_SLACK_MS + 1_500);
+    blockLoop(200 + LATE_BY_MS + 1_500);
     assert.equal(await call, "fetched");
   });
 
@@ -34,7 +36,7 @@ test("test/a-fetch-that-finished-during-a-loop-block-is-not-a-timeout.test.ts", 
     const hung: AsyncGitRunner = (_args, abort) => { signal = abort; return new Promise(() => {}); };
     const call = boundGitCall(hung, MAIN_FETCH, 20, 50);
     await startRunner();
-    blockLoop(20 + LATE_TIMER_SLACK_MS + 300);
+    blockLoop(20 + LATE_BY_MS);
     await assert.rejects(call, (error: Error) => {
       assert.match(error.message, /exceeded its 20ms bound and was killed/);
       assert.match(error.message, /its timer fired [0-9]+ms late \(event loop blocked\)/);
