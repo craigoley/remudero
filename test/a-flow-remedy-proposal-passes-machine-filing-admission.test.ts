@@ -122,3 +122,20 @@ test("the flow gardener runs admission before it writes a drafted shard", (t) =>
   assert.throws(() => invalidSpec.apply(worktree, plan, {}), /machine-filing admission/);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, before, "a refused draft never reaches disk");
 });
+
+test("a flow remedy the machine-filing judge released to verify:auto keeps its new test path admissible", () => {
+  const ruling = (action: string) => `  risk_ruling:\n    verdict: "low"\n    action: ${action}\n    confidence: 0.7\n    reasons:\n      - "fixture"\n    judged_at: "2026-10-06T18:20:44.742Z"\n    pin: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n`;
+  const admit = (yaml: string) => {
+    const plan = loadPlanFromYaml(yaml, "flow-remedy-judged");
+    return machineFilingAdmissionViolations(plan.tasks[0]!, {
+      plan,
+      releasedIds: new Set(),
+      pathExists: path => path === "src/lib/sweep.ts",
+      pathExistsAtBase: () => false,
+    }).join("; ");
+  };
+  const auto = YAML.replace("verify: human", "verify: auto");
+  assert.doesNotMatch(admit(auto + ruling("proceed")), /exist in neither the checkout nor the base tree/, "a judge-released remedy (#9657's W1-T6044 shape) is admitted");
+  assert.match(admit(auto + ruling("escalate")), new RegExp(TEST_PATH.replaceAll("/", "\\/")), "an escalated ruling releases nothing");
+  assert.match(admit(auto), new RegExp(TEST_PATH.replaceAll("/", "\\/")), "an unjudged verify:auto remedy is still refused, as #9571 pins");
+});

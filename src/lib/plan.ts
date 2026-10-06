@@ -373,17 +373,26 @@ function isCiFrictionRemedyProposal(task: Task): boolean {
   );
 }
 
-function isFlowBlockerRemedyProposal(task: Task): boolean {
+function isFlowBlockerRemedyShape(task: Task): boolean {
   const files = task.files ?? [];
   return (
     task.author_class === "machine" &&
-    task.verify === "human" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
     task.origin?.startsWith("flow-blocker:") === true &&
     files.some((f) => /^(src|scripts)\//.test(f)) &&
     files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
   );
+}
+
+function isFlowBlockerRemedyProposal(task: Task): boolean {
+  return task.verify === "human" && isFlowBlockerRemedyShape(task);
+}
+
+/** The machine-filing judge's `proceed` ruling releases a parked flow remedy to verify:auto; its new test
+ *  path stays admissible. The ruling's pin is checked by machineAuthorVerifyViolation in the same lint. */
+function isJudgeReleasedFlowBlockerRemedy(task: Task): boolean {
+  return task.verify === "auto" && task.risk_ruling?.action === "proceed" && isFlowBlockerRemedyShape(task);
 }
 
 function isParkedMachineProposal(task: Task): boolean {
@@ -1160,7 +1169,7 @@ export function machineFilingAdmissionViolations(
 
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
-  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task);
+  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task);
   const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
   if (missing.length > 0) {
     reasons.push(
