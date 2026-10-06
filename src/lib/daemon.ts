@@ -5018,43 +5018,65 @@ export async function runDaemon(
         (governed ? `governor: ${governed.kind}` : undefined);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
-      const chooseRefill = (runBranchListing: string | undefined): Task | undefined => {
+      const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
         let next: Task | undefined;
+        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.());
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+            ...dispatchOpts,
+            ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
+            dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
+          });
+          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+          if (next) snapshots.push(snapshot);
+        };
+        const readFailed = (e: unknown): void => {
+          reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+        };
+        const conclude = (): Task | undefined => {
+          if (!next) {
+            log("dispatch.lane_refill_held", {
+              lane,
+              finished_task: finished.id,
+              reason: reason ?? "no disjoint runnable task within the lane budget",
+              ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs } : {}),
+              ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
+            });
+            return undefined;
+          }
+          passIds.add(next.id);
+          inFlightTasks.add(next);
+          log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
+          log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
+          attempted.push(next.id);
+          return next;
+        };
         if (reason === undefined) {
           try {
             reloadPlanBinding();
-            const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
-            const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
-            const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.());
-            const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
-              ...dispatchOpts,
-              ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
-              dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-              excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
-            });
-            const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
-            next = fits.dispatch.find((t) => !inFlightTasks.has(t));
-            if (next) snapshots.push(snapshot);
+            const refillPlan = plan;
+            // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
+            // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
+            // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
+            if (deps.refreshMergedAsync) {
+              return deps.refreshMergedAsync(refillPlan).then(
+                (isMerged) => {
+                  try { decide({ plan: refillPlan, isMerged }); } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
+                  return conclude();
+                },
+                (e) => { readFailed(e); return conclude(); },
+              );
+            }
+            decide({ plan: refillPlan, isMerged: deps.refreshMerged(refillPlan) });
           } catch (e) {
-            reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+            // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
+            readFailed(e);
           }
         }
-        if (!next) {
-          log("dispatch.lane_refill_held", {
-            lane,
-            finished_task: finished.id,
-            reason: reason ?? "no disjoint runnable task within the lane budget",
-            ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs } : {}),
-            ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
-          });
-          return undefined;
-        }
-        passIds.add(next.id);
-        inFlightTasks.add(next);
-        log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
-        log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
-        attempted.push(next.id);
-        return next;
+        return conclude();
       };
       const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);

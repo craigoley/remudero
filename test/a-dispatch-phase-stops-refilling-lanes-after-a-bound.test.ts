@@ -32,11 +32,19 @@ test("a dispatch phase refills through the bound, drains admitted lanes, then re
   const merged = new Set<string>();
   let nowMs = Date.UTC(2026, 9, 5);
   let tick = 0;
+  // W1-T5846: a lane refill also reads through the async port, so `generation` counts only the
+  // first read of each tick (the top-of-tick refresh); every later read in the tick is a refill's.
   let generation = 0;
+  let readsThisTick = 0;
+  let refillReads = 0;
   let cleaningUp = false;
   const run = runDaemon(loadPlan(path), {
     now: () => new Date(nowMs),
     refreshMergedAsync: async () => {
+      if (readsThisTick++ > 0) {
+        refillReads++;
+        return (id: string) => merged.has(id);
+      }
       generation++;
       // Top-of-tick work is older than the bound before the FIRST phase even starts.
       if (generation === 1) nowMs += 25 * minute;
@@ -46,7 +54,7 @@ test("a dispatch phase refills through the bound, drains admitted lanes, then re
     checkStop: () => cleaningUp ? "test cleanup" : undefined,
     log: (step, extra) => {
       steps.push({ step, extra });
-      if (step === "daemon.tick") tick++;
+      if (step === "daemon.tick") { tick++; readsThisTick = 0; }
     },
     runOne: async (id) => {
       started.push({ id, tick, generation });
@@ -75,6 +83,7 @@ test("a dispatch phase refills through the bound, drains admitted lanes, then re
     }]);
     assert.equal(tick, 1);
     assert.equal(generation, 1);
+    assert.equal(refillReads, 4, "the D..G refills each read once; the bound holds G's lane before any read");
     assert.equal(steps.some(({ step }) => step === "dispatch.settled_set"), false,
       "the bound must leave A and C running");
     await settle("C", minute);
