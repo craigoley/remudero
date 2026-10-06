@@ -81,17 +81,10 @@ export const ACKNOWLEDGED = new Map([
   ],
   ["implement.resumed", "W1-T3352 — union=6 rows, live=0. Same call site as recon.done."],
   [
-    "fix.exhausted",
-    "W1-T3352 — union=166 live=0. INVISIBLE TO THE FIRST DRAFT OF THIS GATE: autonomy.ts writes its " +
-      "pattern as a regex ALTERNATION, and the extractor could not see inside it. Found only after " +
-      "`stepsInPatternText` was taught to split alternations.",
-  ],
-  ["fix.stood_down", "W1-T3352 — union=434 rows, live=0. Same alternation pattern as fix.exhausted."],
-  [
     "panel.operator_note_added",
     "W1-T3352 — union=0 live=0. THE ROW HAS NEVER BEEN WRITTEN AT ALL, so this is a full-corpus scan " +
       "for a step that does not exist. Its fix is not retention or a projection: it is deleting the " +
-      "read, or finding the producer that was never wired. Same alternation pattern as fix.exhausted.",
+      "read, or finding the producer that was never wired. Read through autonomy.ts's regex alternation.",
   ],
 ]);
 
