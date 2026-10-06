@@ -127,6 +127,8 @@ export interface TestSlotDir {
 }
 
 let testProcessSlotDir: string | undefined;
+/** The process's TMPDIR at load, so a test that later points TMPDIR at a fixture never receives the slot dir. */
+const TEST_PROCESS_TMP_ROOT = tmpdir();
 
 /**
  * The shared slot directory: `RMD_TEST_SLOT_DIR` when set (the scratch bind every container
@@ -148,7 +150,7 @@ export function resolveTestSlotDir(
   const configured = env[TEST_SLOT_DIR_ENV];
   if (configured) return { dir: configured, scope: "configured" };
   if (env.NODE_TEST_CONTEXT) {
-    testProcessSlotDir ??= mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}test-slots-`));
+    testProcessSlotDir ??= mkdtempSync(join(TEST_PROCESS_TMP_ROOT, `${RMD_TMP_PREFIX}test-slots-`));
     return { dir: testProcessSlotDir, scope: "test-process" };
   }
   if (isDir(HOST_SCRATCH_RMD_DIR)) return { dir: join(HOST_SCRATCH_RMD_DIR, "test-slots"), scope: "host-scratch" };
