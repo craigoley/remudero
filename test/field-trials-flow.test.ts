@@ -726,3 +726,27 @@ test("the existing private flow consumes prevention source import and later work
   assert.equal(release.state, "candidate");
   assert.doesNotMatch(JSON.stringify(release), /private-worker-source|private-source-round|private-source-assignment|synthetic-private-gate|preventionAdoption|module-import-git/);
 });
+
+test('private repair cells separate observed current-head green from legacy first-commit success', () => {
+  const saved = repoStore([rawPull(1, { merged: T(2) }), rawPull(2, { merged: T(2) })]);
+  const first = saved.pulls.PR_node_1!; first.headSha = 'a'.repeat(40);
+  first.headGreen = { version: 1, headSha: first.headSha, state: 'observed', readAt: T(4),
+    history: { state: 'partial', nextPage: 2, pagesRead: 1, reason: 'pending-history' }, pending: [], seenCheckIds: [11],
+    firstEver: 'unavailable-retention-uncertified',
+    firstObserved: { checkId: 11, suiteId: 22, runId: 33, jobId: 44, checkCompletedAt: T(2),
+      completedAt: T(2), firstReadAt: T(3), validatedAt: T(4), producer: { workflowId: 55, path: '.github/workflows/ci.yml' } } };
+  const other = saved.pulls.PR_node_2!; other.headSha = 'b'.repeat(40); other.headGreen = first.headGreen;
+  const github: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: { 'acme/core': saved } };
+  const sources = [{ label: 'core', repo: 'acme/core', ledger: flowReadOf([]) }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  const cells = Object.values(snapshot.families.repair).map((partition) => partition.cells.toFirstObservedCurrentHeadGreen);
+  assert.equal(cells.reduce((sum, cell) => sum + cell.observed, 0), 1);
+  assert.equal(cells.reduce((sum, cell) => sum + (cell.excluded['missing-join'] ?? 0), 0), 1);
+  for (const cell of cells) {
+    assert.equal(cell.firstEver, 'unavailable-retention-uncertified');
+    assert.equal(cell.basis, 'pr-created-to-observed-current-head-gate-success');
+  }
+  first.headGreen.firstObserved!.completedAt = T(30);
+  const future = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  assert.equal(Object.values(future.families.repair).reduce((sum, partition) => sum + partition.cells.toFirstObservedCurrentHeadGreen.observed, 0), 0);
+});

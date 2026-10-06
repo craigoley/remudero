@@ -26,7 +26,7 @@ import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
-import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStore, RUN_BRANCH_RE,
+import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -337,7 +337,7 @@ function flowCells(units: FlowUnit[]) {
 
 type RepairBucket = "adverse-signal" | "no-adverse-signal-in-window" | "window-immature" | "unknown";
 type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number; reworkCost: RepairCostReport;
-  reverted: boolean; followUp: boolean; bucket: RepairBucket };
+  toFirstObservedCurrentHeadGreen: Duration; reverted: boolean; followUp: boolean; bucket: RepairBucket };
 
 function repairCells(units: RepairUnit[]) {
   const count = (predicate: (unit: RepairUnit) => boolean) => units.filter(predicate).length;
@@ -346,6 +346,8 @@ function repairCells(units: RepairUnit[]) {
   const observed = units.filter((unit) => unit.reviewRounds !== null);
   return { mergedPrs: units.length, firstPass,
     reworkCost: repairCostCells(units.map((unit) => unit.reworkCost)),
+    toFirstObservedCurrentHeadGreen: { ...durationCell(units.map((unit) => unit.toFirstObservedCurrentHeadGreen)),
+      basis: "pr-created-to-observed-current-head-gate-success" as const, firstEver: "unavailable-retention-uncertified" as const },
     reviewRounds: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.reviewRounds!, 0) },
     repairCommits: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.repairCommits!, 0) },
     fixDispatches: units.reduce((sum, unit) => sum + unit.fixDispatches, 0),
@@ -596,8 +598,11 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
       : Date.parse(ctx.asOf) - mergedAt < windowMs ? "window-immature"
         : !scanComplete ? "unknown" : "no-adverse-signal-in-window";
     const detail = pull.detail.state === "observed" ? pull.detail : null;
+    const green = observedCurrentHeadGreen(pull, ctx.asOf);
     return withDigest({ key: `${ctx.label}|${periodOf(pull.mergedAt)}|${task === undefined ? "unlinked" : stratum(classOf.get(task) ?? null)}`,
       firstPass: detail === null ? "unavailable" : detail.checks.state, reviewRounds: detail?.reviews.changesRequested ?? null,
+      toFirstObservedCurrentHeadGreen: green === null ? { excluded: "missing-join" as const }
+        : { ms: Date.parse(green.completedAt) - Date.parse(pull.createdAt!), observed: true },
       repairCommits: detail === null ? null : Math.max(0, detail.commits.count - 1),
       reworkCost: reworkCosts.get(pull.number) ?? repairCostCells([]),
       fixDispatches: (rowsByTask.get(task ?? "") ?? []).filter((row) => row.step === "fix.dispatch").length,
