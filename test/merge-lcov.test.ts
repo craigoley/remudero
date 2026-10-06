@@ -750,6 +750,6 @@ test('coverage merge CLI requires exactly one output mode', () => {
       encoding: 'utf8',
       stdio: 'pipe',
     }),
-    /exactly one of --output or --compact-output is required/,
+    /exactly one of --output, --compact-output or --premap-output is required/,
   );
 });

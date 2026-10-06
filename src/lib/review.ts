@@ -7360,6 +7360,10 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/test-duration-reporter.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
+    "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +
+    "it cannot turn a failing suite green. Its numbers reach the split only through a reviewed ledger.",
   "scripts/diff-coverage-local.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T4084) — a local convenience exposed only as the " +
     "`diff-coverage:local` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +
