@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -498,17 +499,24 @@ test("an overdue Codex deadline with no reply still fails closed after the stdou
   assert.equal(kills, 1);
 });
 
-async function realCapacityExchangeDuringBlockedLoop(initializeReplyDelayMs: number) {
-  clearCodexCapacityCache();
-  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-capacity-"));
+function installIsolatedCapacityAppServer(root: string, initializeReplyDelayMs: number) {
   const bin = join(root, "fake-codex");
   const started = join(root, "started");
   const release = join(root, "release");
   const completed = join(root, "completed");
   writeFileSync(bin, `#!/usr/bin/env node
-const { existsSync, writeFileSync } = require("node:fs");
+const { existsSync, renameSync, writeFileSync } = require("node:fs");
 let buffer = "";
 const replies = [];
+function reply(request, result) {
+  replies.push({ id: request.id, method: request.method });
+  if (replies.length === 2) {
+    const pending = ${JSON.stringify(completed + ".pending")};
+    writeFileSync(pending, JSON.stringify(replies), { flag: "wx" });
+    renameSync(pending, ${JSON.stringify(completed)});
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + "\\n");
+}
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString("utf8");
   for (;;) {
@@ -526,18 +534,61 @@ process.stdin.on("data", (chunk) => {
       }, 5);
     }
     if (request.id === 2) {
-      process.stdout.write(JSON.stringify({ id: 2, result: ${JSON.stringify(LIMITS)} }) + "\\n");
-      replies.push({ id: request.id, method: request.method });
+      reply(request, ${JSON.stringify(LIMITS)});
     }
     if (request.id === 3) {
-      process.stdout.write(JSON.stringify({ id: 3, result: { data: ${JSON.stringify(MODELS)}, nextCursor: null } }) + "\\n");
-      replies.push({ id: request.id, method: request.method });
+      reply(request, { data: ${JSON.stringify(MODELS)}, nextCursor: null });
     }
-    if (replies.length === 2) writeFileSync(${JSON.stringify(completed)}, JSON.stringify(replies));
   }
 });
 `);
   chmodSync(bin, 0o755);
+  return { bin, started, release, completed };
+}
+
+test("isolated capacity fixture publishes a complete witness before its terminal reply can trigger teardown", { timeout: 10_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-capacity-witness-"));
+  const { bin, release, completed } = installIsolatedCapacityAppServer(root, 0);
+  writeFileSync(release, "go");
+  const child = spawn(process.execPath, [bin], { stdio: ["pipe", "pipe", "pipe"] });
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+    rmSync(root, { recursive: true, force: true });
+  });
+  let buffer = "";
+  const terminal = new Promise<{ id: number }>((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const end = buffer.indexOf("\n");
+        if (end < 0) break;
+        const row = JSON.parse(buffer.slice(0, end)) as { id: number };
+        buffer = buffer.slice(end + 1);
+        if (row.id === 3) {
+          child.kill("SIGKILL"); // The fixture consumer may tear down immediately after the final reply.
+          resolve(row);
+        }
+      }
+    });
+  });
+  assert.equal(existsSync(completed), false, "positive control: no exchange has published a witness");
+  for (const request of [{ id: 1, method: "initialize" }, { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" }]) {
+    child.stdin.write(JSON.stringify(request) + "\n");
+  }
+  assert.equal((await terminal).id, 3, "the terminal native protocol reply was actually observed");
+  await closed;
+  assert.deepEqual(JSON.parse(readFileSync(completed, "utf8")), [
+    { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" },
+  ], "a terminal reply must never expose an absent or partially written witness");
+});
+
+async function realCapacityExchangeDuringBlockedLoop(initializeReplyDelayMs: number) {
+  clearCodexCapacityCache();
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-isolated-capacity-"));
+  const { bin, started, release, completed } = installIsolatedCapacityAppServer(root, initializeReplyDelayMs);
   const cfg = config(root);
   cfg.workerProviders!.codexBin = bin;
   let pending: Promise<Awaited<ReturnType<typeof readCodexCapacity>>> | undefined;
@@ -559,7 +610,7 @@ process.stdin.on("data", (chunk) => {
     const completedWhileBlocked = existsSync(completed);
     const result = await pending;
     assert.ok(existsSync(started), "positive control: the real app-server received initialize");
-    assert.ok(completedWhileBlocked, `the isolated exchange must finish both RPCs while the daemon cannot read stdout: ${result.detail ?? 'native result returned'}`);
+    assert.ok(completedWhileBlocked, `the isolated app-server must observe both RPC requests while the daemon loop is blocked: ${result.detail ?? 'native result returned'}`);
     assert.deepEqual(JSON.parse(readFileSync(completed, "utf8")), [
       { id: 2, method: "account/rateLimits/read" }, { id: 3, method: "model/list" },
     ], "the real child observed both protocol requests after release and before the parent resumed");
