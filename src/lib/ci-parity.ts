@@ -2657,6 +2657,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
   // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  // The nested-preflight census (#9724). Its one real `git ls-files` is scoped to `test/*.ts`, the
+  // TEST corpus; the `src/` text the recognizer sees is its fixture import line. Same route as above.
+  refusedForPredicate(
+    "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+    "a",
+    "the nested-preflight census. Its `git ls-files` is scoped to `test/*.ts`, the test corpus; its `src/` " +
+      "text is a fixture import line, so it is not a src-population walk",
+  ),
   // W1-T3086's shard-lint ratchet. The recognizer matches it on the `src/` text of its two imports
   // (src/lib/plan.js, src/lib/task-linter.js) plus a real `git ls-files` — but that call is
   // `git ls-files plan/tasks.d/*.yaml plan/tasks.d/*.yml`, the PLAN shard population, and the
