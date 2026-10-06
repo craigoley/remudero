@@ -411,3 +411,25 @@ test("unit test: a row the projector applied but the ring lacks is still a works
   assert.deepEqual(legacyIds.filter((id) => !viewIds.has(id)).length, 1, "the lost row is legacy's alone");
   assert.notDeepEqual(legacy.data, data);
 });
+
+test("unit test: a live file rotated after the ring was read is read whole by the workstreams shadow side", (t) => {
+  const f = fixture(t);
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
+  const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
+  const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
+  t.after(() => ticker.release());
+  ticker.start();
+  ticker.tick();
+  const data = bodiesOf(posted).at(-1)!.body.data as WorkstreamsData;
+  // A rotation replaces the live file (a new inode): the projector's offset names the old file, so it bounds nothing.
+  renameSync(f.ledgerPath, join(f.stateDir, "ledger.2026-09-30T11-59-45-000Z.ndjson"));
+  // Before the fixture ring's newest row (NOW - 60 s), so the ts bound alone admits it.
+  const late = { ts: iso(NOW - 90_000), step: "pr.stuck", run_id: "DAEMON-1", task_id: "SWEEP", blocker: "rotated" };
+  // The new file carries the archived rows first, so the row sits past the old file's applied offset.
+  writeFileSync(f.ledgerPath, [...ROWS, late].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const legacy = view.legacy("", NOW + 60_000, data);
+  assert.ok(legacy);
+  const sources = capped(legacy.data as WorkstreamsData).map((i) => (i as { source?: string }).source);
+  assert.ok(sources.includes("rmd:ledger:pr.stuck"), "the new live file is read whole, up to the ring's newest ts");
+});
