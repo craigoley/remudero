@@ -136,7 +136,7 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   // The slow lane's views, built as its units build them and handed over as the worker does.
   const panel = { ...deps.panelGraph, inboxRoot: root, ratify: { approve: () => {}, reframe: () => {} }, inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true };
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: (await refreshInboxClassification(panel, {}, clock)).bodies });
-  ticker.accept({ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root, planPath: deps.panelGraph.planPath }, fakeGitHub(), clock) });
+  ticker.accept({ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root, planPath: deps.panelGraph.planPath, stateRoot: root }, fakeGitHub(), clock) });
   // A shadow sample, so the read-model status body carries the comparator's readiness too.
   assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true);
   ticker.tick();

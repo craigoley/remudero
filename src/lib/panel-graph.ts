@@ -71,6 +71,8 @@ import {
 } from "./feedback.js";
 import {
   queueFeedbackRecord,
+  overlayQueuedFeedback,
+  overlayQueuedFeedbackEntries,
   queuedFeedbackLandings,
   readQueuedFeedbackRecords,
   type LandFeedbackOpts,
@@ -285,26 +287,14 @@ export function decorateFeedbackDischargeByTasks(
   });
 }
 
-/** W1-T5627: the queued record's decision fields over the checkout's entry — what the entry reads as until it lands. */
-function overlayQueuedFeedback<E extends FeedbackEntry>(entry: E, queued: ReadonlyMap<string, QueuedFeedbackRecord>): E | (E & { landing: "queued" }) {
-  const record = queued.get(feedbackEntryRepoPath(entry.id));
-  if (!record) return entry;
-  const answeredBy = record.answered_by === undefined ? {} : { answered_by: record.answered_by as string | null };
-  return { ...entry, status: record.status as FeedbackStatus, ...answeredBy, landing: "queued" };
-}
-
 /** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
 function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
-  let queued: Map<string, QueuedFeedbackRecord>;
   try {
-    queued = readQueuedFeedbackRecords(deps.inboxRoot);
+    return overlayQueuedFeedbackEntries(entries, deps.inboxRoot) as ReconciledFeedbackEntry[];
   } catch (error) {
     deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
     return entries.map((entry) => ({ ...entry, landingUnknown: true }));
   }
-  const listed = new Set(entries.map((entry) => feedbackEntryRepoPath(entry.id)));
-  const queueOnly = [...queued].filter(([rel]) => !listed.has(rel)).map(([, record]) => ({ ...record, landing: "queued" }) as unknown as ReconciledFeedbackEntry);
-  return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */

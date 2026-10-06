@@ -111,7 +111,7 @@ test("the feedback view projects a merged proposal as accepted and writes nothin
   writeFileSync(join(dir, "plan", "feedback", "fb-new.yaml"), entry("fb-new", "new"));
   const before = readFileSync(join(dir, "plan", "feedback", "fb-merged.yaml"), "utf8");
   const github = fakeGitHub({ prByRef: (ref: string | number) => (String(ref).endsWith("/7") ? { number: 7, url: String(ref), state: "MERGED" } : null), readFailed: () => true });
-  const bodies = materializeFeedbackView({ root: dir, planPath: join(dir, "plan", "tasks.yaml") }, github, fixedClock(T0));
+  const bodies = materializeFeedbackView({ root: dir, planPath: join(dir, "plan", "tasks.yaml"), stateRoot: dir }, github, fixedClock(T0));
   const all = bodies.find((b) => b.key === "")!;
   assert.deepEqual(all.data.entries.map((e) => [e.id, e.status, e.unverified ?? false]), [["fb-merged", "accepted", false], ["fb-new", "new", false], ["fb-open", "proposed", true]]);
   assert.deepEqual(all.data.counts, { total: 3, byStatus: { accepted: 1, new: 1, proposed: 1 } });

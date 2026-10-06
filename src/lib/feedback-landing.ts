@@ -1448,6 +1448,11 @@ export function queuedFeedbackLandings(stateRoot: string): string[] {
   return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
 }
 
+/** The directory a queued record lands in under `stateRoot` — its mtime moves when a record is queued or acknowledged. */
+export function queuedFeedbackDir(stateRoot: string): string {
+  return join(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR);
+}
+
 export type QueuedFeedbackRecord = Record<string, unknown> & { status: string };
 
 /** W1-T5627: each queued record parsed, by repo path; throws on an unreadable queue or a non-entry record. */
@@ -1465,6 +1470,27 @@ export function readQueuedFeedbackRecords(stateRoot: string): Map<string, Queued
     records.set(rel, parsed as QueuedFeedbackRecord);
   }
   return records;
+}
+
+/** W1-T5627: the queued record's decision fields over the checkout's entry — what the entry reads as until it lands. */
+export function overlayQueuedFeedback<E extends { id: string; status: string }>(entry: E, queued: ReadonlyMap<string, QueuedFeedbackRecord>): E | (E & { landing: "queued" }) {
+  const record = queued.get(`${FEEDBACK_REL_DIR}/${entry.id}.yaml`);
+  if (!record) return entry;
+  const answeredBy = record.answered_by === undefined ? {} : { answered_by: record.answered_by as string | null };
+  return { ...entry, status: record.status as E["status"], ...answeredBy, landing: "queued" };
+}
+
+/**
+ * W1-T5730: every reader of the feedback checkout overlays the one queue the same way — each entry
+ * the queue holds reads its queued record, and a queued record with no checkout entry (a console
+ * capture W1-T5628 left no copy of) is appended as an entry carrying `landing: "queued"`. Throws on an
+ * unreadable queue: the caller names that in its source, it is never read as "nothing queued".
+ */
+export function overlayQueuedFeedbackEntries<E extends { id: string; status: string }>(entries: readonly E[], stateRoot: string): Array<E | (E & { landing: "queued" })> {
+  const queued = readQueuedFeedbackRecords(stateRoot);
+  const listed = new Set(entries.map((entry) => `${FEEDBACK_REL_DIR}/${entry.id}.yaml`));
+  const queueOnly = [...queued].filter(([rel]) => !listed.has(rel)).map(([, record]) => ({ ...record, landing: "queued" }) as unknown as E & { landing: "queued" });
+  return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
 function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
