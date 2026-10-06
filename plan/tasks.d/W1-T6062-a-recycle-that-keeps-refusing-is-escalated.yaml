@@ -1,0 +1,37 @@
+- id: W1-T6062
+  title: "A RECYCLE THAT KEEPS REFUSING IS ESCALATED — site and console refused every image recycle from 2026-10-04 to 10-06 and the only trace was a state/DEPLOY_FAILED file and an hourly deploy.restart_refused row: no issue, no inbox item, no heartbeat signal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-06: Node 24 rollout readiness check (W1-T6061's silent failure)"
+  plan_refs: [W1-T6061, W1-T443]
+  files: [src/lib/deployer.ts, test/a-recycle-that-keeps-refusing-is-escalated.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06: deployer.ts records a refused restart with deploy.restart_refused and
+    state/DEPLOY_FAILED (recordFailure), then backs off IMAGE_RECYCLE_FAILURE_BACKOFF_MS (1 h) and
+    retries; nothing in src/lib/escalate.ts or the SRE lane reads either. Site and console refused
+    every recycle for over two days (W1-T6061) while their images fell 46 baked commits behind, and
+    the operator learned of it only by reading host files during the Node 24 rollout check.
+  design: |
+    Tiered, never a single threshold (operator ruling): the first refusal keeps today's marker and
+    row; a refusal that recurs across consecutive backoff windows for the same instance and the same
+    refusal reason logs deploy.refusal_persisting with the count and the running image's baked-commit
+    lag; while it keeps persisting, the deployer opens ONE needs-human issue per instance and reason
+    through the existing escalation path, naming the instance, the refusal's own remedy line and the
+    lag, and updates that issue rather than opening another. A verified recycle retracts the marker
+    (as today) and closes the issue.
+  acceptance:
+    - claim: "a refusal recurring across backoff windows logs deploy.refusal_persisting with its count and the image's baked-commit lag"
+      proof: 'grep: test("W1-T6062: a refusal that recurs is recorded as persisting with its lag" in test/a-recycle-that-keeps-refusing-is-escalated.test.ts'
+    - claim: "a persisting refusal opens one needs-human issue per instance and reason, and a verified recycle closes it"
+      proof: 'grep: test("W1-T6062: a persisting refusal opens one issue and a verified recycle closes it" in test/a-recycle-that-keeps-refusing-is-escalated.test.ts'
+  falsifier: |
+    Leave the recurrence uncounted: three consecutive refused windows log no deploy.refusal_persisting
+    and open no issue, and both tests fail.
