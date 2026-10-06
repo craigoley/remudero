@@ -1,0 +1,83 @@
+- id: W1-T5639
+  title: "Serve consumers share a qualified plan-source outcome and adopted generation"
+  repo: remudero
+  depends_on: []
+  plan_refs: [W1-T4481, W1-T4906, W1-T5004, W1-T4884, W1-T5340, W1-T5370, W1-T5373, W1-T5269, W1-T5317]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "October 4 approved Inbox follow-ups; existing operator reservation retained in October 5 continuation"
+  files:
+    - src/run-task.ts
+    - src/lib/serve.ts
+    - src/lib/panel-graph.ts
+    - src/lib/inbox.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/board-worker.ts
+    - src/lib/read-model-worker.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/serve-plan-source-initial.test.ts
+    - test/serve-plan-source-population.test.ts
+    - test/serve-plan-source-refresh.test.ts
+    - test/serve-plan-source-adoption.test.ts
+    - test/serve-plan-source-default-worker.test.ts
+    - test/serve-plan-source-boundaries.test.ts
+    - test/serve-board-projection-stays-off-the-event-loop.test.ts
+    - test/serve-plan-reload.test.ts
+    - test/panel-graph.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    A failed plan read is not a successfully read empty plan. OBSERVED at main 773178740:
+    serve assembly still records boardPlanReadFailure and binds an empty Plan after failure.
+    Historical real assembly controls showed healthy-zero Plan-view while the independent
+    default worker read valid on-disk tasks. Legacy controls also showed observed-plan and
+    fresh-complete claims with two synthetic operator decisions after a failed read. Valid
+    empty, nonempty, retired-task, genuine-human and GitHub-unknown controls separate this
+    provenance defect from a classifier bug. These are pinned historical diagnostics, not
+    current-main test execution or production acceptance. Existing reload, worker responsiveness,
+    view freshness, retirement/classification/count/list, stale-pin and malformed-shard owners
+    remain separate; no decoration or filing is implementation credit.
+  design: |
+    Carry one source-qualified plan envelope from the producer to existing consumers:
+    successful read including intentional empty, initial unavailable, or dated last-known-good
+    with a named failed refresh. Pin immutable source generation and observation/as-of evidence;
+    never infer source health from task count or a regenerated projection timestamp.
+    Install envelope and plan coherently through existing reload/adoption and object-identity
+    memo invalidation. Reconcile default worker/read-model and panel generations: independent
+    worker recovery cannot leave Plan-view silently bound to failed empty evidence. Reuse
+    bounded off-loop parsing and qualified view contracts, not a second per-GET parser, hard
+    age timer, restart or new classifier/retirement algorithm.
+    Plan-view, attention census and Inbox list must qualify failure without exact healthy-zero
+    counts, false observed/complete claims or invented operator decisions. Keep dated history
+    readable. GitHub/archive unavailability remains independently unknown. Introduce no absent-
+    task retirement, reply replay, approval/dispatch/routing/PR hold or human waiver. Wire shape
+    changes require maintained OpenAPI and generated consumer fixtures with auth/scope and
+    unknown compatibility preserved. Span is explicit for the atomic producer-to-consumer
+    contract. Default-path behavioral controls qualify recovery, not historical output.
+  acceptance:
+    - claim: "real initial plan failure is unavailable across affected serve readers rather than healthy empty"
+      proof: "unit test: test/serve-plan-source-initial.test.ts"
+    - claim: "valid empty and nonempty plans retain correct counts, retirement history and a genuine human task"
+      proof: "unit test: test/serve-plan-source-population.test.ts"
+    - claim: "failed refresh keeps explicitly dated prior evidence rather than certifying a current generation"
+      proof: "unit test: test/serve-plan-source-refresh.test.ts"
+    - claim: "successful adoption repairs source qualification and classification without restart or reply replay"
+      proof: "unit test: test/serve-plan-source-adoption.test.ts"
+    - claim: "real default worker and Plan-view agree on adopted generation after initial assembly failure"
+      proof: "unit test: test/serve-plan-source-default-worker.test.ts"
+    - claim: "GitHub and archive unknowns remain independent and auth refusals expose no private payload"
+      proof: "unit test: test/serve-plan-source-boundaries.test.ts"
+  falsifier: |
+    Delete source-outcome propagation from the implemented tree and rerun verified real-assembly
+    and default-worker control files: initial-failure and adoption assertions must fail; restore
+    it and they must pass. Valid empty/nonempty controls remain green where their source truly
+    loads. Exercise real default paths and each failure seam. Prove literal resolution by a
+    physical test hit and instrument every changed source in same-tree lcov. Historical output,
+    future test paths or PR-body parsing are not proof execution.
+  note: "Retain actual operator reservation refs/rmd-id/W1-T5639, anchor c8015049bb34cb57aa0db1a155ce229d4fb3a58e and original codex/plan-source-outcome-1791124578505 branch at 36e3d2a5058a52bb2186526b30ed331553b4f17c. Original base 5e517c122b2504267162a44ea4d8d9f6de758db0 is historical. Refreshed shard remains prepared, not published; one plan-only PR without implementation trailer needs its own committed-head author gate, stored-body parser and real filing proofs. Preserve issue 8451 and read-model/view-readiness owners, paid activation, credentials, production authority and existing human/dependency holds. Node 24 hand-built upgrade stays separately owned."
