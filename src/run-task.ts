@@ -28778,6 +28778,23 @@ export type PreflightCommandDeps = PreflightDeps & {
   coverageLockDiscriminator?: string;
 };
 
+/**
+ * Where `preflightCommand` writes its summary, or `undefined` for "write none" — the W1-T455
+ * containment rule as a pure function: an explicit `--summary-file` always wins; otherwise an
+ * injected `deps.spawn` (a test) writes nothing, and only a non-injected run falls back to
+ * `preflightSummaryPath(root)`. Pure so the default-path arm is provable without running the
+ * real gates that a non-injected `preflightCommand` would run.
+ */
+export function preflightSummaryTarget(
+  rest: string[],
+  deps: Pick<PreflightCommandDeps, "spawn">,
+  root: string = repoRoot,
+): string | undefined {
+  const explicitSummaryFile = flagValue(rest, "--summary-file");
+  if (explicitSummaryFile !== undefined) return explicitSummaryFile;
+  return deps.spawn !== undefined ? undefined : preflightSummaryPath(root);
+}
+
 export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
@@ -28930,9 +28947,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // named path, never the default the orchestrator trusts. Only a real, non-injected spawn may
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
-  const explicitSummaryFile = flagValue(rest, "--summary-file");
-  const injectedSpawn = deps.spawn !== undefined;
-  const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
+  const summaryPath = preflightSummaryTarget(rest, deps);
   const summary = buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
@@ -53560,6 +53575,9 @@ export async function main(
   deps: {
     checkFreshness?: typeof checkCliFreshness;
     checkServiceFreshness?: typeof checkServiceFreshness;
+    /** The verb dispatch past the gate. Injectable so a test proves the GATE admits a verb
+     *  without running that verb — `preflight`'s real handler is the whole fast gate. */
+    dispatch?: typeof dispatchCommand;
   } = {},
 ): Promise<void> {
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
@@ -53724,7 +53742,7 @@ export async function main(
   realDeps();
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
-  await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  await flushThenExit(await (deps.dispatch ?? dispatchCommand)(cmd, rest, REGISTRY, USAGE));
 }
 
 // W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.

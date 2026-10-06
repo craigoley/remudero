@@ -58,12 +58,19 @@ const REFUSED_OFF_MAIN_BEHIND = () =>
  *  whether the gate's own refusal message fired (`reached: false`) or execution continued past
  *  it into the verb's own dispatch (`reached: true`). Same shape as
  *  `test/deploy-run-freshness-exempt.test.ts`'s `runVerbUnderRefusal`, independently built here
- *  so this file's evidence does not depend on that file's helper staying unchanged. */
+ *  so this file's evidence does not depend on that file's helper staying unchanged.
+ *
+ *  The dispatch past the gate is a RECORDING FAKE (`main`'s `dispatch` seam): the question here
+ *  is whether the GATE admits the verb, and the real `preflight` handler is the whole fast gate
+ *  run against this checkout — measured at 400 s when this helper let it run. `dispatched`
+ *  names the verb and args the gate let through, which is a stronger signal than the absence of
+ *  the refusal text alone. */
 async function runVerbUnderRefusal(
   t: { mock: { method: typeof import("node:test").mock.method } },
   argv: string[],
   checkFreshness: typeof checkCliFreshness = REFUSED_OFF_MAIN_BEHIND,
-): Promise<{ reached: boolean; errs: string[] }> {
+): Promise<{ reached: boolean; errs: string[]; dispatched: Array<{ cmd: string | undefined; rest: string[] }> }> {
+  const dispatched: Array<{ cmd: string | undefined; rest: string[] }> = [];
   const errs: string[] = [];
   t.mock.method(
     process,
@@ -79,11 +86,17 @@ async function runVerbUnderRefusal(
   process.argv = ["node", "run-task.js", ...argv];
   try {
     let caught: unknown;
-    await main({ checkFreshness }).catch((e) => {
+    await main({
+      checkFreshness,
+      dispatch: async (cmd, rest) => {
+        dispatched.push({ cmd, rest: [...rest] });
+        return 0;
+      },
+    }).catch((e) => {
       caught = e;
     });
     const gateRefused = errs.some((e) => e.includes("refusing to auto-sync"));
-    return { reached: !gateRefused, errs };
+    return { reached: !gateRefused, errs, dispatched };
   } finally {
     process.argv = originalArgv;
   }
@@ -91,11 +104,16 @@ async function runVerbUnderRefusal(
 
 // ── (A) `preflight` reaches its own dispatch on the EXACT shape a feature branch produces ────
 
-test("W1-T2769: `rmd preflight` on an off-main, diverged checkout is NOT refused by the entry gate", async (t) => {
+test("W1-T2769: the freshness gate admits preflight without running a real preflight — an off-main, diverged checkout is NOT refused", async (t) => {
   const r = await runVerbUnderRefusal(t, ["preflight", "--fast"]);
   assert.ok(
     r.reached,
     `the off-main refusal must not fire for preflight; stderr was ${JSON.stringify(r.errs)}`,
+  );
+  assert.deepEqual(
+    r.dispatched,
+    [{ cmd: "preflight", rest: ["--fast"] }],
+    "the gate must hand exactly the preflight invocation to dispatch",
   );
 });
 
@@ -105,6 +123,7 @@ test("W1-T2769 REGRESSION LOCK: a plan-reading verb still refuses on the same of
   const r = await runVerbUnderRefusal(t, ["lint-plan"]);
   assert.ok(!r.reached, "lint-plan must still hit the gate");
   assert.ok(r.errs.some((e) => e.includes("refusing to auto-sync")), "with the remedy message");
+  assert.deepEqual(r.dispatched, [], "a refused verb must never reach dispatch");
 });
 
 test("W1-T2769: the exempt set names exactly {doctor, status, preflight, pr-owner}, each with its own declared reason", () => {
