@@ -1,0 +1,22 @@
+- id: W1-T5973
+  title: "Update scope of W1-T3764 per commit #6029"
+  repo: remudero
+  depends_on:
+    - W1-T5972
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: "W1-T3764 scope reflects changes introduced by commit #6029"
+      proof: "grep: #6029 in plan/tasks.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-09-28 follow-up on W1-T3764-1790590716896, ratified via rmd approve:
+  
+    follow-up harvest [task]: Review W1-T3764 for retirement or updated scope, because commit
+    #6029 already changed the named assertion. — from W1-T3764 (run W1-T3764-1790590716896)
