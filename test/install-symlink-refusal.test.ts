@@ -50,8 +50,10 @@ import {
 } from "../src/run-task.js";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { waitForServeBanner } from "./helpers/serve-boot-banner.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const SERVE_BOOT_BOUND_MS = 120_000;
 
 /** A port nobody holds right now — asked of the OS rather than guessed (the siblings' shape). */
 async function freePort(): Promise<number> {
@@ -243,14 +245,9 @@ async function runServeChild(guarded: boolean): Promise<{ log: string; target: s
     detached: true,
   });
   try {
-    const deadline = Date.now() + 45_000;
-    while (Date.now() < deadline) {
-      const text = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
-      if (text.includes("listening on")) break;
-      if (child.exitCode !== null) break; // a dead child's log is complete — stop waiting
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+    // W1-T6031: a child still booting at the bound fails as WALL-CLOCK DEPENDENT, not as a missing
+    // refusal; one that exits first fails as an exit. 148s was the worst boot measured on a loaded host.
+    const log = await waitForServeBanner(logPath, child, SERVE_BOOT_BOUND_MS);
     return {
       log,
       target,
