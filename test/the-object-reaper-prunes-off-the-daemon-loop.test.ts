@@ -19,6 +19,7 @@ import * as reaperLib from "../src/lib/object-reaper.js";
 import * as runTaskMod from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const { LOOSE_OBJECT_FLOOR, OBJECT_PRUNE_EXPIRY, reapGitObjects } = reaperLib;
 const reapGitObjectsAsync: typeof reaperLib.reapGitObjectsAsync = (...a) => reaperLib.reapGitObjectsAsync(...a);
@@ -127,7 +128,7 @@ test("a prune past its bound is killed and the decision row names the timeout", 
       }),
     }),
   );
-  assert.ok(Date.now() - started < 15_000, "the hung prune is killed at its bound, not waited out");
+  assertWallClockBound(Date.now() - started, 15_000, "the hung prune is killed at its bound, not waited out");
   const decision = rows.find(([s]) => s === "run.disk_reclaim.objects_decision")?.[1];
   assert.ok(decision, `the armed pass writes its decision row (rows: ${JSON.stringify(rows.map(([s]) => s))})`);
   assert.equal(decision.prune_outcome, "timed_out", "a killed prune is named, never read as a completed one");
