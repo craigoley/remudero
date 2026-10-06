@@ -225,6 +225,11 @@ import {
   type MainRunGapDispatch,
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
+import {
+  ACTIONS_INCIDENT_BACKSTOP_STEP, ACTIONS_INCIDENT_HOLD_STEP, ACTIONS_INCIDENT_REQUEUE_STEP, actionsIncidentHoldState,
+  cancelledOnlyRedChecks, classifyActionsIncident, createActionsStatusReader, decideActionsIncidentHold,
+  type ActionsIncidentObservation, type ActionsStatusRead,
+} from "./actions-incident.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
@@ -1324,6 +1329,8 @@ export interface BuildSweepEffectsDeps {
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
   pacer?: GhCallPacer;
   fetchWorkflowRunObservationsImpl?: typeof fetchWorkflowRunObservations;
+  /** W1-T5939: the githubstatus summary read; defaults to one process-lifetime cached reader. */
+  readActionsStatusImpl?: () => Promise<ActionsStatusRead>;
   /** W1-T3283 — the body write the trailer-repair effect performs. Injectable for the SAME reason
    *  `deps.updatePrBody` already is at this file's two other body-write sites: the effect is a thin
    *  wrapper around one network call, so without a seam the only way to cover it is to make a real
@@ -1600,6 +1607,9 @@ export function rebaseDirtyFleetBranchViaGit(
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
 
+/** W1-T5939: process-lifetime, so its TTL cache survives the per-poll rebuild of the effects. */
+const processActionsStatusReader = createActionsStatusReader();
+
 /**
  * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
  * `test/build-sweep-effects-takes-one-deps-object.test.ts` (the entrypoint-only suite) and
@@ -1679,6 +1689,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMergeQueueMembership",
   "escalateRearmExhausted",
   "readArmTimeline",
+  // W1-T5939: the cached githubstatus read the Actions-incident hold classifies.
+  "readActionsStatus",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1732,6 +1744,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMergeQueueMembership"
   | "escalateRearmExhausted"
   | "readArmTimeline"
+  | "readActionsStatus"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1766,6 +1779,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = ghJsonAsync,
+    readActionsStatusImpl = processActionsStatusReader,
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -2444,6 +2458,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // no-op — never a guessed target.
     // W1-T4586: ONE read, only when the sweep is about to act on red CI. The concurrency group
     // that cancels a sibling is ci.yml's, so only its runs count.
+    readActionsStatus: readActionsStatusImpl,
     liveCiRunForHead: async (pr) => {
       try {
         // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
@@ -10178,6 +10193,10 @@ export interface SweepDeps {
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
   reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
+  /** W1-T5939 — a cached read of githubstatus.com's summary, classified by `classifyActionsIncident`
+   *  before a CI-spending lane acts on a red that is only cancelled or never-started checks. Omitted,
+   *  nothing is ever held (the behaviour before this field existed). */
+  readActionsStatus?: () => ActionsStatusRead | Promise<ActionsStatusRead>;
   /** W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
    *  blocked-fixable disposition SPENDS a strike, never the snapshot this pass started from (#388:
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
@@ -12014,6 +12033,65 @@ export async function runSweep(
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
   const checkDeferrals = checkRequeueDeferralsFromLedger(ledgerLines); // W1-T5920
+  // W1-T5939 — AN ACTIONS INCIDENT PAUSES THE LANES THAT SPEND CI. Read githubstatus at most once a
+  // pass, and only when a red that is wholly cancelled/never-started checks is about to be acted on.
+  let actionsObservation: Promise<ActionsIncidentObservation> | undefined;
+  const observeActions = (read: NonNullable<SweepDeps["readActionsStatus"]>): Promise<ActionsIncidentObservation> =>
+    (actionsObservation ??= (async () => {
+      try {
+        return classifyActionsIncident(await read());
+      } catch (e) {
+        return classifyActionsIncident({ ok: false, error: String((e as Error)?.message ?? e), fetchedAtMs: now });
+      }
+    })());
+  /** The stand-down sentence when the incident gate takes this PR, else undefined (ordinary handling). */
+  const actionsIncidentGate = async (pr: OpenPrView, disposition: Disposition): Promise<string | undefined> => {
+    if (!deps.readActionsStatus || (disposition !== "blocked-fixable" && disposition !== "refused-escalate") || !isBlockedCi(pr)) return undefined;
+    const checks = cancelledOnlyRedChecks(pr);
+    if (!checks) return undefined;
+    const obs = await observeActions(deps.readActionsStatus);
+    const decision = decideActionsIncidentHold(obs, actionsIncidentHoldState(ledgerLines, pr), now);
+    const named = checks.map((c) => `"${c}"`).join(", ");
+    const row = {
+      run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+      disposition, checks, actions_state: obs.state, actions_reason: obs.reason,
+      ...(obs.componentStatus !== undefined ? { component_status: obs.componentStatus } : {}),
+      ...(obs.incident !== undefined ? { incident: obs.incident } : {}),
+    };
+    switch (decision.kind) {
+      case "proceed":
+        return undefined;
+      case "hold":
+        if (decision.record) appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_HOLD_STEP, held_since: new Date(now).toISOString() });
+        return `GitHub Actions incident: ${obs.reason} — red only from cancelled/never-started check(s) ${named}; ` +
+          "held with no fix dispatch, strike, requeue or escalation until Actions is operational";
+      case "keep-hold":
+        return `GitHub Actions status ${obs.state}: ${obs.reason} — never read as operational; the incident hold on ${named} stands`;
+      case "backstop": {
+        const reason = `GitHub Actions incident hold on ${named} has stood ${Math.round(decision.heldMs / 60_000)} min, past the BACKSTOP ` +
+          `(${obs.reason}) — escalating once; ordinary handling resumes at this head`;
+        appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_BACKSTOP_STEP, held_ms: decision.heldMs });
+        await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+        return reason;
+      }
+      case "requeue": {
+        const cancelled = (pr.cancelledRequiredChecks ?? []).map((c) => c.name);
+        // A ci-gate timeout needs a NEW head, not a same-sha rerun: W1-T5921's refresh, below, owns it.
+        const timeout = classifyCiTimeoutNoVerdict(pr.ciFailures ?? [], pr.redRequiredChecks ?? [], cancelled);
+        appendLine(deps.ledgerPath, { ...row, step: ACTIONS_INCIDENT_REQUEUE_STEP, route: timeout ? "ci_timeout_refresh" : "job_requeue" });
+        if (timeout) return undefined;
+        const notes: string[] = [];
+        for (const name of checks) {
+          const check = (pr.cancelledRequiredChecks ?? []).find((c) => c.name === name) ?? (pr.ciFailures ?? []).find((f) => f.name === name)!;
+          const key = `${pr.headSha}@${name}`;
+          const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), undefined, { surface: "actions_incident_recovery" });
+          if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+          notes.push(result.note ?? `${result.kind === "dispatched" ? "re-queued" : `requeue ${result.kind} for`} "${name}"`);
+        }
+        return `GitHub Actions operational again: one fresh requeue of the held check(s): ${notes.join("; ")} — no fix strike`;
+      }
+    }
+  };
   // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
   // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
   const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
@@ -13394,6 +13472,7 @@ export async function runSweep(
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
           // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          let actionsIncidentStandDown: string | undefined;
           const liveHead = deps.repairAdmissionSurface === "light" && disposition !== "mergeable"
             ? undefined : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
@@ -13402,6 +13481,9 @@ export async function runSweep(
               "since this pass's snapshot — not acting; the next pass re-derives from the live head";
             appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
               pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead });
+          } else if ((actionsIncidentStandDown = await actionsIncidentGate(pr, disposition)) !== undefined) {
+            acted = false;
+            standDownReason = actionsIncidentStandDown;
           } else switch (disposition) {
             case "mergeable": {
               // ARMING PARITY (see {@link decideSweepArm}): the run flow's capped refusal is
