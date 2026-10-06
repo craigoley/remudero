@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import * as status from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T5966. Rotation retained fix.dispatch but not most of the rows that END a fix round, so after a
@@ -13,23 +12,20 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // FIX_LANE_TERMINAL_STEPS row, and an investigator saw a round's cause with no outcome (#9450's
 // fix.stood_down sat only in a rotated archive). A retained start step must keep its terminal steps.
 //
-// The terminal set is read from status.ts's own declaration rather than restated here, so a step
-// added there without a matching registration in DECISION_RELEVANT_LEDGER_STEPS fails this guard.
+// The terminal set is status.ts's own export, not restated here, so a step added there without a
+// matching registration in DECISION_RELEVANT_LEDGER_STEPS fails this guard.
 
 const START_STEP = "fix.dispatch";
 const TASK = "W1-T9999";
 const FIX_RUN = "FIX-ROUND-1";
 
-function fixLaneTerminalSteps(): ReadonlySet<string> {
-  const source = readFileSync(fileURLToPath(new URL("../src/lib/status.ts", import.meta.url)), "utf8");
-  const block = /const FIX_LANE_TERMINAL_STEPS[^=]*=\s*new Set\(\[([^\]]*)\]\)/.exec(source);
-  assert.ok(block, "sanity: status.ts still declares FIX_LANE_TERMINAL_STEPS as a Set literal");
-  const steps = new Set([...block[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!));
-  assert.ok(steps.has("fix.done") && steps.has("fix.resolved") && steps.has("fix.stood_down"), "sanity: the parse read the set");
-  return steps;
-}
+/** BASE-ONLY FALLBACK: before W1-T5966 status.ts kept the set private, so a run at the parent commit
+ *  (rmd check-proof) reads the members it held then. With the export present this is never read. */
+const TERMINAL_STEPS_BEFORE_EXPORT: ReadonlySet<string> = new Set([
+  "fix.done", "fix.resolved", "fix.exhausted", "fix.stood_down", "fix.superseded", "fix.superseded_unknown", "fix.spawn_abandoned",
+]);
 
-const TERMINAL_STEPS = [...fixLaneTerminalSteps()];
+const TERMINAL_STEPS = [...((status as Partial<typeof status>).FIX_LANE_TERMINAL_STEPS ?? TERMINAL_STEPS_BEFORE_EXPORT)];
 
 /** The two other rows a fix round writes that a deciding reader folds: sweep.ts's fix-rung error and
  *  ci-friction-gardener's priced fix.base_refreshed round. */
@@ -59,7 +55,7 @@ function rotatedRound(terminalStep: string, retainedSteps?: ReadonlySet<string>)
     for (let n = 0; n < padding; n++) appendFileSync(path, noiseRow(n) + "\n");
     assert.ok(ledgerExceedsRotationCeiling(path, ceiling), "setup: padded past the ceiling");
     assert.equal(rotateLedger(path, { ceilingBytes: ceiling, ...(retainedSteps ? { retainedSteps } : {}) }).rotated, true);
-    const after = readLedgerLines(path);
+    const after = status.readLedgerLines(path);
     assert.ok(after.filter((l) => l.step === "ci.polling").length < 50, "the rotation really archived the noise");
     return after;
   } finally {
@@ -80,6 +76,7 @@ function openRounds(lines: Row[]): string[] {
 
 test("W1-T5966: every fix-lane terminal step is retained while fix.dispatch is", () => {
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(START_STEP), "sanity: the start step is retained");
+  assert.ok(TERMINAL_STEPS.includes("fix.stood_down") && TERMINAL_STEPS.includes("fix.done"), "sanity: the set was read");
   const unretained = [...TERMINAL_STEPS, ...ROUND_READ_BACK_STEPS].filter((s) => !DECISION_RELEVANT_LEDGER_STEPS.has(s));
   assert.deepEqual(unretained, [], "register these in DECISION_RELEVANT_LEDGER_STEPS beside fix.dispatch");
 });

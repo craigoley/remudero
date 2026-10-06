@@ -3038,7 +3038,7 @@ const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
 /** The cold fix rung runs under its caller's run_id, not the task run's. Its task_id is deliberately
  *  preserved, so allow only that fix invocation's own rows to extend liveness after fix.dispatch;
  *  a later sweep/automerge/review row naming the same task is not evidence that the worker lived. */
-const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
+export const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
   "fix.done",
   "fix.resolved",
   "fix.exhausted",
