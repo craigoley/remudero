@@ -8,7 +8,8 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
-import { builtRow, createViewEvents, VIEW_EVENTS_PATH, VIEW_EVENTS_SWEEP_MS } from "../src/lib/view-events.js";
+// A namespace import, so a checkout without builtRow still loads this file and its tests fail on their assertions.
+import * as viewEvents from "../src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-10-06T12:00:00.000Z");
@@ -49,7 +50,7 @@ function advancingReadModel() {
 
 function subscriber() {
   const req = new EventEmitter() as IncomingMessage;
-  Object.assign(req, { url: VIEW_EVENTS_PATH, headers: {} });
+  Object.assign(req, { url: viewEvents.VIEW_EVENTS_PATH, headers: {} });
   const res = new EventEmitter() as ServerResponse;
   Object.assign(res, { writableEnded: false, writableLength: 0, writeHead: () => res, write: () => true, end: () => res });
   return { req, res };
@@ -60,11 +61,11 @@ async function publisher(rm: ReturnType<typeof advancingReadModel>) {
   const clock: Clock = { now: () => at, date: () => new Date(at), iso: () => iso(at) };
   const runs = new Map<number, () => void>();
   const rows: Array<Record<string, unknown>> = [];
-  const events = createViewEvents({ names: ["now"], readModel: rm, clock, every: (run, ms) => (runs.set(ms, run), () => void runs.delete(ms)),
+  const events = viewEvents.createViewEvents({ names: ["now"], readModel: rm, clock, every: (run, ms) => (runs.set(ms, run), () => void runs.delete(ms)),
     log: (step, extra) => void (step === "view.emitted" && rows.push(extra!)) });
   const { req, res } = subscriber();
   await events.routes[0]!.handler(req, res, { params: {} });
-  return { rows, setNow: (ms: number) => void (at = ms), sweep: () => runs.get(VIEW_EVENTS_SWEEP_MS)?.() };
+  return { rows, setNow: (ms: number) => void (at = ms), sweep: () => runs.get(viewEvents.VIEW_EVENTS_SWEEP_MS)?.() };
 }
 
 test("a view.emitted row ledgers the row its body was built from as rowTs and the emit-time ledger head as judgedRowTs", async () => {
@@ -104,11 +105,11 @@ test("a view.emitted row whose body was built with no ledger row names rowTsAbse
   const row = pub.rows[0]!;
   assert.deepEqual({ rowTs: row.rowTs, rowTsAbsent: row.rowTsAbsent, judgedRowTs: row.judgedRowTs },
     { rowTs: null, rowTsAbsent: "no_ledger_row_in_build_sources", judgedRowTs: null });
-  assert.deepEqual(builtRow(built(2, [], T0)), { rowTs: null, rowTsAbsent: "no_ledger_row_in_build_sources" }, "a body with no sources at all names the same absence");
+  assert.deepEqual(viewEvents.builtRow(built(2, [], T0)), { rowTs: null, rowTsAbsent: "no_ledger_row_in_build_sources" }, "a body with no sources at all names the same absence");
 });
 
 test("builtRow folds a decorated body's carried rowTs into the row it was built from", () => {
   const decorated = { ...built(1, builtUpTo(T0 - 60_000), T0), rowTs: iso(T0 - 10_000) };
-  assert.deepEqual(builtRow(decorated), { rowTs: iso(T0 - 10_000) });
-  assert.deepEqual(builtRow({ ...built(1, [], T0), rowTs: iso(T0 - 10_000) }), { rowTs: iso(T0 - 10_000) }, "a carried row alone is a row");
+  assert.deepEqual(viewEvents.builtRow(decorated), { rowTs: iso(T0 - 10_000) });
+  assert.deepEqual(viewEvents.builtRow({ ...built(1, [], T0), rowTs: iso(T0 - 10_000) }), { rowTs: iso(T0 - 10_000) }, "a carried row alone is a row");
 });
