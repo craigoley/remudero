@@ -106,7 +106,7 @@ test("W1-T1012: an implementation run commits the task trailer before the pr ope
   assert.equal(trailerCallSites.length, 2, "exactly the implement and retro call sites append the commit trailer");
   for (const call of trailerCallSites) {
     const afterCall = src.slice(call.index ?? 0, (call.index ?? 0) + 2000);
-    const nextPrCreate = afterCall.indexOf("ghPrCreateFillCommand(worktreePath");
+    const nextPrCreate = afterCall.search(/ghPrCreateFillCommand(?:Async)?\(worktreePath/);
     assert.ok(nextPrCreate > 0, "a `ghPrCreateFillCommand` build must follow the trailer append, not precede it");
   }
 });

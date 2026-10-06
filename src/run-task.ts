@@ -929,10 +929,11 @@ import { regenerateOrientation } from "./lib/orientation.js";
 import {
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
+  openPullRequestCheckedAsync,
   PrOpenRefusedError,
-  prerunPullRequestProofs,
   readOtherOpenPrForTask,
   recordRefusedPrOpen,
+  type AsyncOpenPullRequestProofRunner,
   type OpenPrJsonReader,
   type OpenPullRequestProofRunner,
 } from "./lib/pr-open.js";
@@ -4313,7 +4314,38 @@ export function ghPrCreateFillCommand(
   title?: string,
   bodyOverride?: string,
   proofRunner?: OpenPullRequestProofRunner,
-): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
+): PrCreateCommand {
+  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
+  const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
+  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+}
+
+/** W1-T6034: {@link ghPrCreateFillCommand} for the daemon loop — the same draft and argv, with the
+ *  filed proofs run as awaited children (`openPullRequestCheckedAsync`), never a `spawnSync`. */
+export async function ghPrCreateFillCommandAsync(
+  worktreePath: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  title?: string,
+  runProofAsync?: AsyncOpenPullRequestProofRunner,
+): Promise<PrCreateCommand> {
+  const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
+  const checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
+  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+}
+
+type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } };
+
+/** The guarded title and unchecked body both PR-create builders share. */
+function draftPrCreate(
+  worktreePath: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  title?: string,
+  bodyOverride?: string,
+): { title: string; body: string } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
   // site at once and cannot be bypassed by a new one. The transport moved; the guard
@@ -4337,7 +4369,17 @@ export function ghPrCreateFillCommand(
   const body = filedTaskIdFromRunBranch(branch)
     ? draftedBody
     : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
-  const checkedBody = openPullRequestChecked(body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
+  return { title: resolvedTitle, body };
+}
+
+function prCreateArgv(
+  worktreePath: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  resolvedTitle: string,
+  checkedBody: string,
+): PrCreateCommand {
   const args = [
     "api",
     "--method",
@@ -18990,9 +19032,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
-        // The proofs run awaited, off the daemon loop; the sync open below answers from them.
-        const proofRunner = await prerunPullRequestProofs(branch, worktreePath, "origin/main", { owner, repo: task.repo });
-        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath), undefined, proofRunner);
+        // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.

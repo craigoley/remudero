@@ -381,6 +381,23 @@ export async function prerunPullRequestProofs(
   return answer;
 }
 
+/**
+ * W1-T6034: {@link openPullRequestChecked} with every proof run AWAITED, for a caller on the daemon
+ * loop. The proofs run through `runProofAsync` (an `execFile` child by default) before the same
+ * synchronous criteria loop reads their results, so its checks and verdicts are unchanged.
+ */
+export async function openPullRequestCheckedAsync(
+  body: string,
+  branch: string,
+  repoRoot: string,
+  baseRef = "origin/main",
+  runProofAsync: AsyncOpenPullRequestProofRunner = defaultProofRunnerAsync,
+  target?: SuiteRegistryTarget,
+): Promise<string> {
+  const answer = await prerunPullRequestProofs(branch, repoRoot, baseRef, target, runProofAsync);
+  return openPullRequestChecked(body, branch, repoRoot, baseRef, answer, target);
+}
+
 /** W1-T5520: an open PR for this task that is NOT the run's own branch. `trailer` means only the body's
  *  `Remudero-Task:` trailer named the task, the head being a non-run branch. */
 export interface OtherOpenPr {
