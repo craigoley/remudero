@@ -184,6 +184,8 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
   assert.deepEqual(resolveTestSlotDir({ [TEST_SLOT_DIR_ENV]: shared }), { dir: shared, scope: "configured" });
   assert.deepEqual(resolveTestSlotDir({}, (p) => p === "/mnt/scratch/rmd"), { dir: "/mnt/scratch/rmd/test-slots", scope: "host-scratch" });
   assert.deepEqual(resolveTestSlotDir({}, () => false), { dir: "/tmp/rmd-test-slots", scope: "local" }, "the narrower fallback names itself");
+  const real = resolveTestSlotDir({});
+  assert.ok(["host-scratch", "local"].includes(real.scope), "the real mount probe answers one of the two host rungs");
   const underTest = resolveTestSlotDir({ NODE_TEST_CONTEXT: "child" }, () => true);
   assert.equal(underTest.scope, "test-process");
   assert.ok(!underTest.dir.startsWith("/mnt/scratch"), "a test process never resolves the host's real scratch");
@@ -226,10 +228,12 @@ test("a dead holder of the host-wide test slot is reclaimed and a live foreign o
     ["an unparseable record", { heartbeatAt: "not-a-time" }, "acquired"],
     ["a live foreign cell, same boot, fresh heartbeat", { bootId: "boot-1" }, "wait_bound_exceeded"],
   ];
+  cases.push(["a truncated record", { truncated: true }, "acquired"]);
   for (const [name, holder, expected] of cases) {
     const dir = slotDir();
     try {
       const path = seedHolder(dir, holder);
+      if (holder.truncated) writeFileSync(path, "{");
       const lease = acquireTestSlot("reclaim-case", { ...base, dir });
       assert.equal(lease.outcome, expected, name);
       if (expected === "acquired") {
