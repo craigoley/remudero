@@ -80,8 +80,7 @@ test("an awaited proof run leaves the event loop free to service a timer while i
     const timer = setInterval(() => ticks++, 20);
     const result = await withEnv({ RMD_FAKE_SLEEP_MS: "600" }, () =>
       defaultProofRunnerAsync("grep: X in a.ts", "abc123", dir, undefined, { bin }),
-    );
-    clearInterval(timer);
+    ).finally(() => clearInterval(timer));
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.ok(ticks >= 10, `the loop serviced only ${ticks} timer ticks during a 600 ms proof run`);
   } finally {
