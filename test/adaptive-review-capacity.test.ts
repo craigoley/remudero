@@ -260,10 +260,12 @@ test("provider projection uses the best fresh readable subscription and preserve
     reservePct: 5,
     ageMs: 1_000,
   });
-  assert.deepEqual(reviewProviderObservation({ ...fresh, freshness: "stale" }, 2_000), {
+  // A reading past the daemon-cadence bound is stale for the widener; a merely router-lapsed one is
+  // not (test/review-widener-judges-provider-age-by-the-daemon-cadence.test.ts).
+  assert.deepEqual(reviewProviderObservation({ ...fresh, freshness: "stale" }, 1_000 + 900_001), {
     fresh: false,
     readable: false,
-    ageMs: 1_000,
+    ageMs: 900_001,
   });
   assert.equal(
     reviewProviderObservation({ ...fresh, state: "blocked", providers: [] }, 2_000).refused,
