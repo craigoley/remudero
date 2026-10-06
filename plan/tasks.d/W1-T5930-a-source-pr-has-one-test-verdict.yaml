@@ -1,0 +1,47 @@
+- id: W1-T5930
+  title: "A SOURCE PR HAS ONE TEST VERDICT — enabling narrow coverage must not reintroduce the broad uninstrumented CI floor beside the instrumented selection"
+  repo: remudero
+  depends_on: [W1-T5705]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: reduce repeated CI/coverage work; current-main 15406e72bfe86b72a1f7b3d86dd688c51f44bac7"
+  plan_refs: [W1-T3207, W1-T4406, W1-T5705, W1-T5891, W1-T5892]
+  files: [.github/workflows/ci.yml, scripts/ci-shard-admission.mjs, test/ci-shard-admission.test.ts, test/a-source-pr-has-one-test-verdict.test.ts, test/the-full-suite-runs-in-the-merge-queue.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED on main 15406e72: SOURCE PRs with RMD_AFFECTED_SUITE_LIVE=0 delegate their test
+    verdict to instrumented coverage under W1-T3207. With the flag at 1, ci-shard computes
+    sel.suites and changes CLASS to AFFECTED, while coverage independently computes sel.narrow.
+    Promotion therefore reintroduces a broad uninstrumented run beside the narrow instrumented
+    verdict. The open PR head diffs for 9428, 9420, 9379 and 9362 contain no repair of this arm.
+    The previous whole-tree cache W1-T4403 was retired because identical-tree reuse reached
+    only about 1% of runs; eliminating duplicate execution directly is the first useful step.
+  design: |
+    Preserve W1-T3207's single instrumented test owner for SOURCE pull_request diffs with
+    either flag value. Remove the ci-shard live-floor arm and its AFFECTED candidate consumer;
+    do not weaken the coverage shard/required aggregator failure propagation or required check
+    names. Preserve test-only, plan/docs, helper-full, push and merge-group behavior. Execute
+    the real workflow shell body in controls proving ordinary SOURCE diffs invoke no second
+    test runner at flag 0 or 1, while changed-test and helper fallback work still runs. Keep
+    the live flag at 0: promotion and baseline qualification remain separate governed work.
+    Align setup admission with this same test ownership: ordinary SOURCE shards 2-8 have no
+    duplicate work at either flag, so neither npm dependencies nor Chromium should be installed.
+    Keep shard 1 setup for typecheck and workflow guard-mutation tests; keep helper/test diffs
+    and uncertain inputs admitted. A workflow SOURCE diff retains its existing shard-1 owner.
+    Exercise the actual dependency-free admission CLI at both flag values; a dormant flag reader
+    must not retain seven idle installs after the test-floor consumer is removed.
+    Update W1-T4406's historical CI-floor assertion to follow its new coverage owner; retain
+    the real selector subprocess control against the coverage step and full merge-group controls.
+  acceptance:
+    - claim: "SOURCE PR CI delegates its test verdict to coverage with either live flag without a second selector or test harness, while changed-test and helper-full paths still execute and stable required aggregators remain present"
+      proof: "unit test: test/a-source-pr-has-one-test-verdict.test.ts"
+  falsifier: |
+    Restore the removed live ci-shard floor arm: flag 1 changes CLASS to AFFECTED and the
+    real shell-body control observes the forbidden second selector/runner. Remove the helper
+    fallback or test-only branch: its corresponding positive control fails.
