@@ -18,6 +18,7 @@
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -95,6 +96,7 @@ export interface FlowRow {
   servedModelReason?: string | null;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
+  repair?: RepairCostContext;
   taskClass: string | null;
   risk: string | null;
   workLane: string | null;
@@ -145,6 +147,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
+    repair: projectRepairCostContext(row),
     notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
       ? row.notional_cost_usd : null,
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
@@ -328,7 +331,7 @@ function flowCells(units: FlowUnit[]) {
 }
 
 type RepairBucket = "adverse-signal" | "no-adverse-signal-in-window" | "window-immature" | "unknown";
-type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number;
+type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number; reworkCost: RepairCostReport;
   reverted: boolean; followUp: boolean; bucket: RepairBucket };
 
 function repairCells(units: RepairUnit[]) {
@@ -337,6 +340,7 @@ function repairCells(units: RepairUnit[]) {
   for (const unit of units) firstPass[unit.firstPass] = (firstPass[unit.firstPass] ?? 0) + 1;
   const observed = units.filter((unit) => unit.reviewRounds !== null);
   return { mergedPrs: units.length, firstPass,
+    reworkCost: repairCostCells(units.map((unit) => unit.reworkCost)),
     reviewRounds: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.reviewRounds!, 0) },
     repairCommits: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.repairCommits!, 0) },
     fixDispatches: units.reduce((sum, unit) => sum + unit.fixDispatches, 0),
@@ -567,6 +571,7 @@ function verifiedStage(taskId: string, rows: FlowRow[], caseFiles: readonly Task
 
 function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: Map<string, string | null>,
   rowsByTask: Map<string, FlowRow[]>): RepairUnit[] {
+  const reworkCosts = repairCostsByPull(ctx.rows, ctx.repo);
   const windowMs = FOLLOW_UP_WINDOW_DAYS * DAY_MS;
   const scanComplete = ctx.store?.cursors.pulls.state === "complete";
   const mergedByTask = new Map<string, GithubPull[]>();
@@ -588,6 +593,7 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
     return withDigest({ key: `${ctx.label}|${periodOf(pull.mergedAt)}|${task === undefined ? "unlinked" : stratum(classOf.get(task) ?? null)}`,
       firstPass: detail === null ? "unavailable" : detail.checks.state, reviewRounds: detail?.reviews.changesRequested ?? null,
       repairCommits: detail === null ? null : Math.max(0, detail.commits.count - 1),
+      reworkCost: reworkCosts.get(pull.number) ?? repairCostCells([]),
       fixDispatches: (rowsByTask.get(task ?? "") ?? []).filter((row) => row.step === "fix.dispatch").length,
       reverted, followUp, bucket });
   });

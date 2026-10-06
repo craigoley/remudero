@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { fixWorkerReceipt, harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
 import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
 import { ledgerPathFor } from "../src/lib/ledger-path.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
@@ -181,6 +181,44 @@ test("W1-T4613: two fix workers under one daemon run id get distinct run ids", a
   assert.ok(a?.worker_run_id && b?.worker_run_id);
   assert.notEqual(a.worker_run_id, b.worker_run_id);
   assert.deepEqual([a.selection_assignment_id, b.selection_assignment_id], ["asg-fix-1", "asg-fix-2"]);
+});
+
+test("the actual fix rung joins its PR round dispatch assignment and terminal repair receipt", async () => {
+  const rung = fixRung({ raw: routedWorker("asg-explicit-repair") });
+  await runFixRung(rung.run);
+  const dispatch = rung.lines.find((line) => line.step === "fix.dispatch")!;
+  const done = rung.lines.find((line) => line.step === "fix.done")!;
+  const receipts = rung.lines.filter((line) => line.step === "worker.assignment" || line.step === "worker.attempt");
+  assert.equal(receipts.length, 2);
+  for (const line of [...receipts, dispatch, done]) {
+    assert.equal(line.repair_pr_url, rung.run.prUrl);
+    assert.equal(line.repair_round_id, done.round_id);
+    assert.equal(line.worker_run_id, done.worker_run_id);
+  }
+  assert.equal(dispatch.selection_assignment_id, "asg-explicit-repair");
+});
+
+test("one caller-owned repair receipt records each fallback selection and does not invent pre-push PR joins", async () => {
+  const lines: Row[] = [];
+  const raw = async (args: SpawnWorkerArgs) => {
+    args.onSelectionAssignment?.(assignment("first"));
+    args.onModelFallbackAttempt?.({ selectionAssignmentId: "first", model: "first-model", reason: "api-error",
+      result: worker({ selectionAssignmentId: "first", isError: true }) });
+    args.onSelectionAssignment?.(assignment("second"));
+    return worker({ selectionAssignmentId: "second" });
+  };
+  const receipt = fixWorkerReceipt(raw, (step, fields) => lines.push({ step, ...fields }), "worker-run", {},
+    { prUrl: "https://github.com/acme/core/pull/1", roundId: "repair-round" });
+  const args = { cwd: process.cwd(), permissionMode: "bypassPermissions", settingsFile: "x", prompt: "p" } as SpawnWorkerArgs;
+  await receipt.spawn(args);
+  assert.equal(lines.filter((line) => line.step === "worker.assignment").length, 2);
+  assert.deepEqual(lines.filter((line) => line.step === "worker.attempt").map((line) => line.selection_assignment_id), ["first", "second"]);
+  assert.ok(lines.every((line) => line.repair_pr_url === "https://github.com/acme/core/pull/1" && line.repair_round_id === "repair-round"));
+  assert.equal(receipt.joinFields().selection_assignment_id, "second");
+  const prePush = fixWorkerReceipt(raw, () => {}, "census-run");
+  await prePush.spawn(args);
+  assert.equal(prePush.joinFields().repair_pr_url, undefined);
+  assert.equal(prePush.ledgerFields(worker()).repair_round_id, undefined);
 });
 
 test("W1-T4613: a receipt failure never blocks or changes the fix", async () => {

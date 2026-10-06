@@ -70,6 +70,31 @@ test("Field Trials keeps the Sol 6.1 switch separate from Sol 6 and cash separat
   assert.equal(snapshot.causalClaims, "none");
 });
 
+test("the existing private repair family consumes explicit PR costs without exporting their identities", () => {
+  const store = emptyRepoStore();
+  for (const number of [1, 2]) {
+    const pull = pullOf(rawPull(number, { task: "W1-Tshared", merged: T(4) }))!;
+    store.pulls[pull.nodeId] = pull;
+  }
+  const rows = [1, 2].flatMap((number) => {
+    const context = { worker_run_id: `fix-${number}`, worker_rung: "fix", repair_round_id: `round-${number}`,
+      repair_pr_url: `https://github.com/acme/core/pull/${number}` };
+    return [
+      { ...assign("W1-Tshared", "daemon", `a-${number}`, T(2)), ...context },
+      row("worker.attempt", "W1-Tshared", "daemon", T(3), { ...context, selection_assignment_id: `a-${number}`,
+        total_cost_usd: number, billing_mode: "api" }),
+    ];
+  });
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(20),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": store } } });
+  const cost = Object.values(snapshot.families.repair)[0]!.cells.reworkCost;
+  assert.equal(cost.knownApiAttempts, 2); assert.equal(cost.apiCostEstimateUsd, 3);
+  assert.equal(cost.subscriptionNotionalUsd, null);
+  assert.equal(cost.history, "unavailable-retention-uncertified");
+  assert.equal(snapshot.causalClaims, "none");
+});
+
 type RawPull = Record<string, unknown>;
 
 function rawPull(number: number, opts: { task?: string; branch?: string; created?: string; merged?: string | null; mergeSha?: string;
