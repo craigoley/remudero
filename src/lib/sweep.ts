@@ -5966,22 +5966,24 @@ const rollupRunId = (c: RollupCheckEntry): number | undefined =>
   c.workflowRunId ?? (Number(c.detailsUrl?.match(/\/actions\/runs\/(\d+)\//)?.[1]) || undefined);
 
 /** W1-T5920 — the fresh rollup's CURRENT job id for `name`, and whether another job of its run is
- *  still in flight. No run identity proves nothing in flight. */
-export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } {
-  const entry = dedupeRollupByLatestAttempt(rollup ?? []).find((c) => (c.name ?? c.context) === name);
+ *  still in flight. No run identity proves nothing in flight; no rollup proves nothing (W1-T5953). */
+export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } | undefined {
+  if (!rollup) return undefined;
+  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === name);
   if (!entry) return { runInFlight: false };
   const run = rollupRunId(entry);
   return {
     jobId: entry.jobId ?? checkJobId(entry),
-    runInFlight: run !== undefined && (rollup ?? []).some((c) => rollupRunId(c) === run && (c.status ?? "COMPLETED") !== "COMPLETED"),
+    runInFlight: run !== undefined && rollup.some((c) => rollupRunId(c) === run && (c.status ?? "COMPLETED") !== "COMPLETED"),
   };
 }
 
 type CheckJobRequeue = { kind: JobRequeueOutcome["kind"] | "held"; note?: string; escalate?: string };
 
-/** W1-T5920 — one job requeue for runSweep. A previously deferred one waits for its run, re-resolves
- *  the current attempt's job, and at the BACKSTOP escalates once instead. The bounding row is
- *  written BEFORE the POST (W1-T1223); a deferral row after it voids it. */
+/** W1-T5920 — one job requeue for runSweep. A previously deferred one waits for its run (a pass
+ *  blind to it holds, W1-T5953), re-resolves the current attempt's job, and at the BACKSTOP
+ *  escalates once instead. The bounding row is written BEFORE the POST (W1-T1223); a deferral row
+ *  after it voids it. */
 async function requeueCheckJob(
   deps: SweepDeps,
   pr: OpenPrView,
@@ -6003,6 +6005,7 @@ async function requeueCheckJob(
       return { kind: "held", note: `${name} requeue deferred ${deferral.count} times — escalated`, escalate };
     }
     const target = deferredRequeueTarget(rollup, check.name);
+    if (!target) return { kind: "held", note: `${name} deferred requeue held: this pass cannot see its run` };
     if (target.runInFlight) return { kind: "held", note: `${name} deferred requeue waits: its run is still in flight` };
     check = { ...check, jobId: target.jobId ?? check.jobId };
   }

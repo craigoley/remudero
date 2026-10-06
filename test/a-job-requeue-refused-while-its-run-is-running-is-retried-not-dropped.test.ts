@@ -142,6 +142,9 @@ async function pass(
   return out;
 }
 
+/** W1-T5953: a deferred requeue is retried only by a pass that can see its run. */
+const seen: Partial<SweepDeps> = { readCiGateRollup: () => [] };
+
 const rollup = (jobId: string, siblingStatus: "IN_PROGRESS" | "COMPLETED"): RollupCheckEntry[] => [
   {
     name: GATE,
@@ -205,7 +208,7 @@ test("a not-current-attempt refusal of an infrastructure retry is deferred and r
   assert.equal(first.rows.find((l) => l.step === CHECK_REQUEUE_DEFERRED_STEP)?.refusal, "not_current_attempt");
   assert.equal(first.dispatched, 0);
 
-  const second = await pass(infra, path, () => true);
+  const second = await pass(infra, path, () => true, seen);
   assert.equal(second.requeued.length, 1, "the deferred retry is taken on the next pass");
   assert.deepEqual(second.infraEscalations, []);
   const third = await pass(infra, path, () => true);
@@ -232,7 +235,7 @@ const seeded = (rows: Array<Record<string, unknown>>) => ({ readLedger: (p: stri
 
 test("CHECK_REQUEUE_DEFERRAL_BACKSTOP deferrals escalate exactly once, naming the refusal", async () => {
   assert.ok(Number.isInteger(CHECK_REQUEUE_DEFERRAL_BACKSTOP) && CHECK_REQUEUE_DEFERRAL_BACKSTOP >= 2);
-  const below = await pass(cancelledView(), ledger(), () => true, seeded(deferrals(CHECK_REQUEUE_DEFERRAL_BACKSTOP - 1)));
+  const below = await pass(cancelledView(), ledger(), () => true, { ...seeded(deferrals(CHECK_REQUEUE_DEFERRAL_BACKSTOP - 1)), ...seen });
   assert.equal(below.requeued.length, 1, "below the bound the deferred requeue is retried");
   assert.deepEqual(below.cancelledEscalations, []);
 
@@ -283,7 +286,7 @@ test("the refusal classifier names the two in-flight 403s and nothing else", () 
   assert.deepEqual(jobRequeueOutcome(undefined), { kind: "dispatched" });
   assert.deepEqual(jobRequeueOutcome(false), { kind: "failed" });
   assert.deepEqual(jobRequeueOutcome(ALREADY_RUNNING), ALREADY_RUNNING);
-  assert.deepEqual(deferredRequeueTarget(undefined, GATE), { runInFlight: false });
+  assert.equal(deferredRequeueTarget(undefined, GATE), undefined, "no rollup proves nothing (W1-T5953)");
   assert.deepEqual(deferredRequeueTarget(rollup("222", "IN_PROGRESS"), GATE), { jobId: "222", runInFlight: true });
   assert.deepEqual(deferredRequeueTarget(rollup("222", "COMPLETED"), GATE), { jobId: "222", runInFlight: false });
   assert.deepEqual(deferredRequeueTarget([{ name: GATE, conclusion: "CANCELLED", jobId: "9" }, { name: "x", status: "QUEUED" }], GATE),
@@ -455,7 +458,7 @@ function flakeHistory(claim: string, head = HEAD): Array<Record<string, unknown>
 }
 
 test("a FLAKE outcome whose requeue never landed does not hold the head under fix already dispatched", async () => {
-  const next = await pass(flakeView(), ledger(), () => true, seeded(flakeHistory("requeue_deferred")));
+  const next = await pass(flakeView(), ledger(), () => true, { ...seeded(flakeHistory("requeue_deferred")), ...seen });
   assert.doesNotMatch(String(next.row.stand_down_reason), DEDUPED);
   assert.deepEqual(next.requeued.map((c) => c.jobId), ["555"], "the deferred requeue is taken before another strike");
   assert.equal(next.dispatched, 0);
