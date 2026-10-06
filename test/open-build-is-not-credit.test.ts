@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -33,6 +33,7 @@ import { runDaemon } from "../src/lib/daemon.js";
 import type { DaemonDeps } from "../src/lib/daemon.js";
 import { daemonCommand } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const TASK_FILES = ["src/lib/status.ts", "src/lib/drain.ts", "test/open-build-is-not-credit.test.ts"];
 
@@ -40,9 +41,8 @@ const task = (id: string, files: string[] = TASK_FILES): Task =>
   ({ id, title: id, repo: "remudero", type: "implement", verify: "auto", depends_on: [], status: "queued", files }) as unknown as Task;
 
 const emptyLedger = (): string => {
-  const p = join(mkdtempSync(join(tmpdir(), "t2397-")), "ledger.ndjson");
-  writeFileSync(p, "");
-  return p;
+  const root = mkdtempSync(join(tmpdir(), "t2397-"));
+  return writeLedger([], { dir: join(root, "state") }).path;
 };
 
 /** #3102's real shape: OPEN, on a `fix/` branch, touching a file W1-T2397 also declares. */
@@ -242,6 +242,9 @@ test("acceptance 8: nothing added paces or throttles or sleeps a call", () => {
 
 test("WIRING: drainCommand passes BOTH callbacks, and they emit one ledger row and one console line", async () => {
   const ledgerPath = emptyLedger();
+  const root = dirname(dirname(ledgerPath));
+  assert.notEqual(root, tmpdir(), "the real writer must stay inside this fixture's owned root");
+  assert.equal(ledgerPath, join(root, "state", "ledger.ndjson"));
   const planDir = mkdtempSync(join(tmpdir(), "t2397-plan-"));
   const planPath = join(planDir, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
@@ -252,7 +255,7 @@ test("WIRING: drainCommand passes BOTH callbacks, and they emit one ledger row a
   console.log = (...a: unknown[]) => void printed.push(a.join(" "));
   try {
     await drainCommand([], {
-      config: { root: dirname(dirname(ledgerPath)), owner: "acme", repo: "remudero" } as never,
+      config: { root, owner: "acme", repo: "remudero" } as never,
       planPath,
       skipGitSync: true,
       githubFactory: () => ({ findMergedByTrailer: () => null }) as never,
@@ -286,6 +289,11 @@ test("WIRING: drainCommand passes BOTH callbacks, and they emit one ledger row a
   assert.match(line, /W1-T2397/, "the console line names the task");
   assert.match(line, /#3102/, "and the open sibling PR");
   assert.match(line, /DISPATCHING ANYWAY/, "and says plainly that it did not refuse");
+  const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((row) => JSON.parse(row));
+  const observations = rows.filter((row) => row.step === "dispatch.open_sibling_build");
+  assert.equal(observations.length, 1, "the default writer emits exactly one observation inside the fixture");
+  assert.equal(observations[0].task_id, "W1-T2397");
+  assert.equal(observations[0].sibling_pr_number, 3102);
 });
 
 test("WIRING: the supplier reads `openSiblingBuild` off the projection, NOT `prState` — it can never become isOpenPr", () => {
