@@ -101,7 +101,9 @@ test("a retire pass writes the knowledge-retire case from its own diff and lists
   for (const f of ["diff.patch", "criteria.yaml", "report.md", "checkout/learnings/ci.yaml", "checkout/docs/knowledge-garden-log.md"]) {
     assert.ok(landing.paths.includes(golden(f)), `paths name ${f}`);
   }
-  assert.ok(!landing.paths.includes(golden("golden.yaml")), "golden.yaml is left as it is");
+  // golden.yaml keeps its verdict facts; its criteria rows are re-pinned to this pass's two claims.
+  assert.ok(landing.paths.includes(golden("golden.yaml")), "the re-pinned golden.yaml is staged");
+  assert.equal((parseYaml(readFileSync(join(root, golden("golden.yaml")), "utf8")) as { criteria: unknown[] }).criteria.length, 2);
   // The earlier pass's checkout files are removed, and the removal is staged with the rest.
   assert.ok(landing.paths.includes(golden("checkout/learnings/platform.yaml")));
   assert.ok(!existsSync(join(root, golden("checkout/learnings/platform.yaml"))));
@@ -207,4 +209,42 @@ test("a pass with no retire or merge action writes no golden", () => {
   assert.deepEqual(landing.paths.filter((p) => p.startsWith("test/")), []);
   assert.equal(git(root, ["status", "--porcelain", "--", "test"]), "");
   assert.equal(readFileSync(join(root, KNOWLEDGE_RETIRE_GOLDEN, "report.md"), "utf8"), "an earlier pass\n");
+});
+
+test("a two-learning pass re-pins golden.yaml's criteria to the claims it writes, so the judge still reaches it", () => {
+  const root = originMainFixture();
+  const pinned = readFileSync(join(root, KNOWLEDGE_RETIRE_GOLDEN, "golden.yaml"), "utf8");
+  const oneRow = `${pinned.slice(0, pinned.search(/^criteria:[ \t]*$/m))}criteria:\n  - met: true\n    proof_exec: executed_pass\n`;
+  put(root, `${KNOWLEDGE_RETIRE_GOLDEN}/golden.yaml`, oneRow);
+  const second: GardenAction = { class: "retire", target: "keeper", reason: "Workers offered it have rarely used it, compared with other learnings." };
+  const landing = pass(root, [RETIRE, second], "retire")!;
+  const dir = join(root, KNOWLEDGE_RETIRE_GOLDEN);
+  assert.ok(landing.paths.includes(`${KNOWLEDGE_RETIRE_GOLDEN}/golden.yaml`), "the re-pinned golden.yaml is staged with the case");
+  const criteria = parseYaml(readFileSync(join(dir, "criteria.yaml"), "utf8")) as AcceptanceCriterion[];
+  const golden = parseYaml(readFileSync(join(dir, "golden.yaml"), "utf8")) as { verdict: Record<string, unknown>; criteria: unknown[] };
+  assert.equal(criteria.length, 3, "the log heading plus one claim per retired learning");
+  assert.equal(golden.criteria.length, criteria.length);
+  assert.deepEqual(golden.verdict, (parseYaml(readFileSync(join(REPO_ROOT, KNOWLEDGE_RETIRE_GOLDEN, "golden.yaml"), "utf8")) as { verdict: unknown }).verdict, "verdict facts are kept");
+  const verdict = judgeReview(criteria, {
+    diff: readFileSync(join(dir, "diff.patch"), "utf8"),
+    report: readFileSync(join(dir, "report.md"), "utf8"),
+    headCheckoutDir: join(dir, "checkout"),
+  });
+  assert.equal(verdict.criteria.length, golden.criteria.length);
+});
+
+test("a golden.yaml already matching the pass, or with no criteria block, is left exactly as it was", () => {
+  const matching = originMainFixture();
+  pass(matching, [RETIRE], "retire");
+  stageAndCommit(matching, [KNOWLEDGE_RETIRE_GOLDEN, "learnings", "docs"]);
+  git(matching, ["checkout", "-q", "HEAD^", "--", "learnings", "docs"]);
+  const again = pass(matching, [RETIRE], "retire")!;
+  assert.equal(again.paths.includes(`${KNOWLEDGE_RETIRE_GOLDEN}/golden.yaml`), false, "an unchanged golden.yaml is not restaged");
+
+  const root = originMainFixture();
+  const bare = "violation: none\nverdict:\n  state: success\narm: true\n";
+  put(root, `${KNOWLEDGE_RETIRE_GOLDEN}/golden.yaml`, bare);
+  const landing = pass(root, [RETIRE], "retire")!;
+  assert.equal(readFileSync(join(root, KNOWLEDGE_RETIRE_GOLDEN, "golden.yaml"), "utf8"), bare);
+  assert.equal(landing.paths.includes(`${KNOWLEDGE_RETIRE_GOLDEN}/golden.yaml`), false);
 });

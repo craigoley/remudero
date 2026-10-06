@@ -249,14 +249,22 @@ test("mergeShaNow: reads merge_commit_sha off the single-PR REST row, and never 
 
 test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — none logs automerge.disarmed unconditionally", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  // TWO sites call it directly (the capped/irreversible branch and the risk-judge escalate dep);
-  // the THIRD, `withdrawArmIfVerdictRefuses`, routes through its injectable `deps.disarm` seam, so
-  // it does not match a bare-name call and is asserted by that shape instead.
-  // TWO sites hand the outcome straight to `disposeDisarm`, which owns the whole decision; the
-  // THIRD, `withdrawArmIfVerdictRefuses`, routes through its injectable `deps.disarm` seam.
-  // W1-T5284: runTaskBody's capped-refusal site awaits the async form; the outcome is disposed the same way.
-  const direct = [...src.matchAll(/disposeDisarm\((?:await )?disarmAutoMerge\w*\(prUrl\)/g)];
-  assert.equal(direct.length, 2, `expected the two direct call sites to dispose their outcome, found ${direct.length}`);
+  // The capped/irreversible branch disposes its awaited outcome directly. The risk-judge branch
+  // goes through `riskJudgeDisarm`, which owns the same await + disposition behind the seam tested
+  // behaviorally in test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts.
+  // `withdrawArmIfVerdictRefuses` remains the third site, routed through its injectable deps.disarm.
+  const direct = [...src.matchAll(/disposeDisarm\(await disarmAutoMergeAsync\(prUrl\)/g)];
+  assert.equal(direct.length, 1, `expected the capped-refusal call site to dispose its awaited outcome, found ${direct.length}`);
+  assert.match(
+    src,
+    /export async function riskJudgeDisarm\([\s\S]{0,500}?return disposeDisarm\(await disarm\(ctx\.prUrl\), ctx, disposition\);/,
+    "the risk-judge disarm seam awaits the injected operation and disposes its actual outcome",
+  );
+  assert.match(
+    src,
+    /escalate: async \(verdict, action\) => \{[\s\S]{0,1200}?await riskJudgeDisarm\(\{/,
+    "risk escalation must await the shared disarm seam before it can continue",
+  );
   assert.match(
     src,
     /\(deps\.disarm \?\? disarmAutoMerge\)\(ctx\.prUrl\)/,

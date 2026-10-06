@@ -7,8 +7,8 @@ import test from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
-import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
-import { reviewCommand, runReview } from "../src/run-task.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "../src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, reviewCommand, runReview } from "../src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -186,6 +186,10 @@ esac
       account: (result) => result,
       spawnReviewer: true,
       reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
+      // Synthetic provider, synthetic file preflight: never enter the host's Mac keychain.
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", (args) => spawnWorker({
+        ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" },
+      })),
       reviewerQueryFn: (() => {
         providerInvoked = true;
         throw new Error("provider unavailable fixture");
