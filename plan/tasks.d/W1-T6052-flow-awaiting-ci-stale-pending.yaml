@@ -1,0 +1,29 @@
+- id: W1-T6052
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — awaiting-ci:stale-pending cost 2.98 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.35
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:awaiting-ci:stale-pending"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-awaiting-ci-stale-pending.test.ts
+  acceptance:
+    - claim: "awaiting-ci:stale-pending is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6052: flow-awaiting-ci-stale-pending clears without a person\" in test/flow-awaiting-ci-stale-pending.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    awaiting-ci:stale-pending cost 2.98 PR-hours; owner ci
+    Owner ci failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9171: 0.46 PR-hours — stale-pending — checks pending 77m (>= 60m ceiling) — escalating
+    - PR #9162: 0.45 PR-hours — stale-pending — checks pending 88m (>= 60m ceiling) — escalating — mergeability unread this pass; inherited last known "clean" observed 2026-10-04T23:14:35.997Z for this exact head 15c82f2 (W1-T4470)
+    - PR #9178: 0.42 PR-hours — stale-pending — checks pending 101m (>= 60m ceiling) — escalating
+    - PR #9167: 0.36 PR-hours — stale-pending — checks pending 76m (>= 60m ceiling) — escalating
+    - PR #9156: 0.34 PR-hours — stale-pending — checks pending 74m (>= 60m ceiling) — escalating
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

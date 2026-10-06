@@ -155,7 +155,13 @@ test("rmd progress-watchdog reads the ledger and prints the verdict as JSON with
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "ledger.ndjson"), lines.join("\n") + "\n");
     const entry = join(fileURLToPath(new URL("..", import.meta.url)), "src", "run-task.ts");
-    const result = spawnSync(process.execPath, ["--import", "tsx", entry, "progress-watchdog", "--json", "--state-root", dir], { encoding: "utf8", timeout: 120_000 });
+    // This invocation only reads the fixture ledger. Keep its documented read-only guard local
+    // to the child: the test must not fetch or replace the author's checkout, or poison siblings.
+    const parentGuard = process.env.RMD_SELF_SYNC_DONE;
+    const result = spawnSync(process.execPath, ["--import", "tsx", entry, "progress-watchdog", "--json", "--state-root", dir], {
+      encoding: "utf8", timeout: 120_000, env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+    });
+    assert.equal(process.env.RMD_SELF_SYNC_DONE, parentGuard, "the read-only guard belongs only to this child");
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const out = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as Row;
     assert.equal(out.state, "STALLED");

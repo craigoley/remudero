@@ -165,13 +165,13 @@ test("W1-T1132 NO TIMER: the release decision reads no clock — W1-T1067's stra
 
 // ── THE ORCHESTRATION — one shared fake remote, two "hosts" ───────────────────────────────────
 
-test("W1-T1132 CONTENTION: a second host triaging a claimed entry REFUSES, and the winner is untouched", () => {
+test("W1-T1132 CONTENTION: a second host triaging a claimed entry REFUSES, and the winner is untouched", async () => {
   const remote = fakeRemote();
-  const first = claimTriage("fb-race", remote.reserverFor("anchor-A"));
+  const first = await claimTriage("fb-race", remote.reserverFor("anchor-A"));
   assert.equal(first.proceed, true, "the first lane wins");
   assert.equal(first.anchor, "anchor-A");
 
-  const second = claimTriage("fb-race", remote.reserverFor("anchor-B"));
+  const second = await claimTriage("fb-race", remote.reserverFor("anchor-B"));
   assert.equal(second.proceed, false, "the second lane refuses — before any Architect call");
   assert.equal(second.anchor, undefined, "and holds nothing it could later release");
   assert.match(second.reason, /anchor-A/, "the refusal names the claim it lost to");
@@ -180,13 +180,13 @@ test("W1-T1132 CONTENTION: a second host triaging a claimed entry REFUSES, and t
   assert.equal(remote.refs.get(triageClaimRef("fb-race")), "anchor-A");
 });
 
-test("W1-T1132 RELEASE ARM 1 (HOLDER): a completed triage drops its claim immediately, waiting for nothing", () => {
+test("W1-T1132 RELEASE ARM 1 (HOLDER): a completed triage drops its claim immediately, waiting for nothing", async () => {
   const remote = fakeRemote();
   const reserver = remote.reserverFor("anchor-A");
-  const claim = claimTriage("fb-done", reserver);
+  const claim = await claimTriage("fb-done", reserver);
   remote.calls.length = 0;
 
-  const released = releaseTriageClaim("fb-done", reserver, { anchor: claim.anchor });
+  const released = await releaseTriageClaim("fb-done", reserver, { anchor: claim.anchor });
   assert.equal(released.arm, "holder");
   assert.equal(released.dropped, true);
   assert.equal(remote.refs.has(triageClaimRef("fb-done")), false, "the ref is gone");
@@ -195,22 +195,22 @@ test("W1-T1132 RELEASE ARM 1 (HOLDER): a completed triage drops its claim immedi
   assert.deepEqual(remote.calls, ["drop:fb-done:anchor-A"]);
 });
 
-test("W1-T1132 RELEASE ARM 1 IS CONDITIONAL: a stale anchor cannot delete a claim that is now someone else's", () => {
+test("W1-T1132 RELEASE ARM 1 IS CONDITIONAL: a stale anchor cannot delete a claim that is now someone else's", async () => {
   const remote = fakeRemote();
-  claimTriage("fb-moved", remote.reserverFor("anchor-NEW"));
+  await claimTriage("fb-moved", remote.reserverFor("anchor-NEW"));
   // A lane whose claim was already dropped and retaken elsewhere tries to release its OWN anchor.
-  const released = releaseTriageClaim("fb-moved", remote.reserverFor("x"), { anchor: "anchor-OLD" });
+  const released = await releaseTriageClaim("fb-moved", remote.reserverFor("x"), { anchor: "anchor-OLD" });
   assert.equal(released.dropped, false, "the conditional delete refuses");
   assert.equal(remote.refs.get(triageClaimRef("fb-moved")), "anchor-NEW", "and the live claim survives");
 });
 
-test("W1-T1132 RELEASE ARM 2 (EVIDENCE): a claim whose entry already has a merged outcome is releasable by ANY host", () => {
+test("W1-T1132 RELEASE ARM 2 (EVIDENCE): a claim whose entry already has a merged outcome is releasable by ANY host", async () => {
   const remote = fakeRemote();
-  claimTriage("fb-stale", remote.reserverFor("anchor-DEAD")); // a lane that died holding it
+  await claimTriage("fb-stale", remote.reserverFor("anchor-DEAD")); // a lane that died holding it
 
   // A DIFFERENT host, holding no anchor, meets the claim and carries fresh evidence the entry
   // is already triaged. That is the read-the-evidence-that-already-exists shape (W1-T1110).
-  const second = claimTriage("fb-stale", remote.reserverFor("anchor-B"), {
+  const second = await claimTriage("fb-stale", remote.reserverFor("anchor-B"), {
     mergedSubjects: () => ["chore(triage): feedback#fb-stale — already decided, no task (#9999)"],
   });
   assert.equal(second.staleReleased, true, "the stale claim was dropped by a host that never held it");
@@ -221,43 +221,43 @@ test("W1-T1132 RELEASE ARM 2 (EVIDENCE): a claim whose entry already has a merge
   assert.match(second.reason, /already has a merged triage outcome/);
 });
 
-test("W1-T1132 RELEASE ARM 3 (OPERATOR): contention with no merged outcome leaves the claim alone", () => {
+test("W1-T1132 RELEASE ARM 3 (OPERATOR): contention with no merged outcome leaves the claim alone", async () => {
   const remote = fakeRemote();
-  claimTriage("fb-live", remote.reserverFor("anchor-A"));
-  const second = claimTriage("fb-live", remote.reserverFor("anchor-B"), { mergedSubjects: () => ["fix(sweep): unrelated (#1)"] });
+  await claimTriage("fb-live", remote.reserverFor("anchor-A"));
+  const second = await claimTriage("fb-live", remote.reserverFor("anchor-B"), { mergedSubjects: () => ["fix(sweep): unrelated (#1)"] });
   assert.equal(second.proceed, false);
   assert.equal(second.staleReleased, false, "a live claim is NOT dropped on a guess");
   assert.equal(remote.refs.get(triageClaimRef("fb-live")), "anchor-A");
   assert.match(second.reason, /git push origin :refs\/rmd-triage\/fb-live/, "the refusal hands the operator the command");
 });
 
-test("W1-T1132 FAIL-CLOSED: an unreachable origin refuses and takes no claim", () => {
-  const r = claimTriage("fb-net", unreachableReserver());
+test("W1-T1132 FAIL-CLOSED: an unreachable origin refuses and takes no claim", async () => {
+  const r = await claimTriage("fb-net", unreachableReserver());
   assert.equal(r.proceed, false);
   assert.equal(r.anchor, undefined);
   assert.equal(r.staleReleased, undefined, "the evidence arm is not consulted on an unreadable remote");
 });
 
-test("W1-T1132 LEDGER: the claim and its release each write ONE row carrying the ref and the arm", () => {
+test("W1-T1132 LEDGER: the claim and its release each write ONE row carrying the ref and the arm", async () => {
   const remote = fakeRemote();
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const log = (step: string, extra: Record<string, unknown> = {}) => rows.push({ step, extra });
 
-  const claim = claimTriageWithLogging(log, "fb-log", remote.reserverFor("anchor-A"));
+  const claim = await claimTriageWithLogging(log, "fb-log", remote.reserverFor("anchor-A"));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].step, "triage.claim");
   assert.equal(rows[0].extra.ref, "refs/rmd-triage/fb-log");
   assert.equal(rows[0].extra.proceed, true);
   assert.equal(rows[0].extra.stale_released, false, "PRESENT and false — a missing key and an empty one read alike to a later zgrep");
 
-  releaseTriageClaimWithLogging(log, "fb-log", remote.reserverFor("x"), claim.anchor!);
+  await releaseTriageClaimWithLogging(log, "fb-log", remote.reserverFor("x"), claim.anchor!);
   assert.equal(rows.length, 2);
   assert.equal(rows[1].step, "triage.claim_released");
   assert.equal(rows[1].extra.arm, "holder");
   assert.equal(rows[1].extra.dropped, true);
 });
 
-test("W1-T1132 BEST-EFFORT RELEASE: a throwing remote costs a ledgered row, never the lane's own outcome", () => {
+test("W1-T1132 BEST-EFFORT RELEASE: a throwing remote costs a ledgered row, never the lane's own outcome", async () => {
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const throwing: TriageClaimReserver = {
     mintAnchor: () => "a",
@@ -269,7 +269,7 @@ test("W1-T1132 BEST-EFFORT RELEASE: a throwing remote costs a ledgered row, neve
   };
   // This runs in a `finally`. A throw here would REPLACE whatever the lane actually reached —
   // including a legitimate error — with a release failure.
-  const r = releaseTriageClaimWithLogging((s, e = {}) => rows.push({ step: s, extra: e }), "fb-throw", throwing, "a");
+  const r = await releaseTriageClaimWithLogging((s, e = {}) => rows.push({ step: s, extra: e }), "fb-throw", throwing, "a");
   assert.equal(r.dropped, false);
   assert.match(r.reason, /origin went away mid-release/);
   assert.equal(rows[0].step, "triage.claim_released");

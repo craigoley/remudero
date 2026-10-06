@@ -50,9 +50,9 @@ function fakeReserver(claims: Record<string, { sha: string; message: string }>):
 
 const anchor = (pid: number, host: string, agoMs: number): string => `rmd-triage claim ${pid}@${host} ${iso(agoMs)}\n`;
 
-function sweep(reserver: TriageClaimReserver, candidates: string[], rows: TriageLivenessRow[] | undefined) {
+async function sweep(reserver: TriageClaimReserver, candidates: string[], rows: TriageLivenessRow[] | undefined) {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const result = sweepTriageClaims(candidates, reserver, {
+  const result = await sweepTriageClaims(candidates, reserver, {
     now: NOW,
     readRows: () => rows,
     log: (step, extra) => logged.push({ step, extra }),
@@ -60,7 +60,7 @@ function sweep(reserver: TriageClaimReserver, candidates: string[], rows: Triage
   return { result, logged };
 }
 
-test("W1-T4769: a silent holder past the window is released on the liveness arm", () => {
+test("W1-T4769: a silent holder past the window is released on the liveness arm", async () => {
   const claimedAgo = 3 * 24 * HOUR;
   const reserver = fakeReserver({ "fb-dead": { sha: "sha-dead", message: anchor(94, "94fb66771d4b", claimedAgo) } });
   // The ledger can see the host (its claim row) but nothing from that pid since.
@@ -69,7 +69,7 @@ test("W1-T4769: a silent holder past the window is released on the liveness arm"
     { ts: iso(HOUR), host: "some-other-host", actor_pid: 94 },
     { ts: iso(HOUR), host: "94fb66771d4b", actor_pid: 7 },
   ];
-  const { result, logged } = sweep(reserver, ["fb-dead"], rows);
+  const { result, logged } = await sweep(reserver, ["fb-dead"], rows);
 
   assert.deepEqual(result.released, ["fb-dead"]);
   assert.deepEqual(result.held, []);
@@ -86,14 +86,14 @@ test("W1-T4769: a silent holder past the window is released on the liveness arm"
   assert.equal(logged[0].extra?.dropped, true);
 });
 
-test("W1-T4769: a holder still writing rows keeps its claim", () => {
+test("W1-T4769: a holder still writing rows keeps its claim", async () => {
   const claimedAgo = 30 * 24 * HOUR;
   const reserver = fakeReserver({ "fb-live": { sha: "sha-live", message: anchor(41, "hostA", claimedAgo) } });
   const rows: TriageLivenessRow[] = [
     { ts: iso(claimedAgo - 1000), host: "hostA", actor_pid: 41 },
     { ts: iso(5 * 60 * 1000), host: "hostA", actor_pid: 41 },
   ];
-  const { result, logged } = sweep(reserver, ["fb-live"], rows);
+  const { result, logged } = await sweep(reserver, ["fb-live"], rows);
 
   assert.deepEqual(result.held, ["fb-live"], "however old the claim is, a writing holder keeps it");
   assert.deepEqual(result.released, []);
@@ -107,7 +107,7 @@ test("W1-T4769: a holder still writing rows keeps its claim", () => {
   assert.equal(young.releasable, false);
 });
 
-test("W1-T4769: an unseen holder host is unobservable and not dead", () => {
+test("W1-T4769: an unseen holder host is unobservable and not dead", async () => {
   const holder = parseTriageClaimAnchorMessage(anchor(9, "ghost-host", TRIAGE_CLAIM_LIVENESS_WINDOW_MS + HOUR));
   const rows: TriageLivenessRow[] = [{ ts: iso(HOUR), host: "another-host", actor_pid: 9 }];
 
@@ -122,13 +122,13 @@ test("W1-T4769: an unseen holder host is unobservable and not dead", () => {
 
   // Through the sweep the claim stays held and nothing is dropped.
   const reserver = fakeReserver({ "fb-ghost": { sha: "s", message: anchor(9, "ghost-host", TRIAGE_CLAIM_LIVENESS_WINDOW_MS + HOUR) } });
-  const under = sweep(reserver, ["fb-ghost"], rows);
+  const under = await sweep(reserver, ["fb-ghost"], rows);
   assert.deepEqual(under.result.held, ["fb-ghost"]);
   assert.deepEqual(reserver.drops, []);
 
   // Past the separately named ceiling it releases, on the age-only tier, and the row says so.
   const old = fakeReserver({ "fb-ghost": { sha: "s", message: anchor(9, "ghost-host", TRIAGE_CLAIM_AGE_ONLY_CEILING_MS + HOUR) } });
-  const past = sweep(old, ["fb-ghost"], rows);
+  const past = await sweep(old, ["fb-ghost"], rows);
   assert.deepEqual(past.result.released, ["fb-ghost"]);
   assert.equal(past.logged[0].extra?.arm, "liveness");
   assert.equal(past.logged[0].extra?.tier, "age-only");
@@ -187,16 +187,16 @@ test("W1-T4769: every candidate held declines with a named reason", () => {
   assert.match(d.reason, /every one of the 3 candidate\(s\) .* held by a live triage claim/);
 });
 
-test("W1-T4769: the claim ref namespace the sweep reads is the one the lane claims on", () => {
+test("W1-T4769: the claim ref namespace the sweep reads is the one the lane claims on", async () => {
   const reserver = fakeReserver({ "fb-a": { sha: "s", message: "" } });
   assert.ok(reserver.claimedIds?.()?.has("fb-a"));
   assert.equal(triageClaimRef("fb-a"), "refs/rmd-triage/fb-a");
   // A claim whose anchor message cannot be read is unobservable: held, never dropped as dead.
-  const { result } = sweep(reserver, ["fb-a"], []);
+  const { result } = await sweep(reserver, ["fb-a"], []);
   assert.deepEqual(result.held, ["fb-a"]);
   // An unreadable namespace surfaces as undefined, never an empty set.
   const blind: TriageClaimReserver = { ...reserver, claimedIds: () => undefined };
-  assert.equal(sweepTriageClaims(["fb-a"], blind, { now: NOW, readRows: () => [], log: () => {} }).held, undefined);
+  assert.equal((await sweepTriageClaims(["fb-a"], blind, { now: NOW, readRows: () => [], log: () => {} })).held, undefined);
 });
 
 // ── THE REAL GIT HALF — the two added reserver methods, against a real bare repo ─────────────
@@ -259,7 +259,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
   try {
     const config = { root: rootA, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
     const reserver = fakeReserver({ [head]: { sha: "s", message: anchor(94, "h", 0).replace(iso(0), at(5 * HOUR)) } });
-    const d = autoTriageCheck({ ...args, config, claimReserver: reserver });
+    const d = await autoTriageCheck({ ...args, config, claimReserver: reserver });
     assert.deepEqual(reserver.drops, [], "an unobservable holder is not dropped on the default read");
     assert.notEqual(d.fire && d.feedbackId, head, "the held head is passed over");
   } finally {
@@ -278,7 +278,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
   };
   try {
     const config = { root: rootB, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
-    const d = autoTriageCheck({
+    const d = await autoTriageCheck({
       ...args,
       config,
       resolveClaimRepo: () => {
@@ -316,14 +316,14 @@ test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead hol
 
     // A LIVE holder on the head (claimed minutes ago): the pass fires on the next entry.
     const live = fakeReserver({ [head]: { sha: "s1", message: anchor(5, "h", 60_000).replace(iso(60_000), at(60_000)) } });
-    const skipped = autoTriageCheck({ config, now, policy, claimReserver: live, deferralPending: true, dispatchCount: 1, laneBudget: 1 });
+    const skipped = await autoTriageCheck({ config, now, policy, claimReserver: live, deferralPending: true, dispatchCount: 1, laneBudget: 1 });
     assert.equal(skipped.fire && skipped.feedbackId, second, "the held head is passed over, not fired on");
     assert.deepEqual(live.drops, [], "a live claim is never dropped");
 
     // A DEAD holder on the head: released before the decision, so the head is fired on.
     const oldMs = 3 * 24 * HOUR;
     const dead = fakeReserver({ [head]: { sha: "s2", message: anchor(94, "h", 0).replace(iso(0), at(oldMs)) } });
-    const released = autoTriageCheck({
+    const released = await autoTriageCheck({
       config,
       now,
       policy,

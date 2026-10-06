@@ -160,7 +160,8 @@ test("W1-T1049 — reviewLanes and dispatchLanes are INDEPENDENT rows, and the s
   // Both are pinned as LITERALS, for the reason test/review-lane-fairness.test.ts gives: reading
   // the rows here would assert values against themselves and guard nothing, so an UNINTENDED
   // change to either must still redden this.
-  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "review budget, plan/policy.yaml sweep.reviewLanes");
+  // 2026-10-06: review 3 -> 4 (max 3 -> 5) by operator ruling, dispatch untouched.
+  assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 4, "review budget, plan/policy.yaml sweep.reviewLanes");
   // 2026-10-03: dispatch restored 2 -> 3 by operator ruling once the memory gate (W1-T5347) was live and
   // the lane-restore condition read burn per run DOWN (plan/policy.yaml sweep.dispatchLanes).
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "build budget, its own row — restored by operator ruling, not by the review retune");

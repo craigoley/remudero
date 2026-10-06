@@ -34,12 +34,13 @@ const okResult = (id: string): RunResult => ({ taskId: id, runId: id + "-run", m
 type Line = { step: string; extra: Record<string, unknown> };
 
 /** One boot over fake deps. `firstPass` is the first full pass's own promise; every later pass settles at once. */
-async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs: number; sweepWallClockBoundMs: number },
+async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs: number; sweepWallClockBoundMs: number; phaseWakeBeforeBoot?: boolean },
   onLightPass: () => void = () => {}) {
   const events: string[] = [];
   const lines: Line[] = [];
   let sweeps = 0;
   let nowMs = 0;
+  let sleeps = 0;
   const merged = new Set<string>();
   const summary = await daemon.runDaemon(
     fixturePlan(),
@@ -81,6 +82,8 @@ async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs
       // A real timer, so a phase ticker's own light pass lands well after any same-tick cadence would.
       sleep: async () => {
         nowMs += 10;
+        // Force the first phase wake ahead of setImmediate without relying on host load or milliseconds.
+        if (++sleeps === 1 && opts.phaseWakeBeforeBoot) return;
         await new Promise<void>((resolve) => setTimeout(resolve, 5));
       },
       log: (step, extra = {}) => lines.push({ step, extra }),
@@ -89,6 +92,50 @@ async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs
   );
   return { events, lines, summary };
 }
+
+test("a boot admits its review-only pass before a phase clock that wakes ahead of the scheduler turn", async () => {
+  let releaseFirstPass: (() => void) | undefined;
+  const firstPass = new Promise<void>((resolve) => (releaseFirstPass = resolve));
+  const { events, summary } = await bootOnce(firstPass,
+    { bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 60_000, phaseWakeBeforeBoot: true },
+    () => releaseFirstPass?.());
+  assert.equal(events[0], "light-pass:review-only", `review-only admission is ordered, not won by a timer (saw ${events.join(", ")})`);
+  assert.ok(events.includes("first-pass-settled"), "positive control: the full sweep also ran");
+  assert.ok(events.indexOf("review-admitted") < events.indexOf("measurement"));
+  assert.deepEqual(summary.merged, ["A"], "the boot still dispatches");
+});
+
+test("a pending boot review does not serialize the background full sweep", async () => {
+  let releaseReview: (() => void) | undefined;
+  let releaseSweep: (() => void) | undefined;
+  const review = new Promise<void>((resolve) => (releaseReview = resolve));
+  const sweep = new Promise<void>((resolve) => (releaseSweep = resolve));
+  const events: string[] = [];
+  const running = daemon.runDaemon(fixturePlan(), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sweep: async () => { events.push("full-started"); await sweep; },
+    sweepLight: async (scope) => {
+      events.push(scope?.reviewOnly ? "review-only-started" : "ordinary-started");
+      if (scope?.reviewOnly) await review;
+    },
+    checkMeasurementCadence: () => { events.push("measurement"); return { fire: false, reason: "fixture" }; },
+    checkStop: () => undefined,
+    checkPause: () => undefined,
+    sleep: () => new Promise<void>((resolve) => setTimeout(resolve, 5)),
+  }, { max: 1, pollIntervalMs: 5, bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 60_000 });
+  try {
+    // Startup uses two scheduler turns. Count turns instead of an elapsed-time deadline.
+    for (let turn = 0; turn < 4; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(events[0], "review-only-started");
+    assert.ok(events.includes("full-started"), "the held review must not keep the full sweep from starting");
+    assert.ok(!events.includes("measurement"), "cadence admission still waits for the held full sweep");
+  } finally {
+    releaseReview?.();
+    releaseSweep?.();
+    assert.equal((await running).stopReason, "max_reached");
+  }
+});
 
 test("W1-T5720: a boot's light pass and review admission run before any tick-1 cadence, released when the first full pass settles", async () => {
   let releaseFirstPass: (() => void) | undefined;

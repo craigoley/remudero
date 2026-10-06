@@ -104,7 +104,7 @@ exit 0
 type JobRun = { ran: boolean; calls: Map<string, string[]>; outcomes: Map<string, string>; failures: string[] };
 
 /** Runs the commitlint job for `event`: its job `if:`, then each step's `if:`, env and real body. */
-function runJob(event: "merge_group" | "pull_request", failOn = ""): JobRun {
+function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcomes: Record<string, string | undefined> = {}): JobRun {
   const ctx = eventContext(event);
   const result: JobRun = { ran: condition(JOB.if, ctx), calls: new Map(), outcomes: new Map(), failures: [] };
   if (!result.ran) return result;
@@ -120,13 +120,23 @@ function runJob(event: "merge_group" | "pull_request", failOn = ""): JobRun {
   const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_") && k !== "BASE_SHA" && k !== "GATE_BASE"));
   let ghSeen = 0;
   (JOB.steps ?? []).forEach((step, index) => {
-    if (!step.run) return;
     const key = step.id ?? `#${index}`;
     if (!condition(step.if, ctx)) {
       result.outcomes.set(key, "skipped");
       ctx[`steps.${key}.outcome`] = "skipped";
       return;
     }
+    if (step.uses) {
+      assert.ok(step.id, "fixture actions must expose their actual workflow step id");
+      assert.match(step.uses, /^actions\/(checkout|setup-node)@/, "unmodeled actions need explicit fixture support");
+      const outcome = Object.hasOwn(actionOutcomes, key) ? actionOutcomes[key] : "success";
+      if (outcome !== undefined) {
+        result.outcomes.set(key, outcome);
+        ctx[`steps.${key}.outcome`] = outcome;
+      }
+      return;
+    }
+    if (!step.run) return;
     const log = join(dir, `calls-${index}.log`);
     const output = join(dir, `output-${index}.txt`);
     writeFileSync(log, "");
@@ -259,6 +269,8 @@ test("W1-T5522: a group commit runs the ratchets against the queue base", () => 
 test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip", () => {
   const pr = runJob("pull_request");
   assert.ok(pr.ran);
+  assert.equal(pr.outcomes.get("checkout"), "success");
+  assert.equal(pr.outcomes.get("setup-node"), "success");
   assert.deepEqual(pr.failures, []);
   // Every step reaches exactly the argv (and the CLAUDE.md BASE_SHA) it reached before this task.
   for (const [id, argv] of Object.entries(PR_ARGV)) assert.deepEqual(pr.calls.get(id), argv, id);
@@ -284,6 +296,19 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   // The merge_group arms leave every OTHER step's argv identical to pull_request.
   const rebased = new Set(["classify", "claude-md-budget-ratchet", "lint-plan", "containment-probe", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "expiring-fixture-census", "baseline-monotonic"]);
   for (const [id, argv] of Object.entries(PR_ARGV)) if (!rebased.has(id)) assert.deepEqual(group.calls.get(id), argv, id);
+});
+
+test("merge-group reporter refuses an unavailable action setup outcome in the executed job fixture", () => {
+  for (const id of ["checkout", "setup-node"]) {
+    const group = runJob("merge_group", "", { [id]: undefined });
+    assert.deepEqual(group.failures, [], "the shell steps succeeded, not the unavailable action setup");
+    const posts = group.calls.get(`#${JOB.steps!.length - 1}`)!.filter((call) => call.includes("/check-runs"));
+    assert.ok(posts.length > 0, "positive control: the real reporter posted gate checks");
+    for (const post of posts) {
+      assert.match(post, /conclusion=failure/);
+      assert.ok(post.includes(`${id}=`), "the failed check names the unavailable setup outcome");
+    }
+  }
 });
 
 type Row = { name: string; status: string; conclusion: string | null };
