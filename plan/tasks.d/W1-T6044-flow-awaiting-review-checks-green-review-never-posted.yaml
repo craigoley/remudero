@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -27,3 +27,13 @@
     - PR #9579: 1.82 PR-hours — checks green, review never posted — running the review lane on #9579
     - PR #9581: 1.82 PR-hours — checks green, review never posted — running the review lane on #9581
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/sweep.ts and one new test file. The description doesn't show any change to secrets, auth, permissions, merge/deploy/review policy, or deletion of data."
+      - "The task is to have the owner clear a blocker (\"awaiting-review:checks green, review never posted\") automatically. That is plausibly in scope for the flow gardener, and the acceptance criterion is a grep-verifiable test name, so the result can be checked."
+      - "The family has no track record (0 merged, 0 declined, Beta mean 0.50), which is neutral rather than concerning. Because no diff or change view was supplied, I can't tell whether the clearing action touches review policy, such as auto-posting or bypassing reviews. The PR still has to pass CI and review, so I rate it low."
+    judged_at: "2026-10-06T18:20:44.742Z"
+    pin: "1e9f56ac59640007873c7d6896f7ed39d69a374da0c1e3bc910d00d11d3ce367"
