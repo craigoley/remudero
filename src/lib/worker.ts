@@ -156,6 +156,9 @@ import {
   OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
   type ProviderSelection,
+  type ProviderMixing,
+  selectWorkerProvider,
+  routingDrawValue,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
@@ -169,6 +172,7 @@ import {
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
+import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -427,6 +431,8 @@ export interface RoutingDecision {
   capability?: CodexModelTier;
   /** The live routing experiment this assignment belongs to (src/lib/routing-experiments.ts). */
   ab?: string;
+  /** W1-T5535: the learner that shaped this fix-lane draw. Mutually exclusive with `ab`: a learned draw is no crossover. */
+  learner?: string;
   /** The cash trial this run belongs to, its arm, and why (src/lib/cash-trial.ts). */
   trial?: string;
   trialArm?: string;
@@ -1073,6 +1079,11 @@ export interface SpawnWorkerArgs {
     ) => Promise<WorkerResult>;
     /** Test seam: the auction's drawn value in [0, 1), in place of the seeded draw (W1-T4617). */
     draw?: number;
+    /**
+     * W1-T5535: the fix rung's learned acceptance arms. Set ONLY by `runFixRung`; absent, the auction weighs
+     * headroom alone, exactly as before. Ignored for a task enrolled in a live routing experiment.
+     */
+    learnedArms?: FixLearnedArms;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
@@ -1650,13 +1661,15 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
   const rule = routingRule(args, input);
-  const ab = rule === "headroom-auction" && experimentTaskIdentity(args.taskId) !== undefined
+  const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
+  const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
     : undefined;
   return {
     rule,
     ...(input.capability ? { capability: input.capability } : {}),
     ...(ab ? { ab } : {}),
+    ...(learner ? { learner } : {}),
     ...(args.routingTrial
       ? { trial: args.routingTrial.id, trialArm: args.routingTrial.arm, trialReason: args.routingTrial.reason }
       : {}),
@@ -1702,6 +1715,75 @@ export function auctionDrawSeed(
   const unit = experimentTaskIdentity(args.taskId);
   if (experiment && unit) return experimentDrawSeed(experiment, unit);
   return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
+}
+
+/** The concrete model a capacity reading would serve: the arm key's `selected_model`, aliases resolved as the assignment row does. */
+function fixArmModel(
+  args: Pick<SpawnWorkerArgs, "model">,
+  capacity: ProviderCapacity,
+  capabilities: CapabilityLadder | undefined,
+): string | undefined {
+  const model = capacity.model ?? args.model;
+  return model !== undefined && capacity.provider === "claude" ? resolveClaudeModelAlias(model, capabilities) : model;
+}
+
+/** The decision row is the rung's evidence, never a precondition: a sink that throws changes no routing. */
+function emitFixRoutingDecision(learned: FixLearnedArms, fields: Record<string, unknown>): void {
+  try {
+    learned.onDecision?.(fields);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.fix_routing_decision_write_failed", reason: "write-failed", error: String(error) }));
+  }
+}
+
+/**
+ * W1-T5535: shape ONE fix-lane auction by commit acceptance. Steers the Codex read to the arm whose Thompson draw
+ * beats the model the read served (revalidated by that read: a model without headroom is bypassed, never forced),
+ * then weighs every eligible provider's served arm. Never throws: an unreadable re-read keeps the original capacity.
+ */
+async function applyFixLearner(input: {
+  args: SpawnWorkerArgs;
+  learned: FixLearnedArms;
+  capacities: ProviderCapacity[];
+  seed: string;
+  capability: CodexModelTier | undefined;
+  capabilities: CapabilityLadder | undefined;
+  codexPreference: unknown;
+  reservePercent: number;
+  readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
+}): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
+  const { args, learned, seed, capability, capabilities } = input;
+  let capacities = input.capacities;
+  const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
+  if (codexIndex >= 0 && capability && !input.codexPreference) {
+    const current = capacities[codexIndex];
+    const known = learned.evidence.arms.filter((arm) => arm.provider === "codex").map((arm) => ({ provider: "codex", model: arm.model }));
+    const drawn = learned.weigh([...known, { provider: "codex", model: current.model }], seed).arms;
+    const beat = drawn.find((arm) => arm.model === (current.model ?? ""))?.draw ?? 0;
+    const better = drawn
+      .flatMap((arm) => (arm.draw !== null && arm.model !== "" && arm.model !== current.model && arm.draw > beat ? [{ model: arm.model, draw: arm.draw }] : []))
+      .sort((a, b) => b.draw - a.draw);
+    for (const arm of better.slice(0, 3)) {
+      try {
+        const reread = await input.readCodexFor({ capability, effort: args.effort ?? "default", model: arm.model });
+        if (reread.readable && reread.model === arm.model) {
+          capacities = capacities.map((capacity, index) => (index === codexIndex ? reread : capacity));
+          break;
+        }
+      } catch (error) {
+        console.error(JSON.stringify({ event: "worker.fix_routing_codex_reread_failed", model: arm.model, reason: "read-failed", error: String(error) }));
+      }
+    }
+  }
+  const candidates = capacities
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible)
+    .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
+  const weights = learned.weigh(candidates, seed);
+  return {
+    capacities,
+    weights,
+    mixing: { epsilon: weights.epsilon, multipliers: weights.multipliers as ProviderMixing["multipliers"] },
+  };
 }
 
 let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
@@ -2200,17 +2282,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
   }
   if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
-    const capacities = await Promise.all(
+    const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
+      (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
+        requestedModel: args.model,
+        requestedEffort: args.effort,
+        ...(preferred ? { preferredModel: preferred } : {}),
+        reservePercent: routingPolicy.reservePercent,
+        ...(args.model && capabilities ? { capabilities } : {}),
+      });
+    let capacities = await Promise.all(
       providers.map((provider) => {
-        if (provider === "codex") {
-          return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
-            requestedModel: args.model,
-            requestedEffort: args.effort,
-            ...(routingPolicy.codexModelPreference ? { preferredModel: routingPolicy.codexModelPreference } : {}),
-            reservePercent: routingPolicy.reservePercent,
-            ...(args.model && capabilities ? { capabilities } : {}),
-          });
-        }
+        if (provider === "codex") return readCodexFor(routingPolicy.codexModelPreference);
         if (claudeHealthRoute && !claudeHealthRoute.eligible) return unavailableClaudeCapacity(claudeHealthRoute);
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))()
           .then((capacity) => claudeHealthRoute
@@ -2243,13 +2325,44 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
-      const routed = selectWorkerProviderForPolicy(
-        capacities,
-        auction.policy,
-        args.providerRouting?.draw ?? auctionDrawSeed(args, auction.policy, capacities, requestedCapability),
-      );
+      // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
+      // is judged on the arms the auction would have drawn without the learner.
+      const keyed = auctionDrawSeed(args, auction.policy, capacities, requestedCapability);
+      const draw = args.providerRouting?.draw ?? keyed;
+      const learned = args.providerRouting?.learnedArms;
+      let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
+      if (learned) {
+        const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
+          : auction.policy.preference !== "automatic" ? "operator-preference" : undefined;
+        if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
+        else {
+          const learning = await applyFixLearner({
+            args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
+            codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, readCodexFor,
+          });
+          capacities = learning.capacities;
+          fixLearning = { mixing: learning.mixing, weights: learning.weights };
+        }
+      }
+      const routed = fixLearning
+        ? {
+          selection: selectWorkerProvider(
+            capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
+            auction.policy.reservePercent, draw, fixLearning.mixing,
+          ),
+          preferenceBypass: undefined,
+        }
+        : selectWorkerProviderForPolicy(capacities, auction.policy, draw);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
+      const learnedProbabilities = selection.draw?.learned?.probabilities;
+      if (fixLearning && learned && learnedProbabilities) {
+        emitFixRoutingDecision(learned, fixRoutingDecisionFields({
+          weights: fixLearning.weights,
+          probabilities: learnedProbabilities,
+          selected: { provider: selection.provider, model: fixArmModel(args, selection.capacity, capabilities) },
+        }));
+      }
     } catch (error) {
       // W1-T3692: A BLOCKED AUCTION IS THE MOMENT CASH SHOULD CARRY THE WORK, NOT A DEAD END.
       // This fires ONLY where dispatch would otherwise stall, so its worst case is spending
