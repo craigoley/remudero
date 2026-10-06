@@ -1399,7 +1399,7 @@ function* attemptPlanPrMergeSteps(
         error = String((e as Error)?.message ?? e);
       }
     }
-    if (head) elapsedMs = planPrUnknownElapsedMs(deps.ledgerLines?.() ?? [], prUrl, head, Date.now());
+    if (head) elapsedMs = planPrUnknownElapsedMs(deps.ledgerLines?.() ?? [], prUrl, head, systemClock.now());
     if (elapsedMs >= PLAN_PR_UNKNOWN_HOLD_BOUND_MS) {
       deps.say(
         `automerge.plan_pr_mergeability_unknown_escalated (W1-T5733): head=${head} elapsed_ms=${elapsedMs}` +

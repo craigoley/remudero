@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { systemClock } from "../src/lib/clock.js";
 import {
   attemptArm,
   attemptArmAsync,
@@ -91,7 +92,7 @@ describe("test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escal
   });
 
   test("an unknown head held for ten minutes escalates to the operator instead of being held again", (t) => {
-    t.mock.method(Date, "now", () => NOW);
+    t.mock.method(systemClock, "now", () => NOW);
     const h = harness({ ledger: [heldRow(600_000)] });
     const result = attemptArm(PR, h.deps, HEAD);
     assert.equal(result.outcome, "direct-merge-preflight-refused");
@@ -107,7 +108,7 @@ describe("test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escal
   });
 
   test("the earliest matching held row determines age and one millisecond under the bound still holds", (t) => {
-    t.mock.method(Date, "now", () => NOW);
+    t.mock.method(systemClock, "now", () => NOW);
     const h = harness({ ledger: [heldRow(1), heldRow(599_999), heldRow(200)] });
     const result = attemptArm(PR, h.deps, HEAD);
     assert.equal(result.outcome, "plan-pr-held");
@@ -115,7 +116,7 @@ describe("test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escal
   });
 
   test("another PR, another head, another remedy, invalid or future timestamps do not age this hold", (t) => {
-    t.mock.method(Date, "now", () => NOW);
+    t.mock.method(systemClock, "now", () => NOW);
     const h = harness({ ledger: [
       heldRow(900_000, { pr_url: `${PR}0` }), heldRow(900_000, { prior_head_sha: "old" }),
       heldRow(900_000, { remedy: "retry-later" }), heldRow(900_000, { step: "automerge.arm_skipped" }),
@@ -158,7 +159,7 @@ describe("test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escal
   });
 
   test("a known re-read merges even when earlier unknown holds exceeded the bound", (t) => {
-    t.mock.method(Date, "now", () => NOW);
+    t.mock.method(systemClock, "now", () => NOW);
     let reads = 0;
     const h = harness({ ledger: [heldRow(900_000)], facts: () => ++reads === 1 ? UNKNOWN : CLEAN });
     assert.equal(attemptArm(PR, h.deps, HEAD).outcome, "direct-merged");
