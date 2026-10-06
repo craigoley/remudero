@@ -492,8 +492,9 @@ test("a serve booted onto its analytics checkpoint merges cache reuse from the c
 test("a checkpoint carrying no token terms restores none, and its cache reuse diff stays real", async (t) => {
   const { stateDir, built } = await checkpointed(t, CORE_LINES);
   const path = join(stateDir, ".analytics-console-v1.checkpoint.json");
-  const file = JSON.parse(readFileSync(path, "utf8")) as { state: Record<string, unknown> };
+  const file = JSON.parse(readFileSync(path, "utf8")) as { state: Record<string, unknown>; snapshotHidden?: unknown };
   delete file.state.tokensTotal;
+  delete file.snapshotHidden; // a checkpoint written before hidden fields round-tripped
   writeFileSync(path, JSON.stringify(file));
   const restored = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers }).current();
   assert.equal(restored.asOf, built.asOf, "positive control: the checkpoint was restored");

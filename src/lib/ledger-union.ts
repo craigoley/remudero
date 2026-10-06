@@ -310,6 +310,9 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   liveStartOffset?: number;
   /** Seed the bounded replay window without persisting raw ledger lines. */
   dedupeSeed?: readonly { step: string; fingerprint: string }[];
+  /** Asked after each ROTATION is fully read (never the live file): true ends the stream there, so
+   *  a caller with a time budget stops on a rotation boundary it can resume from via `afterRotation`. */
+  stopAfterRotation?: (path: string) => boolean;
 }
 
 export function fingerprintLedgerLine(raw: string): string {
@@ -487,6 +490,7 @@ export async function* openLedgerUnion(
       gunzip?.destroy();
       source?.destroy();
     }
+    if (entry.path !== livePath && opts.stopAfterRotation?.(entry.path)) return;
   }
 }
 
