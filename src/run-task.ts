@@ -1508,6 +1508,7 @@ import {
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
   persistVerifiedCredit,
+  isPlanTextDeliverable,
   type RequiredContextsRead,
   type ThrownRunVerdictStage,
   type RefusedRunVerdictStage,} from "./lib/status.js";
@@ -18643,7 +18644,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, taskId, resolved, github.changedFiles?.(resolved.url));
+        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
@@ -41095,18 +41096,18 @@ export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: stri
 export type ReconcileCreditCandidate = CreditCandidate & { creditHasOtherBuildMerge?: boolean };
 
 function creditEvidenceFor(
-  taskId: string,
+  task: Pick<Task, "id" | "files">,
   prNumber: number,
   body: string | undefined,
   mergeSubjects: ReadonlyMap<number, string>,
   mergedPaths: ReadonlyMap<number, readonly string[]>,
 ): Pick<CreditCandidate, "creditIsImplementation" | "creditHasBuildDiff"> {
   const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(prNumber));
-  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, taskId);
+  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, task.id);
   const paths = mergedPaths.get(prNumber);
   let creditHasBuildDiff: boolean | undefined;
   if (prerequisiteOnly === true) creditHasBuildDiff = false;
-  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
+  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths) || isPlanTextDeliverable(task, paths);
   // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
   // the squash commit carries the task trailer. Unreadable body evidence stays with the
   // subject result so this repair can only subtract the measured false credit.
@@ -41121,16 +41122,18 @@ export function creditCandidatesFromProjection(
   mergeBodies: ReadonlyMap<number, string> = new Map(),
   mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
   mergedCreditsFor: (taskId: string) => readonly PrRef[] = () => [],
+  tasksById: ReadonlyMap<string, Pick<Task, "id" | "files">> = new Map(),
 ): ReconcileCreditCandidate[] {
   const candidates: ReconcileCreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
     const id = projection.taskId;
-    const evidence = creditEvidenceFor(id, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
+    const task = tasksById.get(id) ?? { id };
+    const evidence = creditEvidenceFor(task, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
     const candidate: ReconcileCreditCandidate = { taskId: id, prNumber: projection.prNumber, prUrl: projection.prUrl, merged: true, ...evidence };
     const buildsOnMain = (pr: PrRef): boolean =>
       pr.state === "MERGED" && pr.number !== projection.prNumber && (creditsByAnchoredTrailer("MERGED", pr.headRefName, pr.body, id) || taskIdFromRunBranch(pr.headRefName) === id) &&
-      creditIsReconcilable({ merged: true, ...creditEvidenceFor(id, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
+      creditIsReconcilable({ merged: true, ...creditEvidenceFor(task, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
     if (!creditIsReconcilable(candidate) && mergedCreditsFor(id).some(buildsOnMain)) candidate.creditHasOtherBuildMerge = true;
     candidates.push(candidate);
   }
@@ -41208,7 +41211,7 @@ export function buildCreditCandidates(
     }
     return mergedByTask.get(taskId) ?? [];
   };
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor, plan.byId);
 }
 
 /**
