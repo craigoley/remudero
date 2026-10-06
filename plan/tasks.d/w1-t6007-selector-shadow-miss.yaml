@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,14 @@
   acceptance:
     - claim: "the narrow selector includes test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts when this edge is exercised"
       proof: "grep: test/the-knowledge-gardener-pins-its-own-retirement-golden\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared files list names only src/lib/affected-suites.ts, which is a test-selector mapping. Nothing in the description or files points to secrets, auth, deletion, merge/deploy policy, or irreversible actions."
+      - "The acceptance criterion is a single grep that checks whether a specific test path appears in that file. That check is verifiable from what is shown."
+      - "The change adds a missed test to a narrow selector. It needs no operator decision, and CI and review still apply."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50), so there is no evidence of repeated failure. The gates state shows nothing concerning. No bounded change view was supplied, so the verdict rests on the description and files list alone."
+    judged_at: "2026-10-06T16:33:11.804Z"
+    pin: "9876e3a852b22e5726cf1fd3b8556f9eb8ce26c74198afeda6482dac7b87be51"
