@@ -3,6 +3,7 @@ import { Agent as HttpAgent, createServer as createHttpServer, request as httpRe
 import { createRequire } from "node:module";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
+import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -5368,15 +5369,7 @@ export async function worktreeAddAsync(
   base = "origin/main",
   deps: WorktreeAddDepsArg = {},
 ): Promise<void> {
-  let enabled: string | undefined;
-  try {
-    enabled = (await worktreeGit(["-C", repoDir, "config", "--local", "--get", "extensions.worktreeConfig"])).trim();
-  } catch {
-    // An absent setting takes the same migration path as the sync form.
-  }
-  if (enabled !== "true") {
-    await worktreeGit(["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
-  }
+  await ensureWorktreeConfigEnabledAsync((args) => worktreeGit(["-C", repoDir, ...args]));
   // W1-T5284: the sync form's ref-lock retry (#8043). Daemon lanes now add concurrently with dispatch,
   // so two fetches of one repo can race for a ref lock where the sync add serialized them.
   await fetchOriginRetryingRefLockAsync((args) => worktreeGit(["-C", repoDir, ...args], true));

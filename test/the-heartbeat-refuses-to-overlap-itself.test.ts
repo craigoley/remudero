@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { installFixtureDuGuard } from "./helpers/fixture-du.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
@@ -76,6 +77,7 @@ function makeBed(): Bed {
   for (const d of [binDir, scriptsDir, join(root, "state"), join(dir, "home"), join(dir, ".git")]) {
     mkdirSync(d, { recursive: true });
   }
+  installFixtureDuGuard(binDir, [dir]);
   writeFileSync(join(binDir, "git"), GIT_STUB, { mode: 0o755 });
   chmodSync(join(binDir, "git"), 0o755);
 

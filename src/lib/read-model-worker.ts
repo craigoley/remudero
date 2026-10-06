@@ -32,6 +32,7 @@ import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { createWorkstreamsView } from "./workstreams-view.js";
+import { createActionsView } from "./actions-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
@@ -1400,10 +1401,11 @@ export function runReadModelViewWorker(
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
     const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const actions = createActionsView({ instances: data.instances, ledgerSource });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, actions, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);

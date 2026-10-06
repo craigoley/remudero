@@ -7683,6 +7683,43 @@ components:
                   additionalProperties:
                     type: string
 
+    ActionsView:
+      type: object
+      description: >
+        GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page
+        as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for
+        that instance, built by the same function in the read-model worker from the projector's
+        `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until
+        state/read-model/switches.json sets `actions` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [actions]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, results]
+                properties:
+                  instance: {type: string}
+                  results:
+                    $ref: "#/components/schemas/ExternalActionResultsEnvelope"
+
     AgentView:
       type: object
       description: >
@@ -14304,6 +14341,33 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Kept for the view contract; the legacy computation answers whenever the view has no body.
+
+  /v1/views/actions:
+    get:
+      summary: The actions page for every instance, served from the read model.
+      description: >
+        W1-T5052 (arch Phase 4 design §1.1, P4-T13). Answers what GET /v1/action-results answers with no
+        filter, per instance, without a request-time ledger read; no query parameters. DARK: it answers 404
+        `view_disabled` until state/read-model/switches.json sets `actions` to `serve`, and `shadow`
+        answers 404 `view_shadow` while the worker compares it with the route's own computation. Same ETag
+        and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionsView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
   /v1/views/agent:
     get:

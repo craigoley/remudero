@@ -10,6 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installFixtureDuGuard, type FixtureDuCall } from "./fixture-du.js";
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
@@ -25,6 +26,8 @@ export interface Beat {
   stderr: string;
   /** Every stubbed `git` invocation, in order. */
   calls: Call[];
+  /** Native fixture sizes and explicit refusals of host-wide scans, never invented zero readings. */
+  duCalls: FixtureDuCall[];
   /** The payload piped to `git hash-object` — the bytes actually PUBLISHED, not the dry-run print. */
   published: string;
   /** The tree entry piped to `git mktree`. */
@@ -106,6 +109,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   mkdirSync(scriptsDir, { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(dir, "home"), { recursive: true });
+  const du = installFixtureDuGuard(binDir, [dir, rec]);
 
   // THE SUBJECT IS THE COMMITTED FILE. Copied only so INSTALL_DIR is controllable and mutants have
   // something to edit; equality is asserted below so a drifted copy cannot quietly pass.
@@ -199,6 +203,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     stdout: r.stdout ?? "",
     stderr: r.stderr ?? "",
     calls,
+    duCalls: du.calls(),
     published: read("payload"),
     treeInput: read("treeinput"),
   };
