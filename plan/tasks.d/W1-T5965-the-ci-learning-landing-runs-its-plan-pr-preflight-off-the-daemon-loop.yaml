@@ -1,0 +1,36 @@
+- id: W1-T5965
+  title: "THE CI-LEARNING LANDING RUNS ITS PLAN-PR PREFLIGHT OFF THE DAEMON LOOP — landCiLearningShards drives the SYNC driveLanding/planPrPreflightAtCommit path (plan-pr-emitter runInTree spawnSync: lint-plan, task-id-existence-check 35 s, shard census), so the ci_learning cadence blocked the daemon loop 143 s at 04:50Z 2026-10-06 while opening #9473; W1-T5521 already moved the sweep's landing to the async preflight"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — one landing entry point's preflight moves to the existing async driver
+  band_meaning: span
+  origin: "operator session 2026-10-06: the loop block behind #9460's withheld review"
+  plan_refs: [W1-T5521, W1-T5689, W1-T5964, W1-T2968]
+  files: [src/lib/feedback-landing.ts, src/run-task.ts, test/the-ci-learning-landing-runs-its-plan-pr-preflight-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only): daemon.loop_lag lag_ms 143167 at 04:50:00.085Z, phase pulse,
+    last_step_before_block ci_learning_cadence.ran, sync_spawn_top spawnSync node
+    scripts/task-id-existence-check.mjs 34985 ms at runInTree (src/lib/plan-pr-emitter.ts). The cadence opened
+    #9473 (ci-learning-landing) at 04:49:59. Every daemon timer in that window fired late, including the
+    reviewer-freshness fetch bound, which withheld #9460's passing review (W1-T5964). landCiLearningShards
+    (feedback-landing.ts) calls driveLanding with syncPreflightOf; sweepFeedbackLandingAsync shows the async
+    shape (driveLandingAsync + planPrPreflightAtCommitAsync) W1-T5521 built for the sweep's landing.
+    Other loop blocks in the same window (W1-T5689's population, not this task): triageClaimReserverFor's push
+    51 s, materializeOriginShards around garden.pass 158 s, pr-open defaultProofRunner check-proof 20 s.
+  design: |
+    Give the ci-learning landing an async entry (driveLandingAsync with planPrPreflightAtCommitAsync, the
+    sweepFeedbackLandingAsync pattern) and await it from the daemon's ci_learning cadence; the manual verb may
+    keep the sync path. The preflight's checks and verdicts are unchanged; only where they run moves.
+  acceptance:
+    - claim: "the daemon's ci-learning cadence lands its shards through the async plan-PR preflight and never reaches the synchronous runInTree spawn"
+      proof: "unit test: test/the-ci-learning-landing-runs-its-plan-pr-preflight-off-the-daemon-loop.test.ts"
+  falsifier: |
+    Leave the cadence on landCiLearningShards' sync preflight: the test's sync preflight seam is called on the
+    daemon path and the test fails.
