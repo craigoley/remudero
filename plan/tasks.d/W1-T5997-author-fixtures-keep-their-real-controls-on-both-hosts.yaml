@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 5.00
-  risk: low
+  risk: high
   band_meaning: blast-radius
   origin: "operator continuation 2026-10-06: retained actual failed full author at 964d04b18bcbb4072112e8d0492baf9fdb4f0cb0; explicit six-fixture repair, PR9547 identity correction"
   plan_refs: [W1-T5882, W1-T5930]
@@ -37,7 +37,7 @@
     - claim: "The real reviewer-spawn fixture supplies a synthetic credential-file preflight explicitly."
       proof: 'grep: keychain: { platform: "linux", readCredentialFile: () => "{}" } in test/worker.test.ts'
     - claim: "The owner fixture captures the canonical path before its actual removal."
-      proof: "grep: const ownerRealpath = realpathOf(f.ownerPath); in test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts"
+      proof: 'grep: const ownerRealpath = realpathOf(f\.ownerPath); in test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts'
   falsifier: |
     Remove the credential-file injection: the retained Mac failure returns before the synthetic
     query is reached. Restore realpath after actual removal: BSD realpath cannot resolve the
