@@ -3600,6 +3600,16 @@ export async function runDaemon(
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
     }
 
+    // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
+    // Start, don't await: a slow review must not serialize the background full sweep behind it.
+    const bootReviewPass = bootGateTrigger === undefined ? (async () => {
+      try {
+        await deps.sweepLight?.({ reviewOnly: true });
+      } catch (e) {
+        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+      }
+    })() : undefined;
+
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
     // Best-effort in code, not just prose: this loop's only try/catch wraps the dispatch below, so an
@@ -3709,11 +3719,7 @@ export async function runDaemon(
     };
 
     if (bootGateTrigger === undefined) {
-      try {
-        await deps.sweepLight?.({ reviewOnly: true });
-      } catch (e) {
-        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
-      }
+      await bootReviewPass;
       for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
       await bootGateOpened;
     }
