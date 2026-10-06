@@ -9,6 +9,7 @@ import { captureImportedModule, importedModuleOf, preventionRegistrationsOf, pre
 import { executingHarnessRevision, benchmarkRunAssignmentReceipt } from "../src/lib/benchmark-run.js";
 import { ciFrictionGardenSpec, readCiFrictionPlanTasks } from "../src/lib/ci-friction-gardener.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { fixedClock, clockFromIsoFn } from "../src/lib/clock.js";
 
 const SHA = "a".repeat(40), BLOB = "b".repeat(40);
 const T = (day: number) => `2026-10-${String(day).padStart(2, "0")}T00:00:00.000Z`;
@@ -111,10 +112,18 @@ test("module capture names each unavailable boundary and assignment receipts pre
   assert.equal(captureImportedModule("/x/src/a.ts", pin, () => { throw new Error("read failed"); }).state, "unavailable");
   assert.equal(captureImportedModule("/outside/a.ts", pin, () => "/x").state, "unavailable");
   const answers = ["/x", BLOB, BLOB];
-  assert.equal(captureImportedModule("/x/src/a.ts", pin, () => answers.shift()!, () => "invalid").state, "unavailable");
+  assert.equal(captureImportedModule("/x/src/a.ts", pin, () => answers.shift()!, clockFromIsoFn(() => "invalid")).state, "unavailable");
   const assigned = benchmarkRunAssignmentReceipt({ id: "a", requested: { model: "test", effort: "low" }, selected: { provider: "test", model: "test", effort: "low" } }, {}, { loadedModule: imported });
   assert.deepEqual(assigned.loadedModule, imported);
   assert.equal(benchmarkRunAssignmentReceipt({ id: "a", requested: { model: "test", effort: "low" }, selected: { provider: "test", model: "test", effort: "low" } }, {}).loadedModule.state, "unavailable");
+});
+
+test("imported source timestamps use the shared frozen clock port", () => {
+  const pin = { source: "executing-module-git", revision: SHA };
+  const answers = ["/x", BLOB, BLOB];
+  const captured = captureImportedModule("/x/src/a.ts", pin, () => answers.shift()!, fixedClock(Date.parse(T(3))));
+  assert.equal(captured.state, "observed");
+  if (captured.state === "observed") assert.equal(captured.capturedAt, T(3));
 });
 
 function shard(status = "queued") {

@@ -1,6 +1,7 @@
 /** Source adoption is file identity plus later relevant work, separate from causal efficacy. */
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, relative } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 
 const SHA = /^[0-9a-f]{40}$/;
 const PATH = /^(?:src|scripts)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|js|sh)$/;
@@ -20,7 +21,7 @@ export interface PreventionSourceRegistration {
 export function captureImportedModule(moduleFile: string, pin: unknown,
   git: (args: string[]) => string = (args) => execFileSync("git", ["-C", dirname(moduleFile), ...args],
     { encoding: "utf8", timeout: 2000, maxBuffer: 64 * 1024 }),
-  now: () => string = () => new Date().toISOString(),
+  clock: Clock = systemClock,
 ): ImportedModuleEvidence {
   const value = object(pin);
   if (value?.source !== "executing-module-git" || !SHA.test(String(value.revision)))
@@ -31,7 +32,7 @@ export function captureImportedModule(moduleFile: string, pin: unknown,
     if (isAbsolute(path) || !validPath(path)) return { state: "unavailable", reason: "module-path-not-a-source-file" };
     const blob = git(["rev-parse", `${value.revision}:${path}`]).trim();
     const actual = git(["hash-object", "--no-filters", "--", moduleFile]).trim();
-    const capturedAt = now();
+    const capturedAt = clock.iso();
     if (!SHA.test(blob) || actual !== blob || !time(capturedAt)) return { state: "unavailable", reason: "module-source-capture-mismatch" };
     return { state: "observed", source: "module-import-git", path, blob, revision: String(value.revision), capturedAt };
   } catch {
