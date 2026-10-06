@@ -325,7 +325,8 @@ export function selectorShadowMainFailures(
 }
 
 /** W1-T4439/W1-T5409: one selector-shadow pass as the daemon builds it — the PR runs, their changed
- *  paths, and main's failures at each run's base sha, all read through `io` (absent: the gh transport). */
+ *  paths, main's failures at each run's base sha and (W1-T5925) a bounded replay of older failing runs,
+ *  all read through `io` (absent: the gh transport). */
 export function selectorShadowGardenPass(
   d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: SelectorShadowGhReads = {},
 ): () => Promise<void> {
@@ -338,7 +339,8 @@ export function selectorShadowGardenPass(
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
       await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
-        undefined, undefined, selectorShadowMainFailures(owner, repo, io));
+        undefined, undefined, selectorShadowMainFailures(owner, repo, io),
+        { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
     } catch (e) {
       d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
