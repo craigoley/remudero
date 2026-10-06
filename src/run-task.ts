@@ -12174,6 +12174,7 @@ export async function runFixRung(opts: {
         subtype: "signal_terminated",
         worker_subtype: fixResult.subtype,
         worker_exit: "signal",
+        worker_exit_signal: fixResult.exit.signal,
         cost_usd: fixResult.costUsd,
         num_turns: fixResult.numTurns,
         elapsed_ms: spawnElapsedMs,
@@ -42904,12 +42905,11 @@ function lastCommitRefusalPromptLines(
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
-/** W1-T5999: did this worker END BY A SIGNAL? The codex runner (`spawnCodexWorkerInPrivateTemp`) names a
- *  failed exit `error_exit_${code}`, and Node's `exit` event passes `code === null` only to a child a
- *  signal ended — so `error_exit_null` IS the runner's exit-by-signal flag (it keeps no signal name).
- *  A Claude worker killed before its result envelope throws instead; W1-T2402's catch owns that. */
-function fixWorkerEndedBySignal(result: Pick<WorkerResult, "subtype" | "isError">): boolean {
-  return result.isError && result.subtype === "error_exit_null";
+/** W1-T5999: did this worker END BY A SIGNAL? W1-T6027: read off the runner's observed `exit`, never the subtype. A codex
+ *  stream that logged turn.failed or ended on a torn line reads `error_codex` whatever ended the child. A Claude worker
+ *  killed before its result envelope throws instead; W1-T2402's catch owns that. */
+function fixWorkerEndedBySignal(result: Pick<WorkerResult, "exit">): result is WorkerResult & { exit: { kind: "signal"; signal: string } } {
+  return result.exit?.kind === "signal";
 }
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */

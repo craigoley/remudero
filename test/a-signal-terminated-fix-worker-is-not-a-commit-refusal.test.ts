@@ -31,13 +31,13 @@ import type { ReviewVerdict } from "../src/lib/review.js";
 const TASK = "W1-T5999X";
 const HEAD = "head-a";
 const MISSING_LINE = "no anchored COMMIT_MESSAGE line in the report";
-/** The codex runner's subtype for a child whose exit code is null — the signal-terminated shape. */
-const SIGNAL_EXIT = { subtype: "error_exit_null", isError: true };
-const NORMAL_EXIT = { subtype: "success", isError: false };
+/** The codex runner's result for a child a signal ended: subtype `error_exit_null`, and since W1-T6027 the signal's name. */
+const SIGNAL_EXIT = { subtype: "error_exit_null", isError: true, exit: { kind: "signal", signal: "SIGTERM" } } as const;
+const NORMAL_EXIT = { subtype: "success", isError: false, exit: { kind: "exit", code: 0 } } as const;
 
 type Row = { step: string; task_id: string } & Record<string, unknown>;
 
-async function fixRound(t: TestContext, runId: string, exit: Pick<WorkerResult, "subtype" | "isError">) {
+async function fixRound(t: TestContext, runId: string, exit: Pick<WorkerResult, "subtype" | "isError" | "exit">) {
   t.mock.method(childProcess, "execFileSync", (_command: string, args: string[]) => {
     if (args.includes("rev-parse")) return HEAD;
     throw new Error("test: subprocess reads unavailable");
@@ -133,7 +133,7 @@ test("W1-T5999: a fix worker that exits normally without a COMMIT_MESSAGE line i
 });
 
 test("W1-T5999: a non-zero exit CODE is not a signal — the worker exited, so its missing line is a refusal", async (t) => {
-  const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_1", isError: true });
+  const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_1", isError: true, exit: { kind: "exit", code: 1 } });
   assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
   assert.equal(rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
 });
