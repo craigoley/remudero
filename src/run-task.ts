@@ -2311,7 +2311,8 @@ export function buildSweepEffects(
                 ? `merge-base worktree unavailable: ${baseProof.baseWorktreeFailure}`
                 : "merge-base proof evidence is unavailable";
           } else {
-            const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+            // Awaited and bounded: a read killed at its bound throws naming it, into the fallback below.
+            const diff = await ghPrDiffAsync(pr.prUrl);
             const discriminated = await discriminateReviewReuseAsync({
               prior,
               diff,
@@ -2883,7 +2884,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { fetchPrDiff } from "./lib/pr-diff.js";
+import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
@@ -7509,10 +7510,9 @@ async function runReview(args: {
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
-  const diffOutcome = fetchPrDiff(prUrl, headSha, {
-    api: (u) => String(ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })),
-    local: (sha) => execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
-  });
+  // Both reads awaited and bounded (MEASURED 2026-10-06: the sync read held the daemon loop); a read killed at its
+  // bound is a named refusal below, never a hang.
+  const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   if (diffOutcome.kind === "refused") {
     // The pending status remains unsatisfied. Record a named refusal and return a withheld
     // result so both the CLI and sweep can retry or escalate without losing this attempt.
