@@ -1407,11 +1407,14 @@ objectReap:
   # so NO pass of survey dispositions was read first. The operator asked for it armed; the cost of
   # that shortcut is that the quiet predicate's real firing rate is still unmeasured.
   #
-  # WHAT ARMED MEANS HERE. The reap acts only when the fleet is QUIET — no registered worktree, no
-  # inflight lock, no open handle under .git — and ALWAYS with --expire=24.hours.ago, so an object
-  # a live worker created today is ineligible even if that quiet verdict were wrong. Prune only,
-  # never gc. While false it SURVEYS instead: every one of those probes still runs and what a
-  # prune WOULD remove is ledgered, spawning nothing.
+  # WHAT ARMED MEANS HERE (operator ruling 2026-10-06, "prune on expiry alone"). The reap refuses
+  # only on an open handle under .git (an unreadable count reads as held). A registered worktree
+  # or inflight lock no longer refuses: the prune runs ALWAYS with --expire=24.hours.ago, so an
+  # object a live worker created today is ineligible, and the objects_decision row says whether
+  # `quiet` or `expiry` carried it. Stale objects/maintenance.lock / gc.pid are reclaimed first.
+  # Both the managed checkout and the daemon's own checkout (<root>/remudero) are reaped. Prune
+  # only, never gc. While false it SURVEYS instead: every one of those probes still runs and what
+  # a prune WOULD remove is ledgered, spawning nothing.
   #
   # Set back to false to return to survey-only; nothing else changes. Ratifying afterwards
   # (rmd ratify objectReap) pins the armed operation against silent drift.
