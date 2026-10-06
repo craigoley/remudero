@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5825 (#9283) builder's residual-defect report"
   plan_refs: [W1-T5825, W1-T4780, W1-T5740]
   files: [src/lib/gardener.ts, test/a-gardener-judges-its-own-actions.test.ts, test/a-settled-gardener-pending-forgets-its-held-pass.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

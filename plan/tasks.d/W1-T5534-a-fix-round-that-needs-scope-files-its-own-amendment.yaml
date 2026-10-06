@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: split out of W1-T5532 (typed fix outcomes); NEEDS_SCOPE for non-test paths"
   plan_refs: [W1-T3434, W1-T3830, W1-T5118, W1-T4207]
   files: [src/lib/proof-amendment.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

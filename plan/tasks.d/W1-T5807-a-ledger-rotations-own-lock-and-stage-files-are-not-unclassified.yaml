@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5763 (#9232) follow-up"
   plan_refs: [W1-T5763, W1-T4817, W1-T5514, W1-T2899]
   files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, test/a-ledger-rotations-own-lock-and-stage-files-are-not-unclassified.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

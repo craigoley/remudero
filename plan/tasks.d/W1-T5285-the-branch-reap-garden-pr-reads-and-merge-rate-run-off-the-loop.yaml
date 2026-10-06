@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
   plan_refs: [W1-T4476, W1-T5114, W1-T448]
   files: [src/lib/branch-reaper.ts, src/lib/gardener.ts, src/lib/fleet-lane.ts, src/lib/daemon.ts, src/run-task.ts, test/the-reap-and-garden-reads-never-block-the-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-02. The profile windows held these sync stacks: `fleet-lane mergedInLastDay` (git log)

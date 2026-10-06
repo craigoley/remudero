@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9392 stranded after a merge-queue ejection"
   plan_refs: [W1-T4784, W1-T5376, W1-T975, W1-T1000002, W1-T4405, W1-T5403, W1-T1116, W1-T2345]
   files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/ledger.ts, src/run-task.ts, docs/forensics/sweep.md, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts, test/a-pr-the-merge-queue-ejects-is-re-armed-a-bounded-number-of-times.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: "reservation hand-off: run-unfiled-1791232843893 -> run-unfiled-1791237718711"

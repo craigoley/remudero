@@ -11,7 +11,7 @@
   origin: "2026-10-06 core-console architecture plan backlog E14 (SLOWVIEW follow-up (a), after #8324/#8325/#8329)"
   plan_refs: [W1-T5066, W1-T5885]
   files: [src/lib/board-projection.ts, src/lib/now-view.ts, test/a-cold-board-ingest-yields-between-chunks.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

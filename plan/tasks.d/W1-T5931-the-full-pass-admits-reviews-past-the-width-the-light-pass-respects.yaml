@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
   plan_refs: [W1-T4732, W1-T5922, W1-T473, W1-T2519]
   files: [src/lib/sweep.ts, test/the-full-pass-admits-reviews-under-the-same-width-the-light-pass-respects.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

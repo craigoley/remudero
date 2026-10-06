@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: #9567 review withheld twice (13:10Z, 15:08Z)"
   plan_refs: [W1-T5964, W1-T5771, W1-T5282, W1-T5530]
   files: [src/lib/self-sync.ts, test/a-reviewer-freshness-check-survives-one-stalled-github-handshake.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

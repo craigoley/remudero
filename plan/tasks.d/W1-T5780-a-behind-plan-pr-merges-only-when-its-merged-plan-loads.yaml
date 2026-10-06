@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5748 (#9205) follow-up"
   plan_refs: [W1-T5748, W1-T5472, W1-T5615]
   files: [src/lib/plan-pr-merge-safety.ts, test/a-behind-plan-pr-merges-when-its-merged-plan-is-safe.test.ts, test/a-behind-plan-pr-merges-only-when-its-merged-plan-loads.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: pre-enforce check of W1-T1289 observe-mode rows on the Azure host"
   plan_refs: [W1-T1289]
   files: [src/lib/worker.ts, test/egress-readiness-tells-a-stalled-loop-from-a-dead-proxy.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
