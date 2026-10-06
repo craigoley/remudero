@@ -14683,13 +14683,38 @@ export async function runSweep(
   // W1-T2584 — FIXED-SIZE PULL POOL. At most `reviewLanes` worker promises and that many live
   // effects. Each pull increments the index synchronously before its first await, preserving
   // oldest-first START order even when reviewers settle out of order.
+  // W1-T5931: a full pass claims each slot under `reviewAdmissionBound`, live at the pull; a worker
+  // waits for a release while its own pass holds one, and otherwise stands the tail down.
+  const fullSurface = deps.repairAdmissionSurface === "full";
+  let passReviewsInFlight = 0;
+  let widthStopReason: string | undefined;
   const workerCount = Math.min(reviewLanes, orderedReviews.length);
   await Promise.all(
     Array.from({ length: workerCount }, async () => {
       while (true) {
+        if (fullSurface && nextReviewIndex < orderedReviews.length) {
+          const { bound, inFlight } = reviewAdmissionBound(reviewLanes);
+          if (bound === 0 && passReviewsInFlight === 0) {
+            widthStopReason = `not admitted this pass: semantic post-review admission bound 0${inFlightNote(inFlight)}`;
+            return;
+          }
+          if (bound === 0) {
+            await new Promise<void>((wake) => reviewSlotWaiters.add(wake));
+            continue;
+          }
+        }
         const job = takeNextReview();
         if (job === undefined) return;
-        const work = trackInFlightReview(runReview(job));
+        if (fullSurface) {
+          fullPassReviewsInFlight++;
+          passReviewsInFlight++;
+        }
+        const tracked = trackInFlightReview(runReview(job));
+        const work = !fullSurface ? tracked : tracked.finally(() => {
+          fullPassReviewsInFlight--;
+          passReviewsInFlight--;
+          releaseReviewSlot();
+        });
         if (deps.detachReviewWait) {
           deps.detachReviewWait(work);
           return;
@@ -14713,7 +14738,7 @@ export async function runSweep(
       false,
       false,
       undefined,
-      admissionStopReason ?? "review admissions stopped — re-derived next pass",
+      admissionStopReason ?? widthStopReason ?? "review admissions stopped — re-derived next pass",
       undefined,
       undefined,
       undefined,
@@ -14879,6 +14904,20 @@ const lightPassReservedHeads = new Set<string>();
 // W1-T5901: at most one plan PR direct-merges across overlapping light passes.
 let lightPassPlanMergeInFlight = false;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
+// W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
+let fullPassReviewsInFlight = 0;
+const reviewSlotWaiters = new Set<() => void>();
+const releaseReviewSlot = (): void => {
+  for (const wake of [...reviewSlotWaiters]) wake();
+  reviewSlotWaiters.clear();
+};
+const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight ${inFlight}` : "");
+
+/** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
+export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
+  return { bound: Math.max(0, width - inFlight), inFlight };
+}
 
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
@@ -14906,7 +14945,7 @@ export async function runSweepLightPass(
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
-  const semanticBound = Math.max(0, policySemanticBound - lightPassSpawningReservations);
+  const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const availablePlanFilings = Math.max(0, policy.planFilingAdmissionBound - lightPassPlanFilingReservations);
   const { spawning, planFilings } = selectReviewAdmissions(
     openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
@@ -14931,6 +14970,7 @@ export async function runSweepLightPass(
       if (spawningNumbers.has(pr.prNumber)) lightPassSpawningReservations--;
       else lightPassPlanFilingReservations--;
       lightPassReservedHeads.delete(lightPassHeadKey(pr));
+      releaseReviewSlot();
     });
   }
   try {
@@ -15002,6 +15042,7 @@ export async function runSweepLightPass(
                           ? "post-review admissions per light pass"
                           : "post-review admissions available across light passes")
                       : `not admitted this pass: semantic post-review admission bound ${semanticBound}` +
+                        inFlightNote(reviewsInFlight) +
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
