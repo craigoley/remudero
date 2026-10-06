@@ -556,16 +556,26 @@ export interface ShadowLegacy {
   /** Why legacy's own sources say it is not ready ({@link unreadySources}): the sample is skipped, not compared. */
   unready?: string;
   /** Per data path, the source it is computed from wholly and the as-of legacy read it at: a diff there when the
-   *  body read that source at another as-of compared two different inputs, so it is `timing`, never `real`. */
-  paired?: Readonly<Record<string, { source: string; asOf: string | null }>>;
+   *  body read that source at another as-of compared two different inputs, so it is `timing`, never `real`. A path
+   *  merged from several sources lists each, and differs in input when the body read ANY of them at another as-of. */
+  paired?: Readonly<Record<string, ShadowPairedRead | readonly ShadowPairedRead[]>>;
 }
 
-/** The diff under a {@link ShadowLegacy.paired} path whose source the body read at another as-of, judged `timing`. */
+/** One source legacy read for a paired path, and the as-of it read it at. */
+export interface ShadowPairedRead {
+  source: string;
+  asOf: string | null;
+}
+
+/** The diff under a {@link ShadowLegacy.paired} path one of whose sources the body read at another as-of, judged `timing`. */
 function unpairedRead(path: string, paired: ShadowLegacy["paired"], sources: readonly ViewSource[] | undefined): { classification: ShadowClassification; reason: string } | undefined {
-  for (const [under, read] of Object.entries(paired ?? {})) {
-    if (path !== under && !path.startsWith(`${under}.`)) continue;
-    const bodyRead = sources?.find((source) => source.name === read.source);
-    if (bodyRead && bodyRead.asOf !== read.asOf) return { classification: "timing", reason: `legacy read ${read.source} as of ${read.asOf}, the body as of ${bodyRead.asOf}` };
+  for (const [under, reads] of Object.entries(paired ?? {})) {
+    // A child is `<under>.field` or `<under>[key=…]`: a list's elements are keyed, not dotted.
+    if (path !== under && !path.startsWith(`${under}.`) && !path.startsWith(`${under}[`)) continue;
+    for (const read of ([] as ShadowPairedRead[]).concat(reads)) {
+      const bodyRead = sources?.find((source) => source.name === read.source);
+      if (bodyRead && bodyRead.asOf !== read.asOf) return { classification: "timing", reason: `legacy read ${read.source} as of ${read.asOf}, the body as of ${bodyRead.asOf}` };
+    }
   }
   return undefined;
 }
@@ -612,10 +622,13 @@ function unreadReading(path: string, legacy: ShadowLegacy, body: { data: unknown
 
 /** What legacy read of each source its definition pairs ({@link ViewDefinition.shadowSources}). */
 function pairedReads(declared: ViewDefinition["shadowSources"], sources: readonly ViewSource[]): ShadowLegacy["paired"] {
-  const out: Record<string, { source: string; asOf: string | null }> = {};
-  for (const [path, name] of Object.entries(declared ?? {})) {
-    const read = sources.find((source) => source.name === name);
-    if (read) out[path] = { source: name, asOf: read.asOf };
+  const out: Record<string, ShadowPairedRead | ShadowPairedRead[]> = {};
+  for (const [path, names] of Object.entries(declared ?? {})) {
+    const reads = ([] as string[]).concat(names).flatMap((name) => {
+      const read = sources.find((source) => source.name === name);
+      return read ? [{ source: name, asOf: read.asOf }] : [];
+    });
+    if (reads.length > 0) out[path] = typeof names === "string" ? reads[0]! : reads;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
