@@ -590,11 +590,13 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
+  landCiLearningShardsAsync,
   landPlanReconcileShards,
   recordDecision,
   recordRuling,
   sweepFeedbackLanding,
   sweepFeedbackLandingAsync,
+  type LandCiLearningShardsOptions,
   type LandFeedbackResult,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
@@ -34720,7 +34722,9 @@ export function buildCiLearningCadenceRunner(deps: {
   loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
   loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
   fileShards?: typeof fileCiLearningShards;
-  landShards?: typeof landCiLearningShards;
+  /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
+  landShards?: (...args: Parameters<typeof landCiLearningShards>) => ReturnType<typeof landCiLearningShards> | Promise<ReturnType<typeof landCiLearningShards>>;
+  gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
   mergedOrigins?: (checkoutRoot: string) => string[];
@@ -34771,12 +34775,13 @@ export function buildCiLearningCadenceRunner(deps: {
               mintTaskId,
               planOrigins: idempotencyOrigins,
             })
-          : (deps.landShards ?? landCiLearningShards)(result.drafts, deps.checkoutRoot, {
+          : await (deps.landShards ?? landCiLearningShardsAsync)(result.drafts, deps.checkoutRoot, {
               stateRoot: deps.root,
               mintTaskId,
               planOrigins: idempotencyOrigins,
               renderShard: ciLearningShardYaml,
               recordVerdict: ciLearningRecordVerdict,
+              gh: deps.gh,
             });
         filed = filing.filed.length;
         skipped = filing.skipped.length;
