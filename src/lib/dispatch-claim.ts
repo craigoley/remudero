@@ -1,9 +1,11 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
-import { assertClaimRefPushAllowed } from "./live-write-guard.js";
+import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import type { Escalation } from "./escalate.js";
 
 /**
@@ -312,54 +314,181 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const msg = `rmd-dispatch claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
-      return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
+      return deps.run(["commit-tree", tree, "-m", claimAnchorMessage()]).stdout.trim();
     },
     attempt(taskId, anchor) {
       assertClaimRefPushAllowed(deps.run, dispatchClaimRef(taskId));
-      const res = deps.run(["push", "origin", `${anchor}:${dispatchClaimRef(taskId)}`]);
-      if (res.status === 0) {
-        lastStderr = undefined;
-        return "created";
-      }
-      lastStderr = res.stderr;
-      return classifyPushFailure(res.stderr);
+      const res = deps.run(claimPushArgs(taskId, anchor));
+      lastStderr = res.status === 0 ? undefined : res.stderr;
+      return claimAttemptOutcome(res);
     },
     holder(taskId) {
-      const res = deps.run(["ls-remote", "origin", dispatchClaimRef(taskId)]);
-      if (res.status !== 0) return undefined;
-      const sha = res.stdout.trim().split(/\s+/)[0];
-      return sha ? sha : undefined;
+      return holderFromLsRemote(deps.run(["ls-remote", "origin", dispatchClaimRef(taskId)]));
     },
     drop(taskId, opts = {}) {
-      const ref = dispatchClaimRef(taskId);
-      const args = opts.expect
-        ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
-        : ["push", "origin", `:${ref}`];
-      assertClaimRefPushAllowed(deps.run, ref);
-      return deps.run(args).status === 0;
+      assertClaimRefPushAllowed(deps.run, dispatchClaimRef(taskId));
+      return deps.run(claimDropArgs(taskId, opts.expect)).status === 0;
     },
     list() {
-      const res = deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]);
-      if (res.status !== 0) return [];
-      return res.stdout
-        .split("\n")
-        .map((line) => /\srefs\/rmd-dispatch\/(\S+)$/.exec(line.trim())?.[1])
-        .filter((id): id is string => id !== undefined);
+      return claimIdsFromLsRemote(deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
     },
     anchorMessage(taskId) {
       const sha = this.holder(taskId);
       if (!sha) return undefined;
       // Fetch first: this is a parentless commit on a ref no clone tracks, so a bare cat-file on
       // a fresh checkout would miss it and read as "no identity" on a claim that's genuinely dead.
-      deps.run(["fetch", "--quiet", "origin", `${dispatchClaimRef(taskId)}:${dispatchClaimRef(taskId)}`]);
-      const res = deps.run(["cat-file", "-p", sha]);
-      if (res.status !== 0) return undefined;
-      // `cat-file -p` on a commit prints headers, a blank line, then the message.
-      const blank = res.stdout.indexOf("\n\n");
-      return blank === -1 ? undefined : res.stdout.slice(blank + 2).trim();
+      deps.run(claimFetchArgs(taskId));
+      return messageFromCatFile(deps.run(["cat-file", "-p", sha]));
     },
   };
+}
+
+// ── THE SHARED READINGS: one parse per git answer, so the sync and awaited reservers cannot drift ──
+
+type GitAnswer = { status: number; stdout: string; stderr: string };
+
+function claimAnchorMessage(): string {
+  return `rmd-dispatch claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+}
+
+function claimPushArgs(taskId: string, anchor: string): string[] {
+  return ["push", "origin", `${anchor}:${dispatchClaimRef(taskId)}`];
+}
+
+function claimAttemptOutcome(res: GitAnswer): DispatchClaimOutcome {
+  return res.status === 0 ? "created" : classifyPushFailure(res.stderr);
+}
+
+function claimDropArgs(taskId: string, expect: string | undefined): string[] {
+  const ref = dispatchClaimRef(taskId);
+  return expect ? ["push", `--force-with-lease=${ref}:${expect}`, "origin", `:${ref}`] : ["push", "origin", `:${ref}`];
+}
+
+function claimFetchArgs(taskId: string): string[] {
+  return ["fetch", "--quiet", "origin", `${dispatchClaimRef(taskId)}:${dispatchClaimRef(taskId)}`];
+}
+
+function holderFromLsRemote(res: GitAnswer): string | undefined {
+  if (res.status !== 0) return undefined;
+  const sha = res.stdout.trim().split(/\s+/)[0];
+  return sha ? sha : undefined;
+}
+
+function claimIdsFromLsRemote(res: GitAnswer): string[] {
+  if (res.status !== 0) return [];
+  return res.stdout
+    .split("\n")
+    .map((line) => /\srefs\/rmd-dispatch\/(\S+)$/.exec(line.trim())?.[1])
+    .filter((id): id is string => id !== undefined);
+}
+
+function messageFromCatFile(res: GitAnswer): string | undefined {
+  if (res.status !== 0) return undefined;
+  // `cat-file -p` on a commit prints headers, a blank line, then the message.
+  const blank = res.stdout.indexOf("\n\n");
+  return blank === -1 ? undefined : res.stdout.slice(blank + 2).trim();
+}
+
+// ── THE AWAITED RESERVER: the same claim, with every git round trip off the daemon loop ──────
+
+/** A value or a promise of one — what {@link releaseDispatchClaimAsync} and runTask await. */
+type Awaitable<T> = T | Promise<T>;
+
+/**
+ * {@link DispatchClaimReserver} with each git round trip awaitable. MEASURED 2026-10-06: the sync
+ * reserver's `spawnSync` git was the largest single holder of the daemon loop — 89 `daemon.loop_lag`
+ * rows over 17 h, 1,506 s of spawn time, one push or ls-remote up to 106 s. A plain sync reserver is
+ * also one of these (each value is awaitable), so a test's scripted fake needs no change.
+ */
+export interface DispatchClaimReserverAsync {
+  mintAnchor(): Awaitable<string>;
+  attempt(taskId: string, anchor: string): Awaitable<DispatchClaimOutcome>;
+  holder(taskId: string): Awaitable<string | undefined>;
+  drop(taskId: string, opts?: { expect?: string }): Awaitable<boolean>;
+  lastAttemptStderr?(): string | undefined;
+  anchorMessage?(taskId: string): Awaitable<string | undefined>;
+  list?(): Awaitable<string[]>;
+}
+
+export interface ClaimGitDepsAsync {
+  /** Runs a git argv off the loop; resolves (never rejects) with its exit status, stdout and stderr. */
+  run(args: string[]): Promise<GitAnswer>;
+  /** Overrides the anchor so a test can make two writers distinguishable. */
+  anchor?: () => string;
+}
+
+/** {@link gitDispatchClaimReserver}, awaited: the same argv and the same readings, method for method. */
+export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): DispatchClaimReserverAsync {
+  let lastStderr: string | undefined;
+  const holder = async (taskId: string): Promise<string | undefined> =>
+    holderFromLsRemote(await deps.run(["ls-remote", "origin", dispatchClaimRef(taskId)]));
+  return {
+    lastAttemptStderr: () => lastStderr,
+    async mintAnchor() {
+      if (deps.anchor) return deps.anchor();
+      const tree = (await deps.run(["hash-object", "-t", "tree", "/dev/null"])).stdout.trim();
+      return (await deps.run(["commit-tree", tree, "-m", claimAnchorMessage()])).stdout.trim();
+    },
+    async attempt(taskId, anchor) {
+      await assertClaimRefPushAllowedAsync(deps.run, dispatchClaimRef(taskId));
+      const res = await deps.run(claimPushArgs(taskId, anchor));
+      lastStderr = res.status === 0 ? undefined : res.stderr;
+      return claimAttemptOutcome(res);
+    },
+    holder,
+    async drop(taskId, opts = {}) {
+      await assertClaimRefPushAllowedAsync(deps.run, dispatchClaimRef(taskId));
+      return (await deps.run(claimDropArgs(taskId, opts.expect))).status === 0;
+    },
+    async list() {
+      return claimIdsFromLsRemote(await deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
+    },
+    async anchorMessage(taskId) {
+      const sha = await holder(taskId);
+      if (!sha) return undefined;
+      await deps.run(claimFetchArgs(taskId));
+      return messageFromCatFile(await deps.run(["cat-file", "-p", sha]));
+    },
+  };
+}
+
+/** How long one claim git call may run before it is killed and read as unreachable. */
+export const DISPATCH_CLAIM_GIT_TIMEOUT_MS = 60_000;
+
+/**
+ * The real awaited runner: `git -C <repoDir> <args>` through `execFile`, bounded at `timeoutMs`
+ * (SIGTERM, then SIGKILL after {@link killAfterGrace}'s grace). It RESOLVES on every outcome, as
+ * `spawnSync` did, and each failure is failure-shaped so the reserver fails closed:
+ *  - exit N            → status N, git's own stderr (a contended push still reads `taken`);
+ *  - killed at the bound → status 1, stderr NAMING the bound — no contention word, so
+ *    `classifyPushFailure` reads `unreachable` and the dispatch refuses rather than guesses;
+ *  - signalled, or never started (ENOENT) → status 1, with node's error text when git wrote none —
+ *    the same status `gitRunAdapter` gives a signalled `spawnSync`, so neither can read as success.
+ */
+export function gitClaimRunnerAsync(
+  repoDir: string,
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
+): ClaimGitDepsAsync["run"] {
+  const timeoutMs = opts.timeoutMs ?? DISPATCH_CLAIM_GIT_TIMEOUT_MS;
+  return (args) =>
+    new Promise((resolve) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve({ status: 0, stdout, stderr });
+        if (timedOut) {
+          const said = stderr.trim() ? ` git said: ${stderr.trim()}` : "";
+          return resolve({ status: 1, stdout, stderr: `git ${args[0]} timed out after ${timeoutMs}ms and was killed.${said}` });
+        }
+        const code = (err as { code?: unknown }).code;
+        return resolve({ status: typeof code === "number" ? code : 1, stdout, stderr: stderr || err.message });
+      });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
 }
 
 /**
@@ -448,6 +577,43 @@ export function releaseDispatchClaim(
     return { ...decision, dropped: judged ? reserver.drop(taskId, { expect: judged }) : false };
   }
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+}
+
+/**
+ * {@link releaseDispatchClaim}, awaited — the same four-arm decision ({@link decideDispatchClaimRelease}),
+ * the same gather order (anchor message only off the this-run path, probes only once it parsed) and the
+ * same CAS'd drop, so runTask's daemon-loop releases never spawn git synchronously. Accepts a sync
+ * reserver too: every value it reads is awaited.
+ */
+export async function releaseDispatchClaimAsync(
+  taskId: string,
+  reserver: DispatchClaimReserverAsync,
+  i: {
+    anchor?: string;
+    evidenceObserved?: boolean;
+    /** Handed the anchor identity just parsed — the probe runs only once one has. */
+    livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
+  } = {},
+): Promise<DispatchClaimReleaseResult> {
+  let anchorIdentity: ClaimAnchorIdentity | undefined;
+  let liveness: ClaimantLivenessProbe | undefined;
+  if (i.anchor === undefined && i.evidenceObserved !== true && i.livenessProbe) {
+    anchorIdentity = parseClaimAnchorMessage(await reserver.anchorMessage?.(taskId));
+    if (anchorIdentity) liveness = i.livenessProbe(anchorIdentity);
+  }
+  const decision = decideDispatchClaimRelease({
+    heldByThisRun: i.anchor !== undefined,
+    evidenceObserved: i.evidenceObserved === true,
+    taskId,
+    anchorIdentity,
+    liveness,
+  });
+  if (!decision.release) return { ...decision, dropped: false };
+  if (decision.arm === "dead-claimant") {
+    const judged = await reserver.holder(taskId);
+    return { ...decision, dropped: judged ? await reserver.drop(taskId, { expect: judged }) : false };
+  }
+  return { ...decision, dropped: await reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
 }
 
 const MINT_ROW_ARCHIVE_READS = 3;
