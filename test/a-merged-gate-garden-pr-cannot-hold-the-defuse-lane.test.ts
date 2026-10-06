@@ -61,7 +61,8 @@ async function heldGarden(pending: Record<string, unknown> = {}, lastPass?: { fi
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const landed: string[] = [];
   const prStates = new Map<string, PrState>([[HELD_PR, "merged"]]);
-  const sources = { thresholdDays: 30, mintTaskId: () => "W1-T6001", openOrigins: () => [] as string[], admissionViolations: () => [] };
+  // W1-T6036: the fixture stands for a confirmed bomb — red only once the clock is shifted past it.
+  const sources = { thresholdDays: 30, mintTaskId: () => "W1-T6001", openOrigins: () => [] as string[], admissionViolations: () => [], runSuite: (_file: string, shiftDays: number) => shiftDays < 1 };
   const deps = (at: number) => ({
     repoRoot: repo.dir, stateDir, clock: fixedClock(at), seed: 1,
     log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),

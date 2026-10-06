@@ -54,12 +54,20 @@ export const EXEMPT_MARKER = "expiring-fixture: exempt";
  */
 export const CENSUS_MAIN_BRANCH_RUN = "CENSUS_MAIN_BRANCH_RUN";
 
+/** An `offsetDays` that is the sweep's own staleness policy, read where `main` reads it. */
+export const STALE_DAYS_OFFSET = "sweep.staleDays";
+
 /**
  * The fields a live threshold ages against `Date.now()`, and where that happens.
  *
  * This table is the one thing that can silently go stale, so {@link assertFieldsStillAged} pins
  * every row against its own source: rename the field or drop the comparison and the census FAILS
  * rather than quietly covering nothing. That is the difference between a gate and an ornament.
+ *
+ * W1-T6036: `offsetDays` is how long after its stamp a row's threshold fires. A deadline fires AT
+ * its instant, so dating it a staleness threshold later reported a crossing two weeks after it
+ * happened. The `updated_at`/`updatedAt` rows are the wire names one rename away from
+ * `lastActivityAt`: main went red on `updated_at: "2026-09-22T12:00:00Z"` while this read OK.
  */
 export const AGED_FIELDS = [
   {
@@ -68,44 +76,74 @@ export const AGED_FIELDS = [
     source: "src/lib/sweep.ts",
     // `deriveDisposition` parses this field and compares the resulting ageDays to policy.staleDays.
     evidence: ["Date.parse(pr.lastActivityAt)", "policy.staleDays"],
+    offsetDays: STALE_DAYS_OFFSET,
+  },
+  {
+    // The GitHub REST wire name for the same instant: mapRestPr copies it to updatedAt.
+    field: "updated_at",
+    threshold: "sweep.staleDays (REST updated_at -> updatedAt -> lastActivityAt)",
+    source: "src/lib/open-prs-rest.ts",
+    evidence: ["updatedAt: row.updated_at"],
+    offsetDays: STALE_DAYS_OFFSET,
+  },
+  {
+    // buildOpenPrViews copies it to lastActivityAt, which deriveDisposition ages.
+    field: "updatedAt",
+    threshold: "sweep.staleDays (updatedAt -> lastActivityAt)",
+    source: "src/run-task.ts",
+    evidence: ["lastActivityAt: pr.updatedAt"],
+    offsetDays: STALE_DAYS_OFFSET,
   },
   {
     field: "deadline",
     threshold: "follow-up policy evaluation time",
     source: "src/lib/follow-up-policy.ts",
     evidence: ["Date.parse(candidate.deadline)", "<= now"],
+    offsetDays: 0,
   },
   {
     field: "snoozedUntil",
     threshold: "follow-up policy evaluation time",
     source: "src/lib/follow-up-policy.ts",
     evidence: ["Date.parse(current.snoozedUntil)", "> now"],
+    offsetDays: 0,
   },
   {
     field: "freshUntil",
     threshold: "operator preference evaluation time",
     source: "src/lib/preference-policy.ts",
     evidence: ["Date.parse(preference.freshUntil)", "now >"],
+    offsetDays: 0,
   },
   {
     field: "retroAttemptAt",
     threshold: "automated retro attempt backoff",
     source: "src/lib/retro.ts",
-    evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs"],
+    // The first failure's wait; a streak doubles it, so this is the earliest the row can cross.
+    evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs", "baseDelayMs: 6 * 60 * 60 * 1000"],
+    offsetDays: 0.25,
   },
   {
     field: "from",
     threshold: "feedback age observation-window start",
     source: "src/lib/human-gate.ts",
     evidence: ["Date.parse(supplied.window.from)", "input.now >= Date.parse(supplied.window.from)"],
+    offsetDays: 0,
   },
   {
     field: "through",
     threshold: "feedback age observation-window end",
     source: "src/lib/human-gate.ts",
     evidence: ["Date.parse(supplied.window.through)", "input.now <= Date.parse(supplied.window.through)"],
+    offsetDays: 0,
   },
 ];
+
+/** A row's key, bare, quoted or JSON-escaped inside a string, after a left word boundary, then an
+ *  ISO stamp in any quote: `field: "…"`, `"field":"…"`, `\"field\":\"…\"`. */
+function stampRe(field) {
+  return new RegExp(`(?:^|[^\\w$])\\\\?["'\u0060]?${field}\\\\?["'\u0060]?\\s*:\\s*\\\\?["'\u0060](\\d{4}-\\d{2}-\\d{2}T[^"'\u0060\\\\]*)`);
+}
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
  *
@@ -339,14 +377,14 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
     for (const [index, line] of lines.entries()) {
       for (const row of AGED_FIELDS) {
         // The stamp as it is actually written in a fixture: `field: "2026-08-26T18:15:00Z"`.
-        const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
+        const m = stampRe(row.field).exec(line);
         if (!m) continue;
         population += 1;
         populationByFile[file] = (populationByFile[file] ?? 0) + 1;
 
         const stamp = Date.parse(m[1]);
         if (Number.isNaN(stamp)) continue;
-        const expiresAt = stamp + thresholdDays * MS_PER_DAY;
+        const expiresAt = stamp + (row.offsetDays === STALE_DAYS_OFFSET ? thresholdDays : row.offsetDays) * MS_PER_DAY;
         const daysLeft = (expiresAt - now) / MS_PER_DAY;
 
         const record = { file, line: index + 1, field: row.field, threshold: row.threshold, stamp: m[1], expiresAt, daysLeft };
@@ -380,7 +418,7 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
       if (baseText === undefined) continue; // absent at base ⇒ every stamp in it is this diff's
       for (const line of baseText.split("\n")) {
         for (const row of AGED_FIELDS) {
-          const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
+          const m = stampRe(row.field).exec(line);
           if (m) inheritedKeys.add(`${file}\u0000${row.field}\u0000${m[1]}`);
         }
       }
