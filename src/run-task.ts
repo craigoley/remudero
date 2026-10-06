@@ -1570,6 +1570,7 @@ import {
   type EscalationReconcileSummary,
   type FixClass,
   type FixDispatchEvidence,
+  type FixOwnerResidue,
   type FixDispatchSnapshot,
   type FixSuperseded,
   type InstrumentEntanglementPaths,
@@ -2402,7 +2403,7 @@ export function buildSweepEffects(
       remove: removeAbandonedFixWorktreeOwner,
       publishAhead: publishAbandonedFixOwnerAhead,
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
-      preserveTrackedDirty: preserveTrackedDirtyFixOwner,
+      preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -41804,8 +41805,66 @@ export function preserveTrackedDirtyFixOwner(
   localSha: string,
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
-  const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
-  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, readTrackedDirtyOwnerPatch(ownerPath, localSha), deps);
+}
+
+/** W1-T5918: the production seam. An empty HEAD-relative diff returns the index/operation residue
+ *  (to be recorded, then reset) instead of throwing; a real diff is preserved exactly as before. */
+export function preserveOrDiscardFixOwnerResidue(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string | FixOwnerResidue {
+  const patch = readTrackedDirtyOwnerPatch(ownerPath, localSha);
+  if (patch.length === 0) return readFixOwnerResidue(ownerPath, localSha);
+  return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
+}
+
+const FIX_OWNER_RESIDUE_PATH_BOUND = 20;
+const FIX_OWNER_OPERATION_MARKERS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] as const;
+
+function nulPaths(raw: string): string[] {
+  return raw.split("\0").filter((path) => path.length > 0);
+}
+
+function readFixOwnerResidue(ownerPath: string, localSha: string): FixOwnerResidue {
+  const gitOut = (args: string[]) =>
+    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  let markerKind: FixOwnerResidue["markerKind"] = null;
+  let markerSha: string | null = null;
+  for (const marker of FIX_OWNER_OPERATION_MARKERS) {
+    let raw: string;
+    try {
+      raw = readFileSync(resolve(ownerPath, gitOut(["rev-parse", "--git-path", marker]).trim()), "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    const markerLine = raw.split("\n")[0].trim();
+    if (!/^[0-9a-f]{40,64}$/i.test(markerLine)) throw new Error(`dirty owner ${marker} is malformed`);
+    markerKind = marker;
+    markerSha = markerLine;
+    break;
+  }
+  const unmerged = [...new Set(nulPaths(gitOut(["diff", "--name-only", "--diff-filter=U", "-z"])))];
+  const unmergedSet = new Set(unmerged);
+  const staged = nulPaths(gitOut(["diff", "--cached", "--name-only", "-z", localSha])).filter((path) => !unmergedSet.has(path));
+  const bound = (paths: string[]) => paths.slice(0, FIX_OWNER_RESIDUE_PATH_BOUND).map((path) => path.slice(0, 256));
+  return {
+    markerKind,
+    markerSha,
+    unmergedPaths: bound(unmerged),
+    unmergedMore: Math.max(0, unmerged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
+    stagedPaths: bound(staged),
+    stagedMore: Math.max(0, staged.length - FIX_OWNER_RESIDUE_PATH_BOUND),
+    status: gitOut(["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]).slice(0, 512),
+    ...(markerKind === null && staged.length > 0 ? { refusal: "owner_dirty_staged_only_refused" as const } : {}),
+  };
+}
+
+function readTrackedDirtyOwnerPatch(ownerPath: string, localSha: string): string {
   const observedHead = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -41816,13 +41875,24 @@ export function preserveTrackedDirtyFixOwner(
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (untracked.length > 0) throw new Error("dirty owner has untracked paths");
-  const patch = execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
+  return execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
     encoding: "utf8",
     maxBuffer: 1 << 26,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
+}
 
+function preserveTrackedDirtyPatch(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  patch: string,
+  deps: CaptureRegisteredFixOwnerDeps,
+): string {
+  if (patch.length === 0) throw new Error("dirty owner has no HEAD-relative tracked diff");
+  const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
+  const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = temporaryIndexTree(ownerPath, localSha, (env) => {
     execFileSync("git", ["-C", ownerPath, "add", "-A"], {
       env,
