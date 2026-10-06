@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fixedClock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
@@ -22,6 +22,7 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
@@ -30,7 +31,7 @@ import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
-import { RmdError } from "./errors.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
 
@@ -2090,6 +2091,57 @@ export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnch
   }
 }
 
+/** BACKSTOP: how long one evidence-anchor `git grep` may run off the loop before it is killed. A sync grep held the
+ *  daemon loop up to 29 s (2026-10-06 loop_lag rows); this fires only on a grep already far past that. */
+export const ANCHOR_GREP_TIMEOUT_MS = 120_000;
+
+/** An evidence-anchor grep that ran past its bound and was killed: neither "true" nor "false". */
+export class AnchorGrepTimeoutError extends RmdError {
+  constructor(readonly anchor: EvidenceAnchor, readonly timeoutMs: number) {
+    super("git", GENERIC_EXIT_CODE, `git grep for evidence anchor "${anchor.description}" exceeded its ${timeoutMs}ms bound and was killed`, {
+      pattern: anchor.pattern,
+      timeoutMs,
+    });
+    this.name = "AnchorGrepTimeoutError";
+  }
+}
+
+/** One `execFile` call, injectable so a test can stand in a slow or failing child. */
+export type AnchorGrepExecFile = typeof execFile;
+
+/** {@link gitGrepAnchorTrue} OFF THE EVENT LOOP, with the same exit-code contract: 0 is true, EXACTLY 1 is false, and
+ *  anything else rejects with the child's own error. Past `timeoutMs` the child gets SIGTERM, then SIGKILL after a
+ *  grace, and the call rejects with {@link AnchorGrepTimeoutError} — a named failure, never a guessed answer. */
+export function gitGrepAnchorTrueAsync(
+  cwd: string,
+  ref: string,
+  anchor: EvidenceAnchor,
+  timeoutMs = ANCHOR_GREP_TIMEOUT_MS,
+  run: AnchorGrepExecFile = execFile,
+): Promise<boolean> {
+  const args = anchor.path ? ["grep", "-I", "-q", "-e", anchor.pattern, ref, "--", anchor.path] : ["grep", "-I", "-q", "-e", anchor.pattern, ref];
+  return new Promise<boolean>((resolve, reject) => {
+    let timedOut = false;
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const child = run("git", args, { cwd }, (err) => {
+      done = true;
+      clearTimeout(timer);
+      if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
+      if (!err) return resolve(true);
+      // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
+      if ((err as { code?: unknown }).code === 1) return resolve(false);
+      reject(err);
+    });
+    if (done) return;
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killAfterGrace(child);
+    }, timeoutMs);
+  });
+}
+
 /**
  * W1-T4261 — answers {@link gitGrepAnchorTrue} once per (main commit, anchor). MEASURED 2026-09-23 on the fleet
  * gateway: one `git grep` spawn per proposal per inbox pass was 39% of the serve process's CPU (693 proposals). A
@@ -2118,16 +2170,83 @@ export function cachedAnchorGrep(
   grep: (ref: string, anchor: EvidenceAnchor) => boolean,
 ): boolean {
   if (sha === undefined) return grep("origin/main", anchor);
-  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
-    cache.sha = sha;
-    cache.results.clear();
-  }
-  const key = JSON.stringify([anchor.pattern, anchor.path ?? null]);
+  resetAnchorGrepCacheFor(cache, sha);
+  const key = anchorGrepKey(anchor);
   const hit = cache.results.get(key);
   if (hit !== undefined) return hit;
   const answer = grep(sha, anchor);
   cache.results.set(key, answer);
   return answer;
+}
+
+/** The cache key of one anchor: its pattern and path, the only inputs a grep at a fixed sha reads. */
+function anchorGrepKey(anchor: EvidenceAnchor): string {
+  return JSON.stringify([anchor.pattern, anchor.path ?? null]);
+}
+
+/** A new sha empties the cache; so does the {@link ANCHOR_GREP_CACHE_MAX_ENTRIES} backstop. */
+function resetAnchorGrepCacheFor(cache: AnchorGrepCache, sha: string): void {
+  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
+    cache.sha = sha;
+    cache.results.clear();
+  }
+}
+
+/** How many anchor greps one warm pass keeps in flight at once. */
+export const ANCHOR_GREP_WARM_CONCURRENCY = 4;
+
+/**
+ * Fill `cache` for `sha` with every anchor's answer BEFORE the sync readiness pass reads it, each miss through the
+ * async `grep`, so the daemon loop never waits on a `git grep` child (2026-10-06: up to 29 s a spawn). A failed or
+ * timed-out grep is NOT cached, as {@link cachedAnchorGrep} never caches a throw; it is returned by key so
+ * {@link warmedAnchorGrep} rethrows it where the sync grep would have thrown, and the next pass retries it.
+ * `sha` undefined (origin/main unresolvable) warms nothing and keeps the uncached sync grep, as before.
+ */
+export async function warmAnchorGrepCache(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  anchors: readonly EvidenceAnchor[],
+  grep: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  concurrency = ANCHOR_GREP_WARM_CONCURRENCY,
+): Promise<Map<string, unknown>> {
+  const failures = new Map<string, unknown>();
+  if (sha === undefined) return failures;
+  resetAnchorGrepCacheFor(cache, sha);
+  const misses = new Map<string, EvidenceAnchor>();
+  for (const anchor of anchors) {
+    const key = anchorGrepKey(anchor);
+    if (!cache.results.has(key)) misses.set(key, anchor);
+  }
+  const queue = [...misses.entries()];
+  const lane = async (): Promise<void> => {
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      const [key, anchor] = next;
+      try {
+        const answer = await grep(sha, anchor);
+        // The backstop bound still holds: past it, the rest stay misses and take the sync path.
+        if (cache.sha === sha && cache.results.size < ANCHOR_GREP_CACHE_MAX_ENTRIES) cache.results.set(key, answer);
+      } catch (err) {
+        // Carried, not erased: warmedAnchorGrep rethrows this exact error for this key.
+        failures.set(key, err);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => lane()));
+  return failures;
+}
+
+/** The readiness pass's grep after {@link warmAnchorGrepCache}: a key whose warm grep failed rethrows THAT error
+ *  (the sync grep would have thrown there too); every other key answers through {@link cachedAnchorGrep}. */
+export function warmedAnchorGrep(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  failures: ReadonlyMap<string, unknown>,
+  anchor: EvidenceAnchor,
+  grep: (ref: string, anchor: EvidenceAnchor) => boolean,
+): boolean {
+  const key = anchorGrepKey(anchor);
+  if (failures.has(key)) throw failures.get(key);
+  return cachedAnchorGrep(cache, sha, anchor, grep);
 }
 
 /** A file's text, or undefined when it cannot be read — every caller below treats absent and unreadable alike. */

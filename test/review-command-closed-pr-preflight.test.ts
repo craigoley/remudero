@@ -1,17 +1,28 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import type { Config } from "../src/lib/config.js";
 import { reviewCommand } from "../src/run-task.js";
 
 test("review command declines a PR closed after sweep discovery before materializing its worktree", async () => {
   let read = 0;
-  const code = await reviewCommand("8303", ["--repo", "acme/remudero"], {
-    resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }),
-    fetchView: () => { read++; return { state: "closed", number: 8303 }; },
-    loadConfig: () => { throw new Error("closed PR must not load the review workspace"); },
-    fetchHead: () => { throw new Error("closed PR must not fetch its old head"); },
-  });
-  assert.equal(code, 2);
-  assert.equal(read, 1, "the existing REST view supplies the lifecycle fact");
+  // The config is read only to ledger the decline; the head fetch and worktree stay unreached.
+  const root = mkdtempSync(join(tmpdir(), "rmd-closed-preflight-"));
+  try {
+    const code = await reviewCommand("8303", ["--repo", "acme/remudero"], {
+      resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }),
+      fetchView: () => { read++; return { state: "closed", number: 8303 }; },
+      loadConfig: () => ({ root, claudeBin: "/bin/true" }) as Config,
+      fetchHead: () => { throw new Error("closed PR must not fetch its old head"); },
+      materialize: () => { throw new Error("closed PR must not materialize a worktree"); },
+    });
+    assert.equal(code, 2);
+    assert.equal(read, 1, "the existing REST view supplies the lifecycle fact");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("review command continues to the review workspace for an open PR", async () => {

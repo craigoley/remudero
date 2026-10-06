@@ -85,6 +85,24 @@ export function probeCacheFromLedger(lines: readonly Row[]): Map<string, BasePro
   return cache;
 }
 
+/** W1-T6024: a `main.health.observed` green decided by a run of main's own head (legacy rows carry no
+ *  `decided_by_sha`); a green borrowed from an older completed run does not clear main's known reds. */
+export function isMainGreenOnItsOwnHead(line: Row): boolean {
+  return line.step === "main.health.observed" && line.state === "green" && (line.decided_by_sha ?? line.sha) === line.sha;
+}
+
+/** W1-T6024: test files a `reproduced` probe (any PR, any main sha) found failing on main since main
+ *  was last green on its own head. A red whose test files all sit here is main's, whatever its check. */
+export function mainFailingTestFiles(lines: readonly Row[]): Set<string> {
+  const files = new Set<string>();
+  for (const line of lines) {
+    if (isMainGreenOnItsOwnHead(line)) files.clear();
+    if (line.step !== "sweep.base_reproduction" || line.verdict !== "reproduced" || !Array.isArray(line.files)) continue;
+    for (const probe of line.files) if (typeof probe?.file === "string") files.add(probe.file);
+  }
+  return files;
+}
+
 export function refundedStrikeKeys(lines: readonly Row[]): Set<string> {
   return new Set(lines.filter((line) => line.step === "fix.strike_refunded" &&
     typeof line.task_id === "string" && typeof line.head_sha === "string" && typeof line.strike === "number")

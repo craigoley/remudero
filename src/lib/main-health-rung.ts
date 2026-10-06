@@ -14,7 +14,9 @@ import {
   dedupeRollupByLatestAttempt,
   enrichMainHealthObservation,
   failedMainGuardRuns,
+  MAIN_HEALTH_FALLBACK_WINDOW_COMMITS,
   mainHealthEscalationDecision,
+  mainHealthFallbackCandidates,
   mainHealthFallbackRuns,
   mainHealthFromRollup,
   mainHealthHeadInconclusive,
@@ -97,6 +99,8 @@ interface RunHistoryCache {
   readAtMs: number;
   history: MainHealthRunHistoryEntry[];
   jobsByRunId: Map<number, RollupCheckEntry[]>;
+  /** W1-T6023: main's newest first-parent shas from this head, read once a fallback is needed. */
+  recentShas?: ReadonlySet<string>;
 }
 
 export interface MainHealthRungDeps {
@@ -262,17 +266,18 @@ interface WorkflowRunHistoryResponse {
     id?: unknown;
     name?: unknown;
     head_sha?: unknown;
+    status?: unknown;
     conclusion?: unknown;
     html_url?: unknown;
     pull_requests?: ReadonlyArray<{ number?: unknown; html_url?: unknown; url?: unknown }>;
   }>;
 }
 
+/** W1-T6023: no `status=completed` filter. With it, GitHub sometimes answered with a days-old page
+ *  (2026-10-06: runs from 09-28 at 13:46Z) where the unfiltered call returned that hour's runs;
+ *  completed runs are kept client-side in {@link mainPushRunHistoryFromResponse} instead. */
 export function mainPushRunHistoryRestArgs(owner: string, repo: string, branch: string): string[] {
-  return [
-    "api",
-    `repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&event=push&status=completed&per_page=100`,
-  ];
+  return ["api", `repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&event=push&per_page=100`];
 }
 
 export function fetchMainPushRunHistory(
@@ -288,6 +293,9 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
   return (response.workflow_runs ?? [])
     .map((run): MainHealthRunHistoryEntry | undefined => {
       if (typeof run.head_sha !== "string" || run.head_sha.trim() === "") return undefined;
+      // W1-T6023: a queued or running run concluded nothing. A run with no `status` field at all is
+      // kept: it decides nothing anyway unless it carries a `conclusion`.
+      if (typeof run.status === "string" && run.status !== "completed") return undefined;
       const pullRequests = (run.pull_requests ?? [])
         .map((pr) => ({
           ...(typeof pr.number === "number" ? { number: pr.number } : {}),
@@ -304,6 +312,36 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
       };
     })
     .filter((run): run is MainHealthRunHistoryEntry => run !== undefined);
+}
+
+interface FirstParentCommit {
+  sha?: unknown;
+  parents?: ReadonlyArray<{ sha?: unknown }>;
+}
+
+/** W1-T6023 — main's newest {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent shas, `headSha`
+ *  first, walked through one `commits?sha=` page by each commit's first parent. The page is 100, not
+ *  N, so a second-parent commit interleaved by date cannot cut the walk short. A page that is not a
+ *  list, or does not hold the head, throws: a window that was not read admits no run. */
+async function readMainFirstParentWindow(
+  owner: string,
+  repo: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): Promise<ReadonlySet<string>> {
+  const page = await fetch(["api", `repos/${owner}/${repo}/commits?sha=${headSha}&per_page=100`]);
+  if (!Array.isArray(page)) throw new Error("GitHub's commit list for main's head was not a list");
+  const parentOf = new Map<string, unknown>(
+    (page as FirstParentCommit[]).map((commit) => [String(commit?.sha), commit?.parents?.[0]?.sha]),
+  );
+  if (!parentOf.has(headSha)) throw new Error(`GitHub's commit list did not hold main's head ${headSha}`);
+  const window = new Set<string>();
+  let at: unknown = headSha;
+  while (typeof at === "string" && parentOf.has(at) && window.size < MAIN_HEALTH_FALLBACK_WINDOW_COMMITS) {
+    window.add(at);
+    at = parentOf.get(at);
+  }
+  return window;
 }
 
 interface WorkflowJobsResponse {
@@ -478,8 +516,28 @@ export function buildMainHealthRung(
       // decides instead. `decidedBySha` names which commit's evidence the verdict rests on.
       let decidedBySha = sha;
       let evidenceRollup: readonly RollupCheckEntry[] = rollup;
-      if (runHistory && mainHealthHeadInconclusive(observation)) {
-        for (const run of mainHealthFallbackRuns(runHistory)) {
+      // W1-T6023: and only a run whose head is one of main's newest first-parent commits may decide.
+      // A window that was not read, or a history holding only older runs, leaves main undetermined.
+      let recentShas = runHistoryCache?.recentShas;
+      if (runHistory && mainHealthHeadInconclusive(observation) && mainHealthFallbackCandidates(runHistory).length > 0 && !recentShas) {
+        try {
+          recentShas = await readMainFirstParentWindow(owner, repo, sha, deps.fetch);
+          if (runHistoryCache) runHistoryCache.recentShas = recentShas;
+        } catch (error) {
+          const message = String((error as Error)?.message ?? error);
+          deps.log("main.health.recent_commits_unreadable", { branch, sha, error: message });
+          observation = {
+            ...observation,
+            reason:
+              `${observation.reason}; main's last ${MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits were not ` +
+              `read (${message}), so no completed main run may decide`,
+          };
+        }
+      }
+      if (runHistory && recentShas && mainHealthHeadInconclusive(observation)) {
+        const { runs, skipped } = mainHealthFallbackRuns(runHistory, recentShas);
+        let decided = false;
+        for (const run of runs) {
           let jobs: RollupCheckEntry[];
           try {
             jobs =
@@ -506,7 +564,16 @@ export function buildMainHealthRung(
           };
           decidedBySha = run.headSha;
           evidenceRollup = jobs;
+          decided = true;
           break;
+        }
+        if (!decided && skipped.length > 0) {
+          observation = {
+            ...observation,
+            reason:
+              `${observation.reason}; no completed main run among main's last ${MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} ` +
+              `first-parent commits decides, and the newest older run skipped is for ${skipped[0]!.headSha}`,
+          };
         }
       }
       // W1-T5490 (a): a failed guard workflow reads main red even beside green required checks.
