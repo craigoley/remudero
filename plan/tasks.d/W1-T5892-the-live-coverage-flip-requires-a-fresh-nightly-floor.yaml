@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 2; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T5705, W1-T5704, W1-T5811, W1-T5891, W1-T5930]
-  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts, test/the-live-selection-narrows-the-coverage-lane.test.ts]
+  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts, test/the-live-selection-narrows-the-coverage-lane.test.ts, src/lib/review.ts, test/helpers/gh-shim.ts, test/helpers/gh-shim.test.ts]
   status: queued
   priority: 3
   attempts: 0
@@ -49,7 +49,7 @@
     boundary clock and Node22/24 separation, shared pinned choice and failure propagation.
   acceptance:
     - claim: "with the live flag on and no successful compatible pinned coverage-nightly or coverage-merged artifact within the 24-hour bound, every shard falls back to full with a named reason; a complete fresh success authorizes narrowing against one verified floor, failed or incompatible artifacts never do, and flag-off behavior is unchanged"
-      proof: "grep: node scripts/coverage-floor.mjs select coverage-floor-pin in .github/workflows/ci.yml"
+      proof: "grep: node scripts/coverage-floor\\.mjs select coverage-floor-pin in .github/workflows/ci.yml"
   falsifier: |
     Narrow without checking the floor: the no-artifact fixture narrows and the test fails. Accept a
     completed-red upload, different runtime/digest or independently select a replacement after the
@@ -59,3 +59,11 @@
     downloadable LCOV; coverage-nightly uploads before its final zero-test-exit gate. These bytes
     prove a latent failed-run admission gap, not that a bad artifact was consumed. Live flag is0.
     The added producer/helper files and provenance contract are declared before implementation.
+    Author admission 2026-10-06 found copied Git/GitHub transport fixtures and an unregistered
+    gate-rule helper. Register only coverage-floor.mjs on the existing instrument surface;
+    preserve shared fixture identity and use the existing gh shim for bounded JSON/binary
+    artifact transport. Add binary fixture output and its real child controls in the shared
+    helper rather than duplicating a new PATH executable. Acceptance, high risk, complete
+    floor bounds, full infrastructure assurance and the disabled live flag remain unchanged.
+    The existing physical-line source proof now escapes the module suffix dot as a basic
+    regular expression; its claim and invoked workflow marker remain identical.

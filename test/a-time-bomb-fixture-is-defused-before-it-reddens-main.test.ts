@@ -59,6 +59,8 @@ async function fixture(daysLeft = 14, extra = "") {
       return `W1-T${6000 + ++minted}`;
     },
     openOrigins: () => [] as string[],
+    // W1-T6036: these fixtures stand for a confirmed bomb — red only once the clock is shifted past it.
+    runSuite: (_file: string, shiftDays: number) => shiftDays < 1,
   };
   return { repo, put, deps, sources, landed, rows, probes: await probes, minted: () => minted };
 }
