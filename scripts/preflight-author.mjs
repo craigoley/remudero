@@ -2,9 +2,9 @@
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { affectedSelectionOrFull, readAffectedSuitesInput } from '../src/lib/affected-suites.ts';
+import { acquireTestSlot, lowPriorityCommand, testRunArgv } from '../src/lib/test-slot.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
@@ -74,14 +74,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args) => {
+  const runStep = (name, args, file = process.execPath) => {
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs: AUTHOR_STEP_RUNTIME_MS });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(process.execPath, args);
+    if (spawn !== spawnSync) return run(file, args);
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
-    const result = captureStepSync(process.execPath, args, { cwd: root, env: authorEnvironment(process.env),
+    const result = captureStepSync(file, args, { cwd: root, env: authorEnvironment(process.env),
       ...logs, resultPath });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
@@ -153,9 +153,17 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // receipt and selected floor, but don't spend another full run on known-doomed tests.
         if (staticOk) {
           // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-          const tests = runStep('affected-tests', ['--test', '--test-reporter=tap', `--test-concurrency=${Math.min(4, availableParallelism())}`,
-            '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
-          report('affected-tests', tests, completeTestResult(tests));
+          // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
+          const slot = acquireTestSlot('preflight-author:affected-tests');
+          try {
+            receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites], Math.min(4, slot.concurrency)));
+            const tests = runStep('affected-tests', child.args, child.file);
+            report('affected-tests', tests, completeTestResult(tests));
+          } finally {
+            slot.release();
+          }
         } else {
           receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
           console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');
