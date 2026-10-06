@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
-import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
-import { runReview } from "../src/run-task.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "../src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
 import { judgeReview, planOnlyDiff, reviewerOutcome, taskIdDeclarationsInDiff } from "../src/lib/review.js";
 
 const REPO_ROOT = process.cwd();
@@ -203,6 +203,10 @@ esac
       say: () => {},
       account: (r: never) => r,
       spawnReviewer: true,
+      // Synthetic provider, synthetic file preflight: never enter the host's Mac keychain.
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", (args) => spawnWorker({
+        ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" },
+      })),
       reviewerQueryFn,
       // Both arm seams injected: the plan-only fixture PASSES, so runReview reaches
       // armIfVerdictPermits, which refuses to touch its production dependency under the test

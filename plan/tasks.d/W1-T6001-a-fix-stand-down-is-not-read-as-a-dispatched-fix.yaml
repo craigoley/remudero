@@ -1,0 +1,30 @@
+- id: W1-T6001
+  title: "A FIX STAND-DOWN IS NOT READ AS A DISPATCHED FIX — when the fix rung stands down because an escalation is already open, the sweep's next pass reads the acted disposition as \"fix already dispatched for this head — awaiting its outcome\" (stall signature 7), though no fix.dispatch row exists for that head; W1-T5919 and W1-T5932 cover a declined claim and a detached dispatch, not a stand-down"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: medium  # Rule 19: one concern — what the sweep's prior-fixed fold counts as a dispatch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (signature 7 residual on #9505)"
+  plan_refs: [W1-T5919, W1-T5932, W1-T5908]
+  files: [src/lib/sweep.ts, test/a-fix-stand-down-is-not-read-as-a-dispatched-fix.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: 4 sweep.disposed rows on #9505 (heads cd62a18 x2, b95338c x2) read "fix already dispatched
+    for this head (...) — awaiting its outcome" (src/lib/sweep.ts) after the rung had logged fix.stood_down because
+    escalation #9507/#9523 was open, with no fix.dispatch row for those heads. Cost was nil this time (the PR was
+    blocked anyway), but the same misreading is what stranded #9362/#9379 on 2026-10-05 before W1-T5919.
+  design: |
+    The sweep's prior-fixed fold counts a head as fix-dispatched only on a fix.dispatch (or W1-T5932 detached
+    dispatch) row for that head; a stand-down row makes the disposition name the stand-down reason instead.
+  acceptance:
+    - claim: "a head whose fix round stood down with no fix.dispatch row is dispositioned with the stand-down reason, never as a dispatched fix awaiting its outcome"
+      proof: "unit test: test/a-fix-stand-down-is-not-read-as-a-dispatched-fix.test.ts"
+  falsifier: |
+    Keep counting the acted stand-down as dispatched: the fixture disposition reads "fix already dispatched" and the
+    test fails.

@@ -184,7 +184,8 @@
   cited: "2026-07-14"
 - id: webtools-are-injection-surface
   subsystem: sdk-tools
-  lifecycle: active
+  # knowledge gardener: retire webtools-are-injection-surface
+  lifecycle: superseded
   files: [src/lib/worker.ts, settings/worker.json]
   fact: >-
     claude-code-action DISABLES WebSearch/WebFetch by default — fetched content is a prompt-injection
