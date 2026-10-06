@@ -191,6 +191,7 @@ runs, on the same inputs CI would produce.
   --lcov <path>  where the run writes the lcov report and the gate reads it
                  (default coverage/lcov.info; relative paths resolve against the repo root)
   --dry-run      print the node invocation and diff base this would use; run nothing
+  --keep-raw     retain the temporary raw V8 coverage directory and print its path
 `;
 
 // ── The real implementation behind each injectable seam, each its OWN export a test calls directly.
@@ -205,16 +206,22 @@ export function ensureRawCoverageDir() {
 
 /** Removes a stale lcov at `lcovPath` first -- inside the seam every `main` test fakes, so none can
  *  delete the lcov an enclosing coverage run is writing (W1-T5485). */
-export function runInstrumentedTests(nodeArgs, lcovPath) {
+export function runInstrumentedTests(nodeArgs, lcovPath, { keepRaw = false, spawn = spawnSync, log = console.log } = {}) {
   if (lcovPath !== undefined) {
     rmSync(lcovPath, { force: true });
     mkdirSync(dirname(lcovPath), { recursive: true });
   }
-  return spawnSync(process.execPath, nodeArgs, {
-    stdio: "inherit",
-    cwd: REPO_ROOT,
-    env: { ...process.env, NODE_V8_COVERAGE: "coverage/raw" },
-  });
+  const rawDir = mkdtempSync(join(tmpdir(), "rmd-diff-coverage-raw-"));
+  try {
+    return spawn(process.execPath, nodeArgs, {
+      stdio: "inherit",
+      cwd: REPO_ROOT,
+      env: { ...process.env, NODE_V8_COVERAGE: rawDir },
+    });
+  } finally {
+    if (keepRaw) log(`diff-coverage-local: kept raw coverage at: ${rawDir}`);
+    else rmSync(rawDir, { recursive: true, force: true });
+  }
 }
 
 /** @param {string} lcovPath absolute, or relative to the repo root */
@@ -254,7 +261,6 @@ export function removeTempDiffDir(path) {
 export function defaultMainDeps() {
   return {
     readCiYaml,
-    ensureRawCoverageDir,
     runInstrumentedTests,
     statLcov,
     computeMergeBaseDiff,
@@ -270,7 +276,6 @@ export function defaultMainDeps() {
 export function main(argv, deps = {}) {
   const {
     readCiYaml: readCi,
-    ensureRawCoverageDir,
     runInstrumentedTests,
     statLcov,
     computeMergeBaseDiff,
@@ -289,6 +294,7 @@ export function main(argv, deps = {}) {
       base: { type: "string", default: "origin/main" },
       lcov: { type: "string", default: "coverage/lcov.info" },
       "dry-run": { type: "boolean", default: false },
+      "keep-raw": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -315,18 +321,17 @@ export function main(argv, deps = {}) {
   const nodeArgs = [...flags, ...testFiles];
 
   if (values["dry-run"]) {
-    log(`diff-coverage-local: would run: NODE_V8_COVERAGE=coverage/raw node ${nodeArgs.join(" ")}`);
+    log(`diff-coverage-local: would run: NODE_V8_COVERAGE=<fresh temp directory> node ${nodeArgs.join(" ")}`);
     log(`diff-coverage-local: would then read the lcov at: ${lcovPath}`);
     log(`diff-coverage-local: would then check: git diff ${mergeBaseDiffArgs(values.base, "HEAD")[1]}`);
     return 0;
   }
 
-  ensureRawCoverageDir();
   log(
     `diff-coverage-local: running the instrumented suite exactly as ci.yml's "${COVERAGE_STEP_NAME_PREFIX}" ` +
       `step does, over ${testFiles.length} file(s)...`,
   );
-  const testResult = runInstrumentedTests(nodeArgs, lcovPath);
+  const testResult = runInstrumentedTests(nodeArgs, lcovPath, { keepRaw: values["keep-raw"], log });
 
   // THE ONE THING CHECKED BEFORE THE TEST EXIT CODE, mirroring ci.yml's own step: no lcov means
   // the gate below has nothing to read, which is the vacuous pass this whole script exists to
