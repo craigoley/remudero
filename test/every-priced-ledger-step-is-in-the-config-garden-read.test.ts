@@ -66,6 +66,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.check_requeue.deferred": A_LANE_RUN_ID,
   "sweep.ci_gate_reaggregated": A_LANE_RUN_ID,
   "sweep.codeql_blocker.dispatch": A_LANE_RUN_ID,
+  "code_scanning.fix_dispatch": A_LANE_RUN_ID, // W1-T5633: the code-scanning fix hand-off, under the sweep's deps.runId
   "sweep.credit_backfill": A_LANE_RUN_ID,
   "sweep.disposed": A_LANE_RUN_ID,
   "pr.terminal": A_LANE_RUN_ID, // W1-T5318: the sweep's terminal-row rung, under SWEEP-/DAEMON- run ids
