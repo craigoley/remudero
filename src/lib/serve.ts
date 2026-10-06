@@ -1382,6 +1382,8 @@ export interface GatewayCheckoutAssessment {
   /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
   restartDue: boolean;
   reloadPlanAt?: string;
+  /** origin/main's sha when the checkout is behind: what a handoff requested now would serve. */
+  targetSha?: string;
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1481,9 +1483,21 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
   const relevant = svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths);
-  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && !relevant && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
-  return { state, restartDue: !svc.dirty && relevant, ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }) };
+  // RELOADED EVEN WHEN RELEVANT: a code handoff now waits out SERVE_HANDOFF_COALESCE_MS, and the plan
+  // half of a mixed merge must not wait with it. A plan the old code cannot parse keeps the old one.
+  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  return {
+    state,
+    restartDue: !svc.dirty && relevant,
+    ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+    ...(svc.behind === null ? {} : { targetSha: svc.behind.newSha }),
+  };
 }
+
+/** OPERATOR RULING 2026-10-06: a generation asks for a code handoff at most once per this window,
+ *  measured from its boot or its last ask, so every merge landing meanwhile rides ONE handoff (each
+ *  cost ~55 s of cold prewarm, ~95 a day). Plan-only advances still reload in place at once. */
+export const SERVE_HANDOFF_COALESCE_MS = 15 * 60_000;
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
 export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
@@ -1525,6 +1539,8 @@ export interface StaleCodeExitDeps {
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
   requestHandoff?: (detail: Record<string, unknown>) => void;
+  /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
+  bootedAt?: number;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1609,6 +1625,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let handoffAsked: string | undefined;
   let exited: Promise<void> | undefined;
   let dirtyReported: string | undefined;
+  let windowFrom = deps.bootedAt ?? clock.now();
+  let coalescing: { firstSeenSha: string; firstSeenAt: number } | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
   let headPlanRef: string | undefined;
@@ -1658,6 +1676,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
+      coalescing = undefined;
       return;
     }
     staleSince ??= clock.now();
@@ -1681,12 +1700,23 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       staleForMs,
       patienceMs,
       msSinceLastRead,
+      ...(checkout?.targetSha === undefined ? {} : { targetSha: checkout.targetSha }),
       ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
     };
     if (deps.requestHandoff) {
       const key = `${currentSha} ${originBehind ?? ""}`;
       if (key === handoffAsked) return;
+      const targetSha = checkout?.targetSha ?? currentSha;
+      coalescing ??= { firstSeenSha: targetSha, firstSeenAt: clock.now() };
+      const dueAt = windowFrom + SERVE_HANDOFF_COALESCE_MS;
+      if (clock.now() < dueAt) return;
       handoffAsked = key;
+      windowFrom = clock.now();
+      // ONE ROW PER WINDOW, written when the deferred ask finally goes out, never per poll.
+      if (coalescing.firstSeenAt < dueAt) {
+        log("serve.handoff_coalesced", { firstSeenSha: coalescing.firstSeenSha, targetSha, waitedMs: clock.now() - coalescing.firstSeenAt, mergesAbsorbed: commitsBehind, windowMs: SERVE_HANDOFF_COALESCE_MS });
+      }
+      coalescing = undefined;
       log("serve.handoff_requested", decision);
       return deps.requestHandoff(decision);
     }
