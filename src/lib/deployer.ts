@@ -788,9 +788,7 @@ export interface IdleProbe {
    *  a probe that cannot see the daemon must not report it quiet. Optional — absent means every
    *  read succeeded, so an existing {@link IdleProbe} literal is unaffected. */
   unreadable?: readonly string[];
-  /** W1-T5764 — the running daemon booted recently and has not yet logged a `sweep.pass`: a
-   *  boot that is still warming up, whose first sweep (median ~8 min) a recycle would throw away.
-   *  Optional — absent means not settling, so an existing {@link IdleProbe} literal is unaffected. */
+  /** W1-T5764 — booted recently, no `sweep.pass` since. Optional: absent means not settling. */
   bootSettling?: boolean;
 }
 
@@ -804,13 +802,11 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   // unreadable signal can never wedge the fleet — the alternative, an in-place restart, costs a
   // SIGKILLed worker.
   if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
-  // A boot that has not swept yet is not an idle gap (W1-T5764): the ceiling bounds the deferral.
   if (p.bootSettling === true) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
 }
 
-/** Names every reason {@link daemonIsIdle} reads the probe as busy — the `deploy.not_idle` row
- *  carries this so a deferral says WHY (`boot-settling` among them). Empty ⇔ idle. */
+/** Why {@link daemonIsIdle} reads the probe busy (`boot-settling` among them); empty ⇔ idle. */
 export function idleBlockers(p: IdleProbe): string[] {
   const out: string[] = [];
   if (p.unreadable !== undefined && p.unreadable.length > 0) out.push("unreadable");
@@ -821,17 +817,11 @@ export function idleBlockers(p: IdleProbe): string[] {
   return out;
 }
 
-/**
- * W1-T5764 — BACKSTOP on how long a boot with no `sweep.pass` yet counts as settling. A boot's
- * first sweep takes a median ~8.1 min, so 15 minutes covers the slow tail; it is a backstop, not
- * the normal exit (the first `sweep.pass` is) — and it sits well under
- * {@link DEPLOY_IDLE_DEFER_CEILING_MS} so a daemon that never sweeps cannot hold a deploy past it.
- */
+/** W1-T5764 — BACKSTOP on how long a sweep-less boot counts as settling (first sweep: median ~8 min). */
 export const BOOT_SETTLING_BACKSTOP_MS = 15 * 60_000;
 
-/** Is the daemon's most recent `daemon.boot` younger than `backstopMs` with no `sweep.pass` logged
- *  after it? `settling: false` for no boot row at all or an absent ledger (ENOENT — nothing to
- *  protect); any OTHER read failure answers `unreadable: true`, never a quiet "not settling". */
+/** Latest `daemon.boot` younger than `backstopMs` with no `sweep.pass` after it. No boot or no ledger
+ *  is not settling; any other read failure is `unreadable`, never a quiet "not settling". */
 export function readBootSettling(
   ledgerPath: string,
   nowMs: number,
@@ -2259,7 +2249,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       };
       const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
       const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
-      // W1-T5764: a boot that has not swept yet is not an idle gap. The key is set only when true.
+      // Key set only when true, so the probe's shape is unchanged otherwise.
       const boot = readBootSettling(ledgerPath, Date.now());
       if (boot.unreadable) unreadable.push("bootSettling");
       return {
