@@ -975,7 +975,6 @@ export function hydrateScannerBlockerObservations(
   return out;
 }
 
-// W1-T5633: observation only — a failed read is `undefined`; an alert from another head never counts.
 export const CODEQL_CHECK_NAME = "CodeQL";
 export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
 export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
@@ -994,7 +993,6 @@ export interface CodeqlHeadObservation {
   alerts: CodeqlHeadAlert[];
 }
 
-// The LATEST attempt (by `startedAt`) of the `CodeQL` check failed; a superseded red does not count.
 export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined): boolean {
   let latest: RestRollupEntry | undefined;
   for (const entry of rollup ?? []) {
@@ -1012,7 +1010,6 @@ interface RestHeadAlert extends RestScannerAlert {
   rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
 }
 
-// The open high CodeQL alerts analysed at exactly `headSha`; `undefined` if none or unreadable.
 export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
   if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
   const found: CodeqlHeadAlert[] = [];
@@ -1044,7 +1041,6 @@ export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): Code
   return found.length === 0 ? undefined : { headSha, alerts: found };
 }
 
-// One bounded read per candidate; a failed read is absent from the map.
 export function hydrateCodeqlHeadAlerts(
   owner: string,
   repo: string,
