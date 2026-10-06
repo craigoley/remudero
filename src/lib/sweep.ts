@@ -11928,7 +11928,7 @@ export async function drainDetachedSweepActions(
       released.add(work);
       opts.onRelease?.({
         actionKind: action.actionKind, taskId: action.taskId,
-        ageMs: Math.max(0, Date.now() - action.startedAtMs), phase: action.phase,
+        ageMs: Math.max(0, systemClock.now() - action.startedAtMs), phase: action.phase,
         reason: action.phase === "best-effort"
           ? "best-effort cadence is redone after restart"
           : "pushed fix CI wait is re-derived after restart",
