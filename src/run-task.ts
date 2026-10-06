@@ -12140,6 +12140,32 @@ export async function runFixRung(opts: {
       throw e;
     }
 
+    // W1-T5999: a worker KILLED BY A SIGNAL returned a truncated report, not a refusal. No commit is
+    // attempted, and no `fix.dispatch`/`fix.commit_refused` is written, so `fixRoundTally` counts it
+    // neither as a strike nor toward "refused twice" — the same ledger shape W1-T2402's thrown kill leaves.
+    if (fixWorkerEndedBySignal(fixResult)) {
+      deps.log("fix.done", {
+        ...fixReceipt.ledgerFields(fixResult),
+        round_id: roundId,
+        ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+        head_sha: priorHeadSha,
+        strike: attempt,
+        round,
+        session_id: fixResult.sessionId,
+        subtype: "signal_terminated",
+        worker_subtype: fixResult.subtype,
+        worker_exit: "signal",
+        cost_usd: fixResult.costUsd,
+        num_turns: fixResult.numTurns,
+        elapsed_ms: spawnElapsedMs,
+      });
+      deps.branchClaim?.release();
+      deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} worker TERMINATED BY SIGNAL (${fixResult.subtype}) — ` +
+        `not a commit refusal, no strike spent: ${opts.prUrl}`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "fix worker terminated by signal",
+        standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
+    }
+
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -42711,6 +42737,14 @@ function lastCommitRefusalPromptLines(
  *  carries no anchored COMMIT_MESSAGE line. Shared with `resumeForMissingCommitLine` below so the
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
+
+/** W1-T5999: did this worker END BY A SIGNAL? The codex runner (`spawnCodexWorkerInPrivateTemp`) names a
+ *  failed exit `error_exit_${code}`, and Node's `exit` event passes `code === null` only to a child a
+ *  signal ended — so `error_exit_null` IS the runner's exit-by-signal flag (it keeps no signal name).
+ *  A Claude worker killed before its result envelope throws instead; W1-T2402's catch owns that. */
+function fixWorkerEndedBySignal(result: Pick<WorkerResult, "subtype" | "isError">): boolean {
+  return result.isError && result.subtype === "error_exit_null";
+}
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
 export const REFUSED_REPORT_TAIL_CHARS = 800;
