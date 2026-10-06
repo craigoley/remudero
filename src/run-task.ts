@@ -1935,6 +1935,23 @@ export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, 
   };
 }
 
+/**
+ * JUDGE AT REVIEW START (operator ruling 2026-10-06). The publication guard (W1-T3337,
+ * `reviewerCodePublicationRefusal`) used to re-read freshness just before posting, so a review-path
+ * merge landing DURING a review withheld a verdict judged by code that was current when it began:
+ * 35 of 51 "materially behind" withholds (2026-09-30..10-06) were fresh or immaterial at start.
+ * A fresh or stale START reading now decides publication; W1-T3337's own case, code already
+ * materially behind when it judged, still withholds. An unreadable or absent start reading proves
+ * nothing, so it keeps the just-in-time read.
+ */
+export function reviewerFreshnessForPublication(
+  atStart: ReviewerCodeFreshness | undefined,
+  justInTime: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness> {
+  if (atStart === undefined || atStart.status === "unreadable") return justInTime;
+  return () => atStart;
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1990,7 +2007,9 @@ export function buildReviewerCodeFreshnessGate(
         log("review.skipped_stale_reviewer_code", stale);
         return 0;
       }
-      return next(prArg, rest, reviewDeps);
+      // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
+      // guard judges against it, so a merge landing mid-review no longer discards the verdict.
+      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
     },
     staleThisPass: () => firstStale,
   };
@@ -20697,6 +20716,10 @@ interface ReviewCommandDeps {
   resolveOwnerRepo?: typeof resolveOwnerRepo;
   /** W1-T4933: brings an explicit target's managed checkout install in line with its lockfile before proofs run; default {@link stagedInstall}. */
   refreshSubjectInstall?: (repoDir: string) => void;
+  /** The freshness gate's reading taken immediately before this review began; see
+   *  {@link reviewerFreshnessForPublication}. Absent (operator CLI, fresh-tree child) keeps the
+   *  just-in-time read. */
+  reviewStartFreshness?: ReviewerCodeFreshness;
 }
 
 type ReviewSubjectFailureReason =
@@ -21129,6 +21152,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
   if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed") {
+    // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
+    const closed = raw as RestPullRow;
+    appendLedger(ledgerPathFor(loadConfigDep()), {
+      run_id: `review-PR${closed.number}-${Date.now()}`, task_id: `PR-${closed.number}`, lane: "review",
+      step: "review.skipped_closed_before_review", pr_number: closed.number, pr_url: closed.html_url,
+      head_sha: closed.head?.sha, merged: typeof closed.merged_at === "string",
+    });
     console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
     return 2;
   }
@@ -21330,6 +21360,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // coverage of a latency window unique to this manual/sweep-dispatched path. A throw (e.g. a
   // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
   // best-effort legibility, never a reason this command fails to review the PR at all.
+  // The gate's start reading could not prove freshness: say so, then fall back to the JIT read.
+  if (deps.reviewStartFreshness?.status === "unreadable") {
+    log("review.reviewer_freshness_unreadable_at_start", {
+      pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest,
+      reason: deps.reviewStartFreshness.reason,
+    });
+  }
+  const publicationFreshness = reviewerFreshnessForPublication(deps.reviewStartFreshness, reviewerCodeFreshnessDep);
   try {
     await postReviewPendingDep({
       owner,
@@ -21412,7 +21450,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
-          reviewerCodeFreshness: reviewerCodeFreshnessDep,
+          reviewerCodeFreshness: publicationFreshness,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
           // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
@@ -21443,7 +21481,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      reviewerCodeFreshness: await reviewerCodeFreshnessDep(),
+      reviewerCodeFreshness: await publicationFreshness(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
       fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
         const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
