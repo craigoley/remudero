@@ -47,7 +47,7 @@ const CI_SHARD = [
 const LOG_HEAD = "# Knowledge garden log\n\nEach section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.\n\n## Pass 2026-01-01T00:00:00.000Z\n\n- retire older-one: it was old.\n";
 
 /** A repo shaped like origin/main: shards, a garden log, and the knowledge-retire case hand-pinned to an EARLIER pass. */
-function baseRepo(): string {
+function originMainFixture(): string {
   const root = gitRepo({ seedCommit: false, kind: "knowledge-golden" }).dir;
   put(root, "learnings/ci.yaml", CI_SHARD);
   put(root, "learnings/testing.yaml", "- id: other\n  lifecycle: active\n");
@@ -93,7 +93,7 @@ function stageAndCommit(root: string, paths: string[]): void {
 }
 
 test("a retire pass writes the knowledge-retire case from its own diff and lists those paths in the PR", () => {
-  const root = baseRepo();
+  const root = originMainFixture();
   const landing = pass(root, [RETIRE], "retire");
   assert.ok(landing, "the pass lands");
   const golden = (f: string) => `${KNOWLEDGE_RETIRE_GOLDEN}/${f}`;
@@ -130,7 +130,7 @@ test("a retire pass writes the knowledge-retire case from its own diff and lists
 });
 
 test("the real prompt-surface gate passes over the pass's changed paths, and refuses them without the golden", () => {
-  const root = baseRepo();
+  const root = originMainFixture();
   const landing = pass(root, [RETIRE], "retire")!;
   stageAndCommit(root, landing.paths);
   const result = gate.evaluatePromptSurfaceGate({ root, base: "HEAD^" });
@@ -140,7 +140,7 @@ test("the real prompt-surface gate passes over the pass's changed paths, and ref
   assert.ok(result.evidence.includes(`${KNOWLEDGE_RETIRE_GOLDEN}/diff.patch`));
 
   // The same pass minus its golden paths is the pre-W1-T5837 behaviour: the gate refuses it.
-  const bare = baseRepo();
+  const bare = originMainFixture();
   const bareLanding = pass(bare, [RETIRE], "retire")!;
   git(bare, ["checkout", "-q", "--", KNOWLEDGE_RETIRE_GOLDEN]);
   stageAndCommit(bare, bareLanding.paths.filter((p) => !p.startsWith(KNOWLEDGE_RETIRE_GOLDEN)));
@@ -150,7 +150,7 @@ test("the real prompt-surface gate passes over the pass's changed paths, and ref
 });
 
 test("the judge over the written case reaches the golden verdict", () => {
-  const root = baseRepo();
+  const root = originMainFixture();
   pass(root, [RETIRE], "retire");
   const dir = join(root, KNOWLEDGE_RETIRE_GOLDEN);
   const criteria = parseYaml(readFileSync(join(dir, "criteria.yaml"), "utf8")) as AcceptanceCriterion[];
@@ -170,7 +170,7 @@ test("the judge over the written case reaches the golden verdict", () => {
 });
 
 test("a merge pass folds into the older learning and writes the case with the superseded_by line", () => {
-  const root = baseRepo();
+  const root = originMainFixture();
   const landing = pass(root, [{ class: "merge", target: "stale-ci-lesson", into: "keeper", reason: "near-duplicate" }], "merge")!;
   assert.ok(landing.paths.includes(`${KNOWLEDGE_RETIRE_GOLDEN}/diff.patch`));
   assert.equal(
@@ -180,7 +180,7 @@ test("a merge pass folds into the older learning and writes the case with the su
 });
 
 test("a pass with no retire or merge action writes no golden", () => {
-  const root = baseRepo();
+  const root = originMainFixture();
   const landing = pass(root, [{ class: "refresh", target: "", reason: "assertions re-run" }], "refresh", ["learnings/ci.yaml"])!;
   assert.ok(landing);
   assert.deepEqual(landing.paths.filter((p) => p.startsWith("test/")), []);
