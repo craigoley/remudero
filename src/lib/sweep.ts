@@ -4349,6 +4349,9 @@ export function classifyCiTimeoutNoVerdict(
   return { notReady, hung };
 }
 
+/** W1-T5954: the `why` a pass without update-branch wrote before it deferred instead. */
+const CI_TIMEOUT_UNWIRED_WHY = "update-branch is not wired";
+
 export type CiTimeoutRefreshDecision = { kind: "refresh" | "await" | "escalated" } | { kind: "escalate"; why: string };
 
 export function ciTimeoutRefreshDecision(
@@ -4363,6 +4366,7 @@ export function ciTimeoutRefreshDecision(
     if (l.pr_number !== pr.prNumber) continue;
     const here = l.head_sha === pr.headSha;
     if (l.step === "sweep.ci_timeout_refresh.escalated") {
+      if (l.why === CI_TIMEOUT_UNWIRED_WHY) continue; // W1-T5954: a pre-fix deferral, not an escalation
       count = 0;
       escalated ||= here;
     } else if (l.step === "sweep.disposed" && l.disposition === "blocked-fixable" && l.acted === true) {
@@ -4412,7 +4416,7 @@ async function applyCiTimeoutRefresh(
   if (decision.kind === "await") return `${head}; base refresh already requested at this head — awaiting the new head`;
   if (decision.kind === "escalate") return escalate(decision.why);
   if (deps.behindMainByPr?.get(pr.prNumber) === 0) return escalate("the head is not behind main, so update-branch has nothing to merge");
-  if (!deps.updateBranch) return escalate("update-branch is not wired");
+  if (!deps.updateBranch) return `${head}; deferred to full sweep (update-branch not available on this pass)`;
   const live = await deps.readLiveState?.(pr);
   if (live?.ok !== true) return `${head}; fresh head unreadable — refresh deferred, no requeue or fix strike`;
   const terminal = terminalStateReason(live.state);
