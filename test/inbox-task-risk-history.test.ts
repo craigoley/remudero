@@ -35,8 +35,12 @@ test("a risk-judge ask retires on exact explicit plan retirement while retaining
     assert.match(result.retiredReason ?? "", new RegExp(`explicitly ${retirement} in the plan`));
     assert.equal(JSON.stringify(ask), before, "classification never deletes or rewrites a proposal");
     assert.equal(ctx.plan.byId.get(ID)!.verify, "auto", "no task approval or rewrite");
-    assert.notEqual(classifyProposal(proposal(`proof-debt:${ID}:0`), undefined, ctx).state, "retired",
-      "a different finding is not resolved by an operator task retirement");
+    // W1-T5652: every task-referent ask on the retired task retires with it, whatever its kind.
+    for (const sibling of [`proof-debt:${ID}:0`, `verify-human-automate:${ID}`]) {
+      assert.equal(classifyProposal(proposal(sibling), undefined, ctx).state, "retired", sibling);
+    }
+    assert.notEqual(classifyProposal(proposal("machine-judge:W1-T9003"), undefined, ctx).state, "retired",
+      "a different task's ask is not resolved by this task's retirement");
   }
 });
 
