@@ -6373,13 +6373,36 @@ export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[
   return failed;
 }
 
-/** Completed, non-guard main runs (newest first) whose jobs may stand in for a head whose own
- *  required runs were cancelled or are still pending. */
+/** W1-T6023 — PRIMARY CONTROL: how many of main's newest first-parent commits (the head included)
+ *  a fallback run's head sha must be among. GitHub sometimes answered the push-run history with a
+ *  days-old page (2026-10-06: main read green on 22397b6d, 1856 first-parent commits back, and red on
+ *  ca9be1f7, 124 back). DERIVATION, measured 2026-10-06: a `ci` push run on main took at most 37.8
+ *  min (p90 33.6, 43 completed runs), and ci.yml cancels in progress on pull requests only, so the
+ *  push lane holds one running and one pending run: main's newest completed run began at most two
+ *  run lengths (~76 min) ago. The most first-parent merges in any 90-minute window of the 1320 since
+ *  2026-09-29 was 38; the deepest legitimate fallback that day's 100 push runs replay was 9 behind.
+ *  50 is 38 with ~30% headroom, and still well short of the nearest stale run (124). */
+export const MAIN_HEALTH_FALLBACK_WINDOW_COMMITS = 50;
+
+/** Completed, non-guard main runs (newest first) that concluded something. */
+export function mainHealthFallbackCandidates(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run));
+}
+
+/** The {@link mainHealthFallbackCandidates} whose jobs may stand in for a head whose own required
+ *  runs were cancelled or are still pending: W1-T6023, only a run whose head sha is in `recentShas`
+ *  (main's newest {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits). Every other
+ *  candidate is returned as `skipped`, newest first, so the caller can name what it passed over. */
 export function mainHealthFallbackRuns(
   history: readonly MainHealthRunHistoryEntry[],
+  recentShas: ReadonlySet<string>,
   limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
-): MainHealthRunHistoryEntry[] {
-  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run)).slice(0, limit);
+): { runs: MainHealthRunHistoryEntry[]; skipped: MainHealthRunHistoryEntry[] } {
+  const candidates = mainHealthFallbackCandidates(history);
+  return {
+    runs: candidates.filter((run) => recentShas.has(run.headSha)).slice(0, limit),
+    skipped: candidates.filter((run) => !recentShas.has(run.headSha)),
+  };
 }
 
 /** True when the head's own rollup concluded nothing: no required check yet, or one still pending

@@ -68,6 +68,11 @@ function harness(options: { injectReader?: boolean } = {}): Harness {
     const path = args[1]!;
     if (path === "repos/o/r") return { default_branch: "trunk" };
     if (path === "repos/o/r/commits/trunk") return { sha: h.head };
+    // W1-T6023: main's first-parent window, which a fallback run's head must sit in.
+    if (path.startsWith("repos/o/r/commits?")) {
+      const chain = [...new Set([h.head, HEAD, LAST])];
+      return chain.map((sha, i) => ({ sha, parents: chain[i + 1] ? [{ sha: chain[i + 1] }] : [] }));
+    }
     if (path.includes("/check-runs?")) return { check_runs: h.checks };
     if (path.endsWith("/status")) return { statuses: h.statuses };
     if (path.includes("/actions/runs?")) {
