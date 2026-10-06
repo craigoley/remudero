@@ -252,6 +252,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
   const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS;
   const pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
   const startedAt = clock.now();
+  const startedIso = clock.iso();
   const unslotted = (outcome: TestSlotLease["outcome"], concurrency: number, note: string): TestSlotLease => ({
     outcome, concurrency, waitedMs: clock.now() - startedAt, note, refresh: () => {}, release: () => {},
   });
@@ -266,7 +267,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
   }
   const record = (): TestSlotHolder => ({
-    pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: new Date(startedAt).toISOString(),
+    pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
     heartbeatAt: clock.iso(), label,
   });
   let announced = false;
