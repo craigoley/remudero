@@ -1,0 +1,33 @@
+- id: W1-T5950
+  title: "THE DAEMON LOOP-LAG BOUND TEST HOLDS UNDER PARALLEL LOAD — test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts (W1-T5481) failed at 1369 ms against its 600 ms bound when run beside 7 other files, and passed alone twice; a wall-clock assertion that measures the host's load rather than the daemon's loop reads as a regression every time CI is busy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: span — one test's timing method
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
+  plan_refs: [W1-T5481, W1-T5931]
+  files: [test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    Observed 2026-10-06 while building W1-T5931 (#9448): the 113-file daemon-wiring run failed only on
+    W1-T5481's loop-lag bound (1369 ms > 600 ms) under 8-way concurrency; alone it passed 2/2. The bound
+    is declared by test/a-wall-clock-bound-declares-itself.test.ts, so the number is deliberate; what is
+    fragile is measuring absolute wall clock on a loaded host.
+  design: |
+    Measure the loop's lag RELATIVE to a same-process control (an idle timer sampled over the same
+    window) or run the probe with --test-concurrency=1 isolation, so host load cancels out; keep the
+    declared bound and its declaring site unchanged.
+  acceptance:
+    - claim: "the loop-lag bound test compares the daemon's lag against a same-window idle control, so host load does not fail it while a genuinely blocked loop still does"
+      proof: "unit test: test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts"
+      kind: guard
+    - claim: "the test samples an idle control in the same window"
+      proof: "grep: idle control in test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts"
+  falsifier: |
+    Block the loop for longer than the bound inside the cadence phase: the test still fails.

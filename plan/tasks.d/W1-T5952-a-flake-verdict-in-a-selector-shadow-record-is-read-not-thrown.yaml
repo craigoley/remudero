@@ -1,0 +1,30 @@
+- id: W1-T5952
+  title: "A FLAKE VERDICT IN A SELECTOR SHADOW RECORD IS READ, NOT THROWN — affected-suites.ts can emit a 'flake' verdict for a failure only recently selected, but parseSelectorShadowLines (src/lib/selector-shadow-gardener.ts) accepts only 'selected' or 'missed' and throws 'invalid failure verdict', so the first shadow record carrying a flake would fail the whole gardener pass"
+  repo: remudero
+  depends_on: [W1-T5925]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # one concern — one parser accepting a verdict its producer already emits
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
+  plan_refs: [W1-T5925, W1-T5705, W1-T5891]
+  files: [src/lib/selector-shadow-gardener.ts, test/a-flake-verdict-in-a-selector-shadow-record-is-read-not-thrown.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Found 2026-10-06 while building W1-T5925 (#9443, merged). src/lib/affected-suites.ts's verdict()
+    returns "selected" | "missed" | "flake"; parseSelectorShadowLines rejects anything but
+    "selected"/"missed" ("selector shadow: invalid failure verdict"). CI does not pass --recent-failures
+    today, so no flake has been emitted yet, but the day it is, the shadow gardener (and the evidence gate
+    for the 55% narrow-coverage saving) stops on a throw.
+  design: |
+    Accept "flake" in the parser and count it separately in the report: a flake is neither a selection
+    nor a miss, so it never satisfies or fails the verdict. Name the count on the report row.
+  acceptance:
+    - claim: "a shadow record carrying a flake verdict is parsed and counted separately, neither as selected nor missed, and the report names the flake count"
+      proof: "unit test: test/a-flake-verdict-in-a-selector-shadow-record-is-read-not-thrown.test.ts"
+  falsifier: |
+    Keep the two-value check: the flake record throws and the test fails.

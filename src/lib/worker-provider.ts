@@ -479,6 +479,20 @@ export interface RoutingDraw {
   seed: string;
   key?: RoutingDrawKey;
   probabilities: Array<{ provider: WorkerProviderId; probability: number }>;
+  /** W1-T5535: present ONLY when a learned mixing shaped the probabilities; each provider's three shares. */
+  learned?: {
+    epsilon: number;
+    probabilities: Array<{ provider: WorkerProviderId; headroom: number; learned: number; final: number }>;
+  };
+}
+
+/**
+ * W1-T5535: a learned per-provider multiplier on the headroom weights, mixed with the pure-headroom
+ * probabilities as `(1 - epsilon) * p_learned + epsilon * p_headroom`. Absent, the selector is unchanged.
+ */
+export interface ProviderMixing {
+  epsilon: number;
+  multipliers: Partial<Record<WorkerProviderId, number>>;
 }
 
 function resolveRoutingDraw(source: number | RoutingDrawSeed): { value: number; seed: string; key?: RoutingDrawKey; order?: readonly WorkerProviderId[] } {
@@ -500,6 +514,7 @@ export function selectWorkerProvider(
   capacities: ProviderCapacity[],
   reservePercent = 5,
   draw: number | RoutingDrawSeed = 0,
+  mixing?: ProviderMixing,
 ): ProviderSelection {
   const eligible = capacities
     .filter((capacity) => providerEligibility(capacity, reservePercent).eligible)
@@ -514,18 +529,26 @@ export function selectWorkerProvider(
     })
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
   if (eligible.length === 0) throw new ProviderCapacityBlockedError(capacities);
-  const totalWeight = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const headroomTotal = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const mixed = mixing ? mixedProbabilities(eligible, headroomTotal, mixing) : undefined;
+  // The walk's weights ARE the probabilities when a mixing is present, else the headroom weights themselves.
+  const walkWeight = (item: { allocationWeight: number }, index: number) => mixed ? mixed[index].final : item.allocationWeight;
+  const totalWeight = mixed ? mixed.reduce((sum, entry) => sum + entry.final, 0) : headroomTotal;
   const resolved = resolveRoutingDraw(draw);
   const recorded: RoutingDraw = {
     method: ROUTING_DRAW_METHOD,
     value: resolved.value,
     seed: resolved.seed,
     ...(resolved.key ? { key: resolved.key } : {}),
-    probabilities: eligible.map((item) => ({ provider: item.provider, probability: item.allocationWeight / totalWeight })),
+    probabilities: eligible.map((item, index) => ({ provider: item.provider, probability: walkWeight(item, index) / totalWeight })),
+    ...(mixed && mixing
+      ? { learned: { epsilon: mixing.epsilon, probabilities: mixed.map((entry, index) => ({ provider: eligible[index].provider, ...entry })) } }
+      : {}),
   };
-  const weighted = eligible.map((item) => ({
+  const weighted = eligible.map((item, index) => ({
     ...item,
-    allocationSharePercent: item.allocationWeight / totalWeight * 100,
+    walkWeight: walkWeight(item, index),
+    allocationSharePercent: walkWeight(item, index) / totalWeight * 100,
     draw: recorded,
   }));
   // The walk's order moves no probability; an experiment fixes it so one task-keyed value reads as one arm.
@@ -537,10 +560,39 @@ export function selectWorkerProvider(
   const targetWeight = resolved.value * totalWeight;
   let cumulativeWeight = 0;
   for (const item of walk) {
-    cumulativeWeight += item.allocationWeight;
-    if (targetWeight < cumulativeWeight) return item;
+    cumulativeWeight += item.walkWeight;
+    if (targetWeight < cumulativeWeight) return stripWalkWeight(item);
   }
-  return walk[walk.length - 1];
+  return stripWalkWeight(walk[walk.length - 1]);
+}
+
+/** The walk weight is the selector's own bookkeeping: the returned selection keeps its pre-W1-T5535 shape. */
+function stripWalkWeight<T extends { walkWeight: number }>(item: T): Omit<T, "walkWeight"> {
+  const { walkWeight: _walkWeight, ...selection } = item;
+  return selection;
+}
+
+/** Each provider's headroom share, its share once weighted by its learned multiplier, and the epsilon mix. */
+function mixedProbabilities(
+  eligible: ReadonlyArray<{ provider: WorkerProviderId; allocationWeight: number }>,
+  headroomTotal: number,
+  mixing: ProviderMixing,
+): Array<{ headroom: number; learned: number; final: number }> {
+  const positive = (value: number | undefined): value is number => typeof value === "number" && value > 0;
+  const known = eligible.map((item) => mixing.multipliers[item.provider]).filter(positive);
+  // A provider with no learned multiplier takes the mean of the others', so it is neither favoured nor starved.
+  const fallback = known.length > 0 ? known.reduce((sum, value) => sum + value, 0) / known.length : 1;
+  const raw = eligible.map((item) => {
+    const multiplier = mixing.multipliers[item.provider];
+    return item.allocationWeight * (positive(multiplier) ? multiplier : fallback);
+  });
+  const rawTotal = raw.reduce((sum, value) => sum + value, 0);
+  const epsilon = Math.min(Math.max(mixing.epsilon, 0), 1);
+  return eligible.map((item, index) => {
+    const headroom = item.allocationWeight / headroomTotal;
+    const learned = raw[index] / rawTotal;
+    return { headroom, learned, final: (1 - epsilon) * learned + epsilon * headroom };
+  });
 }
 
 /**

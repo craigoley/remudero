@@ -24,7 +24,8 @@ import { promisify } from "node:util";
 import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
-import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
+import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+  type JobRequeueOutcome } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -180,7 +181,7 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -189,7 +190,7 @@ import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommend
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
-import { flowGardenSpec } from "./lib/flow-gardener.js";
+import { flowGardenSpec as flowRemedyGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -280,7 +281,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "flow", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1242,6 +1243,12 @@ import {
   type DispatchValueContext,
   type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
+import {
+  fixArmEvidence,
+  fixRoutingWeights,
+  readFixRoutingRows,
+  type FixLearnedArms,
+} from "./lib/fix-routing-learner.js";
 import {
   boundRiskJudgeChangeView,
   DEFAULT_RISK_POLICY,
@@ -10230,6 +10237,32 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * suite. The real call site (`runTaskBody`) wires the module's own
  * `spawnWorker`/`waitForCiGreen`/`runReview` plus a small git-push wrapper.
  */
+/**
+ * W1-T5535: the fix lane's learned acceptance arms. `runFixRung` is the ONLY producer, so every other lane's
+ * auction weighs headroom alone, as before. The ledger read is async and cached; an unreadable ledger is named on
+ * its own row and the round routes by headroom, never blocks.
+ */
+export async function fixLearnedArmsFor(
+  ledger: { ledgerPath: string; log: (step: string, extra?: Record<string, unknown>) => void;
+    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>> },
+  strike: { strike: number; round: string },
+): Promise<FixLearnedArms | undefined> {
+  const nowMs = systemClock.now();
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = await (ledger.readFixRoutingRows ?? readFixRoutingRows)(dirname(ledger.ledgerPath), nowMs);
+  } catch (error) {
+    ledger.log("fix.routing_learner_unavailable", { ...strike, reason: "ledger-read-failed", error: String(error) });
+    return undefined;
+  }
+  const evidence = fixArmEvidence(rows, nowMs);
+  return {
+    evidence,
+    weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed),
+    onDecision: (fields) => ledger.log("fix.routing_decision", { ...strike, ...fields }),
+  };
+}
+
 export async function runFixRung(opts: {
   /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
   guardRoundHead?: boolean;
@@ -10331,7 +10364,7 @@ export async function runFixRung(opts: {
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     readMainTip?: () => string | Promise<string>;
     reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
-    requeueCheck?: (failure: CiFailure) => boolean | Promise<boolean>;
+    requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
     /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
@@ -10487,6 +10520,8 @@ export async function runFixRung(opts: {
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
     ledgerPath: string;
+    /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
+    readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     account: (r: WorkerResult) => WorkerResult;
@@ -11891,6 +11926,8 @@ export async function runFixRung(opts: {
     // The final fresh strike steps up: the fix mount has already failed this PR at least once.
     const strikeMount = opts.stepUpMount && round === "fresh" && attempt >= opts.strikeCap ? opts.stepUpMount : opts.mount;
     if (strikeMount !== opts.mount) deps.log("fix.step_up", { strike: attempt, from: opts.mount.model, to: strikeMount.model });
+    // W1-T5535: a mount that names its provider bypasses the auction, so there is nothing to learn for.
+    const learnedArms = strikeMount.provider === undefined ? await fixLearnedArmsFor(deps, { strike: attempt, round }) : undefined;
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
       permissionMode: "bypassPermissions",
@@ -11915,6 +11952,7 @@ export async function runFixRung(opts: {
       // candidate read `undefined` and the reclaim kill never fired on the process it exists to stop.
       runId: opts.runId,
       taskId: opts.taskId,
+      ...(learnedArms ? { providerRouting: { learnedArms } } : {}),
     };
 
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
@@ -12323,14 +12361,22 @@ export async function runFixRung(opts: {
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
+      let deferred = false;
       for (const failure of failures) {
         const key = `${priorHeadSha}@${failure.name}`;
         if (!priorHeadSha || !failure.jobId || spent.has(key)) { requeued = false; continue; }
         spent.add(key);
-        deps.log(CHECK_REQUEUE_STEP, { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId });
+        const row = { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId };
+        deps.log(CHECK_REQUEUE_STEP, row);
         try {
-          const queued = await (deps.requeueCheck ?? ((f) => requeueActionsJob(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure);
-          requeued = queued && requeued;
+          const queued = jobRequeueOutcome(await (deps.requeueCheck ??
+            ((f) => requeueActionsJobOutcome(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure));
+          requeued = queued.kind === "dispatched" && requeued;
+          // W1-T5920: refused while its run is in flight — unspent, and the sweep retries it.
+          if (queued.kind === "deferred") {
+            deferred = true;
+            deps.log(CHECK_REQUEUE_DEFERRED_STEP, { ...row, refusal: queued.refusal, outcome: "deferred", error: queued.error });
+          }
         } catch (error) {
           requeued = false;
           deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
@@ -12348,7 +12394,7 @@ export async function runFixRung(opts: {
         }
       }
       if (green) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "flake-confirmed" });
-      fixClaimFields.flake_claim = green ? "confirmed" : "refuted";
+      fixClaimFields.flake_claim = green ? "confirmed" : deferred ? "requeue_deferred" : "refuted";
       logFixDone();
       return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
         reason: green ? "flake-confirmed" : "flake claim refuted" };
@@ -34756,7 +34802,7 @@ export function requeueActionsJob(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = ghExec,
 ): boolean {
-  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec, "main.health.ci_requeue.error")).kind === "dispatched";
 }
 
 function* requeueActionsJobSteps(
@@ -34765,29 +34811,40 @@ function* requeueActionsJobSteps(
   failure: { name: string; jobId?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown,
-): Steps<boolean> {
-  if (!failure.jobId) return false;
+  errorStep: string,
+): Steps<JobRequeueOutcome> {
+  if (!failure.jobId) return { kind: "failed", error: "no resolvable Actions job id" };
   try {
     yield* step(() => exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]));
-    return true;
-  } catch (error) {
-    log("main.health.ci_requeue.error", {
-      check_name: failure.name,
-      job_id: failure.jobId,
-      error: String((error as Error)?.message ?? error),
-    });
-    return false;
+    return { kind: "dispatched" };
+  } catch (e) {
+    const error = String((e as Error)?.message ?? e);
+    log(errorStep, { check_name: failure.name, job_id: failure.jobId, error });
+    const refusal = jobRerunRefusal(error);
+    return refusal ? { kind: "deferred", refusal, error } : { kind: "failed", error };
   }
 }
 
-export function requeueActionsJobAsync(
+/** W1-T5920 — the fix rung's FLAKE rerun: the same POST, a typed outcome (an in-flight HTTP 403
+ *  is `deferred`), and its refusal logged under a fix-lane step, never the main-health one. */
+export function requeueActionsJobOutcome(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = ghExec,
+): JobRequeueOutcome {
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec, "fix.flake_requeue.error"));
+}
+
+export async function requeueActionsJobAsync(
   owner: string,
   repo: string,
   failure: { name: string; jobId?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = (args) => ghTextAsync(args),
 ): Promise<boolean> {
-  return runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+  return (await runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec, "main.health.ci_requeue.error"))).kind === "dispatched";
 }
 
 /**
@@ -35553,9 +35610,9 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
-    case "flow": {
-      const d = deps("flow", raiseDuplicate);
-      return gardenPass(flowGardenSpec(d, {
+    case "flow-remedy": {
+      const d = deps("flow-remedy", raiseDuplicate);
+      return gardenPass(flowRemedyGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
@@ -35571,6 +35628,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
       return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
     }
+    case "flow":
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot));
     case "evidence-coverage":
       return () => {
         try {

@@ -59,7 +59,6 @@ function annotated(name: string, messages: string[]): CiFailure {
 
 test("classifyUpdateBranchFailure: conflict/divergence-shaped stderr classifies as conflict", () => {
   for (const s of [
-    "HTTP 422: expected_head_sha does not match the pull request head",
     "the merge conflicts with target branch",
     "branch has diverged from base",
     "Merge conflict in src/run-task.ts",

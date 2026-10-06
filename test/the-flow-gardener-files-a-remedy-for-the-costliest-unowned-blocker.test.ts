@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { fixedClock } from "../src/lib/clock.js";
-import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-gardener.js";
+import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-gardener.js";
 import { ciFrictionRecordVerdict } from "../src/lib/ci-friction-gardener.js";
 import { gardenSchedule, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
@@ -128,22 +128,22 @@ test("W1-T5538: the top cause is filed once and a debited remedy reopens one run
 });
 
 test("W1-T5538: the flow gardener is registered and builds", async (t) => {
-  assert.ok(REGISTERED_GARDEN_NAMES.includes("flow"));
-  assert.ok(GARDEN_NAMES.includes("flow"));
-  assert.equal(GARDEN_BRANCH_RE.test("flow-garden-123"), true);
-  assert.equal(GARDEN_BRANCH_RE.test("flow-garden-invalid"), false);
-  assert.equal(gardenSchedule("flow").intervalFor(60_000), 60_000);
+  assert.ok(REGISTERED_GARDEN_NAMES.includes("flow-remedy"));
+  assert.ok(GARDEN_NAMES.includes("flow-remedy"));
+  assert.equal(GARDEN_BRANCH_RE.test("flow-remedy-garden-123"), true);
+  assert.equal(GARDEN_BRANCH_RE.test("flow-remedy-garden-invalid"), false);
+  assert.equal(gardenSchedule("flow-remedy").intervalFor(60_000), 60_000);
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-builder-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"));
   const failures: string[] = [];
-  const pass = await buildRegisteredGarden("flow", {
+  const pass = await buildRegisteredGarden("flow-remedy", {
     config: { root, claudeBin: "/bin/true" }, repoRoot: root, owner: "acme", repo: "remudero",
     raiseDuplicate: () => "", log: step => failures.push(step),
   });
   assert.equal(typeof pass, "function");
   await pass();
-  assert.ok(failures.includes("flow.gardener_failed"), "the built flow spec reports its own unreadable corpus");
+  assert.ok(failures.includes("flow-remedy.gardener_failed"), "the built flow-remedy spec reports its own unreadable corpus");
 });
 
 test("flow measures equal PR-hour windows, distinguishes pending and credit, and escalates rung three", (t) => {

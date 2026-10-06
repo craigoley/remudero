@@ -63,6 +63,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
+  "sweep.check_requeue.deferred": A_LANE_RUN_ID,
   "sweep.ci_gate_reaggregated": A_LANE_RUN_ID,
   "sweep.codeql_blocker.dispatch": A_LANE_RUN_ID,
   "sweep.credit_backfill": A_LANE_RUN_ID,
@@ -108,6 +109,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "test.pass": A_LANE_RUN_ID,
   // Command lanes: review, dep-review, approve/inbox, alert-fix, onboarding, the CI mutation ratchet.
   "automerge.capped_override_granted": A_LANE_RUN_ID,
+  "automerge.risk_override_observed": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
   "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,

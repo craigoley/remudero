@@ -1,0 +1,44 @@
+- id: W1-T5941
+  title: "THE MERGE-QUEUE EJECTION PATH IS PROVEN ACROSS REAL SWEEP PASSES BEFORE THE QUEUE IS RE-ENABLED — the 2026-10-05 rollout exercised only the happy path; its first live ejection exposed four daemon gaps (prior-arm memory outvoting a disarm, a risk-held head ignoring the operator's enqueue, a refused job requeue dropped, a ci-gate timeout no requeue can clear), each fixed separately, but no test drives one PR through ejection, disarm, re-arm and merge across consecutive passes"
+  repo: remudero
+  depends_on: [W1-T5909, W1-T5911, W1-T5920, W1-T5921]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a multi-pass scenario test; no production change unless the scenario fails
+  band_meaning: span
+  origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
+  plan_refs: [W1-T5909, W1-T5911, W1-T5920, W1-T5921, W1-T5922, W1-T4405, W1-T5940]
+  files: [test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    The operator enabled the merge queue on 2026-10-05 on the session's recommendation, with only the
+    happy path proven, and disabled it two hours later after re-enqueueing PRs by hand ("next time don't
+    have me enable something that won't work"). The gaps were each fixed in isolation: W1-T5909 (#9392
+    stranded), W1-T5911 (#9391 risk-held), W1-T5920 (requeue 403s), W1-T5921 (ci-gate timeout). The proof
+    that the queue is now safe to re-enable is one scenario that drives a PR through the whole failure
+    sequence with real runSweep passes and a GitHub fake.
+  design: |
+    One test file, using the existing sweep harnesses and the gh-shim helper, drives these sequences
+    across consecutive runSweep passes (full and light):
+    (a) a sweep-armed PR is enqueued, its group's checks are cancelled, GitHub ejects it and disables
+        auto-merge; the next pass re-arms it within W1-T5909's bound, and it merges when green;
+    (b) the same with a risk-held head that the operator enqueues by hand (W1-T5911);
+    (c) a requeue refused with 403 "already running" is deferred and retried after the run concludes
+        (W1-T5920);
+    (d) a ci-gate timeout gets a new head (W1-T5921);
+    (e) an ejection on every attempt escalates once at the bound instead of looping.
+    A failing sequence is a defect to file, not a test to loosen.
+    Every scenario test title starts with `W1-T5941:`.
+  acceptance:
+    - claim: "across consecutive sweep passes a merge-queue-ejected PR is re-armed and merged when green, a risk-held PR the operator enqueued by hand is released, a 403-refused requeue is retried after its run concludes, a ci-gate timeout gets a new head, and a PR ejected on every attempt escalates once at the bound"
+      proof: "unit test: test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts"
+      kind: guard
+    - claim: "the scenario test exists and names its task, so the proof discriminates head from base"
+      proof: "grep: W1-T5941: in test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts"
+  falsifier: |
+    Revert W1-T5909's disarm re-arm: sequence (a) strands the PR deduped as already armed and the test
+    fails.

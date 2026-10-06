@@ -1,0 +1,36 @@
+- id: W1-T5940
+  title: "THE MERGE GROUP CONFIRMS THE COMBINATION RATHER THAN REPEATING THE PR RUN — with the merge queue on, every PR ran the full ci.yml on its own head and again on its merge_group commit, doubling CI demand; on 2026-10-05 that doubling turned a GitHub Actions slowdown into repeated group timeouts and ejections, and the operator disabled the queue; the group only needs to prove the PRs still pass TOGETHER"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # a workflow-graph change to required checks: an operator build, as W1-T5705 and W1-T1041 park theirs
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the merge_group event runs; it changes a required check's job graph
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
+  plan_refs: [W1-T5515, W1-T5522, W1-T5705, W1-T5925, W1-T1041, W1-T5941]
+  files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, test/the-merge-group-confirms-the-combination-rather-than-repeating-the-pr-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05. The merge queue ruleset (SQUASH, ALLGREEN, build 4) ran the full CI on every
+    merge_group commit after each PR had already run it on its own head (pre-outage PR CI p50 22 min).
+    During the Actions incident the duplicated demand meant groups waited for runners and were ejected
+    after ~15 min of cancelled jobs; the operator disabled ruleset 24525891 at ~21:36Z. The queue's value
+    is catching two individually green PRs that break main together (18:56Z that day: W1-T5896's view
+    switch gate vs W1-T5055's analytics view). That only needs the suites the COMBINED diff affects, plus
+    the fast gates, not a second full run.
+  design: |
+    On merge_group, select by the group's combined diff against its base: the fast gates always, plus the
+    affected suites (the same selection the narrow coverage lane uses, W1-T5705), falling back to the full
+    run when the selection is unusable. Never narrower than the union of the member PRs' affected sets.
+    Report the selection size in the step summary. Re-enabling the queue stays an operator decision and
+    is gated on W1-T5941's scenario proof.
+  acceptance:
+    - claim: "a merge_group run selects the fast gates plus the suites the group's combined diff affects, falls back to the full run when the selection is unusable, and never selects fewer suites than the union of its member PRs' affected sets"
+      proof: "unit test: test/the-merge-group-confirms-the-combination-rather-than-repeating-the-pr-run.test.ts"
+  falsifier: |
+    Select only the last member PR's affected suites: a suite only the first member affects is missed and
+    the test fails.
