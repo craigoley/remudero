@@ -788,6 +788,8 @@ export interface IdleProbe {
    *  a probe that cannot see the daemon must not report it quiet. Optional — absent means every
    *  read succeeded, so an existing {@link IdleProbe} literal is unaffected. */
   unreadable?: readonly string[];
+  /** W1-T5764 — booted recently, no `sweep.pass` since. Optional: absent means not settling. */
+  bootSettling?: boolean;
 }
 
 /**
@@ -800,7 +802,56 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   // unreadable signal can never wedge the fleet — the alternative, an in-place restart, costs a
   // SIGKILLed worker.
   if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
+  if (p.bootSettling === true) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
+}
+
+/** Why {@link daemonIsIdle} reads the probe busy (`boot-settling` among them); empty ⇔ idle. */
+export function idleBlockers(p: IdleProbe): string[] {
+  const out: string[] = [];
+  if (p.unreadable !== undefined && p.unreadable.length > 0) out.push("unreadable");
+  if (p.bootSettling === true) out.push("boot-settling");
+  if (p.workers !== 0) out.push("workers");
+  if (p.inflightLocks !== 0) out.push("inflight-locks");
+  if (p.worktreeLocks !== 0) out.push("worktree-locks");
+  return out;
+}
+
+/** W1-T5764 — BACKSTOP on how long a sweep-less boot counts as settling (first sweep: median ~8 min). */
+export const BOOT_SETTLING_BACKSTOP_MS = 15 * 60_000;
+
+/** Latest `daemon.boot` younger than `backstopMs` with no `sweep.pass` after it. No boot or no ledger
+ *  is not settling; any other read failure is `unreadable`, never a quiet "not settling". */
+export function readBootSettling(
+  ledgerPath: string,
+  nowMs: number,
+  backstopMs: number = BOOT_SETTLING_BACKSTOP_MS,
+): { settling: boolean; unreadable: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    return { settling: false, unreadable: !lockReadFailureMeansZero(err) };
+  }
+  let bootMs: number | undefined;
+  let swept = false;
+  for (const line of text.split("\n")) {
+    const isBoot = line.includes('"step":"daemon.boot"');
+    if (!isBoot && !line.includes('"step":"sweep.pass"')) continue;
+    const ts = /"ts":"([^"]+)"/.exec(line)?.[1];
+    const ms = ts === undefined ? NaN : Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    if (isBoot) {
+      if (bootMs === undefined || ms >= bootMs) {
+        bootMs = ms;
+        swept = false;
+      }
+    } else if (bootMs !== undefined && ms >= bootMs) {
+      swept = true;
+    }
+  }
+  if (bootMs === undefined || swept) return { settling: false, unreadable: false };
+  return { settling: nowMs - bootMs < backstopMs, unreadable: false };
 }
 
 /** Does this `pgrep` failure mean a TRUE zero (exit 1, no processes matched) rather than a read
@@ -1472,6 +1523,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe1.inflightLocks,
     worktree_locks: probe1.worktreeLocks,
     unreadable: probe1.unreadable,
+    boot_settling: probe1.bootSettling === true,
+    blockers: idleBlockers(probe1),
   };
   if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
@@ -1502,6 +1555,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe2.inflightLocks,
     worktree_locks: probe2.worktreeLocks,
     unreadable: probe2.unreadable,
+    boot_settling: probe2.bootSettling === true,
+    blockers: idleBlockers(probe2),
   };
   if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
@@ -1799,6 +1854,7 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
 
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
@@ -1914,7 +1970,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
 
   return {
     log,
-    now: () => Date.now(),
+    now: clock,
     fetch: () => {
       fetchWithRefLockRetry();
     },
@@ -2192,11 +2248,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
           return 0;
         }
       };
+      const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
+      const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
+      // Key set only when true, so the probe's shape is unchanged otherwise.
+      const boot = readBootSettling(ledgerPath, clock());
+      if (boot.unreadable) unreadable.push("bootSettling");
       return {
         workers,
-        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks"),
-        worktreeLocks: countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks"),
+        inflightLocks,
+        worktreeLocks,
         unreadable,
+        ...(boot.settling ? { bootSettling: true } : {}),
       };
     },
     kickstartConsole: () => {
