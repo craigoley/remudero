@@ -1,0 +1,14 @@
+- id: step-names-come-from-source
+  subsystem: ledger
+  # knowledge gardener: retire step-names-come-from-source
+  lifecycle: superseded
+  files: [ src/lib/ledger.ts, src/lib/ledger-union.ts, src/run-task.ts ]
+  fact: >-
+    A guessed ledger step name is indistinguishable from an absent event.
+    sweep.escalation_reconcile exists nowhere as a step — the real names carry
+    suffixes, sweep.escalation_reconcile.summary and .list_failed — and four
+    guessed names read false zeros. Enumerate from source first (grep -oh
+    '"sweep\.[a-z_.]+"' src/) and query only names that appear there.
+  assertion: 'grep -q "\"sweep.escalation_reconcile.summary\"" src/lib/sweep.ts'
+  src: re-derived at 682c5d5a — bare name 0 hits, suffixed names 2
+  cited: "2026-08-23"

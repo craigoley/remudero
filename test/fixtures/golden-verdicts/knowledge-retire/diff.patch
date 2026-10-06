@@ -1,19 +1,25 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
-index 8a2c8a41..c41e5d07 100644
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -66,0 +67,6 @@
+@@ -72,0 +73,7 @@
 +
-+## Pass 2026-10-06T09:21:02.674Z
++## Pass 2026-10-06T10:53:35.712Z
 +
-+- retire a-board-wide-plan-red-is-main: Workers offered it have rarely used it, compared with other learnings.
++- retire step-names-come-from-source: Workers offered it have rarely used it, compared with other learnings.
++- retire webtools-are-injection-surface: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 18%. Dangling Why pointers: 1.
-diff --git a/learnings/ci.yaml b/learnings/ci.yaml
-index 33ad82a3..5b1e90f2 100644
---- a/learnings/ci.yaml
-+++ b/learnings/ci.yaml
-@@ -161,1 +161,2 @@
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@ -175,1 +175,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire a-board-wide-plan-red-is-main
++  # knowledge gardener: retire step-names-come-from-source
++  lifecycle: superseded
+diff --git a/learnings/platform.yaml b/learnings/platform.yaml
+--- a/learnings/platform.yaml
++++ b/learnings/platform.yaml
+@@ -187,1 +187,2 @@
+-  lifecycle: active
++  # knowledge gardener: retire webtools-are-injection-surface
 +  lifecycle: superseded
