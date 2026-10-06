@@ -26,6 +26,7 @@ import { attachReadModel, currentReadModelPath, sourceSnapshotStates, type Sourc
 import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewSource } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 
@@ -269,7 +270,7 @@ test("serve's legacy merge over its own caches matches the read-model body for t
   assert.ok(!("error" in computed));
   assert.deepEqual(computed.data, w.body().data, "the two sides agree on the same inputs");
   assert.deepEqual(computed.sources, w.body().sources);
-  assert.deepEqual(legacy.shadowSources, { overview: "analytics:core", coverage: "analytics:core", "instances[instanceId=core]": "analytics:core", "instances[instanceId=site]": "analytics:site" });
+  assert.deepEqual(legacy.shadowSources, { overview: ["analytics:core", "analytics:site"], coverage: ["analytics:core", "analytics:site"], "instances[instanceId=core]": "analytics:core", "instances[instanceId=site]": "analytics:site" });
 });
 
 test("the legacy merge leaves out a cold cache and merges cache reuse only from carried token terms", () => {
@@ -407,4 +408,47 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   assert.deepEqual(merged()?.coverage, { counted: 1, of: 1, missing: [] }, JSON.stringify(posted.filter((m) => m.type === "log")));
   assert.equal(metric(merged()!, "runs.completed").value, 2);
   onMessage?.({ type: "stop" });
+});
+
+// Host reading 2026-10-06T18:34Z: every analytics sample diffed overview runs.completed 1751 vs 1752, tokens.total
+// and cache.reuse, classified real. The overview merges EVERY instance, but the shadow paired it with the first
+// instance's source only: core's as-of matched, console's differed (legacy 18:30:00.792Z, body 18:30:55.440Z), so
+// console's own entry was timing while the overview it feeds stayed real on every sample.
+const NO_EVIDENCE: ShadowEvidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 };
+
+/** One analytics sample: legacy rendered over `legacy` as serve's sampler renders it, compared against a body merged over `view`. */
+function compareAnalytics(legacy: Array<[string, AnalyticsSnapshot]>, view: Array<[string, AnalyticsSnapshot]>, tamper?: (data: AnalyticsViewData) => void) {
+  const { clock } = handClock(T0);
+  const posted: ShadowRequest[] = [];
+  const definition = analyticsLegacyView({ clock, scopes: () => legacy.map(([instanceId, snapshot]) => ({ instanceId, analytics: () => snapshot })) });
+  legacyViewSampler({ legacy: [definition], clock, defer: (run) => run(), post: (request) => void posted.push(request) })(ANALYTICS_VIEW_NAME, "", new URLSearchParams());
+  assert.ok(posted[0]?.legacy, "legacy rendered the sample");
+  const body = mergeAnalytics(view.map(([instanceId, snapshot]) => ({ instanceId, snapshot: { asOf: snapshot.asOf!, console: analyticsSourceBodies(snapshot)[0]!.body as AnalyticsConsoleSource } })), T0);
+  tamper?.(body.data);
+  const asOf = body.sources.map((s) => s.asOf!).sort()[0]!;
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NO_EVIDENCE });
+  return shadow.compare({ view: ANALYTICS_VIEW_NAME, key: "", requests: 0, legacy: posted[0].legacy, body: { data: body.data, asOf, sources: body.sources } });
+}
+
+test("an analytics overview diff from a later instance's refresh is timing when the body read that instance at another as-of", () => {
+  const core = snapshotOf(CORE_LINES, T0 - 5 * MINUTE);
+  const siteBefore = snapshotOf(SITE_LINES, T0 - 4 * MINUTE);
+  // Site's next refresh counted one more run; the body merged it, legacy still merged the one before.
+  const siteAfter = snapshotOf([...SITE_LINES, ...run("s2", T0 - 30 * MINUTE, 2_000, { input: 50, output: 1 })], T0 - 3 * MINUTE);
+  const compared = compareAnalytics([["core", core], ["site", siteBefore]], [["core", core], ["site", siteAfter]]);
+  const real = compared.diffs.filter((d) => d.classification === "real");
+  assert.deepEqual(real, [], "a diff explained by the second instance's as-of is not real");
+  const overview = compared.diffs.filter((d) => d.path.startsWith("overview"));
+  assert.ok(overview.length > 0, "the overview differs: the comparison is not vacuous");
+  for (const d of overview) assert.match(d.reason, new RegExp(`legacy read analytics:site as of ${iso(T0 - 4 * MINUTE)}, the body as of ${iso(T0 - 3 * MINUTE)}`), d.path);
+});
+
+test("an analytics overview diff over the same snapshots of every instance stays real", () => {
+  const core = snapshotOf(CORE_LINES, T0 - 5 * MINUTE);
+  const site = snapshotOf(SITE_LINES, T0 - 4 * MINUTE);
+  const compared = compareAnalytics([["core", core], ["site", site]], [["core", core], ["site", site]], (data) => {
+    const runs = data.overview.find((m) => m.key === "runs.completed")!;
+    runs.value = Number(runs.value) + 1;
+  });
+  assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [["overview[key=runs.completed].value", "real"]]);
 });

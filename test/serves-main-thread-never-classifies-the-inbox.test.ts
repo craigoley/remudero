@@ -13,7 +13,7 @@ import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { inboxLegacyView, refreshInboxClassification, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildInboxThreadsRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createViewShadow, legacyViewSampler, type ShadowRequest } from "../src/lib/view-shadow.js";
+import { createViewShadow, legacyViewSampler, type ShadowPairedRead, type ShadowRequest } from "../src/lib/view-shadow.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService, type Route } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -155,7 +155,7 @@ test("the inbox view's legacy side reads the same snapshot as the slow lane's bo
   const compare = (request: ShadowRequest) => shadow.compare({ view: "inbox", key: request.key, requests: 1, legacy: request.legacy!, body: { data: body.data, asOf: body.sources[0]!.asOf, sources: body.sources } });
 
   const paired = sample(Date.parse("2026-10-05T12:01:00.000Z"));
-  assert.equal(paired.legacy?.paired?.items?.asOf, first.generatedAt, "legacy read the snapshot the body was built from");
+  assert.equal((paired.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, first.generatedAt, "legacy read the snapshot the body was built from");
   assert.deepEqual(compare(paired).diffs, [], "one snapshot, two computations over it: nothing differs");
   const late = inboxLegacyView(deps, fixedClock(Date.parse("2026-10-05T13:00:00.000Z"))).compute(new URLSearchParams({ section: "needsYou" }));
   assert.ok(!("error" in late) && late.sources[0]?.state === "stale", "a snapshot past its budget is labelled stale, as of its own generatedAt");
@@ -166,7 +166,7 @@ test("the inbox view's legacy side reads the same snapshot as the slow lane's bo
   const second = await refreshInboxClassification(laneDeps, memo, fixedClock(Date.parse("2026-10-05T12:02:00.000Z")));
   assert.ok(second.changed);
   const later = sample(Date.parse("2026-10-05T12:03:00.000Z"));
-  assert.equal(later.legacy?.paired?.items?.asOf, second.generatedAt);
+  assert.equal((later.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, second.generatedAt);
   const diffs = compare(later).diffs;
   assert.ok(diffs.length > 0, "the newer snapshot differs from the body built over the older one");
   assert.deepEqual([...new Set(diffs.map((d) => d.classification))], ["timing"], "a diff between two snapshots is timing, never real");
