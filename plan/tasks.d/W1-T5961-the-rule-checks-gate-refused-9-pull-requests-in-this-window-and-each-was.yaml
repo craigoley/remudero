@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the rule-checks gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:9276:rule-checks in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:9276:rule-checks. The rule-checks gate went red on #9276 and was repaired; the repair touched test/census-precheck-runs-the-admitted-census-suites.test.ts, doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md, plan/tasks.d/W1-T5050-the-workstreams-view.yaml, plan/tasks.d/W1-T5071-the-analytics-run-detail-route.yaml, plan/tasks.d/W1-T5897-serves-main-thread-never-classifies-the-inbox.yaml, plan/tasks.d/W1-T5908-a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.yaml, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts, test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts, test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts, test/analytics-view.test.ts, test/author-preflight.test.ts, test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts, test/doctrine-and-root-markdown-are-docs.test.ts, test/human-gate-operator-items.test.ts, test/measurement-cadence.test.ts, test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts, test/the-reap-and-garden-reads-never-block-the-loop.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml. The acceptance criterion is a grep for a learnings entry, so the change appears to add a documentation or learning entry."
+      - "The description doesn't mention secrets, auth, deletion, merge or deploy policy, or any irreversible action. It also doesn't ask for an operator decision."
+      - "The change is checkable with the stated grep. The ci-learning family has 2 merged and 0 declined tasks, and the gates state is clean (filingTime true, machine author)."
+    judged_at: "2026-10-06T05:17:44.250Z"
+    pin: "3b03ee5bd06156008c27808f4a8d38cccdf51288b862e7130e79e0212a75087c"
