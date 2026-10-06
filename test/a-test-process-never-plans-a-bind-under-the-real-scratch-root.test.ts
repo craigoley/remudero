@@ -88,6 +88,7 @@ test("a test naming its own RMD_SCRATCH_ROOT still plans its binds, and producti
   // probe above can see a bind under /mnt/scratch when one would be made.
   const prod = { ...host.env };
   delete prod.NODE_TEST_CONTEXT;
+  prod.NODE_V8_COVERAGE = ""; // blanked, not deleted: child_process re-injects a deleted one
   const real = plan(prod, host.state);
   assert.equal(real.status, 0, real.note);
   assert.ok(real.args.some((a) => a.startsWith(`${REAL_ROOT}/rmd/recycle-state-`)), JSON.stringify(real.args));
