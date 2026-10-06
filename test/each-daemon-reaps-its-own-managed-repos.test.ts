@@ -24,10 +24,10 @@ const noSweeps = {
   ratifications: new Map(),
 };
 
-function rung(root: string) {
+async function rung(root: string) {
   const calls: Array<{ dir: string; streakPath?: string }> = [];
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = logDiskReclaimRung({ root } as never, (s, f) => rows.push([s, f]), {
+  const out = await logDiskReclaimRung({ root } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
     reapObjects: ((dir: string, _i: string, d: ObjectReapDeps) => {
       calls.push({ dir, streakPath: d.streakPath });
@@ -37,12 +37,12 @@ function rung(root: string) {
   return { calls, rows, out };
 }
 
-test("a console daemon reaps its own managed repo, not only repos/remudero", () => {
+test("a console daemon reaps its own managed repo, not only repos/remudero", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}console-root-`));
   mkdirSync(join(root, "repos", "remudero-console", ".git"), { recursive: true });
   mkdirSync(join(root, "repos", "not-a-store"), { recursive: true });
   mkdirSync(join(root, "remudero", ".git"), { recursive: true });
-  const { calls, rows, out } = rung(root);
+  const { calls, rows, out } = await rung(root);
   assert.deepEqual(
     calls.map((c) => c.dir),
     [join(root, "repos", "remudero"), join(root, "repos", "remudero-console"), join(root, "remudero")],
@@ -55,11 +55,11 @@ test("a console daemon reaps its own managed repo, not only repos/remudero", () 
   assert.deepEqual(repos, ["managed", "managed:remudero-console", "daemon-checkout"]);
 });
 
-test("a site daemon reaps repos/remudero-site and survives a root with no repos directory", () => {
+test("a site daemon reaps repos/remudero-site and survives a root with no repos directory", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}site-root-`));
   mkdirSync(join(root, "repos", "remudero-site", ".git"), { recursive: true });
-  assert.ok(rung(root).calls.some((c) => c.dir === join(root, "repos", "remudero-site")));
+  assert.ok((await rung(root)).calls.some((c) => c.dir === join(root, "repos", "remudero-site")));
 
   const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bare-root-`));
-  assert.deepEqual(rung(bare).calls.map((c) => c.dir), [join(bare, "repos", "remudero")], "core's managed repo is still reaped");
+  assert.deepEqual((await rung(bare)).calls.map((c) => c.dir), [join(bare, "repos", "remudero")], "core's managed repo is still reaped");
 });
