@@ -2417,14 +2417,15 @@ export function refusesAsPlanOnly(task: Pick<Task, "id" | "files">, files: reado
  */
 export function persistVerifiedCredit(
   ledgerPath: string,
-  taskId: string,
+  task: Pick<Task, "id" | "files"> | string,
   pr: { number: number; url: string },
   files: readonly string[] | undefined,
 ): "recorded" | "plan-only" | "unreadable" {
   if (!files || files.length === 0) return "unreadable";
-  if (isPlanOnlyChangeset(files)) return "plan-only";
+  const creditTask = typeof task === "string" ? { id: task } : task;
+  if (refusesAsPlanOnly(creditTask, files)) return "plan-only";
   const path = defaultCreditStorePath(ledgerPath);
-  saveCreditStore(path, recordCredit(loadCreditStore(path), taskId, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
+  saveCreditStore(path, recordCredit(loadCreditStore(path), creditTask.id, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
   return "recorded";
 }
 
