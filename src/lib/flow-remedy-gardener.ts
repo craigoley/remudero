@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fixedClock, systemClock } from "./clock.js";
 import { ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
@@ -10,7 +10,7 @@ import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type Garden
 import { ghExec } from "./github-transport.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml } from "./plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
 import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -318,6 +318,16 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
       const contents = sources.draftShard ? sources.draftShard(action, id) : draftShard(action, id, search);
       const verdict = ciFrictionRecordVerdict(contents, `flow:${id}`);
       if (!verdict.ok) throw new Error(`flow gardener: drafted record failed lint (${verdict.reason})`);
+      const draftedPlan = loadPlanFromYaml(contents, `flow:${id}`);
+      if (draftedPlan.tasks.length !== 1) throw new Error(`flow gardener: drafted shard must contain exactly one task (found ${draftedPlan.tasks.length})`);
+      const task = draftedPlan.tasks[0]!;
+      const admission = machineFilingAdmissionViolations(task, {
+        plan: draftedPlan,
+        releasedIds: new Set(),
+        pathExists: path => existsSync(join(ws.root, path)),
+        pathExistsAtBase: search.fileExists,
+      });
+      if (admission.length > 0) throw new Error(`flow gardener: drafted record failed machine-filing admission (${admission.join("; ")})`);
       const dir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const path = join(dir, `${id}-flow-${slug(action.price.key, 80)}.yaml`);
       mkdirSync(dir, { recursive: true }); writeFileSync(path, contents);
