@@ -685,15 +685,12 @@ type AnalyticsCheckpointSource = {
   live: { size: number; mtimeMs: number; ino?: number } | null;
   lastArchive: string | null;
   liveOffset: number;
-  /** Where `liveOffset` sits, so a resume after a rotation finds it again (absent before this field existed). */
   liveAnchor?: LiveAnchor;
 };
 
-/** The live file a fold read: its inode, the carried prefix it began with (rotation archives only the
- *  bytes after it), and the digest of the bytes read just before `liveOffset`, past that prefix. */
+/** The live file read: inode, carried prefix, and digest of the bytes before `liveOffset` past that prefix. */
 type LiveAnchor = { ino: number; prefixBytes: number; prefixSha256: string; tailBytes: number; tailSha256: string };
 
-/** How a resume reads the live side: the live file from an offset, after an optional rotation tail. */
 type LivePosition = { liveStartOffset: number; rotationStart?: { name: string; offset: number } };
 
 const LIVE_ANCHOR_TAIL_BYTES = 4096;
@@ -1913,7 +1910,6 @@ function sha256Hex(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** The carried prefix the last rotation names, as the rotation itself reads it (`archivedPrefixBytes`). */
 function carriedPrefixClaim(livePath: string): { bytes: number; sha256: string } | undefined {
   try {
     const carried = JSON.parse(readFileSync(`${livePath}${LEDGER_CARRIED_PREFIX_SUFFIX}`, "utf8")) as { bytes?: unknown; sha256?: unknown };
@@ -1925,8 +1921,6 @@ function carriedPrefixClaim(livePath: string): { bytes: number; sha256: string }
   }
 }
 
-/** The anchor of the live file a fold read through `offset`, read from that same inode; none when it was
- *  replaced since, so a later resume across a rotation falls back to a named full scan. */
 function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor | undefined {
   const livePath = join(stateDir, LEDGER_FILENAME);
   let fd: number;
@@ -1959,10 +1953,8 @@ function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor |
   }
 }
 
-/** Where the live side resumes, or why it cannot. The same inode resumes at `liveOffset`. A replaced one
- *  was rotated: its unread tail opens the first rotation after `lastArchive`, at `liveOffset` less the
- *  carried prefix (or at `liveOffset` if that rotation archived it whole), and the new file reads from 0.
- *  Each candidate is proven by the anchor's digests, never assumed. */
+/** A replaced live file's unread tail opens the first new rotation, at the offset less the carried prefix
+ *  or (archived whole) at the offset, whichever the digests prove; the new live file then reads from 0. */
 async function resumeLivePosition(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource, stateDir: string): Promise<LivePosition | string> {
   if (previous.live === null || current.live === null) return { liveStartOffset: 0 };
   const offset = previous.liveOffset;
@@ -2359,8 +2351,7 @@ export async function scanAnalyticsLedger(
   }
   finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
   const snapshot = snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
-  // The rotations listed BEFORE the read and the live bytes it actually consumed: a rotation or an append
-  // landing after the read is unread, and a later resume must find it so.
+  // The rotations listed BEFORE the read and the live bytes it consumed: anything landing later is unread.
   const source: AnalyticsCheckpointSource = currentSource === undefined
     ? { archives: [], live: null, lastArchive: null, liveOffset: 0 }
     : { ...currentSource, liveOffset: liveRead?.endOffset ?? 0 };
