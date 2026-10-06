@@ -99,13 +99,15 @@ export interface ActionsIncidentHoldRecord {
 }
 
 /** `holds` per `${pr}@${head}`; `fresh` per `${head}@${check}`: the run attempt a hold saw, voiding an
- *  earlier requeue's bound until a requeue row after the hold spends it. */
+ *  earlier requeue's bound until a requeue row after the hold spends it (a deferred one gives it back). */
 export function actionsIncidentHoldsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   requeueStep: string,
+  deferredStep: string,
 ): { holds: Map<string, ActionsIncidentHoldRecord>; fresh: Map<string, number | null> } {
   const holds = new Map<string, ActionsIncidentHoldRecord>();
   const fresh = new Map<string, number | null>();
+  const spent = new Map<string, number | null>();
   for (const l of lines) {
     const key = `${String(l.pr_number)}@${String(l.head_sha)}`;
     if (l.step === ACTIONS_INCIDENT_HOLD_STEP) {
@@ -115,8 +117,11 @@ export function actionsIncidentHoldsFromLedger(
       }
     } else if (l.step === ACTIONS_INCIDENT_HOLD_ESCALATED_STEP) {
       holds.set(key, { heldAtMs: holds.get(key)?.heldAtMs ?? 0, escalated: true });
-    } else if (l.step === requeueStep) {
-      fresh.delete(`${String(l.head_sha)}@${String(l.check_name)}`);
+    } else if (l.step === requeueStep || (l.step === deferredStep && l.outcome === "deferred")) {
+      const check = `${String(l.head_sha)}@${String(l.check_name)}`;
+      const [from, to] = l.step === requeueStep ? [fresh, spent] : [spent, fresh];
+      if (from.has(check)) to.set(check, from.get(check)!);
+      from.delete(check);
     }
   }
   return { holds, fresh };

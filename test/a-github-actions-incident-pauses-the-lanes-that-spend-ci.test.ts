@@ -30,6 +30,7 @@ import { clockFromMillisFn } from "../src/lib/clock.js";
 import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import {
+  CHECK_REQUEUE_DEFERRED_STEP,
   CHECK_REQUEUE_STEP,
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -112,13 +113,19 @@ test("actionsIncidentHoldsFromLedger folds holds, escalations and the fresh-requ
     { step: ACTIONS_INCIDENT_HOLD_STEP, pr_number: 2, head_sha: "h2", held_at_ms: "not a number" },
     { step: ACTIONS_INCIDENT_HOLD_ESCALATED_STEP, pr_number: 3, head_sha: "h3" },
     { step: CHECK_REQUEUE_STEP, head_sha: "h1", check_name: "lint" },
+    { step: ACTIONS_INCIDENT_HOLD_STEP, pr_number: 4, head_sha: "h4", held_at_ms: T0, cancelled_checks: [{ name: "ci", run_attempt: 1 }] },
+    { step: CHECK_REQUEUE_STEP, head_sha: "h4", check_name: "ci" },
+    { step: CHECK_REQUEUE_DEFERRED_STEP, head_sha: "h4", check_name: "ci", outcome: "deferred" },
+    { step: CHECK_REQUEUE_DEFERRED_STEP, head_sha: "h1", check_name: "never-held", outcome: "deferred" },
   ];
-  const { holds, fresh } = actionsIncidentHoldsFromLedger(lines, CHECK_REQUEUE_STEP);
+  const { holds, fresh } = actionsIncidentHoldsFromLedger(lines, CHECK_REQUEUE_STEP, CHECK_REQUEUE_DEFERRED_STEP);
   assert.deepEqual(holds.get("1@h1"), { heldAtMs: T0, escalated: false });
   assert.deepEqual(holds.get("2@h2"), { heldAtMs: 0, escalated: false }, "an unreadable stamp ages to the BACKSTOP, never freezes");
   assert.deepEqual(holds.get("3@h3"), { heldAtMs: 0, escalated: true });
   assert.equal(fresh.get("h1@test (1/8)"), 2, "the pre-hold requeue is voided at the attempt the hold saw");
   assert.equal(fresh.has("h1@lint"), false, "a requeue after the hold spends the fresh one");
+  assert.equal(fresh.get("h4@ci"), 1, "a W1-T5920 deferral (refused while in flight) gives the fresh requeue back");
+  assert.equal(fresh.has("h1@never-held"), false);
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(ACTIONS_INCIDENT_HOLD_STEP), "the hold survives rotation");
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(ACTIONS_INCIDENT_HOLD_ESCALATED_STEP));
 });
