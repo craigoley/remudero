@@ -251,6 +251,10 @@ test("each stage is measured from the ledger rows, with the review surface and a
     rows.push(...prRows({ n: 9400 + i, cls: "code", mergedMs, ttm: 50, ready: 3, armSurface: "light", reviews: [[1, "light"]] }));
     rows.push(...prRows({ n: 9500 + i, cls: "gardener", mergedMs, ttm: 20, ready: 2 }));
   }
+  // A PR whose only merge evidence is a backfill stamped at write time is not measured.
+  rows.push({ ts: at(NOW - 5 * DAY), run_id: "W1-T9600-1", task_id: "W1-T9600", step: "pr.opened", pr_url: URL(9600) });
+  rows.push({ ts: at(NOW - HOUR), run_id: "DAEMON-1", task_id: "SWEEP", step: "pr.terminal", pr_number: 9600, pr_url: URL(9600), state: "merged" });
+  rows.push({ ts: at(NOW - HOUR), run_id: "DAEMON-1", task_id: "W1-T9600", step: "verdict.merged", pr_number: 9600, pr_url: URL(9600), source: "sweep.credit_backfill" });
   const h = harness(rows);
   t.after(h.cleanup);
   await runFlowGardener(h.deps, h.sources);
@@ -363,6 +367,12 @@ test("the daemon's garden registry runs the flow gardener once a day off its loo
   const broken = flowGardenPass(refusing, "acme", "remudero", () => "W1-T9799", { readJson: async () => ({ workflow_runs: [] }) });
   await broken();
   assert.match(String(h.steps("flow.gardener_failed")[0]?.extra.error), /ledger refused the report/);
+  // The default reads (the gh transport) over an empty ledger: nothing to read, an empty report.
+  const empty = join(h.root, "empty-state");
+  mkdirSync(empty);
+  await flowGardenPass({ ...h.deps, stateDir: empty }, "acme", "remudero", () => "W1-T9799")();
+  assert.equal(h.steps("flow.report").at(-1)?.extra.prs_current, 0);
+  assert.equal(h.steps("flow.report").at(-1)?.extra.ci_read, 0);
   assert.equal(h.steps("flow.gardener_failed").length, 1);
 });
 

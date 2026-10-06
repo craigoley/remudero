@@ -77,7 +77,7 @@ const STAGE_OWNER: Readonly<Record<FlowStage, string>> = {
 };
 
 const READ_STEPS = [
-  "pr.opened", "pr.terminal", "verdict.merged", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
+  "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
   "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "review.plan_only_reviewed",
 ];
 /** Raw-line prefilter: the stage rows, a disposition that carries `arm_surface`, a gardener's filing row. */
@@ -170,9 +170,10 @@ export function flowPrs(rows: readonly Row[]): FlowPr[] {
   }
   const prs: FlowPr[] = [];
   for (const [number, list] of byPr) {
-    const terminal = list.find((r) => r.step === "pr.terminal" && r.state === "merged");
-    const verdict = list.find((r) => r.step === "verdict.merged");
-    const mergedMs = terminal ? Date.parse(String(terminal.merged_at ?? terminal.ts)) : verdict ? tsOf(verdict) : Number.NaN;
+    // GitHub's own merged_at. A backfilled terminal row (no merged_at) and a `verdict.merged` credit
+    // backfill are stamped when written, days late on 2026-10-05, so neither dates a merge.
+    const terminal = list.find((r) => r.step === "pr.terminal" && r.state === "merged" && typeof r.merged_at === "string");
+    const mergedMs = terminal ? Date.parse(terminal.merged_at as string) : Number.NaN;
     if (!Number.isFinite(mergedMs)) continue;
     const opened = list.find((r) => r.step === "pr.opened");
     const gardener = list.some((r) => typeof r.run_id === "string" && r.run_id.startsWith("GARDEN-"));
