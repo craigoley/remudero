@@ -8,7 +8,7 @@ import * as local from "../scripts/diff-coverage-local.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
-function assertOutsideRepo(path: string) {
+function assertTransientRawPath(path: string) {
   assert.ok(isAbsolute(path), "raw coverage must use an absolute path");
   const fromRepo = relative(REPO_ROOT, path);
   assert.ok(fromRepo === ".." || fromRepo.startsWith(`..${sep}`) || isAbsolute(fromRepo));
@@ -27,7 +27,7 @@ function runMain(testStatus: number | null, argv: string[] = [], throws = false,
         spawn: (_command: string, _args: string[], spawnOptions: { env: NodeJS.ProcessEnv; cwd: string }) => {
           rawPath = spawnOptions.env.NODE_V8_COVERAGE as string;
           observeRaw(rawPath);
-          assertOutsideRepo(rawPath);
+          assertTransientRawPath(rawPath);
           assert.equal(spawnOptions.cwd, REPO_ROOT);
           assert.ok(existsSync(rawPath), "the directory must exist while the child runs");
           writeFileSync(join(rawPath, "coverage.json"), "raw fixture");
@@ -106,7 +106,7 @@ test("W1-T5766: the default spawn writes real V8 output outside the checkout and
     `]);
     assert.equal(result.status, 0);
     const rawPath = readFileSync(observedPath, "utf8");
-    assertOutsideRepo(rawPath);
+    assertTransientRawPath(rawPath);
     assert.ok(!existsSync(rawPath));
 
     const logs: string[] = [];
@@ -118,7 +118,7 @@ test("W1-T5766: the default spawn writes real V8 output outside the checkout and
     assert.equal(logs.length, 1);
     const retained = logs[0].replace("diff-coverage-local: kept raw coverage at: ", "");
     try {
-      assertOutsideRepo(retained);
+      assertTransientRawPath(retained);
       assert.ok(readdirSync(retained).some((file) => file.endsWith(".json")));
     } finally {
       rmSync(retained, { recursive: true, force: true });
