@@ -34,6 +34,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "config",
   "export",
   "ci-friction",
+  "flow",
   "selector-shadow",
   "evidence-coverage",
   "overseer",
