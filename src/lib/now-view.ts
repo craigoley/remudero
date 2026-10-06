@@ -19,7 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
   computeRecentActivity,
@@ -637,9 +637,54 @@ export interface NowViewOptions {
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
 export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
 
+/** A full sha, never an abbreviation: what `git rev-parse` prints, so a file answer is compared byte for byte. */
+const isFullSha = (text: string): boolean => /^[0-9a-f]{40,64}$/.test(text);
+
+function readRefFile(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    // deliberate: absent or unreadable means this layout does not hold the ref here; the caller spawns git.
+    return undefined;
+  }
+}
+
+/** A full ref's sha from the common dir's loose ref, else its packed-refs line (a loose ref wins, as in git). */
+function refShaFromFiles(commonDir: string, ref: string): string | undefined {
+  const loose = readRefFile(join(commonDir, ref))?.trim();
+  if (loose !== undefined) return isFullSha(loose) ? loose : undefined;
+  const packed = readRefFile(join(commonDir, "packed-refs"));
+  return packed?.split("\n").find((line) => line.endsWith(` ${ref}`) && isFullSha(line.slice(0, line.indexOf(" "))))?.split(" ")[0];
+}
+
 /**
- * Compares the plan this thread serves with its origin/main. The commit log is read only when the pair of
- * heads moved since `memo` last saw them, so a materialize costs one `git rev-parse` per instance.
+ * What `git -C <dir> rev-parse <base> origin/main` prints, read from the ref files with no spawn — `.git` (a
+ * directory, or a linked worktree's `gitdir:` file), its `commondir`, the loose ref, then `packed-refs`; the
+ * inbox's {@link "./inbox.js".readOriginMainSha} reads origin/main the same way. `base` is a full sha (a pinned
+ * plan) or `HEAD` (direct, or one symbolic hop to a branch). Undefined for any other shape — the caller spawns.
+ */
+export function planHeadsFromRefFiles(dir: string, base: string): string | undefined {
+  const dotGit = join(dir, ".git");
+  const pointer = readRefFile(dotGit);
+  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(dir, pointer.slice("gitdir:".length).trim()) : dotGit;
+  const common = readRefFile(join(gitDir, "commondir"));
+  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  let left: string | undefined;
+  if (isFullSha(base)) left = base;
+  else if (base === "HEAD") {
+    const head = readRefFile(join(gitDir, "HEAD"))?.trim();
+    const symbolic = head?.startsWith("ref: ") ? head.slice("ref: ".length).trim() : undefined;
+    left = symbolic === undefined ? (head !== undefined && isFullSha(head) ? head : undefined) : refShaFromFiles(commonDir, symbolic);
+  }
+  const main = left === undefined ? undefined : refShaFromFiles(commonDir, "refs/remotes/origin/main");
+  return main === undefined ? undefined : `${left}\n${main}`;
+}
+
+/**
+ * Compares the plan this thread serves with its origin/main. The pair of heads is read from the ref files
+ * ({@link planHeadsFromRefFiles}); only a layout those cannot answer spawns `git rev-parse`. The commit log is
+ * read only when the heads moved since `memo` last saw them, so an idle materialize spawns no git at all.
+ * MEASURED 2026-10-06: the rev-parse ran on every read-model materialize, idle passes included (~7 ms each).
  * `base` is the commit the plan is pinned to when serve reloaded it in place (thread-plan.ts), else the
  * checkout's HEAD: a generation's working tree never moves, so HEAD read every plan merge after its boot
  * as behind while the pinned plan already held it (2026-10-06: 74 of 74 now reads stale over 8 reloads).
@@ -649,10 +694,11 @@ export function gitPlanBehind(
   memo: { heads?: string; result?: PlanBehind } = {},
   git: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
   base: string = threadPlanPinnedRef(planPath) ?? "HEAD",
+  readHeads: (dir: string, base: string) => string | undefined = planHeadsFromRefFiles,
 ): PlanBehind {
   const dir = dirname(dirname(planPath));
   try {
-    const heads = git(["-C", dir, "rev-parse", base, "origin/main"]).trim();
+    const heads = readHeads(dir, base) ?? git(["-C", dir, "rev-parse", base, "origin/main"]).trim();
     if (memo.heads === heads && memo.result) return memo.result;
     const [head, main] = heads.split("\n");
     const paths = [relative(dir, planPath), relative(dir, join(dirname(planPath), "tasks.d"))];
