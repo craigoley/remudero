@@ -319,10 +319,14 @@ test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve o
   const stagedPath = join(root, "marker.pending");
   const readyPath = join(root, "marker.ready");
   const releasePath = join(root, "marker.release");
-  t.after(() => writeFileSync(releasePath, "release\n"));
+  const donePath = join(root, "marker.done");
+  t.after(async () => {
+    writeFileSync(releasePath, "release\n");
+    if (existsSync(readyPath)) await waitFor(() => existsSync(donePath), 5000, 50);
+  });
   // Redirection creates an empty file before printf writes it. Publish the complete
   // fixture receipt by rename, and hold the child so the unpublished state is observed.
-  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > "${stagedPath}"\n: > "${readyPath}"\nwhile [ ! -f "${releasePath}" ]; do sleep 0.01; done\nmv -- "${stagedPath}" "${markerPath}"\n`, { mode: 0o755 });
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\ntrap ': > "${donePath}"' EXIT\nprintf '%s\\n' "$*" > "${stagedPath}"\n: > "${readyPath}"\ndeadline=$((SECONDS+5))\nwhile [ ! -f "${releasePath}" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.01; done\n[ -f "${releasePath}" ] || exit 2\nmv -- "${stagedPath}" "${markerPath}"\n`, { mode: 0o755 });
 
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P900", summary: "a ready proposal", evidenceAnchors: [] }] }));
