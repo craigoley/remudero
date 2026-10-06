@@ -13,7 +13,8 @@
  *   stale with no worker message, exactly as a GET would re-judge it).
  * - `: hb` every 25 s, so an idle proxy never cuts the stream.
  * - `handover` ends every stream when serve drains, and a subscriber stalled past its bound.
- * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07).
+ * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07),
+ *   and each row says so: `sampleEveryMs`, and `unsampled`, the key's events since its last row that no row records.
  * - KILL SWITCH: `"push": "on"` in the read model's switches.json; absent or `off` answers 404 `push_disabled`, and
  *   switching it off ends every open stream (`handover`) within a sweep.
  *
@@ -122,6 +123,8 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const stallMs = opts.stallMs ?? VIEW_EVENTS_STALL_MS;
   const inlineBytes = opts.inlineBytes ?? VIEW_EVENTS_INLINE_BYTES;
   const sampledAt = new Map<string, number>();
+  /** Per key, the events emitted since its last `view.emitted` row: none of them is ledgered. */
+  const unsampled = new Map<string, number>();
   const subs = new Set<Subscriber>();
   const emitted = new Map<string, string>();
   /** The newest ledger row each key's last event reflected, kept across every event, sampled or not. */
@@ -210,9 +213,12 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     const text = frame("view", bytes <= inlineBytes ? { ...event, body } : event, `${bootId}:${seq}`);
     if (now - (sampledAt.get(id) ?? Number.NEGATIVE_INFINITY) >= VIEW_EMITTED_SAMPLE_MS) {
       sampledAt.set(id, now);
+      const skipped = unsampled.get(id) ?? 0;
+      unsampled.set(id, 0);
       opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs, bytes, inline: bytes <= inlineBytes, subscribers: subs.size,
+        sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: skipped,
         ...(prevRowTs ? { prevRowTs } : {}), ...(entry.buildStartedMs !== undefined ? { buildStartedAt: fixedClock(entry.buildStartedMs).iso() } : {}) });
-    }
+    } else unsampled.set(id, (unsampled.get(id) ?? 0) + 1);
     for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(sub, id, text, now);
   };
 
