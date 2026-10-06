@@ -731,8 +731,10 @@ import {
 import {
   type RemoteRefReserver,
   type RemoteReservationBlock,
+  type ReservationPolicyCurrency,
   type TaskIdReservationBlock,
   TaskIdReservationError,
+  describeReservationTakeover,
   firstUnreservedAtOrAbove,
   nextPrefixedTaskIdStart,
   parsePrefixedTaskId,
@@ -740,6 +742,8 @@ import {
   gitRemoteRefReserver,
   remoteReservedTaskIds,
   reservationFloorFrom,
+  reservationPolicyCurrency,
+  reservationTakeoverFields,
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
   reserveTaskIdRemote,
@@ -26006,6 +26010,8 @@ export interface NextTaskIdReserveDeps {
   /** W1-T4388: the `--prefix` mint's target checkout (defaults to {@link cloneTargetPlan}) and its filing branch. */
   openTargetRepo?: (repo: string) => ReturnType<typeof cloneTargetPlan>;
   filingBranch?: string;
+  /** W1-T6026: whether this checkout's reservation module is origin/main's; defaults to the real blob read. */
+  policyCurrency?: () => ReservationPolicyCurrency;
 }
 
 /** W1-T4388: a shallow, blob-less, sparse clone of `source`'s main (`owner/name` or a git URL) holding
@@ -26470,7 +26476,7 @@ export async function nextTaskIdCommand(
     const contested: string[] = [];
     const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
     // W1-T4414: `--branch` names the holder the filing PR's head must match; absent keeps the current branch.
-    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch") });
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run), filingBranch: flagValue(rest, "--branch"), policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
     // Decorate rather than modify: the decorator only OBSERVES each attempt, so a `taken` outcome
     // is reported instead of silently skipped.
     //
@@ -26504,7 +26510,10 @@ export async function nextTaskIdCommand(
       const held = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(mint.n, reserver));
       console.log(describeMintWithHistory(mintForReservationAttempt(mint, held.id, held.taskId)));
       for (const line of contested) console.log(line);
-      console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)`);
+      // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
+      const takeover = held.takenOver ? ` — ${describeReservationTakeover(held.takenOver)}` : "";
+      console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)${takeover}`);
+      if (held.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(held, held.takenOver));
       if (held.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${held.taskId} is the id actually HELD)`);
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
