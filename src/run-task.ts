@@ -43376,7 +43376,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, ghJson, Date.now(), baseChangedFilesByPr);
+  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, baseChangedFilesByPr);
   await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { dryRun, behindMainByPr });
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
@@ -44648,7 +44648,7 @@ export function buildSweepHook(
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
       const behindMainByPr = tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, ghJson, Date.now(), freshBaseChangedFiles);
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a

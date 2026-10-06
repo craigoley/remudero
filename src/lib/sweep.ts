@@ -9138,7 +9138,9 @@ export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
   "tsconfig*.json",
 ];
 
-/** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. */
+/** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. BACKSTOP: the
+ *  primary control is the main-side file intersection; this only catches a PR so far behind that
+ *  an unrelated-looking base is no longer trusted. */
 export const DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING = 60;
 
 /** `*` is the only glob character; every other character in a path glob is literal. */
