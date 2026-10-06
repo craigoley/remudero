@@ -332,14 +332,14 @@ test("a throwing update-branch is recorded as an error outcome and escalated, ne
   assert.equal(h.fixed.length, 0);
 });
 
-test("an unwired update-branch escalates rather than falling through to a fix strike", async () => {
+test("an unwired update-branch defers rather than falling through to a fix strike (W1-T5954)", async () => {
   const path = ledger("unwired");
   const h = harness(path, { unwired: true });
   await runSweep([subject()], h.d, DEFAULT_SWEEP_POLICY);
   assert.equal(h.fixed.length, 0);
   assert.deepEqual(h.requeued, []);
-  assert.equal(h.escalated.length, 1);
-  assert.match(h.escalated[0], /not wired/);
+  assert.equal(h.escalated.length, 0);
+  assert.match(String(disposed(path)?.stand_down_reason), /deferred to full sweep/);
 });
 
 test("a fresh read that shows the head moved, or cannot be read, refuses the refresh", async () => {
