@@ -15859,8 +15859,14 @@ export async function runSweep(
     const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
     // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
+    // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.
+    const readyCandidate = deps.baseChangedFilesByPr !== undefined && refreshPrs.some((pr) => {
+      const behindBy = behindMainByPr.get(pr.prNumber) ?? 0;
+      return behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold && pr.isDraft !== true &&
+        (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+    });
     const readyFacts: ReadyRefreshFacts = {
-      incidentHold: deps.readActionsStatusSummary !== undefined &&
+      incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&
         actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold",
       spentHeads: new Set(ledgerLines
         .filter((l) => l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted")
