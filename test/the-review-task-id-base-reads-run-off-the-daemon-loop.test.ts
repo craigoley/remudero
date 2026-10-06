@@ -9,8 +9,7 @@ import { test } from "node:test";
 import * as reviewLib from "../src/lib/review.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
-// MEASURED 2026-10-06 on the deployed daemon (0d90c2a98, after #9644 made the anchor read awaited):
-// runReview's task-id evidence still read origin/main's declarations (ls-tree + cat-file --batch) and
+// After #9644 made the anchor read awaited, runReview's task-id evidence still read origin/main's declarations (ls-tree + cat-file --batch) and
 // the reservation baseline (git show) through execFileSync, and judgeReview re-read the declarations
 // a second time, synchronously. These pin the awaited replacement: the loop keeps running, a bound
 // kills a hung git and the evidence names it, and the awaited reads answer a real repository exactly

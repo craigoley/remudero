@@ -6929,9 +6929,9 @@ export interface ReviewTaskIdEvidence {
 /**
  * The daemon's runReview takes this one: every git read of the task-id evidence awaited and bounded — the base
  * declarations (ls-tree + cat-file --batch), the reservation baseline (show) and the anchors (ls-remote, fetch, log).
- * MEASURED 2026-10-06 on the deployed daemon (0d90c2a98): the base `cat-file --batch` was still an execFileSync,
- * attributed 3.4 s in one loop_lag row. A base read killed at its bound reads every filed id `unknown`, NAMING the
- * timeout, and the judge sees an empty base, as on any unreadable ref — never a fabricated collision.
+ * Before this, only the anchor read was awaited (#9644): both base reads ran execFileSync and the judge re-read the
+ * declarations. A base read killed at its bound reads every filed id `unknown`, NAMING the timeout, and the judge
+ * sees an empty base, as on any unreadable ref — never a fabricated collision.
  */
 export async function reviewTaskIdEvidenceAsync(
   diff: string,
