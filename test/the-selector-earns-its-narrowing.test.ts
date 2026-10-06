@@ -494,6 +494,12 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
         await new Promise((r) => setTimeout(r, 10));
       }
       assert.ok(existsSync(allDone), "the current read completed all eight coverage jobs");
+      // W1-T5925: the pass then lists older history once for its replay; keep the shim until it has.
+      const replayState = join(root, "state", "selector-shadow-replay.json");
+      for (let waited = 0; !existsSync(replayState) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(replayState), "the pass finished, its replay listing included");
     } finally {
       garden.stop();
     }
