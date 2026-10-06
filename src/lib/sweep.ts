@@ -9780,6 +9780,15 @@ function isOwnerClaimDecline(line: Record<string, unknown>): boolean {
     typeof line.pr_number === "number" && typeof line.head_sha === "string";
 }
 
+/** W1-T5932 — a detached `dispatchFix` that rejected; it voids the dedup as a decline does. */
+function isDetachedFixDispatchFailure(line: Record<string, unknown>): boolean {
+  return line.step === "sweep.fix.dispatch_failed" && typeof line.pr_number === "number" && typeof line.head_sha === "string";
+}
+
+/** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
+ *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
+export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
+
 /** W1-T5919 — BACKSTOP: owner-claim declines per (PR, head) before the sweep stops and escalates once;
  *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
@@ -9791,7 +9800,7 @@ async function holdRepeatedFixClaimDecline(
   escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-  if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return undefined;
+  if (declines.length < FIX_CLAIM_DECLINE_BACKSTOP) return holdRepeatedFixDispatchFailure(pr, lines, escalate);
   const last = declines[declines.length - 1];
   const why = String(last.owner_recovery_reason);
   const reason =
@@ -9802,6 +9811,24 @@ async function holdRepeatedFixClaimDecline(
     l.head_sha === pr.headSha && l.fix_claim_decline_escalated === why);
   if (!escalated) await escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
   return { reason, fields: { fix_claim_decline_escalated: why } };
+}
+
+/** W1-T5932 — at {@link FIX_DISPATCH_FAILED_BACKSTOP}, the stand-down; escalates once per (PR, head). */
+async function holdRepeatedFixDispatchFailure(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  escalate: SweepDeps["escalate"],
+): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
+  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+  if (failures.length < FIX_DISPATCH_FAILED_BACKSTOP) return undefined;
+  const reason =
+    `detached fix dispatch failed before fix.dispatch ${failures.length} times on #${pr.prNumber} at head ` +
+    `${pr.headSha.slice(0, 7)} (${String(failures[failures.length - 1].error)}) — ` +
+    `FIX_DISPATCH_FAILED_BACKSTOP ${FIX_DISPATCH_FAILED_BACKSTOP} reached, no further dispatch is attempted at this head`;
+  const escalated = lines.some((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
+    l.head_sha === pr.headSha && l.fix_dispatch_failed_escalated === true);
+  if (!escalated) await escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+  return { reason, fields: { fix_dispatch_failed_escalated: true } };
 }
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
@@ -10679,6 +10706,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   const realFixDispatches = new Set<string>();
+  const voidedFixes = new Map<string, string>();
   for (const line of lines) {
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
       const refusal = reviewFreshnessRefusals.get(line.review_key);
@@ -10782,12 +10810,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       continue;
     }
     // W1-T5919: a declined claim voids this head's dedup unless fix.dispatch/fix.retrigger exists at it.
+    // W1-T5932: so does a detached dispatch failure; both apply after the walk, since either can precede its row.
     if ((line.step === "fix.dispatch" || line.step === "fix.retrigger") && typeof line.head_sha === "string") {
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
     }
-    if (isOwnerClaimDecline(line)) {
-      if (!realFixDispatches.has(`${String(line.task_id)}@${String(line.head_sha)}`)) fixed.delete(`${line.pr_number}@${line.head_sha}`);
+    if (isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)) {
+      voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
     }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
@@ -10829,6 +10858,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
+  for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
   return {
     armed,
     fixed,
@@ -12313,6 +12343,22 @@ export async function runSweep(
       };
     }
     return { ok: true, release: () => claimedReviewKeys.delete(reviewKey) };
+  }
+
+  /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
+   *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
+  function detachFixDispatch(pr: OpenPrView, work: Promise<unknown>): void {
+    detachSweepAction(
+      work.catch((e: unknown) => appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: pr.taskId ?? "SWEEP",
+        step: "sweep.fix.dispatch_failed",
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+      })),
+      { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+    );
   }
 
   /** W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY, or refuse: the fix-rung twin of the review claim
@@ -13951,10 +13997,7 @@ export async function runSweep(
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
               if (deps.detachFixWait) {
-                detachSweepAction(
-                  fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)),
-                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
-                );
+                detachFixDispatch(pr, fixClaim.run(() => deps.dispatchFix(pr, fixEvidence)));
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -14034,10 +14077,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachSweepAction(
-                  conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)),
-                  { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
-                );
+                detachFixDispatch(pr, conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence)));
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
