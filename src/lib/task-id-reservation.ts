@@ -952,7 +952,6 @@ export type ReservationAnchorRead =
 
 type GitAnswer = { status: number; stdout: string; stderr: string };
 
-/** Every id UNKNOWN when the listing failed (a timed-out one included), else `undefined`. */
 function unreadAnchorListing(ids: readonly string[], listed: GitAnswer): Map<string, ReservationAnchorRead> | undefined {
   if (listed.status === 0) return undefined;
   return new Map(ids.map((id) => [id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` }]));
@@ -970,8 +969,7 @@ function anchorReadFrom(body: GitAnswer): ReservationAnchorRead {
   return body.status === 0 ? { status: "present", message: body.stdout } : { status: "unknown", reason: body.stderr.trim() };
 }
 
-/** Reads refs/rmd-id/<id> for each id from `run`'s origin. A failed listing makes EVERY id unknown:
- *  an unread namespace is not an empty one, so it can never be read as "not reserved". */
+/** Reads refs/rmd-id/<id> per id from origin; a failed listing makes EVERY id unknown, never absent. */
 export function readReservationAnchors(
   ids: readonly string[],
   run: RemoteReserveDeps["run"],
@@ -1017,12 +1015,10 @@ export async function readReservationAnchorsAsync(
   return reads;
 }
 
-/** BACKSTOP per git call, above the slowest measured anchor spawn (322 s, 2026-10-06); past it the
- *  id reads UNKNOWN, never absent. */
+/** BACKSTOP per git call, above the slowest measured anchor spawn (322 s, 2026-10-06). */
 export const RESERVATION_ANCHOR_GIT_TIMEOUT_MS = 600_000;
 
-/** Resolves on every outcome: exit N → N; killed at the bound → 1 with stderr NAMING the timeout;
- *  signalled or never started → 1. SIGTERM, then SIGKILL after the grace. */
+/** Resolves on every outcome; killed at the bound (SIGTERM→SIGKILL) → 1, stderr NAMING the timeout. */
 export function gitReservationRunnerAsync(
   repoDir: string,
   opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
