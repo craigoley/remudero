@@ -975,11 +975,8 @@ export function hydrateScannerBlockerObservations(
   return out;
 }
 
-/* ────────────────────────────────────────────────────────────────────────────────────────────
- * W1-T5633 — A HEAD WHOSE `CodeQL` RESULTS CHECK FAILED. ci-gate never waits on that check, so a new
- * high alert used to merge (#9034, alert #311). The sweep reads its open alerts ONCE per pass for such
- * a head, and the machine judge decides each. This module only OBSERVES: a failed read is `undefined`
- * (nothing is judged on a guess), and an alert not analysed at THIS head never counts. */
+/* W1-T5633 — a head whose `CodeQL` check failed has its open high alerts read for the sweep's judge.
+ * Observation only: a failed read is `undefined`, and an alert not analysed at THIS head never counts. */
 export const CODEQL_CHECK_NAME = "CodeQL";
 export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
 export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
@@ -993,15 +990,12 @@ export interface CodeqlHeadAlert {
   message: string; // bounded to SCANNER_DIAGNOSTIC_MAX_CHARS; untrusted scanner text
 }
 
-/** `alerts` is never empty: a head whose failed CodeQL check has no readable high alert is `undefined`. */
 export interface CodeqlHeadObservation {
   headSha: string;
   alerts: CodeqlHeadAlert[];
 }
 
-/** True when the LATEST attempt of the `CodeQL` check concluded failure. Deduped by the latest
- *  `startedAt` per name first: a listing keeps superseded attempts, so a re-run that went green would
- *  otherwise still read red. An absent check (paths-ignored) is not a failed one. */
+/** True when the LATEST attempt (by `startedAt`) of the `CodeQL` check failed; a superseded red does not count. */
 export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined): boolean {
   let latest: RestRollupEntry | undefined;
   for (const entry of rollup ?? []) {
@@ -1019,8 +1013,7 @@ interface RestHeadAlert extends RestScannerAlert {
   rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
 }
 
-/** The open high/error CodeQL alerts analysed at exactly `headSha`; `undefined` for a truncated or
- *  malformed listing, and for a listing holding none. */
+/** The open high CodeQL alerts analysed at exactly `headSha`; `undefined` if none or unreadable. */
 export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
   if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
   const found: CodeqlHeadAlert[] = [];
@@ -1052,8 +1045,7 @@ export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): Code
   return found.length === 0 ? undefined : { headSha, alerts: found };
 }
 
-/** One bounded read per failing-CodeQL candidate; a failed read is absent from the map, so that head is
- *  untouched this pass rather than judged on nothing. */
+/** One bounded read per candidate; a failed read is absent from the map. */
 export function hydrateCodeqlHeadAlerts(
   owner: string,
   repo: string,
@@ -1067,7 +1059,7 @@ export function hydrateCodeqlHeadAlerts(
     try {
       listing = fetch(codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
     } catch (error) {
-      void error; // a failed read leaves the head unobserved, and an unobserved head is untouched
+      void error; // unobserved, so untouched
       continue;
     }
     const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);
