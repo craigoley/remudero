@@ -1,0 +1,38 @@
+- id: W1-T6033
+  title: "A REVIEWER FRESHNESS CHECK SURVIVES ONE STALLED GITHUB HANDSHAKE — with W1-T5964 live, 4 of 87 reviews on 2026-10-06 07:16-15:10Z still withheld a passing verdict as 'reviewer code freshness is unprovable' because one `git fetch` of origin/main sat in fetch/remote_refs with git-remote-https still running past its 60 s bound; each refusal costs a review re-run and ~35-40 min before re-admission (W1-T5771)"
+  repo: remudero
+  depends_on: [W1-T5964]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — what evidence the reviewer-code freshness check may use when one fetch stalls
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: #9567 review withheld twice (13:10Z, 15:08Z)"
+  plan_refs: [W1-T5964, W1-T5771, W1-T5282, W1-T5530]
+  files: [src/lib/self-sync.ts, test/a-reviewer-freshness-check-survives-one-stalled-github-handshake.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger union, read-only): review.post_refused "reviewer code freshness is unprovable"
+    since the 07:16Z boot that carries W1-T5964: 13:10:01 #9567, 14:56:39 #9555, 15:06:53 #9572, 15:08:53
+    #9567, each "exceeded its 60000ms bound ... last trace2 region: fetch/remote_refs; elapsed 600xx ms; still
+    running: git remote-https origin https://github.com/craigoley/remudero.git". The timer fired on time (60.0
+    s), so these are genuine stalls of GitHub's ref advertisement, not the loop blocks W1-T5964 fixed. 87
+    review.posted rows in the same window, so ~5% of reviews. checkServiceFreshnessAsync (src/lib/self-sync.ts)
+    turns any fetch failure into `degraded`, and reviewerFreshnessFromService maps degraded to `unreadable`,
+    which withholds the terminal verdict.
+  design: |
+    In checkServiceFreshnessAsync, when the fetch fails as a bound timeout whose trace names fetch/remote_refs
+    (or a still-running git-remote-https), retry the fetch once. If the retry also fails, assess against the
+    local refs/remotes/origin/main when its last update (its reflog timestamp) is younger than a named recency
+    bound (derive it from the daemon's freshness cadence and say so), and return the assessment marked with
+    `source: "recent-fetch"` and the ref's age, so the reviewer's verdict row says which evidence it used. Any
+    other fetch failure, an unreadable reflog, or an older ref stays `degraded` exactly as today.
+  acceptance:
+    - claim: "a reviewer freshness check whose fetch stalls in fetch/remote_refs retries once, then assesses against a recently fetched origin/main and names that source and age, while an old origin/main ref or any other fetch failure still reads unreadable"
+      proof: "unit test: test/a-reviewer-freshness-check-survives-one-stalled-github-handshake.test.ts"
+  falsifier: |
+    Map every fetch failure straight to degraded: the stalled-handshake fixture with a 2-minute-old origin/main
+    ref reads unreadable and the test fails.
