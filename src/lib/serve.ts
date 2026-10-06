@@ -160,7 +160,7 @@ import {
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
-import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -335,7 +335,8 @@ export interface ServeDeps {
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
-  board: BoardDeps;
+  /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
+  board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
   /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
   modelApprovals?: readonly ModelApproval[];
   /**
@@ -2703,7 +2704,7 @@ function assembleServeRoutes(
   // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
   // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
   // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
-  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -2750,7 +2751,8 @@ function assembleServeRoutes(
     ...(readModel ? { panelRows: createOperatorAgentRowsSource(readModel, { instance: deps.instances?.coreInstance ?? CORE_INSTANCE }) } : {}),
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
-      if (state?.state === "unavailable") return undefined;
+      // An unavailable plan source is a placeholder plan, never an empty goal board.
+      if (state?.state === "unavailable" || deps.board.planSource?.state === "unavailable") return undefined;
       return { plan: deps.board.plan, snapshot: state?.snapshot ?? (goalBoard = goalBoardCache.get(deps.board)) };
     },
   });

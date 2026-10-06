@@ -37,6 +37,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import type { PlanSourceOutcome } from "./serve-plan-reload.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -158,6 +159,9 @@ export interface PanelGraphDeps {
   planPath: string;
   ledgerPath: string;
   readPlanSnapshot?: () => Plan;
+  /** W1-T5639: the qualified outcome of the read that produced `readPlanSnapshot`'s plan. Absent, that plan is trusted as
+   *  it always was; present, a reader must not turn an `unavailable` source's placeholder into counts or decisions. */
+  readPlanSource?: () => PlanSourceOutcome | undefined;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
   /** Fault seam for the first durable write; a pre-write failure is not a delivered reply. */
@@ -707,6 +711,22 @@ function parseMaxParam(url: URL): { max?: number } | { error: string } {
  * travels as a separate read-builder capability, never through the write-route dependency bag. */
 function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Plan {
   return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
+}
+
+/** W1-T5639: a body qualified by where its plan came from. Absent outcome, the body is unchanged. */
+function withPlanSource<B extends object>(deps: PanelGraphDeps, body: B): B | (B & { planSource: PlanSourceOutcome }) {
+  const planSource = deps.readPlanSource?.();
+  return planSource === undefined ? body : { ...body, planSource };
+}
+
+/** W1-T5639: answer 503 when the plan was never read. The plan bound beside an `unavailable` source is a placeholder, so any
+ *  count, classification or operator decision derived from it would be invented. Returns whether it refused. */
+function refusePlanSourceUnavailable(deps: PanelGraphDeps, res: ServerResponse): boolean {
+  const planSource = deps.readPlanSource?.();
+  if (planSource?.state !== "unavailable") return false;
+  res.setHeader("retry-after", "5");
+  sendJson(res, 503, { error: "plan_source_unavailable", detail: `serve has not read the plan yet: ${planSource.failure.reason}`, planSource });
+  return true;
 }
 
 /** `Task` preserves `plan_refs`, so a process-owned plan needs no second shard traversal. */
@@ -1452,6 +1472,12 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
         sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
         return;
       }
+      const planSource = deps.readPlanSource?.();
+      if (planSource?.state === "unavailable") {
+        // Unknown, never a healthy zero: no counts, no sections and no frontier come from a placeholder plan.
+        sendJson(res, 200, { planSource, progress: { unknown: true, unavailableReason: `plan_source_unavailable: ${planSource.failure.reason}` }, sections: [], frontier: [] });
+        return;
+      }
       const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
@@ -1462,7 +1488,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>
         projection.get(id)?.indeterminate === true);
-      sendJson(res, 200, { progress, sections, frontier });
+      sendJson(res, 200, withPlanSource(deps, { progress, sections, frontier }));
     },
   };
 }
@@ -1985,11 +2011,12 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await inboxRead(deps, readPlanSnapshot);
       if (!read) return void inboxNotReady(res);
       const { ready, drafting, notReady, declined, needsYou, fleet, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet };
-      const at = read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt };
+      const at = { ...(read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt }), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
@@ -2087,11 +2114,14 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
     handler: async (_req, res) => {
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const plan = classified.plan();
+      // A dated last-known-good plan is evidence, but not a current generation: the census is partial, never complete.
+      const planSource = deps.readPlanSource?.();
       const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
         step: ["ratify.approved", "verify_human.judged"],
         refuseIncomplete: true,
@@ -2129,14 +2159,14 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: classified.mergedTaskIds,
         sources: {
-          plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
+          plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
           // retained file. Until a durable continuity index exists, history cannot certify a zero.
           archiveLedger: ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" : "partial",
           githubProjection: projectionPartial ? "partial" : "observed",
         },
       });
-      sendJson(res, 200, census);
+      sendJson(res, 200, planSource === undefined ? census : { ...census, planSource });
     },
   };
 }
@@ -2339,11 +2369,12 @@ export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
         warmArmed = true;
         setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
       }
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await readInboxThreadListView(view);
       if (read.kind === "ok") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale" && new URL(req.url ?? "/", "http://localhost").searchParams.get("qualified") === "1") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale") {
         res.setHeader("retry-after", "1");
         sendJson(res, 503, { error: "inbox_threads_stale", detail: "the thread list is being refreshed; its rows are not source-verified", source: read.source });
@@ -2367,6 +2398,7 @@ export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: (
     handler: async (req, res) => {
       const threadId = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
       const proposalId = proposalIdOfThread(threadId);
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const item = proposalId ? operatorThreadItems(deps, readPlanSnapshot, classified).find((i) => i.proposalId === proposalId) : undefined;
