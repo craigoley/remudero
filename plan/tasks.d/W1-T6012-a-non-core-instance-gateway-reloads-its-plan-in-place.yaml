@@ -1,0 +1,39 @@
+- id: W1-T6012
+  title: "A NON-CORE INSTANCE GATEWAY RELOADS ITS PLAN IN PLACE — buildInstanceGatewayRoutes (instance-gateway.ts) calls loadPlan once per non-core instance at serve boot and hands that Plan to the instance's BoardDeps for the generation's life, so /v1/i/<instance>/status and /recent keep a console or site task list that is filed, retired or edited after boot until the next serve restart; core's own plan reloads in place (reloadServePlan, W1-T4481) and its threads follow the pin (#8784)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — when a non-core instance's board plan is re-read
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E8 (P0-LOOP: non-core instance gateways loadPlan once at boot)"
+  plan_refs: [W1-T4228, W1-T4481, W1-T4906, W1-T5060]
+  files: [src/lib/instance-gateway.ts, test/a-non-core-instance-gateway-reloads-its-plan-in-place.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: buildInstanceGatewayRoutes (src/lib/instance-gateway.ts) runs
+    `plan = (opts.loadPlan ?? loadPlan)(root.planPath)` once per non-core instance and builds
+    `const board: BoardDeps = { plan, ledgerPath: root.ledgerPath, github }`; nothing in the module reloads it
+    (no `reload` symbol in the file). The instance's managed checkout IS fast-forwarded (W1-T4356), so its plan
+    files move while serve holds the boot parse. Core's main thread reloads in place (reloadServePlan) and
+    #8784 pins worker threads to it; non-core instances have neither. W1-T5060 retires these gateways, but it is
+    dispatch_hold on a 7-day measured gate, so the stale board stands until then. Scope-time checks: W1-T5060 is
+    the only open record naming instance-gateway.ts and it retires rather than reloads; no run- branch or open
+    PR head touches the file.
+  design: |
+    Each non-core instance's BoardDeps reads its plan through a per-instance holder that re-parses when the
+    instance's plan files change (thread-plan.ts planFilesIdentity is the file identity core threads already
+    use), off the request's hot path where possible, and swaps `board.plan` in place as reloadServePlan does for
+    core. A failed re-parse keeps the last good plan and logs `serve.instance_plan_reload_failed` naming the
+    instance; a successful one logs `serve.instance_plan_reloaded`. An instance whose BOOT parse failed still
+    answers 503 until a later parse succeeds.
+  acceptance:
+    - claim: "a task filed in a non-core instance's plan after the gateway was built appears in that instance's /v1/i/<instance>/status board without a serve restart, and an unparseable edit keeps the last good plan and ledgers the failure"
+      proof: "unit test: test/a-non-core-instance-gateway-reloads-its-plan-in-place.test.ts"
+  falsifier: |
+    Keep the single boot loadPlan: the fixture files a task in the instance plan after building the routes, the
+    status board does not list it, and the test fails.
