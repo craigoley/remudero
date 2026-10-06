@@ -18,7 +18,7 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures,
+  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
@@ -7331,21 +7331,26 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 
-/** Per `pr@head`: the check a prior pass stood down as a base red, and whether its one refresh was
- *  already spent. Together they bound the lane to one record and one refresh per head. */
+/** Per `pr@head`: the check a prior pass stood down as a base red, whether its one refresh was
+ *  spent, and (W1-T6024) whether a probe reproduced its red on main before main next went green. */
 export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>[]): {
   stoodDown: Map<string, string>;
   refreshed: Set<string>;
+  reproducedBeforeGreen: Set<string>;
 } {
   const stoodDown = new Map<string, string>();
   const refreshed = new Set<string>();
+  const reproduced = new Set<string>();
+  const reproducedBeforeGreen = new Set<string>();
   for (const line of lines) {
+    if (isMainGreenOnItsOwnHead(line)) for (const key of reproduced) reproducedBeforeGreen.add(key);
     if (typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
     const key = `${line.pr_number}@${line.head_sha}`;
     if (line.step === BASE_RED_STOOD_DOWN_STEP && typeof line.check_name === "string") stoodDown.set(key, line.check_name);
     if (line.step === BASE_RED_REFRESH_STEP) refreshed.add(key);
+    if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
-  return { stoodDown, refreshed };
+  return { stoodDown, refreshed, reproducedBeforeGreen };
 }
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
@@ -7370,8 +7375,11 @@ export function decideBaseRed(
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
-  if (recorded === undefined || !names.includes(recorded) || history.refreshed.has(key)) return { kind: "own" };
-  return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (history.refreshed.has(key)) return { kind: "own" };
+  if (recorded !== undefined && names.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
+  const named = names[0];
+  return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
 }
 
 // ── W1-T5349 — the plan-repair rung ─────────────────────────────────────────────────────────────
@@ -14661,6 +14669,16 @@ export async function runSweep(
                   break;
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
+                // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
+                const mainFailing = verdict === "clear" ? undefined : mainFailingTestFiles(reproductionHistory);
+                if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
+                  acted = false;
+                  const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
+                  if (!baseRedHistory.stoodDown.has(key)) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: check, main_sha: mainTipSha, step: BASE_RED_STOOD_DOWN_STEP });
+                  standDownReason = `base red: ${reproductionFiles.join(", ")} failed on main since it was last green, and this ${verdict} probe at ${mainTipSha} does not clear them — no fix dispatched, the branch refreshes once main is green`;
+                  baseRedStandDownPrs.add(pr.prNumber);
+                  break;
+                }
                 const previouslyReproduced = reproductionHistory.some((line) => line.step === "sweep.base_reproduction" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.verdict === "reproduced" && line.main_sha !== mainTipSha);
                 if (verdict === "clear" && previouslyReproduced && !baseRedHistory.refreshed.has(key)) {
