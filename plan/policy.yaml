@@ -614,11 +614,23 @@ sweep:
   # supposed to earn lane three has fired 718 times since 2026-09-05 and granted it ZERO times —
   # 59% of refusals are missing telemetry, not pressure, on a host reporting 0% PSI and 29 GiB
   # free. Until that is fixed this committed value is the ONLY way a third lane exists.
+  #
+  # OPERATOR RULING 2026-10-06 (option A, "width 4, max 5"): value 3 -> 4, max 3 -> 5, min stays 1.
+  # MEASURED 2026-10-05 23:05 -> 2026-10-06 16:00Z: in the 13-16Z backlog (queue 4-19) the width-3
+  # ceiling bound for 2.05 of 3 h (191 "semantic post-review admission bound 0, in-flight 3" rows).
+  # Reviews ran p50 4.5 min / p90 13 min. The widener could not help: max equalled value, and its
+  # commonest reason was `provider-telemetry-unavailable` (142 of 316 `review.capacity` rows,
+  # provider_status_age_ms ~500-800 s against the router's 60 s cache bound); `healthy-window`
+  # fired twice. MEMORY: mem_available min 4.3 GB / median 6.7 GB on the 16 GB host; one more
+  # ~1.33 GiB worker at that minimum leaves ~3 GB, above the 1.5 GiB reserve, and the
+  # memory-pressure and memory-reserve arms still shed admissions below it. Lane five is never
+  # committed: it stays capacity the widener must earn (option B, a separate code PR). Not a
+  # ratified rung: plan/ratifications.yaml pins no `sweep.*` row, so nothing needs re-ratifying.
   reviewLanes:
-    value: 3
+    value: 4 # operator ruling 2026-10-06: 3 -> 4
     origin: "net-new"
     min: 1
-    max: 3
+    max: 5 # operator ruling 2026-10-06: 3 -> 5
   # W1-T2853: lane three is temporary capacity earned by a sustained healthy window, not a new
   # default. These rows govern review admission only; they never cancel a live worker and never
   # widen dispatchLanes. The 1.5 GiB reserve follows W1-T1049's measured ~1.33 GiB Claude-worker

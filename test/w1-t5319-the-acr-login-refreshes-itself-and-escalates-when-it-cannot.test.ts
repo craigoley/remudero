@@ -10,6 +10,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { parseHeartbeatPayload, runHostResourcePass, type HostResourcePorts } from "../src/lib/host-resource-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { installFixtureDuGuard } from "./helpers/fixture-du.js";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const reason = 'AADSTS700082: session expired; run "az login"\nrequest id: a\\b; path: c:\\new\\tfile';
@@ -20,6 +21,7 @@ function fixture(t: TestContext) {
   const bin = join(root, "bin");
   const state = join(root, "fleet", "state");
   mkdirSync(bin);
+  installFixtureDuGuard(bin, [root]);
   mkdirSync(state, { recursive: true });
   const calls = join(root, "calls");
   writeFileSync(calls, "");
@@ -119,7 +121,7 @@ test("W1-T5319: a host without az publishes unavailable even with an old failed 
   assert.equal(inherited.stdout.trim(), join(ambient, "az"), "removing the local stub exposes an ambient az");
   // Keep the real shell utilities while excluding every ambient Azure CLI installation.
   for (const tool of ["bash", "cat", "date", "dirname", "mkdir", "mktemp", "mv", "rm",
-    "grep", "head", "sed", "ls", "wc", "tr", "awk", "df", "du", "uname", "hostname", "git"]) {
+    "grep", "head", "sed", "ls", "wc", "tr", "awk", "df", "uname", "hostname", "git"]) {
     const resolved = spawnSync("bash", ["-c", 'command -v "$1"', "fixture", tool], { encoding: "utf8" });
     assert.equal(resolved.status, 0, `${tool} must be available to the isolated fixture`);
     symlinkSync(resolved.stdout.trim(), join(f.bin, tool));

@@ -675,7 +675,7 @@ test("W1-T2865: a zero-action freshness exit emits no drain telemetry", async ()
   assert.equal(lines.some((line) => line.step.startsWith("daemon.freshness_drain.")), false);
 });
 
-test("W1-T2865: late freshness closes the interphase review clock before its final sweep", async () => {
+test("W1-T2865: an idle transition closes its review clock before the next freshness sweep", async () => {
   const waiters: Array<(result: "wake" | "timeout") => void> = [];
   const sweepTickerWaiters: Array<() => void> = [];
   let releaseOrphan!: () => void;
@@ -683,19 +683,19 @@ test("W1-T2865: late freshness closes the interphase review clock before its fin
   const orphanGate = new Promise<void>((resolve) => { releaseOrphan = resolve; });
   const finalSweepGate = new Promise<void>((resolve) => { releaseFinalSweep = resolve; });
   let freshnessReads = 0;
+  let idleTransitions = 0;
   let sweepCalls = 0;
   let finalSweepStarted = false;
+  let bootReviewPasses = 0;
   let lightPasses = 0;
   let lateLightPasses = 0;
 
   const daemon = runDaemon(fixturePlan(), {
-    // W1-T2984 — EVERYTHING MERGED, so this tick selects nothing and the clock choreography below
-    // is measured on its own. It used to read `() => false`, which left A and B runnable; that did
-    // not matter while a consumed wake `continue`d before dispatch, but the wake no longer discards
-    // an admitted batch, so a runnable queue would now start a real dispatch and its own in-flight
-    // ticker inside this fixture. The subject here is the LATE FRESHNESS BOUNDARY closing the
-    // interphase clock before its final sweep, which has nothing to do with dispatch.
+    // With everything merged, the idle branch closes this clock, then the next tick sees
+    // freshness. It never reaches the dispatch branch's late freshness check. Observe that
+    // actual idle boundary, and deliver a wake while stop is pending to prove admission closed.
     refreshMerged: () => () => true,
+    log: (step) => { if (step === "daemon.idle") idleTransitions++; },
     runOne: async (id) => okResult(id),
     sleep: () => new Promise<void>((resolve) => sweepTickerWaiters.push(resolve)),
     checkFreshness: (): DaemonFreshness =>
@@ -714,7 +714,11 @@ test("W1-T2865: late freshness closes the interphase review clock before its fin
       return { killed: [], leftAlone: [] };
     },
     sleepUntilSweepWake: () => new Promise((resolve) => waiters.push(resolve)),
-    sweepLight: async () => {
+    sweepLight: async (scope) => {
+      if (scope?.reviewOnly && !finalSweepStarted) {
+        bootReviewPasses++;
+        return;
+      }
       lightPasses++;
       if (finalSweepStarted) lateLightPasses++;
     },
@@ -728,8 +732,11 @@ test("W1-T2865: late freshness closes the interphase review clock before its fin
   await waitFor(() => lightPasses === 1, "the interphase clock did not consume its first wake");
   await waitFor(() => waiters.length >= 1, "the interphase clock did not resume waiting after its first wake");
   releaseOrphan();
-  for (let i = 0; i < 10; i++) await settle();
+  await waitFor(() => idleTransitions === 1, "the fixture never reached its idle transition");
   const finalSweepStartedBeforeClockSettled = finalSweepStarted;
+  assert.ok(waiters.length > 0, "positive control: the review clock still owns an unsettled wait");
+  waiters.shift()!("wake");
+  await settle();
   while (waiters.length > 0) waiters.shift()!("timeout");
   await waitFor(() => finalSweepStarted, "the final freshness sweep never started after the clock settled");
   await waitFor(() => sweepTickerWaiters.length === 1, "the final full-sweep ticker never began waiting");
@@ -739,12 +746,15 @@ test("W1-T2865: late freshness closes the interphase review clock before its fin
 
   const summary = await daemon;
   assert.equal(summary.stopReason, "stale");
+  assert.equal(summary.ticks, 1, "one idle transition preceded the next tick's freshness exit");
+  assert.equal(freshnessReads, 2, "the fixture saw initial freshness and next-tick staleness");
+  assert.equal(bootReviewPasses, 1, "the restricted boot review is distinct from the interphase wake");
   assert.equal(sweepCalls, 2, "the ordinary and final freshness sweeps each ran once");
   assert.equal(
     finalSweepStartedBeforeClockSettled,
     false,
-    "the late freshness boundary closes the interphase clock before starting its final sweep",
+    "the idle boundary settles the interphase clock before the next freshness sweep",
   );
-  assert.equal(lightPasses, 1, "the clock admitted no pass after the late freshness boundary");
+  assert.equal(lightPasses, 1, "the late wake admitted no pass after the idle boundary closed the clock");
   assert.equal(lateLightPasses, 0, "no review or fix admission raced behind the final sweep");
 });
