@@ -10,7 +10,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/lib/author-step-capture.mjs');
 const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
   captureStepSync: (file: string, args: string[], options: Record<string, unknown>) => {
-    status: number | null; signal: string | null; error?: Error; stdout: string; stderr: string;
+    status: number | null; signal: string | null; error?: Error; stdout: string; stderr: string; outputComplete: boolean;
   };
 };
 function fixture() {
@@ -19,6 +19,42 @@ function fixture() {
   mkdirSync(root, { mode: 0o700 });
   return { root, stdoutPath: join(root, 'stdout.log'), stderrPath: join(root, 'stderr.log'), resultPath: join(root, 'result.json') };
 }
+
+test('author step capture refuses malformed native receipts despite a successful transport exit', () => {
+  assert.equal(typeof mod.captureStepSync, 'function');
+  for (const receipt of [
+    { version: 0, status: 0, outputComplete: true },
+    { version: 1, status: 0, outputComplete: 'complete' },
+    { version: 1, status: '0', outputComplete: true },
+    { version: 1, status: 0.5, outputComplete: true },
+    { version: 1, status: 7, signal: null, outputComplete: true },
+  ]) {
+    const f = fixture();
+    let captures = 0;
+    const result = mod.captureStepSync(process.execPath, ['-e', ''], {
+      ...f, cwd: ROOT,
+      spawnCapture(_file: string, _args: string[], options: { input: string }) {
+        const request = JSON.parse(options.input);
+        assert.equal(request.resultPath, f.resultPath);
+        captures++;
+        // The transport seam supplies the artifact; production still reads and validates it.
+        writeFileSync(f.resultPath, JSON.stringify(receipt), { flag: 'wx' });
+        writeFileSync(f.stdoutPath, 'receipt diagnostic witness\n', { flag: 'wx' });
+        return { status: 0, signal: null };
+      },
+    });
+    assert.equal(captures, 1, 'the controlled transport must actually supply the measured receipt');
+    assert.match(result.stdout, /receipt diagnostic witness/);
+    if (receipt.version === 1 && receipt.status === 7) {
+      assert.equal(result.status, 7, 'positive control: native failure survives transport success');
+      assert.equal(result.error, undefined);
+      assert.equal(result.outputComplete, true);
+    } else {
+      assert.equal((result.error as NodeJS.ErrnoException).code, 'ERR_AUTHOR_CAPTURE_RECEIPT');
+      assert.equal(result.outputComplete, false, 'a transport exit zero cannot certify an invalid receipt');
+    }
+  }
+});
 
 test('author step capture preserves native failure, signal and spawn error with private logs', () => {
   assert.equal(typeof mod.captureStepSync, 'function');

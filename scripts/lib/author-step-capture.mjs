@@ -9,11 +9,11 @@ export const AUTHOR_STEP_RUNTIME_MS = 4 * 60 * 60 * 1000;
 
 /** A small spooler owns the pipes while the synchronous author waits. No test reruns. */
 export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath, stderrPath, resultPath,
-  maxBytes = AUTHOR_OUTPUT_LIMIT_BYTES, runtimeMs = AUTHOR_STEP_RUNTIME_MS } = {}) {
+  maxBytes = AUTHOR_OUTPUT_LIMIT_BYTES, runtimeMs = AUTHOR_STEP_RUNTIME_MS, spawnCapture = spawnSync } = {}) {
   const config = { file, args, cwd, stdoutPath, stderrPath, resultPath, maxBytes, runtimeMs };
   // A full verified file list can exceed Linux's single-argument limit even when
   // the real child's many small arguments fit. Stdin avoids adding that extra limit.
-  const transport = spawnSync(process.execPath, [SCRIPT], {
+  const transport = spawnCapture(process.execPath, [SCRIPT], {
     cwd, env, input: JSON.stringify(config), encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
   let outcome;
