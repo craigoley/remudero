@@ -322,12 +322,17 @@ export interface ShadowFailure {
   file: string;
   floor: "selected" | "missed" | "flake";
   narrow?: "selected" | "missed" | "flake";
+  /** The file's own W1-T4398 retry in this shard: "recovered" when pass two did not fail it again.
+   *  Absent when no retry ran or its outcome could not be read. */
+  retry?: "recovered" | "failed";
 }
 
 /** W1-T4404 (ii) — the SHADOW RECORD for one full run: for every file that really failed, whether
  *  each selection would have run it. A full-run selection runs everything, so it misses nothing.
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
-export function shadowRecord(selection: AffectedSelection, failedFiles: readonly string[]): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
+export function shadowRecord(
+  selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
+): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
@@ -345,6 +350,7 @@ export function shadowRecord(selection: AffectedSelection, failedFiles: readonly
       file,
       floor: verdict(floor, recentOnlyFloor, file),
       ...(narrow ? { narrow: verdict(narrow, recentOnlyNarrow, file) } : {}),
+      ...(Object.hasOwn(retried, file) ? { retry: retried[file] } : {}),
     })),
   };
 }
