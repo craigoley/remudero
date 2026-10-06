@@ -1401,7 +1401,7 @@ export function runReadModelViewWorker(
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
-    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, clock, log });
     const actions = createActionsView({ instances: data.instances, ledgerSource });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     const incidents = createIncidentsView({ instances: data.instances, ledgerSource });

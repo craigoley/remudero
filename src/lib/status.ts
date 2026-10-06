@@ -459,6 +459,9 @@ export interface DeriveDeps {
   creditOverridePath?: string;
   /** W1-T2970 — test seam: read the override record's text. Production reads the real file. */
   readCreditOverrideFile?: () => string;
+  /** The override record's rows, loaded at most once per {@link projectPlan} pass and shared by every task.
+   *  Absent, each derivation loads the record itself, as a standalone `deriveStatus` does. */
+  creditOverrideRows?: () => readonly CreditOverrideRow[];
   /** Reader for the durable credit store; defaults to {@link loadCreditStore}. Injectable so a test
    *  can hand a canned store directly and prove the resolution never touches `deps.github`. */
   readCreditStore?: () => CreditStore;
@@ -2536,7 +2539,7 @@ function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverri
   let first: CreditOverrideRow | undefined;
   const rowFor = (prNumber: number | undefined): CreditOverrideRow | undefined => {
     if (prNumber === undefined) return undefined;
-    rows ??= loadCreditOverrides(
+    rows ??= deps.creditOverrideRows?.() ?? loadCreditOverrides(
       deps.readCreditOverrideFile ??
         (() => nodeReadFileSync(deps.creditOverridePath ?? defaultCreditOverridePath(deps.ledgerPath), "utf8")),
     ).rows;
@@ -3838,8 +3841,17 @@ export function projectPlan(
   const creditStoreAtStart = effectiveDeps.readCreditStore ? effectiveDeps.readCreditStore() : loadCreditStore(creditStorePathOnce);
   const flushCreditStore = effectiveDeps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(creditStorePathOnce, store));
   let creditStoreLive = creditStoreAtStart;
+  // AND THE OVERRIDE RECORD, ONCE PER PLAN, LAZILY: each task asking loaded it afresh, a file read (a thrown
+  // ENOENT where there is none) and a YAML parse per task, ~3,000 a pass, on every read-model build.
+  let overrideRows: readonly CreditOverrideRow[] | undefined;
+  const passDeps = effectiveDeps;
+  const creditOverrideRows = passDeps.creditOverrideRows ?? ((): readonly CreditOverrideRow[] => (overrideRows ??= loadCreditOverrides(
+    passDeps.readCreditOverrideFile ??
+      (() => nodeReadFileSync(passDeps.creditOverridePath ?? defaultCreditOverridePath(passDeps.ledgerPath), "utf8")),
+  ).rows));
   effectiveDeps = {
     ...effectiveDeps,
+    creditOverrideRows,
     readCreditStore: () => creditStoreLive,
     writeCreditStore: (store: CreditStore) => {
       creditStoreLive = store;
@@ -3865,7 +3877,8 @@ export function projectPlan(
     const captured = byTask;
     // W1-T2392: the SAME rows, walked once more in memory for the prose index — no second fetch, and skipped
     // entirely when the batched read failed.
-    const prose = allMerged !== null ? indexProseNamedTaskIds(allMerged) : undefined;
+    // Only the uncredited-build warning reads the index, so a pass that skips the warning skips the walk too.
+    const prose = allMerged !== null && !effectiveDeps.skipUncreditedBuildWarning ? indexProseNamedTaskIds(allMerged) : undefined;
     // W1-T3763: capture the exact trailer lookup from this projection's SAME merged snapshot. A failed merged
     // read must stay a failure for every task, never fall back into N direct probes that can restart the board
     // walk. A gateway without this optional batched surface keeps its existing direct lookup.
@@ -5002,17 +5015,22 @@ export function buildBatchedGithub(
    *  `findMergedByTrailer` path only needs one task at a time and is deliberately left as-is for callers that
    *  do not already hold a board snapshot. `projectPlan`, however, derives every task: rescanning thousands of
    *  bodies for every absent id lets its gateway TTL expire mid-pass and restarts the same GitHub walk. */
+  /** The trailer map of the index it was built from: a pass over an unrefreshed index reuses it, not rescans every body. */
+  let trailersOf: { idx: Index; byTask: Map<string, PrRef> } | undefined;
   const mergedTrailerLookup = (): ((taskId: string) => PrRef | null) | null => {
     const idx = index();
     if (unreadable()) return null;
-    const byTask = new Map<string, PrRef>();
-    for (const pr of idx.mergedNewestFirst) {
-      for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
-        // `[ \t]*` keeps the established anchored-trailer dialect while the captured value remains exact.
-        const match = /^Remudero-Task:[ \t]*(.*?)[ \t]*$/.exec(rawLine);
-        const taskId = match?.[1];
-        if (taskId !== undefined && !byTask.has(taskId)) byTask.set(taskId, asRef(pr));
+    const byTask = trailersOf?.idx === idx ? trailersOf.byTask : new Map<string, PrRef>();
+    if (trailersOf?.idx !== idx) {
+      for (const pr of idx.mergedNewestFirst) {
+        for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
+          // `[ \t]*` keeps the established anchored-trailer dialect while the captured value remains exact.
+          const match = /^Remudero-Task:[ \t]*(.*?)[ \t]*$/.exec(rawLine);
+          const taskId = match?.[1];
+          if (taskId !== undefined && !byTask.has(taskId)) byTask.set(taskId, asRef(pr));
+        }
       }
+      trailersOf = { idx, byTask };
     }
     // The old lookup falls back to the memoized commit index only after a body miss. Keep that laziness and
     // precedence; the difference is that the body miss is now O(1), not a fresh O(merged PRs) scan per task.
