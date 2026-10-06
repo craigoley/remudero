@@ -668,10 +668,6 @@ function readOperatorAgentUnion(stateDir: string, opts: PanelUnionReadOptions): 
   return read.rows;
 }
 
-/**
- * W1-T5051: runs `read` with `rows` (every `panel.*` row) standing in for the ledger under `ledgerPath`, as a
- * served GET does, so the agent view computes each part with the very readers its route calls.
- */
 export function withOperatorAgentRows<T>(ledgerPath: string, rows: ReadonlyArray<Record<string, unknown>>, read: () => T): T {
   const was = servedPanelRows;
   servedPanelRows = { stateDir: dirname(ledgerPath), rows };
@@ -3935,7 +3931,6 @@ function projectPlan(deps: OperatorAgentRouteDependencies, state: IntentPlanStat
   return projectIntentPlan(state, planLinkedActions(deps, state), clockFromMillisFn(deps.now), planDelegation(deps, state));
 }
 
-/** GET /v1/operator-agent/intent-plans's body: every intent plan projected with its linked actions and delegation. */
 export function readOperatorAgentIntentPlans(deps: OperatorAgentRouteDependencies) {
   return { version: INTENT_PLAN_VERSION, state: "verified" as const, intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" as const };
 }
