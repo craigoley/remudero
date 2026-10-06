@@ -69,8 +69,8 @@ export interface ViewDefinition<T = unknown> {
   shadowReadings?: Readonly<Record<string, ShadowReadingSpec>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
   compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
-  /** Per data path, the one source its value is computed from wholly: the shadow pairs the two sides' reads of it (view-shadow.ts). */
-  shadowSources?: Readonly<Record<string, string>>;
+  /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */
+  shadowSources?: Readonly<Record<string, string | readonly string[]>>;
 }
 
 export interface ViewBody<T = unknown> {
