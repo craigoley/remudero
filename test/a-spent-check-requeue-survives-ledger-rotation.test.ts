@@ -114,18 +114,11 @@ function srcSources(): Map<string, string> {
   return out;
 }
 
-// Fold reads that were ALREADY unretained when this census landed (2026-10-06), each the same defect
-// as sweep.check_requeued and each owed its own registration. A RATCHET: an entry here that the census
-// no longer finds fails below, so the list only shrinks. Never add to it — register the step instead.
-const KNOWN_UNRETAINED_FOLD_READS: ReadonlySet<string> = new Set([
-  "main.run_gap.dispatched", // main-run-gaps.ts mainRunGapHistoryFromLedger
-  "refusal_amendment.drafted", // refusal-amendment.ts noPrVerdictRowsFromLedger
-  "sre.governor", // sre-governor.ts governorTiersFromLedger
-  "sweep.ci_gate_reaggregated", // sweep.ts reaggregatedCiGateKeysFromLedger
-  "sweep.plan_repair", // sweep.ts planRepairHistoryFromLedger
-  "plan_repair.dispatch", // sweep.ts priorPlanRepairStrikesFromLedger
-  "sweep.missing_task_trailer_repaired", // sweep.ts priorActionsFromLedger
-]);
+// Fold reads that were ALREADY unretained when this census landed (2026-10-06). W1-T5958 registered
+// every one, so it is empty. A RATCHET: an entry here that the census no longer finds fails below,
+// so the list only shrinks. Never add to it — register the step instead; a deliberately transient
+// step may stand here only with its reason beside it.
+const KNOWN_UNRETAINED_FOLD_READS: ReadonlySet<string> = new Set<string>([]);
 
 test("W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain", () => {
   const sources = srcSources();

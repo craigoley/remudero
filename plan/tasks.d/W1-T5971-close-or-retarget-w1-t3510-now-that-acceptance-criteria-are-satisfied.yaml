@@ -1,0 +1,23 @@
+- id: W1-T5971
+  title: Close or retarget W1-T3510 now that acceptance criteria are satisfied
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+  acceptance:
+    - claim: W1-T3510 is closed or retargeted because its acceptance criteria are already met on origin/main
+      proof: "grep: confirm closure or retarget in plan/tasks.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-09-27 follow-up on W1-T3510-1790488330737, ratified via rmd approve:
+  
+    follow-up harvest [task]: Have the plan/gardener process re-evaluate W1-T3510 — its acceptance
+    criterion is already met on `origin/main` by unrelated PRs (#5365, #5528), so it likely needs
+    closing/retargeting rather than implementation; an implement worker with this task's narrow
+    authorization ("does not authorize merging or closing pull requests, changing fleet policy")
+    cannot resolve that mismatch itself. — from W1-T3510 (run W1-T3510-1790488330737)
