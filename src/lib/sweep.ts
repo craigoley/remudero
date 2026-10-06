@@ -4053,8 +4053,12 @@ function riskRefusalStands(lines: ReadonlyArray<Record<string, unknown>>, riskRe
 /** W1-T5911 — the first non-fleet arm or enqueue after this head's latest escalation, or why none counts. */
 async function handArmAfterEscalation(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView): Promise<{ by: string; reason: string } | { stands: string }> {
-  const escalatedAt = Math.max(...rowsAtHead(lines, "risk_judge.escalated", pr).map((line) => Date.parse(String(line.ts))));
-  if (!Number.isFinite(escalatedAt)) return { stands: "this head's risk_judge.escalated row carries no readable ts" };
+  const stamps = rowsAtHead(lines, "risk_judge.escalated", pr).map((line) => String(line.ts));
+  if (!stamps.length || stamps.some((ts) => !Number.isFinite(Date.parse(ts)))) {
+    return { stands: "this head's risk_judge.escalated row carries no readable ts" };
+  }
+  const since = stamps.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+  const escalatedAt = Date.parse(since);
   let timeline: ArmTimeline;
   try {
     timeline = await deps.readArmTimeline!(pr);
@@ -4062,7 +4066,6 @@ async function handArmAfterEscalation(deps: SweepDeps, lines: ReadonlyArray<Reco
     timeline = { unreadable: true, reason: String((e as Error)?.message ?? e) };
   }
   if ("unreadable" in timeline) return { stands: timeline.reason };
-  const since = new Date(escalatedAt).toISOString();
   const hand = timeline.events.find((event) => !event.fleet && Date.parse(event.at) > escalatedAt);
   return hand
     ? { by: hand.actor, reason: `${hand.kind} by ${hand.actor} at ${hand.at}, after the risk judge escalated this head at ${since}` }
@@ -12809,6 +12812,7 @@ export async function runSweep(
                 ...(issueUrl ? { issue_url: issueUrl } : {}) });
               refused = false;
             } catch (e) {
+              // Refused still: a release the ledger cannot hold would not survive the next pass.
               handArmStands = `override row not written: ${String((e as Error)?.message ?? e)}`;
             }
           } else {
