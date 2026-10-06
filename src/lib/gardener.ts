@@ -565,7 +565,7 @@ export interface GardenPassResult<C extends string, A extends GardenAction<C>> {
   scorecard?: Record<string, unknown>;
 }
 
-/** A released pending frees the lane. A `lastPass` that landed nothing was recorded while the pending
+/** A settled pending frees the lane. A `lastPass` that landed nothing was recorded while the pending
  *  held every class, so its candidates were seen but never offered; forgetting it lets them act. */
 function heldPassForgotten<C extends string>(state: GardenState<C>): GardenState<C> {
   return state.lastPass?.landed === undefined ? { ...state, lastPass: undefined } : state;
@@ -612,7 +612,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
-    state = judged.state;
+    state = heldPassForgotten(judged.state);
     deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (state.lastCheap === cheap) {
       writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
@@ -636,7 +636,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
     const judged = judgedByDecision(spec, held.actionClass)
       ? judgeGardenDecision(state, prState ?? "unknown")
       : judgeGardenPending(state, metricOf(spec, inventory, held.actionClass), prState ?? "unknown", clock);
-    state = judged.verdict === "released" ? heldPassForgotten(judged.state) : judged.state;
+    state = judged.state.pending ? judged.state : heldPassForgotten(judged.state);
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (judged.verdict === "released") {
       deps.log(`${spec.name}.pending_released`, { pr_url: held.prUrl, action_class: held.actionClass, waited_ms: clock.now() - Date.parse(held.mergeSeenAt!), bound_ms: GARDEN_PENDING_RELEASE_MS });

@@ -95,6 +95,7 @@ test("W1-T5949: sweepUpdatedHeadsForTask reads head-moved and up-to-date rows wh
 });
 
 test("W1-T5949: a head-moved or up-to-date row, like a conflict, suppresses no orphan — no new head was minted", () => {
+  // (W1-T5713 note: even .updated no longer hides the orphan; it only stays out of the count.)
   const PRIOR = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
   const CURRENT = "cafe1234cafe1234cafe1234cafe1234cafe1234";
   for (const step of [...NEW_STEPS, ...SIBLINGS]) {
@@ -118,5 +119,8 @@ test("W1-T5949: a head-moved or up-to-date row, like a conflict, suppresses no o
     "W1-A",
     CURRENT,
   );
-  assert.equal(updated.orphanedByPush, false, "control: only .updated suppresses the orphan");
+  // W1-T5713: a successful update still supersedes the head, so the orphan stays visible to review
+  // reuse — but it joins neither the count nor the clock. Only .updated differs from the siblings.
+  assert.equal(updated.orphanedByPush, true, "control: .updated leaves the superseded head visible as an orphan");
+  assert.equal(updated.priorOrphans, 0, "control: only .updated is excluded from the foreign-push count");
 });

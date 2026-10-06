@@ -249,18 +249,19 @@ test("W1-T4780: a merged metric PR progresses with unchanged action fingerprint"
   let reads = 0;
   const landed: Array<{ title: string; body: string }> = [];
   const s = spec(inv, { fingerprint: () => "stable", inventory: () => { reads++; return inv; } });
-  const deps = { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), prState: () => "merged" as const, log: () => {} };
+  const deps = { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), prState: () => "merged" as const, log: () => {}, seed: 1 };
   assert.equal(runGarden(s, deps).ran, false);
   assert.deepEqual(readGardenState(path, ["a", "b"]).pending?.atMerge, { trials: 100, successes: 40 });
   assert.equal(reads, 1, "a merge establishes its baseline despite unchanged inputs");
   inv.metrics.a = { trials: 200, successes: 90 };
   inv.version = 2;
-  assert.equal(runGarden(s, deps).ran, false);
+  assert.equal(runGarden(s, deps).ran, true);
   const saved = readGardenState(path, ["a", "b"]);
-  assert.equal(saved.pending, undefined, "later evidence settles the metric even when action candidates are unchanged");
+  assert.ok(saved.pending, "settling the old metric offers the candidates its held pass never landed");
   assert.deepEqual(saved.classes.a, { alpha: 4, beta: 1 });
   assert.equal(reads, 2);
-  assert.deepEqual(landed, []);
+  assert.equal(landed.length, 1);
+  assert.deepEqual(saved.lastPass, { fingerprint: "stable", landed: saved.pending.prUrl });
 });
 
 test("W1-T4780: an open pending PR skips unchanged inventory", () => {

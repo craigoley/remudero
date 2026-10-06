@@ -39326,12 +39326,15 @@ export function reviewOrphansFor(
   if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
   const sweepUpdatedHeads = sweepUpdatedHeadsForTask(ledger, taskId, prUrl);
   const priorHeads = new Map<string, number>(); // sha -> latest parseable ts (ms since epoch)
+  // W1-T5713: a sweep-superseded head is an orphan the review-reuse rows must see, but not a foreign push,
+  // so it joins neither `priorHeads` (the count) nor `lastAttemptAt` (the clock).
+  let sweepSuperseded = false;
   for (const l of ledger) {
     if (!isReviewPostedStep(l.step)) continue;
     if (prUrl === undefined ? l.task_id !== taskId : !reviewRowNamesPr(l, taskId, prUrl)) continue;
     const sha = typeof l.head_sha === "string" ? l.head_sha : "";
     if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
-    if (sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head
+    if (sweepUpdatedHeads.has(sha)) { sweepSuperseded = true; continue; } // the sweep itself superseded this reviewed head
     const parsed = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
     const prior = priorHeads.get(sha);
     if (prior === undefined) {
@@ -39340,7 +39343,7 @@ export function reviewOrphansFor(
       priorHeads.set(sha, parsed); // a later, parseable ts wins over an earlier missing/older one
     }
   }
-  if (priorHeads.size === 0) return { orphanedByPush: false, priorOrphans: 0 };
+  if (priorHeads.size === 0) return { orphanedByPush: sweepSuperseded, priorOrphans: 0 };
 
   let priorOrphans: number;
   if (diffDigestForHead) {

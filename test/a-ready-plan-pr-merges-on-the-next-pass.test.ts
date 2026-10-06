@@ -108,10 +108,10 @@ test("a light pass direct-merges a green, reviewed, mergeable plan PR instead of
   assert.notEqual(line?.stand_down_reason, "deferred to full sweep (light pass)");
 });
 
-test("the light-pass direct merge runs the W1-T5748 safety decision: a behind plan PR with a disjoint plan merges as-is", async () => {
+test("the light-pass direct merge runs the W1-T5748 safety decision: a behind plan PR whose merged plan loads merges as-is", async () => {
   const h = harness({
     mergeFacts: { mergeable: "MERGEABLE", mergeableState: "clean", behindBy: 2 },
-    safety: { prPlanPaths: ["plan/tasks.d/W1-T9002-x.yaml"], mainPlanPaths: ["plan/tasks.d/W1-T1-y.yaml"] },
+    safety: { prPlanPaths: ["plan/tasks.d/W1-T9002-x.yaml"], mainPlanPaths: ["plan/tasks.d/W1-T1-y.yaml"], mergedTree: { state: "loads" } },
   });
   const plan = readyPr(9002);
   await runSweepLightPass([plan], h.deps, DEFAULT_SWEEP_POLICY);
