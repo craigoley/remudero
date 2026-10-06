@@ -32,6 +32,7 @@ import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { createWorkstreamsView } from "./workstreams-view.js";
+import { createActionsView } from "./actions-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
@@ -599,6 +600,7 @@ interface ViewUnit {
   /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
   dueAt: number;
   startedAt?: number;
+  peakMs?: number;
   heavy?: boolean;
 }
 
@@ -1075,21 +1077,29 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
+    let yielded = 0;
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
     try {
       ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) publish(view.name, view.version, key, data, sources, generation, buildStartedMs);
+      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) {
+        yielded++;
+        publish(view.name, view.version, key, data, sources, generation, buildStartedMs);
+      }
     } catch (error) {
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
     unit.costMs = finished - started;
+    const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
-    if (ready) unit.startedAt = undefined;
-    if (opts.lane && ready && unit.costMs > soloMs !== (opts.lane === "heavy")) {
+    if (ready) {
+      unit.startedAt = undefined;
+      unit.peakMs = undefined;
+    }
+    if (opts.lane && ready && yielded > 0 && peakMs > soloMs !== (opts.lane === "heavy")) {
       unit.heavy = opts.lane === "fast";
-      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: unit.costMs });
+      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs });
     }
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? view.stages?.(scoped) : undefined;
@@ -1391,10 +1401,11 @@ export function runReadModelViewWorker(
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
     const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
+    const actions = createActionsView({ instances: data.instances, ledgerSource });
     const agent = createAgentView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, actions, host, agent, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);

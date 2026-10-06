@@ -162,7 +162,8 @@ test("private Field Trials counts assignment class, risk, lane and effective sta
   assert.deepEqual(snapshot.assignmentTelemetry, [{ source: "core", selectedModel: "claude-sonnet-5-5", assignments: 1,
     taskClass: 1, risk: 1, workLane: 1, harnessPinned: 1, promptPinned: 0, toolPinned: 0,
     scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 1,
-    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 }]);
+    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0,
+    servedModelKnownAssignments: 0, workerOutcomeKnownAssignments: 0, servedModelUnavailableReasons: {} }]);
 });
 
 test("private Field Trials joins terminal cost by assignment and separates API estimates from subscription notional cost", () => {
@@ -654,4 +655,25 @@ test("field trials learning loop counts proposals to outcomes and never zeroes h
   const cells = released.state === "candidate" ? released.release.cells.filter((cell) => cell.family === "learning") : [];
   assert.deepEqual(cells.map((cell) => cell.stratum.kind).sort(), ["evidence-followup", "gardener-pr", "judgement"]);
   assert.ok(cells.every((cell) => cell.reasons.includes("humanEffort:no-independent-human-effort-estimate")));
+});
+
+test("private field trials distinguish explicit Codex notional from cash and keep identity gaps measurable", () => {
+  const rows = [
+    { step: "worker.assignment", ts: T(10), task_id: "W1-T1", worker_assignment: { id: "codex-a", selected: { model: "gpt-6.1-sol" } } },
+    { step: "worker.assignment", ts: T(10), task_id: "W1-T2", worker_assignment: { id: "codex-b", selected: { model: "gpt-6.1-sol" } } },
+    { step: "worker.attempt", ts: T(10, 1), selection_assignment_id: "codex-a", total_cost_usd: 0,
+      notional_cost_usd: 0.75, billing_mode: "subscription", served_model: null, served_model_reason: "CLI-no-model", success: false },
+    { step: "worker.attempt", ts: T(10, 2), selection_assignment_id: "codex-b", total_cost_usd: 0,
+      notional_cost_usd: -1, billing_mode: "subscription", served_model: "gpt-6.1-sol-snapshot", success: true },
+  ];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const counts = snapshot.assignmentTelemetry[0]!;
+  assert.equal(counts.subscriptionNotionalUsd, 0.75);
+  assert.equal(counts.apiCostEstimateUsd, 0);
+  assert.equal(counts.costMissingAssignments, 1, "an invalid explicit notional cannot fall back to a cash placeholder");
+  assert.equal(counts.servedModelKnownAssignments, 1);
+  assert.equal(counts.workerOutcomeKnownAssignments, 2, "known failure is an outcome, not an accepted task");
+  assert.deepEqual(counts.servedModelUnavailableReasons, { "CLI-no-model": 1 });
 });

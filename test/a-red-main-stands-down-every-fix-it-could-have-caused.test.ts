@@ -87,6 +87,8 @@ async function observe(headChecks = [check("ci", "cancelled")], runs: Run[] = []
         calls.push(path);
         if (path === "repos/o/r") return { default_branch: "trunk" };
         if (path === "repos/o/r/commits/trunk") return { sha: HEAD };
+        // W1-T6023: main's first-parent window, which a fallback run's head must sit in.
+        if (path.startsWith("repos/o/r/commits?")) return [{ sha: HEAD, parents: [{ sha: LAST }] }, { sha: LAST, parents: [] }];
         if (path.includes("/check-runs?")) return { check_runs: headChecks };
         if (path.endsWith("/status")) return { statuses: [] };
         if (path.includes("/actions/runs?")) {

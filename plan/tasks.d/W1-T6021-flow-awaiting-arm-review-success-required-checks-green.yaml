@@ -27,3 +27,11 @@
     - PR #9253: 0.41 PR-hours — review success, required checks green — arming auto-merge
     - PR #9284: 0.36 PR-hours — review success, required checks green — arming auto-merge
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required checks\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-06T17:29:22.162Z"
+    pin: "e8ca8f029b1e4e8714f440d434d75a0804d82c8c4a849914a63ebe276406e1c3"
