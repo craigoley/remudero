@@ -11850,6 +11850,8 @@ export async function runSweep(
   const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
   const stuckStages = new Map<string, Record<string, unknown>>();
   const resolvedStages = new Set<string>();
+  // W1-T5939: PRs the Actions-incident gate holds this pass; their stalled stage is the outage's, not theirs.
+  const actionsIncidentHeldPrs = new Set<number>();
   for (const row of ledgerLines) {
     if (row.step === "pr.stuck" || (row.step === "sweep.disposed" && row.stage_stuck === true)) {
       stuckStages.set(stageKey(row), row);
@@ -11871,7 +11873,7 @@ export async function runSweep(
       resolvedStages.add(oldKey);
     }
     const bound = policy.stageBackstops[fields.blocker];
-    if (!bound || fields.blocker_age_ms <= bound.minutes * 60_000 || stuckStages.has(key) ||
+    if (!bound || fields.blocker_age_ms <= bound.minutes * 60_000 || stuckStages.has(key) || actionsIncidentHeldPrs.has(pr.prNumber) ||
         /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
@@ -12044,12 +12046,20 @@ export async function runSweep(
         return classifyActionsIncident({ ok: false, error: String((e as Error)?.message ?? e), fetchedAtMs: now });
       }
     })());
-  /** The stand-down sentence when the incident gate takes this PR, else undefined (ordinary handling). */
-  const actionsIncidentGate = async (pr: OpenPrView, disposition: Disposition): Promise<string | undefined> => {
-    if (!deps.readActionsStatus || (disposition !== "blocked-fixable" && disposition !== "refused-escalate") || !isBlockedCi(pr)) return undefined;
+  /** The stand-down sentence when the incident gate takes this PR, else undefined (ordinary handling).
+   *  Whenever the status was consulted, `annotate` names it on the disposed row — unreadable included. */
+  const actionsIncidentGate = async (
+    pr: OpenPrView,
+    disposition: Disposition,
+    annotate: (fields: Record<string, unknown>) => void,
+  ): Promise<string | undefined> => {
+    // blocked-ambiguous is where a strike-exhausted CI red escalates (and the strike ladder runs).
+    const spendsCi = disposition === "blocked-fixable" || disposition === "blocked-ambiguous" || disposition === "refused-escalate";
+    if (!deps.readActionsStatus || !spendsCi || !isBlockedCi(pr)) return undefined;
     const checks = cancelledOnlyRedChecks(pr);
     if (!checks) return undefined;
     const obs = await observeActions(deps.readActionsStatus);
+    annotate({ actions_state: obs.state, actions_reason: obs.reason });
     const decision = decideActionsIncidentHold(obs, actionsIncidentHoldState(ledgerLines, pr), now);
     const named = checks.map((c) => `"${c}"`).join(", ");
     const row = {
@@ -12058,6 +12068,8 @@ export async function runSweep(
       ...(obs.componentStatus !== undefined ? { component_status: obs.componentStatus } : {}),
       ...(obs.incident !== undefined ? { incident: obs.incident } : {}),
     };
+    // Every arm but "proceed" is the incident's own handling, so the stuck-stage SLO does not page on it.
+    if (decision.kind !== "proceed") actionsIncidentHeldPrs.add(pr.prNumber);
     switch (decision.kind) {
       case "proceed":
         return undefined;
@@ -13481,7 +13493,9 @@ export async function runSweep(
               "since this pass's snapshot — not acting; the next pass re-derives from the live head";
             appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
               pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead });
-          } else if ((actionsIncidentStandDown = await actionsIncidentGate(pr, disposition)) !== undefined) {
+          } else if ((actionsIncidentStandDown = await actionsIncidentGate(pr, disposition, (fields) => {
+            extraDisposedFields = { ...extraDisposedFields, ...fields };
+          })) !== undefined) {
             acted = false;
             standDownReason = actionsIncidentStandDown;
           } else switch (disposition) {
