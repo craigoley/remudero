@@ -982,6 +982,10 @@ export interface RiskJudgeOrchestratorDeps extends RiskJudgeDeps {
    *  a thrown error is ledgered exactly like a disagreement, never thrown onward. Omitted
    *  (the default) runs today's behavior unchanged, with no typed call at all. */
   typedJudge?: (input: RiskJudgeInput) => Promise<TypedJudgmentResult<RiskJudgeVerdictLabel>>;
+  /** W1-T5659: the caller's cancel. Once aborted the judgment writes NO `risk_judge.decision`, runs no typed
+   *  shadow and files no escalation, and returns an unavailable result — a caller that gave up on it (the sweep
+   *  pool's bound) is never answered late. Omitted, the judgment cannot be cancelled. */
+  signal?: AbortSignal;
 }
 
 export interface RiskJudgeResult {
@@ -1002,6 +1006,7 @@ export async function runRiskJudge(
 ): Promise<RiskJudgeResult> {
   const log = deps.log ?? (() => {});
   const verdict = await assessRisk(input, deps);
+  if (deps.signal?.aborted) return cancelledRiskJudgeResult();
   const action =
     verdict.availability === "unavailable" && config.judgeUnavailableAction === "proceed"
       ? {
@@ -1041,6 +1046,9 @@ export async function runRiskJudge(
     await runTypedRiskJudgmentShadow(deps.typedJudge, input, verdict, log);
   }
 
+  // Checked again before the escalation: a filed issue cannot be taken back once the cancel has landed.
+  if (deps.signal?.aborted) return cancelledRiskJudgeResult();
+
   if (action.kind === "escalate") {
     const url = await deps.escalate(verdict, action);
     // W1-T970: rides onto this row for the sweep's priorActionsFromLedger; omitted when absent.
@@ -1052,6 +1060,15 @@ export async function runRiskJudge(
     return { verdict, action, escalationUrl: url };
   }
   return { verdict, action };
+}
+
+/** W1-T5659 — what a judgment cancelled by its caller returns: unavailable, and nothing was ledgered or filed. */
+function cancelledRiskJudgeResult(): RiskJudgeResult {
+  const reason = "risk judgment cancelled at its bound — no LLM risk decision was recorded";
+  return {
+    verdict: { verdict: "high", availability: "unavailable", confidence: 0, reasons: [reason] },
+    action: { kind: "proceed", reason },
+  };
 }
 
 /** W1-T4672: run {@link typedRiskJudgment} in shadow and ledger `risk_judge.typed_shadow`.
@@ -1216,6 +1233,8 @@ export function realRiskJudge(opts: {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** One entry per SPAWN, so a retried judgment (W1-T2212) reports what all attempts cost. */
   spend?: RiskJudgeSpendCollector;
+  /** W1-T5659: passed to every spawn; once aborted no further spawn starts and the judgment throws. */
+  signal?: AbortSignal;
 }): (input: RiskJudgeInput) => Promise<RiskJudgeVerdict> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   const maxAttempts = opts.maxAttempts ?? RISK_JUDGE_MAX_ATTEMPTS;
@@ -1223,8 +1242,10 @@ export function realRiskJudge(opts: {
   return async (input: RiskJudgeInput) => {
     // Built once, reused by reference every attempt — the byte-identical request
     // test/unparseable-verdict-third-state.test.ts pins.
-    const spawnArgs = buildRiskJudgeSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const built = buildRiskJudgeSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const spawnArgs = opts.signal === undefined ? built : { ...built, signal: opts.signal };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (opts.signal?.aborted) throw new Error("risk judgment cancelled before its spawn");
       const result = await spawn(spawnArgs);
       // Recorded BEFORE the parse — an unparseable attempt still cost real money.
       opts.spend?.record({
@@ -1236,6 +1257,7 @@ export function realRiskJudge(opts: {
         accountLabel: result.accountLabel,
         attempts: 1,
       });
+      if (opts.signal?.aborted) throw new Error("risk judgment cancelled during its spawn");
       const outcome = parseRiskJudgeResponse(result.text);
       opts.log?.("risk_judge.parse_attempt", { attempt, max_attempts: maxAttempts, kind: outcome.kind });
       if (outcome.kind === "parsed") return outcome.verdict;
