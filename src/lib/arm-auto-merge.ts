@@ -928,13 +928,35 @@ export function armAutoMergeDetailed(
   isDraft?: boolean,
 ): ArmAttemptResult {
   requireExplicitArmSeam("armAutoMergeDetailed", !isRealArmDepsObject(deps));
+  return runStepsSync(armDetailedSteps(prUrl, taskId, deps, isDraft));
+}
+
+/** W1-T5781 — {@link armAutoMergeDetailed} with every read and write awaited: the SAME steps under
+ *  the async driver, so the sweep's plan merge-safety git calls and REST reads run off the loop and
+ *  every outcome, ledger row and `automerge.*` line is the sync form's. */
+export async function armAutoMergeDetailedAsync(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: ArmDeps<true> = realArmDepsAsync(),
+  isDraft?: boolean,
+): Promise<ArmAttemptResult> {
+  requireExplicitArmSeam("armAutoMergeDetailedAsync", !isRealArmDepsObject(deps));
+  return runStepsAsync(armDetailedSteps(prUrl, taskId, deps, isDraft));
+}
+
+function* armDetailedSteps(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: Pick<ArmDeps<true>, "headSha" | "ledgerLines"> & Parameters<typeof attemptArmSteps>[1],
+  isDraft?: boolean,
+): Steps<ArmAttemptResult> {
   if (!taskId) {
     deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
     return { outcome: "no-task-id" };
   }
   let headSha: string;
   try {
-    headSha = deps.headSha(prUrl);
+    headSha = yield* step(() => deps.headSha(prUrl));
   } catch (e) {
     // recorded via deps.say below, not swallowed silently — the outcome itself also names why.
     deps.say(
@@ -952,7 +974,7 @@ export function armAutoMergeDetailed(
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return { outcome: "ledger-refused" };
   }
-  return attemptArm(prUrl, deps, headSha, isDraft);
+  return yield* attemptArmSteps(prUrl, deps, headSha, isDraft);
 }
 
 /**
