@@ -10,7 +10,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
-import { machineTokens } from "./inbox-plain.js";
+import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 
 /**
@@ -103,6 +103,8 @@ export interface PersistedInboxContent extends ClassificationEvidence {
   ledgerRows: Array<Record<string, unknown>>;
   mergedTaskIds: string[];
   projectionIndeterminate: boolean;
+  /** The decision and plain-message stores the pass's lanes were built with; absent from a file written before they were carried. */
+  stores?: { fleetDecisions: DecisionStore; plainMessages: PlainStore };
 }
 export interface PersistedInbox extends PersistedInboxContent {
   identity: string;

@@ -104,10 +104,10 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
-import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
+import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -1901,11 +1901,24 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
-/** GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts). */
-export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">, inboxRoot: string) {
+export interface InboxStores {
+  fleetDecisions: DecisionStore;
+  plainMessages: PlainStore;
+}
+
+export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>): InboxStores {
+  const stateDir = join(inboxRoot, "state");
+  const ids = new Set(proposals.map((p) => p.id));
+  const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))) };
+}
+
+/** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { stores?: InboxStores }, inboxRoot: string) {
   const { proposals, classifications, ledgerLines } = classified;
+  const stores = classified.stores ?? readInboxStores(inboxRoot, proposals);
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
-  const plainStore = readPlainStore(plainStorePath(join(inboxRoot, "state")));
+  const plainStore = stores.plainMessages;
 
   const ready: InboxReadyItem[] = [];
   const drafting: InboxDraftingItem[] = [];
@@ -1951,7 +1964,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
-  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
+  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
   const needsYou = {
     ready: operatorItems(ready),
     drafting: operatorItems(drafting),
@@ -2251,7 +2264,7 @@ export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefin
 
 function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowLaneInbox {
   const ledgerLines = Object.defineProperty([...persisted.ledgerRows], "torn", { value: 0 }) as LedgerLines;
-  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines };
+  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines, ...(persisted.stores ? { stores: persisted.stores } : {}) };
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
