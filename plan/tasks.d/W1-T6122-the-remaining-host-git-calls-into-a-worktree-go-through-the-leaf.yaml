@@ -1,0 +1,45 @@
+- id: W1-T6122
+  title: "THE REMAINING HOST GIT CALLS INTO A WORKTREE GO THROUGH THE LEAF — outside src/run-task.ts, W1-T6106's census still allows 36 raw `git -C <worktree>` argv: sweep.ts 11, worker.ts 10, retro.ts 6, orientation.ts 4, relint.ts 2, and one each in composition-root.ts, review-worktree-reclaim.ts and spike.ts, each following the addressed tree's `.git` pointer and config"
+  repo: remudero
+  depends_on: [W1-T6106]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which repository a host git call outside run-task.ts may treat as its own
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778); the counts are that PR's own census exceptions"
+  plan_refs: [W1-T6106, W1-T6121, W1-T4614]
+  files: [src/lib/sweep.ts, src/lib/worker.ts, src/lib/retro.ts, src/lib/orientation.ts, src/lib/relint.ts, src/lib/composition-root.ts, src/lib/review-worktree-reclaim.ts, src/spike.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/the-remaining-host-git-calls-into-a-worktree-go-through-the-leaf.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9778 head (bfcd880b4, W1-T6106's build, open at filing). Its census
+    (test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts `RAW_SITE_EXCEPTIONS`) allows, outside
+    src/run-task.ts: src/lib/sweep.ts 11, src/lib/worker.ts 10, src/lib/retro.ts 6, src/lib/orientation.ts 4,
+    src/lib/relint.ts 2, src/lib/composition-root.ts 1, src/lib/review-worktree-reclaim.ts 1, src/spike.ts 1. Counting
+    its `WORKTREE_TARGET` pattern per enclosing top-level function at that head: sweep.ts buildSweepEffects 6,
+    readBaselineRatchetWorktreeState 3, headIsInWorktree 1; worker.ts worktreeAddAsync 6, worktreeAdd 3,
+    excludeNodeModulesFromGit 1; retro.ts stampCitationsAndCommit 4, defaultFreshShardTextReader 2; orientation.ts
+    regenerateOrientation 4; relint.ts newMonolithIdsAgainstBase 2; composition-root.ts realReviewWorktree 1;
+    review-worktree-reclaim.ts defaultReadHeadSha 1; spike.ts main 1. The census reason for worker.ts says
+    worktreeAdd/worktreeAddAsync "cut and wire the worktree (before any worker runs)" — a HARNESS-only tree at that
+    moment — while the sweep's fix rounds and the retro's commit address trees a worker or a PR head wrote.
+  design: |
+    The same classification W1-T6121 applies to src/run-task.ts: (1) class every raw git site in these eight files,
+    whatever its `-C` target is named, as WORKER, REVIEWER or HARNESS by what wrote the tree it addresses; (2) convert
+    every WORKER and REVIEWER site to `hostWorktreeGit` / `hostWorktreeGitAsync`; (3) record each remaining HARNESS
+    site in the census exception with its class and reason and lower each count to exactly what is left; (4) argv,
+    outputs and error shapes are unchanged. A site whose tree's writer cannot be decided from the code stays raw only
+    with a reason that says so, never silently.
+  acceptance:
+    - claim: "every raw git -C argv left in the eight files carries a recorded harness-only class and reason, the sweep's fix-round reads and the retro's citation commit run through the hardened leaf, and on a fixture worktree whose .git pointer names a planted gitdir with a core.fsmonitor marker neither writes the marker"
+      proof: "unit test: test/the-remaining-host-git-calls-into-a-worktree-go-through-the-leaf.test.ts"
+  falsifier: |
+    At the W1-T6106 head, buildSweepEffects and stampCitationsAndCommit spawn raw `git -C`: the planted fsmonitor
+    marker is written and the test fails.
+  notes: |
+    FIXTURES ONLY, as W1-T6121. Split from W1-T6121 for Rule 19 sizing (run-task.ts there, the rest here); the two
+    edit different counts in the same census exception table, so whichever merges second rebases one line. Depends
+    on W1-T6106 (#9778, open at filing); re-count the exceptions at its merged head before building.

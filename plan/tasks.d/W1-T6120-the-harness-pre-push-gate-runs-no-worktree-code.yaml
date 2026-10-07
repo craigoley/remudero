@@ -1,0 +1,58 @@
+- id: W1-T6120
+  title: "THE HARNESS PRE-PUSH GATE RUNS NO WORKTREE CODE — after W1-T6106 the push leaf runs the HARNESS's hooks/pre-push instead of the worktree's, but that hook runs every check as `node scripts/<check>.mjs` relative to its cwd, which is the worker worktree, with the daemon's whole environment; so the PR's own scripts still run as the daemon, with push credentials, before any review"
+  repo: remudero
+  depends_on: [W1-T6106]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what the host-side pre-push gate is allowed to execute from a worker worktree
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778), verified read-only on origin/main and the #9778 head before filing"
+  plan_refs: [W1-T6106, W1-T3059, W1-T3222, W1-T3224, W1-T3225, W1-T5617, W1-T499]
+  files: [hooks/pre-push, src/lib/git-push.ts, test/the-harness-pre-push-gate-runs-no-worktree-code.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9778 head (bfcd880b4, W1-T6106's build, open at filing) and origin/main bd232423a.
+    Static reading only; no hostile script was run anywhere.
+    WHERE THE GATE RUNS: src/lib/git-push.ts `prePushGateSteps` picks `join(harnessHooksDir(), "pre-push")`, the
+    harness's copy, and `worktreePushExec` / `worktreePushExecAsync` exec it with `cwd: worktreePath` and
+    `env: { ...process.env }` minus only the GIT_DIR family, so GH_TOKEN and GH_APP_PRIVATE_KEY_PATH ride along.
+    WHAT THE HOOK EXECUTES: hooks/pre-push (unchanged by #9778) runs, each guarded by a relative `[ -f scripts/... ]`:
+    `node --import tsx scripts/rule15-precheck.mjs`, `scripts/rule25-precheck.mjs`, `scripts/ci-control-plane-precheck.mjs`,
+    `node scripts/test-tier-manifest.mjs`, `scripts/census-precheck.mjs`, `scripts/lint-plan-precheck.mjs`,
+    `scripts/head-identity-gate.mjs` (also imported by path from `process.cwd() + "/scripts/head-identity-gate.mjs"`),
+    `scripts/worker-branch-shape.mjs` and `scripts/proof-resolve-precheck.mjs`. Every one resolves under the
+    worktree, so the file that runs is the one the worker wrote; `--import tsx` resolves tsx from the worktree's
+    node_modules. Two checks run worktree code even from a harness copy: scripts/census-precheck.mjs runs the
+    `CENSUS_ADMITTED_MEMBERS` suites on this tree (W1-T5617), and scripts/lint-plan-precheck.mjs `spawnSync`s the
+    worktree package.json's lint argv. The hook's own `git` calls run with GIT_DIR unset (W1-T3224), so they rediscover
+    the repository from the worktree's `.git` file and honour whatever config that gitdir carries.
+    This is the exposure class W1-T6106 closed for git hooks: code the model wrote runs on the host, as the daemon,
+    with the credentials the push itself needs.
+  design: |
+    The builder owns the shape. Constraints: (1) every script the host-side gate executes comes from the harness's code
+    root (the daemon's own checkout that `harnessHooksDir` already names), never from the worktree; the worktree is
+    read as DATA (its diff, its files) through an explicit root argument. (2) A check that must run worktree code by
+    design (the census-admitted suites, a package.json lint argv) either runs without credentials — an allowlisted env
+    in the shape of W1-T499's `buildProofEnv`, in the worker sandbox (bwrap, as `openWeightCheckSandboxArgv` does) —
+    or leaves the host gate, which CI already re-runs; the PR says which, check by check. (3) The gate's child env is
+    an allowlist, not `process.env`: no GH_TOKEN, no GH_APP_* names. (4) The hook's own git calls carry the leaf's
+    code-executing config overrides (core.fsmonitor=false and the rest of `HOST_GIT_CONFIG`). (5) A check that could
+    not run is still reported skipped-with-a-name, never passed (the hook's existing contract), and the switch
+    `RMD_PREPUSH_GATES=0` keeps working.
+  acceptance:
+    - claim: "a host push through the push leaf from a fixture worktree whose scripts/rule15-precheck.mjs and scripts/census-precheck.mjs each write a marker file runs the harness copies of the gate checks, neither marker is written, the gate's child environment carries no GH_TOKEN, and a check the harness cannot run reports skipped rather than passed"
+      proof: "unit test: test/the-harness-pre-push-gate-runs-no-worktree-code.test.ts"
+  falsifier: |
+    At the W1-T6106 head, run the fixture push through `worktreePushExec`: hooks/pre-push resolves
+    `scripts/rule15-precheck.mjs` under the fixture worktree, the fixture's marker script runs, and the marker is
+    written, so the test fails.
+  notes: |
+    FIXTURES ONLY. The marker scripts are fixture files under the test's tmp dir in a gitRepo() fixture, pushed to a
+    fixture bare remote; `harnessHooksDir` already honours RMD_HARNESS_HOOKS_DIR for a fixture. Nothing runs against
+    a real worktree, the host or origin.
+    Depends on W1-T6106 (#9778, open at filing): the harness-side gate this narrows arrives with it. If #9778 changes
+    the gate before merging, re-read `prePushGateSteps` before building.
