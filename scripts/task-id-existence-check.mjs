@@ -32,18 +32,23 @@ import { isMainModule } from "./lib/argv.mjs";
 import { join, relative } from "node:path";
 import { git } from "./lib/git.mjs";
 import {
-  adjudicateReservationChain,
+  adjudicateReservationChain as adjudicateReservationChainCore,
   parseReservationHolderFields,
   parseReservationHolderLine,
   RESERVATION_PUSH_GRACE_MS,
 } from "../src/lib/reservation-chain.mjs";
 
 export {
-  adjudicateReservationChain,
   parseReservationHolderFields,
   parseReservationHolderLine,
   RESERVATION_PUSH_GRACE_MS,
 };
+
+// Keep the gate's public adjudicator as the entry point its holder read calls, while sharing the
+// pure implementation with source-only runtimes.
+export function adjudicateReservationChain(links, graceMs = RESERVATION_PUSH_GRACE_MS) {
+  return adjudicateReservationChainCore(links, graceMs);
+}
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
 // DECLARED_ID_LINE_RE matches the WHOLE line after `- id:` (`^...$`, not a character class), so a
