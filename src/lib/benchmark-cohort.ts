@@ -867,6 +867,9 @@ export async function runBenchmarkCohortPass(
       opts.onBeforeLiveCacheVerify?.();
       if ((await sourceHashes(cachedLive.path, undefined, cachedPrefix.size)).full !== cachedPrefix.sha256)
         changed.push(cachedLive);
+      // A zero-byte prefix performs no stream read; verify its source still
+      // exists and is a file instead of turning missing evidence into zero.
+      if (!statSync(cachedLive.path).isFile()) throw new Error("ledger-live-not-a-file");
     } catch {
       return { state: "unavailable", snapshot: emptySnapshot("ledger-live-unreadable-before-scan", checkpoint.lastGood),
         scannedSources: 0, pendingSources: 1 };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -496,6 +496,29 @@ test("benchmark cached live verification preserves evidence when its real source
     writeFileSync(live, assignment);
     assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cached empty live evidence still requires an existing regular source", async () => {
+  for (const replacement of ["missing", "directory"] as const) {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-empty-cache-refused-"));
+    try {
+      const live = join(stateDir, "ledger.ndjson");
+      writeFileSync(live, "");
+      const initial = await runBenchmarkCohortPass(stateDir);
+      assert.equal(initial.state, "complete");
+      assert.equal(initial.snapshot.sourceLineage.length, 1, "a real empty source was audited");
+      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const saved = readFileSync(checkpoint, "utf8");
+      const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => {
+        unlinkSync(live);
+        if (replacement === "directory") mkdirSync(live);
+      } });
+      assert.equal(missing.state, "unavailable", `${replacement} source is not verified empty evidence`);
+      assert.equal(missing.snapshot.reason, "ledger-live-unreadable-before-scan");
+      assert.equal(missing.pendingSources, 1);
+      assert.equal(readFileSync(checkpoint, "utf8"), saved);
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  }
 });
 
 test("benchmark cohorts distinguish an unreadable state root from a ledger with no sources", async () => {
