@@ -610,6 +610,7 @@ export const PRECHECK_PARITY = {
   "test/authority-ratchet.test.ts": { run: "census:authority" },
   "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
+  "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts": { run: "census:no-nested-preflight" },
   ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
 };
 
