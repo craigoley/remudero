@@ -2806,6 +2806,7 @@ import {
   sweepStaleWorkerHomes,
   sweepStaleWorkerHomesAsync,
   workerKeychainPaths,
+  type ClaudeCredentialSeedEvent,
 } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
@@ -32883,6 +32884,23 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
   }
 }
 
+/** W1-T6252: ledgers the probe's shared-credential provisioning and heals, so lineage splits are countable. */
+export function usageCredentialSink(config: Config): (event: ClaudeCredentialSeedEvent) => void {
+  return (event) => {
+    try {
+      appendLedger(ledgerPathFor(config), {
+        run_id: "USAGE-PROBE",
+        task_id: "DAEMON",
+        step: event.kind === "provisioned" ? "usage.credential_provisioned" : "usage.credential_healed",
+        store: event.store,
+        prior_verdict: event.priorVerdict,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ event: "usage.credential_ledger_failed", reason: String((error as Error)?.message ?? error) }));
+    }
+  };
+}
+
 /**
  * Read current `/usage` headless and parse it; `undefined` on any failure (best-effort;
  * the drain/daemon continues on an unreadable read — max + budget still bound it. That
@@ -33003,7 +33021,7 @@ export async function readUsageSnapshotPreferSdk(
   } = {},
 ): Promise<UsageSnapshot | undefined> {
   const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
-  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s));
+  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
   // A SOURCE THAT CANNOT ANSWER MUST NOT BREAK THE CALLER. `readUsageSnapshotViaSdk` already
