@@ -99,7 +99,7 @@ test("rotated scan fixtures write each archive before generating the next archiv
     return { at: new Date(Date.UTC(2026, 8, 1) + i * 3_600_000).toISOString(), rows: [{ archive: i }], gz: true };
   }, (rows = [], opts = {}) => {
     assert.deepEqual(rows, []);
-    if (opts.rotations === undefined) order.push("init");
+    if (opts.rotations === undefined) order.push("ledger:create");
     else {
       assert.equal(opts.dir, ledger.dir);
       assert.equal(opts.rotations.length, 1, "only one archive's input rows may be live at the writer");
@@ -108,7 +108,7 @@ test("rotated scan fixtures write each archive before generating the next archiv
     return ledger;
   });
   assert.equal(result, ledger);
-  assert.deepEqual(order, ["init", "make:0", "write:0", "make:1", "write:1", "make:2", "write:2"]);
+  assert.deepEqual(order, ["ledger:create", "make:0", "write:0", "make:1", "write:1", "make:2", "write:2"]);
 });
 
 test("incremental scan fixtures preserve every native gzip archive and live-ledger byte", () => {
