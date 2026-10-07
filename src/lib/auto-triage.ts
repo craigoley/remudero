@@ -674,7 +674,7 @@ export function listTriageHandoffs(root: string): { records: TriageHandoffRecord
   return { records, unreadable };
 }
 
-export interface TriageHandoffDeps {
+export interface TriageHandoffIo {
   /** The open PR for `branch`, `undefined` for none. THROWS when the answer is unknowable (a failed
    *  read must never be taken for "no PR" — that is how a second PR gets opened). */
   findOpenPr: (branch: string) => { prUrl?: string; prNumber?: number } | undefined;
@@ -710,7 +710,7 @@ export interface TriageHandoffRecovery {
  * (so `decideTriageClaimRelease` decides) with only the evidence this recovery can observe — a
  * merged outcome — and otherwise stays held for the liveness sweep or an operator.
  */
-export async function recoverTriageHandoffs(root: string, deps: TriageHandoffDeps): Promise<TriageHandoffRecovery[]> {
+export async function recoverTriageHandoffs(root: string, deps: TriageHandoffIo): Promise<TriageHandoffRecovery[]> {
   const out: TriageHandoffRecovery[] = [];
   const thisHost = (deps.hostname ?? hostname)();
   const { records, unreadable } = listTriageHandoffs(root);

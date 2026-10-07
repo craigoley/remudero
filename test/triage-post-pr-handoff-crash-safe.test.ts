@@ -14,11 +14,13 @@ import {
   triageLockPath,
   writeTriageHandoff,
   type TriageClaimReserverAsync,
-  type TriageHandoffDeps,
+  type TriageHandoffIo,
   type TriageHandoffRecord,
 } from "../src/lib/auto-triage.js";
 import { triageCommand } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
@@ -88,7 +90,7 @@ function fakeClaims(held: string[]): { refs: Map<string, string>; reserver: Tria
   };
 }
 
-function unitDeps(rows: Array<Record<string, unknown>>, over: Partial<TriageHandoffDeps> = {}): TriageHandoffDeps {
+function unitDeps(rows: Array<Record<string, unknown>>, over: Partial<TriageHandoffIo> = {}): TriageHandoffIo {
   return {
     findOpenPr: () => ({ prUrl: PR_URL, prNumber: 998 }),
     recordedSteps: (runId) => new Set(rows.filter((r) => r.run_id === runId).map((r) => String(r.step))),
@@ -101,28 +103,26 @@ function unitDeps(rows: Array<Record<string, unknown>>, over: Partial<TriageHand
 // ── THE ACCEPTANCE PROOF: a real interruption, then two concurrent restarts ───────────────────
 
 function makeOrigin(feedbackId: string): string {
-  const bare = tmp("t6117-origin-");
-  const seed = tmp("t6117-seed-");
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
-  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
-  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
-  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
-  writeFileSync(join(seed, "plan", "alert-policy.yaml"), "act_severities: []\n", "utf8");
+  const bare = gitRepo({ bare: true, kind: "t6117-origin" });
+  const seed = gitRepo({ kind: "t6117-seed" });
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
+  writeFileSync(join(seed.dir, "plan", "alert-policy.yaml"), "act_severities: []\n", "utf8");
   writeFileSync(
-    join(seed, "plan", "tasks.yaml"),
+    join(seed.dir, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
   );
   writeFileSync(
-    join(seed, "plan", "feedback", `${feedbackId}.yaml`),
+    join(seed.dir, "plan", "feedback", `${feedbackId}.yaml`),
     [`id: ${feedbackId}`, "ts: '2026-08-17T00:00:00.000Z'", "raw: fixture entry for the W1-T6117 handoff", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"),
   );
-  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
-  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: GIT_ENV });
-  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
-  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: GIT_ENV });
-  rmSync(seed, { recursive: true, force: true });
-  return bare;
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed plan");
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.cleanup();
+  return bare.dir;
 }
 
 function fakeWorker(text: string): WorkerResult {
@@ -153,8 +153,17 @@ test("two concurrent restarts after a holder died right after remote PR creation
   const bare = makeOrigin(feedbackId);
   const home = tmp("t6117-home-");
   const configRoot = tmp("t6117-root-");
-  const shimDir = tmp("t6117-ghshim-");
-  const argvLog = join(shimDir, "argv.txt");
+  // `pr diff` failing is the INTERRUPTION: run 1 reaches it only AFTER the PR exists, and dies there —
+  // between PR creation and every ledger step that names the PR.
+  const shim = ghShim(
+    [
+      { when: "pulls?head=", stdout: "[]" },
+      { when: "api --method POST", stdout: JSON.stringify({ html_url: PR_URL, number: 998 }) },
+      { when: "--json body", stdout: '{"body":""}' },
+      { when: "pr diff", stderr: "interrupted", exit: 1 },
+    ],
+    { kind: "t6117-ghshim" },
+  );
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
   try {
@@ -169,29 +178,7 @@ test("two concurrent restarts after a holder died right after remote PR creation
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
-    // `fail-diff` is the INTERRUPTION: the first run reaches `gh pr diff` only AFTER the PR exists,
-    // and dies there — between PR creation and every ledger step that names the PR. `open-pr` is
-    // GitHub's answer to "which open PR has this head?" once a restart asks.
-    writeFileSync(
-      join(shimDir, "gh"),
-      [
-        "#!/bin/sh",
-        `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
-        'case "$*" in',
-        '  *"pr list"*) echo "[]" ;;',
-        `  *"pulls?head="*) if [ -f ${JSON.stringify(join(shimDir, "open-pr"))} ]; then echo '[{"html_url":"${PR_URL}","number":998}]'; else echo '[]'; fi ;;`,
-        `  *"api --method POST"*) echo '{"html_url":"${PR_URL}","number":998}' ;;`,
-        `  *"--json headRefName"*) git -C ${JSON.stringify(bare)} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
-        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
-        `  *"pr diff"*) if [ -f ${JSON.stringify(join(shimDir, "fail-diff"))} ]; then echo 'interrupted' >&2; exit 1; fi; echo "" ;;`,
-        "  *) exit 0 ;;",
-        "esac",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-    process.env.PATH = `${shimDir}:${savedPath}`;
-    writeFileSync(join(shimDir, "fail-diff"), "");
+    process.env.PATH = `${shim.dir}:${savedPath}`;
 
     const worker = [
       "GROUND: grepped plan/feedback and MASTER-PLAN.md — this exact alert class is already dispositioned.",
@@ -200,7 +187,16 @@ test("two concurrent restarts after a holder died right after remote PR creation
 
     // ── RUN 1: dies after the PR exists ──
     let died: unknown;
-    await withLiveWritesAllowed(() => triageCommand([feedbackId], { spawn: async () => fakeWorker(worker) })).catch((e) => (died = e));
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async () => {
+          // The lane's worktree branch exists by now; the ownership read answers with it.
+          const branch = execFileSync("git", ["-C", repoDir, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"], { encoding: "utf8" }).trim().split("\n").pop()!;
+          shim.addRoute({ when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) });
+          return fakeWorker(worker);
+        },
+      }),
+    ).catch((e) => (died = e));
     assert.ok(died, "the interrupted run threw after creating the PR");
     const handoffs = listTriageHandoffs(configRoot).records;
     assert.equal(handoffs.length, 1, "the write-ahead record survived the interruption");
@@ -213,8 +209,8 @@ test("two concurrent restarts after a holder died right after remote PR creation
 
     // ── the holder's lock is left behind, its pid provably absent ──
     const gone = plantDeadLock(configRoot);
-    rmSync(join(shimDir, "fail-diff"));
-    writeFileSync(join(shimDir, "open-pr"), "");
+    shim.addRoute({ when: "pr diff", stdout: "" });
+    shim.addRoute({ when: "pulls?head=", stdout: JSON.stringify([{ html_url: PR_URL, number: 998 }]) });
 
     // ── TWO CONCURRENT RESTARTS ──
     let spawned = 0;
@@ -244,7 +240,7 @@ test("two concurrent restarts after a holder died right after remote PR creation
     assert.equal(rowsFor("run.awaiting_external").length, 1, "run.awaiting_external recorded exactly once");
     assert.equal(listTriageHandoffs(configRoot).records.length, 0, "the handoff is complete");
     assert.equal(existsSync(triageLockPath(configRoot)), false, "and the local lock was released");
-    const creates = readFileSync(argvLog, "utf8").split("\n").filter((l) => l.includes("api --method POST"));
+    const creates = shim.calls().filter((l) => l.includes("api --method POST"));
     assert.equal(creates.length, 1, "NO second PR was opened — the restart looked the PR up by branch");
     assert.equal(claims.refs.has(triageClaimRef(feedbackId)), true, "the remote claim is RETAINED while the PR awaits CI");
     assert.equal(readLedger(configRoot).filter((r) => r.step === "triage.claim_retained" && r.run_id === runId).length, 1);
@@ -258,7 +254,7 @@ test("two concurrent restarts after a holder died right after remote PR creation
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
-    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+    for (const d of [bare, home, configRoot, shim.dir]) rmSync(d, { recursive: true, force: true });
   }
 });
 

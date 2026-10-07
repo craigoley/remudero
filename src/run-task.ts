@@ -1472,7 +1472,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, recoverTriageHandoffs, listTriageHandoffs, writeTriageHandoff, completeTriageHandoff, type TriageHandoffDeps, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, triageClaimRef, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, recoverTriageHandoffs, listTriageHandoffs, writeTriageHandoff, completeTriageHandoff, type TriageHandoffIo, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, triageClaimRef, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -46993,7 +46993,7 @@ export async function triageCommand(
     /** W1-T6117: forwarded to {@link acquireDrainLock} (a test injects the pid-liveness probe). */
     lockOpts?: AcquireDrainLockOpts;
     /** W1-T6117: overrides for the post-PR handoff recovery's I/O. Production passes none. */
-    handoff?: Partial<TriageHandoffDeps>;
+    handoff?: Partial<TriageHandoffIo>;
   } = {},
 ): Promise<number> {
   const cfg = opts.config ?? loadConfig();
@@ -47033,7 +47033,7 @@ async function recoverTriageHandoffsAtStart(
   cfg: Config,
   priorHolder: ReturnType<typeof readDrainLock>,
   isPidAlive: (pid: number) => boolean,
-  overrides: Partial<TriageHandoffDeps> = {},
+  overrides: Partial<TriageHandoffIo> = {},
 ): Promise<number | undefined> {
   const ledgerPath = ledgerPathFor(cfg);
   const logFor = (rec: { runId: string; taskId: string }, step: string, extra: Record<string, unknown> = {}) =>
@@ -47053,7 +47053,7 @@ async function recoverTriageHandoffsAtStart(
 
   let repoDir: string | undefined;
   const repoDirOnce = () => (repoDir ??= join(cfg.root, "repos", resolveOwnerRepo().repo));
-  const deps: TriageHandoffDeps = {
+  const deps: TriageHandoffIo = {
     findOpenPr: (branch) => {
       const { owner, repo } = resolveOwnerRepo();
       const head = encodeURIComponent(`${owner}:${branch}`).replace(/%2F/g, "/");
