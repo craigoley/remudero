@@ -7751,6 +7751,7 @@ async function runReview(args: {
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
+  let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
   let reviewerFindingText: string | undefined;
   if (planOnlySkip) {
@@ -7836,6 +7837,7 @@ async function runReview(args: {
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
+        reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
           provider: reviewerFields.provider ?? null,
@@ -7905,6 +7907,7 @@ async function runReview(args: {
   const outcome = reviewerOutcome({
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
+    exit: reviewerExit,
     spawnError: reviewerSpawnFailed,
     // Reported from what ACTUALLY happened, never from the classification alone: `planOnlySkip &&
     // !attemptReviewer` is true only when the spawn was really not dispatched. Measured while
@@ -13874,6 +13877,9 @@ export interface WorkerErrorVerdict {
   budgetBreach: boolean;
   /** Spread verbatim onto the `verdict` ledger line — carries turns + cost. */
   ledger: {
+    worker_exit?: NonNullable<WorkerResult["exit"]>["kind"];
+    worker_exit_signal?: string;
+    worker_exit_code?: number;
     verdict: "blocked_budget" | "failed";
     stage: string;
     subtype: string;
@@ -13967,6 +13973,9 @@ export function workerErrorVerdict(
     verdict,
     budgetBreach,
     ledger: {
+      ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+      ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+      ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
       verdict,
       stage,
       subtype: r.subtype,
@@ -13976,7 +13985,9 @@ export function workerErrorVerdict(
       account_label: r.accountLabel,
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
-        : `worker error at ${stage}: ${r.subtype}`,
+        : r.exit?.kind === "signal"
+          ? `worker ended by signal ${r.exit.signal} at ${stage}`
+          : `worker error at ${stage}: ${r.subtype}`,
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,

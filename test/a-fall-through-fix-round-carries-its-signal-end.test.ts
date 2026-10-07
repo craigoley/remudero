@@ -122,7 +122,8 @@ test(`${PROOF}: a pushed signal-ended round retains its signal and earns the usu
 for (const pushed of [false, true]) {
   test(`${PROOF}: a normal exit ${pushed ? "pushed" : "refused"} round keeps its previous score`, async (t) => {
     const { row } = await fixRound(t, "success", { kind: "exit", code: 0 }, pushed);
-    assert.equal(Object.hasOwn(row, "worker_exit"), false);
+    assert.equal(row.worker_exit, "exit");
+    assert.equal(row.worker_exit_code, 0);
     assert.equal(Object.hasOwn(row, "worker_exit_signal"), false);
     assert.equal(row.subtype, pushed ? "success" : "commit_refused");
     if (!pushed) assert.equal(row.worker_subtype, "success");
