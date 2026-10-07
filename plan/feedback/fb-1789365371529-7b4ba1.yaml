@@ -12,7 +12,7 @@ raw: "Follow-up to fb-1789364676982-6244cf: the current graceful recycler cannot
   runtime-env contract."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/9824
 summary:
