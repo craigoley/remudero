@@ -15,11 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import * as deployer from "../src/lib/deployer.js";
 import {
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
   IMAGE_SHA_CONTAINER,
   decideDeployTrigger,
-  mountPlanDriftFrom,
   realDeployDeps,
   runDeployCycle,
   type DeployDeps,
@@ -326,7 +326,10 @@ test("an unreadable or disabled scratch plan never recycles a container to add o
   // No plan file in this install.
   rmSync(join(f.install, "deploy", "scratch-mounts.sh"));
   assert.equal(read(() => lacking), undefined, "no plan file");
-  assert.equal(mountPlanDriftFrom("", lacking), undefined, "an empty plan is unknown");
+  // A namespace read, so this file still LOADS on a tree without the reader and fails here instead.
+  const { mountPlanDriftFrom } = deployer as Partial<typeof deployer>;
+  assert.equal(typeof mountPlanDriftFrom, "function");
+  assert.equal(mountPlanDriftFrom!("", lacking), undefined, "an empty plan is unknown");
 
   // UNKNOWN changes no decision: the tick stays up-to-date.
   assert.match(decideDeployTrigger({ ...tick, mountPlanDrift: undefined }).reason, /up-to-date/);
