@@ -77,3 +77,15 @@ Learnings used when offered: 18%. Dangling Why pointers: 1.
 - retire webtools-are-injection-surface: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 18%. Dangling Why pointers: 1.
+
+## Pass 2026-10-06T23:10:18.176Z
+
+- retire daemon-launchd-keepalive-restart: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 19%. Dangling Why pointers: 1.
+
+## Pass 2026-10-07T10:29:54.880Z
+
+- retire canonical-checkout-lags-by-design: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 19%. Dangling Why pointers: 1.

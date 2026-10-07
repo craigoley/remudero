@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -15,7 +15,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown }) => number;
 };
 
-function fixture() {
+function fixture(baseline: Record<string, string> = {}) {
   const repo = gitRepo({ kind: 'author-preflight', seedCommit: false });
   const root = repo.dir;
   for (const path of ['test/setup', 'src', 'scripts']) mkdirSync(join(root, path), { recursive: true });
@@ -29,6 +29,7 @@ function fixture() {
   writeFileSync(join(root, 'src/leaf.ts'), 'export const value = 1;\n');
   writeFileSync(join(root, 'test/leaf.test.ts'), "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { value } from '../src/leaf.js'; test('leaf', () => assert.equal(value, 1));\n");
   writeFileSync(join(root, 'test/other.test.ts'), "import { test } from 'node:test'; test('unrelated', () => {});\n");
+  for (const [path, content] of Object.entries(baseline)) writeFileSync(join(root, path), content);
   const git = (...args: string[]) => repo.git(...args);
   git('add', '.');
   git('commit', '-m', 'test: baseline');
@@ -51,7 +52,7 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.hostedFullSuiteAndCoverage, 'required-pending');
   assert.equal(receipt.headSha, f.git('rev-parse', 'HEAD'));
   assert.equal(receipt.baseSha, f.git('rev-parse', 'main'));
-  assert.equal(receipt.selection, 'affected-floor');
+  assert.equal(receipt.selection, 'affected-narrow');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
 });
@@ -275,4 +276,94 @@ test('author preflight records spawn errors and incomplete summaries instead of 
   assert.equal(step.diagnostics.mayBeIncomplete, true);
   assert.match(readFileSync(join(f.root, step.diagnostics.stdout), 'utf8'), /partial diagnostic witness/);
   assert.match(readFileSync(join(f.root, step.diagnostics.stderr), 'utf8'), /buffer limit witness/);
+});
+
+test('author preflight leaves a running receipt and live private logs when its waiting parent is killed', async () => {
+  const f = fixture();
+  const release = join(f.root, 'coverage/release');
+  writeFileSync(join(f.root, 'src/run-task.ts'), `import {existsSync} from 'node:fs'; console.log('live static witness'); console.error('live static stderr'); const timer=setInterval(()=>{if(existsSync(${JSON.stringify(release)})){clearInterval(timer);process.exitCode=7}},10);\n`);
+  f.git('add', '.'); f.git('commit', '-m', 'test: hold native static step');
+  const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import {main} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], {root:${JSON.stringify(f.root)}}));`],
+  { cwd: ROOT, stdio: 'ignore' });
+  const closed = new Promise<string | null>((resolve) => parent.once('close', (_code, signal) => resolve(signal)));
+  const waitFor = async (predicate: () => boolean) => {
+    for (let turn = 0; turn < 1000 && !predicate(); turn++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(predicate(), 'bounded native author witness never arrived');
+  };
+  let logRoot = '';
+  try {
+    await waitFor(() => {
+      const coverage = join(f.root, 'coverage');
+      if (!existsSync(coverage)) return false;
+      const name = readdirSync(coverage).find((entry) => entry.startsWith('rmd-author-'));
+      if (!name) return false;
+      logRoot = join(coverage, name);
+      const log = join(logRoot, 'static-preflight.stdout.log');
+      return existsSync(log) && readFileSync(log, 'utf8').includes('live static witness');
+    });
+    const before = JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8'));
+    assert.equal(before.verdict, 'running');
+    assert.equal(before.currentStep.name, 'static-preflight');
+    assert.equal(before.currentStep.outputLimitBytes, 100 * 1024 * 1024);
+    assert.equal(before.headSha, f.git('rev-parse', 'HEAD'));
+    assert.equal(statSync(logRoot).mode & 0o077, 0);
+    assert.equal(parent.kill('SIGKILL'), true);
+    assert.equal(await closed, 'SIGKILL');
+    writeFileSync(release, 'release');
+    const native = join(logRoot, 'static-preflight.native-result.json');
+    await waitFor(() => existsSync(native));
+    assert.equal(JSON.parse(readFileSync(native, 'utf8')).status, 7);
+    assert.equal(JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8')).verdict, 'running');
+    assert.equal(existsSync(join(logRoot, 'receipt.json')), false, 'loss of the author cannot certify a completed gate');
+    assert.match(readFileSync(join(logRoot, 'static-preflight.stderr.log'), 'utf8'), /live static stderr/);
+  } finally {
+    mkdirSync(join(f.root, 'coverage'), { recursive: true });
+    writeFileSync(release, 'release');
+    if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL');
+  }
+});
+
+test('author preflight cannot publish a passed progress receipt when the authoritative receipt write fails', () => {
+  const f = fixture();
+  mkdirSync(join(f.root, 'coverage/preflight-author.json'), { recursive: true });
+  assert.equal(mod.main([], { root: f.root }), 1);
+  const coverage = join(f.root, 'coverage');
+  const name = readdirSync(coverage).find((entry) => entry.startsWith('rmd-author-'))!;
+  const progress = JSON.parse(readFileSync(join(coverage, name, 'progress.json'), 'utf8'));
+  assert.notEqual(progress.verdict, 'passed', 'native success is not successful authoritative receipt publication');
+  assert.equal(progress.verdict, 'refused');
+  assert.match(progress.error, /receipt could not be written/);
+});
+
+test('preflight-author runs the narrow selection and its receipt records both the floor size and the narrow size', () => {
+  // hub.ts imports leaf.ts but uses only `unchanged`; the branch changes only `value`. The floor's
+  // import graph reaches hub.test.ts; the narrow arm (symbol reach) does not, so it is smaller.
+  const f = fixture({
+    'src/hub.ts': "import { value } from './leaf.js';\nexport const hub = 'hub';\nexport const unused = typeof value;\n",
+    'test/hub.test.ts': "import { test } from 'node:test'; import { hub } from '../src/hub.js'; test('hub', () => { if (hub !== 'hub') throw Error(); });\n",
+    'test/reads-leaf.test.ts': "import { test } from 'node:test'; test('reads', () => { void 'src/leaf.ts'; });\n",
+  });
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'not-run');
+  assert.deepEqual(receipt.steps, [], 'a dry run spawns no suite');
+  assert.equal(receipt.selection, 'affected-narrow');
+  assert.equal(receipt.floorSize, 3, 'floor: the changed test, the import-graph reach, the path namer');
+  assert.equal(receipt.narrowSize, 2, 'narrow: the changed test and the suite naming the changed file by path');
+  assert.deepEqual(receipt.suites, ['test/leaf.test.ts', 'test/reads-leaf.test.ts']);
+  // An import-only edit names no symbol, so the narrow arm cannot reach the module: the floor runs.
+  writeFileSync(join(f.root, 'src/hub.ts'), "import { value } from './leaf.js';\nimport './leaf.js';\nexport const hub = 'hub';\nexport const unused = typeof value;\n");
+  f.git('add', '.'); f.git('commit', '-m', 'test: an import-only edit');
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  assert.equal(f.receipt().selection, 'affected-floor');
+  assert.equal(f.receipt().narrowSize, null);
+  assert.equal(f.receipt().floorSize, f.receipt().suites.length);
+  // A full-run trigger still selects every suite, with no floor or narrow size.
+  writeFileSync(join(f.root, 'package.json'), '{}\n');
+  f.git('add', '.'); f.git('commit', '-m', 'test: unmodelled input');
+  assert.equal(mod.main(['--dry-run'], { root: f.root }), 0);
+  assert.equal(f.receipt().selection, 'full-fallback');
+  assert.deepEqual([f.receipt().floorSize, f.receipt().narrowSize], [null, null]);
+  assert.equal(f.receipt().suites.length, 4);
 });

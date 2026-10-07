@@ -37,6 +37,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import type { PlanSourceOutcome } from "./serve-plan-reload.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -103,10 +104,10 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
-import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
+import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -158,6 +159,7 @@ export interface PanelGraphDeps {
   planPath: string;
   ledgerPath: string;
   readPlanSnapshot?: () => Plan;
+  readPlanSource?: () => PlanSourceOutcome | undefined;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
   /** Fault seam for the first durable write; a pre-write failure is not a delivered reply. */
@@ -709,6 +711,20 @@ function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Pla
   return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
 }
 
+function withPlanSource<B extends object>(deps: PanelGraphDeps, body: B): B | (B & { planSource: PlanSourceOutcome }) {
+  const planSource = deps.readPlanSource?.();
+  return planSource === undefined ? body : { ...body, planSource };
+}
+
+/** W1-T5639: 503 when `readPlanSource` says the plan was never read; its placeholder would invent counts and decisions. */
+function refusePlanSourceUnavailable(deps: PanelGraphDeps, res: ServerResponse): boolean {
+  const planSource = deps.readPlanSource?.();
+  if (planSource?.state !== "unavailable") return false;
+  res.setHeader("retry-after", "5");
+  sendJson(res, 503, { error: "plan_source_unavailable", detail: `serve has not read the plan yet: ${planSource.failure.reason}`, planSource });
+  return true;
+}
+
 /** `Task` preserves `plan_refs`, so a process-owned plan needs no second shard traversal. */
 function planRefsFromSnapshot(plan: Plan): Map<string, string[]> {
   const refs = new Map<string, string[]>();
@@ -1040,50 +1056,48 @@ function activitySummary(row: Record<string, unknown>, taskId?: string): string 
   return taskId ? `${step} (${taskId})` : step;
 }
 
+/** Newest first, a millisecond's rows by their text: a rotation split reorders a tie's reads (2026-10-06 console). */
+function rankedActivityRows(rows: ReadonlyArray<Record<string, unknown>>): Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown> }> {
+  const ranked: Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown>; text?: string }> = [];
+  rows.forEach((row, index) => {
+    const occurredAt = activityTimestamp(row.ts);
+    if (occurredAt && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(occurredAt), occurredAt, row });
+  });
+  const text = (r: (typeof ranked)[number]): string => (r.text ??= JSON.stringify(r.row));
+  return ranked.sort((a, b) => b.ms - a.ms || (text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0));
+}
+
 function activityRows(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   observedAt: string,
 ): OperatorActivityItem[] {
   const duplicates = new Map<string, number>();
-  return ledgerLines
-    .map((row): OperatorActivityItem | undefined => {
-      const occurredAt = activityTimestamp(row.ts);
-      const taskId = activityTaskId(row);
-      const summary = activitySummary(row, taskId);
-      if (!occurredAt || !summary) return undefined;
-      const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
-      const duplicate = duplicates.get(key) ?? 0;
-      duplicates.set(key, duplicate + 1);
-      return {
-        id: activityId(row, occurredAt, duplicate),
-        kind: "activity" as const,
-        summary,
-        source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
-        observedAt: occurredAt,
-        freshness: "verified" as const,
-        ...(taskId ? { taskId } : {}),
-        ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
-      } satisfies OperatorActivityItem;
-    })
-    .filter((item): item is OperatorActivityItem => Boolean(item))
-    .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))
-    .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+  return rankedActivityRows(ledgerLines).slice(0, OPERATOR_ACTIVITY_MAX_ITEMS).map(({ row, occurredAt }): OperatorActivityItem => {
+    const taskId = activityTaskId(row);
+    const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
+    const duplicate = duplicates.get(key) ?? 0;
+    duplicates.set(key, duplicate + 1);
+    return {
+      id: activityId(row, occurredAt, duplicate),
+      kind: "activity" as const,
+      summary: activitySummary(row, taskId)!,
+      source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
+      observedAt: occurredAt,
+      freshness: "verified" as const,
+      ...(taskId ? { taskId } : {}),
+      ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
+    } satisfies OperatorActivityItem;
+  });
 }
 
 /**
  * One rotation's rows reduced to those that could reach {@link activityRows}' bound: its newest
- * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities, ties to the earlier row, kept in file order. The union's
- * newest items are the newest of these, and every earlier row sharing an item's duplicate key ranks above
- * that item, so it is kept too and each id's duplicate count is unchanged.
+ * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities by {@link rankedActivityRows}' rank, kept in file order. The
+ * union's newest items are the newest of these, and every row of an item's duplicate key ranked before it
+ * is kept too, so each id's duplicate count is unchanged.
  */
 export function operatorActivityCandidates(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  const ranked: Array<{ index: number; ms: number }> = [];
-  rows.forEach((row, index) => {
-    const at = activityTimestamp(row.ts);
-    if (at && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(at) });
-  });
-  ranked.sort((a, b) => b.ms - a.ms || a.index - b.index);
-  return ranked
+  return rankedActivityRows(rows)
     .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS)
     .map((r) => r.index)
     .sort((a, b) => a - b)
@@ -1452,6 +1466,11 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
         sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
         return;
       }
+      const planSource = deps.readPlanSource?.();
+      if (planSource?.state === "unavailable") {
+        sendJson(res, 200, { planSource, progress: { unknown: true, unavailableReason: `plan_source_unavailable: ${planSource.failure.reason}` }, sections: [], frontier: [] });
+        return;
+      }
       const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
@@ -1462,7 +1481,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>
         projection.get(id)?.indeterminate === true);
-      sendJson(res, 200, { progress, sections, frontier });
+      sendJson(res, 200, withPlanSource(deps, { progress, sections, frontier }));
     },
   };
 }
@@ -1882,11 +1901,24 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
-/** GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts). */
-export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">, inboxRoot: string) {
+export interface InboxStores {
+  fleetDecisions: DecisionStore;
+  plainMessages: PlainStore;
+}
+
+export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>): InboxStores {
+  const stateDir = join(inboxRoot, "state");
+  const ids = new Set(proposals.map((p) => p.id));
+  const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))) };
+}
+
+/** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { stores?: InboxStores }, inboxRoot: string) {
   const { proposals, classifications, ledgerLines } = classified;
+  const stores = classified.stores ?? readInboxStores(inboxRoot, proposals);
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
-  const plainStore = readPlainStore(plainStorePath(join(inboxRoot, "state")));
+  const plainStore = stores.plainMessages;
 
   const ready: InboxReadyItem[] = [];
   const drafting: InboxDraftingItem[] = [];
@@ -1932,7 +1964,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
-  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
+  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
   const needsYou = {
     ready: operatorItems(ready),
     drafting: operatorItems(drafting),
@@ -1985,11 +2017,12 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await inboxRead(deps, readPlanSnapshot);
       if (!read) return void inboxNotReady(res);
       const { ready, drafting, notReady, declined, needsYou, fleet, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet };
-      const at = read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt };
+      const at = { ...(read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt }), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
@@ -2087,11 +2120,13 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
     handler: async (_req, res) => {
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const plan = classified.plan();
+      const planSource = deps.readPlanSource?.();
       const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
         step: ["ratify.approved", "verify_human.judged"],
         refuseIncomplete: true,
@@ -2129,14 +2164,14 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: classified.mergedTaskIds,
         sources: {
-          plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
+          plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
           // retained file. Until a durable continuity index exists, history cannot certify a zero.
           archiveLedger: ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" : "partial",
           githubProjection: projectionPartial ? "partial" : "observed",
         },
       });
-      sendJson(res, 200, census);
+      sendJson(res, 200, planSource === undefined ? census : { ...census, planSource });
     },
   };
 }
@@ -2229,7 +2264,7 @@ export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefin
 
 function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowLaneInbox {
   const ledgerLines = Object.defineProperty([...persisted.ledgerRows], "torn", { value: 0 }) as LedgerLines;
-  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines };
+  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines, ...(persisted.stores ? { stores: persisted.stores } : {}) };
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
@@ -2339,11 +2374,12 @@ export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
         warmArmed = true;
         setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
       }
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await readInboxThreadListView(view);
       if (read.kind === "ok") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale" && new URL(req.url ?? "/", "http://localhost").searchParams.get("qualified") === "1") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale") {
         res.setHeader("retry-after", "1");
         sendJson(res, 503, { error: "inbox_threads_stale", detail: "the thread list is being refreshed; its rows are not source-verified", source: read.source });
@@ -2367,6 +2403,7 @@ export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: (
     handler: async (req, res) => {
       const threadId = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
       const proposalId = proposalIdOfThread(threadId);
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const item = proposalId ? operatorThreadItems(deps, readPlanSnapshot, classified).find((i) => i.proposalId === proposalId) : undefined;

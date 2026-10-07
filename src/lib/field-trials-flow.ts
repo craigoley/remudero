@@ -17,14 +17,17 @@
  * checked per repository, salted pseudonyms, small cells withheld, and REFUSED if any private join
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
+import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
+import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
-import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStore, RUN_BRANCH_RE,
+import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -91,11 +94,20 @@ export interface FlowRow {
   assignmentId: string | null;
   requestedModel: string | null;
   selectedModel: string | null;
+  selectedEffort?: string | null;
+  provider?: string | null;
   servedModel: string | null;
+  servedModelReason?: string | null;
+  notionalCostUsd?: number | null;
+  notionalCostReported?: boolean;
+  repair?: RepairCostContext;
+  importedModule?: ImportedModuleEvidence;
+  preventions?: PreventionSourceRegistration[];
   taskClass: string | null;
   risk: string | null;
   workLane: string | null;
   stackPinned: { harness: boolean; prompt: boolean; tool: boolean; scorer: boolean; environment: boolean } | null;
+  stackRevisions?: TrialRevisionPins;
   costUsd: number | null;
   billingMode: "api" | "subscription" | null;
   success: boolean | null;
@@ -139,7 +151,16 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
+    selectedEffort: text(record(assignment?.selected)?.effort), stackRevisions: trialRevisionPins(stack),
+    provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
+    servedModelReason: text(row.served_model_reason),
+    notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
+    repair: projectRepairCostContext(row),
+    importedModule: importedModuleOf(benchmark?.loadedModule),
+    preventions: preventionRegistrationsOf(row.prevention_sources),
+    notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
+      ? row.notional_cost_usd : null,
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
     risk: risk?.state === "observed" ? text(risk.value) : text(row.risk),
     workLane: lane?.state === "observed" ? text(lane.value) : text(row.worker_rung),
@@ -321,8 +342,8 @@ function flowCells(units: FlowUnit[]) {
 }
 
 type RepairBucket = "adverse-signal" | "no-adverse-signal-in-window" | "window-immature" | "unknown";
-type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number;
-  reverted: boolean; followUp: boolean; bucket: RepairBucket };
+type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number; reworkCost: RepairCostReport;
+  toFirstObservedCurrentHeadGreen: Duration; reverted: boolean; followUp: boolean; bucket: RepairBucket };
 
 function repairCells(units: RepairUnit[]) {
   const count = (predicate: (unit: RepairUnit) => boolean) => units.filter(predicate).length;
@@ -330,6 +351,9 @@ function repairCells(units: RepairUnit[]) {
   for (const unit of units) firstPass[unit.firstPass] = (firstPass[unit.firstPass] ?? 0) + 1;
   const observed = units.filter((unit) => unit.reviewRounds !== null);
   return { mergedPrs: units.length, firstPass,
+    reworkCost: repairCostCells(units.map((unit) => unit.reworkCost)),
+    toFirstObservedCurrentHeadGreen: { ...durationCell(units.map((unit) => unit.toFirstObservedCurrentHeadGreen)),
+      basis: "pr-created-to-observed-current-head-gate-success" as const, firstEver: "unavailable-retention-uncertified" as const },
     reviewRounds: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.reviewRounds!, 0) },
     repairCommits: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.repairCommits!, 0) },
     fixDispatches: units.reduce((sum, unit) => sum + unit.fixDispatches, 0),
@@ -406,10 +430,13 @@ export interface FieldTrialsFlowSnapshot {
   causalClaims: "none";
   followUpWindowDays: number;
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  preventionAdoption?: { source: string; repo: string; evidence: ReturnType<typeof preventionAdoption> }[];
+  servedTrialCohorts?: { source: string; repo: string; evidence: ReturnType<typeof servedTrialCohorts> }[];
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
-    apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
+    apiCostEstimateUsd: number; subscriptionNotionalUsd: number; servedModelKnownAssignments: number;
+    workerOutcomeKnownAssignments: number; servedModelUnavailableReasons: Record<string, number> }[];
   /** Private finding-quality evidence. Never copied into the public release. No trusted labels are inferred from GitHub workflow state. */
   reviewFindingOutcomes: FindingOutcomeReport;
   reviewFindingEvidence: FindingEvidenceReport;
@@ -559,6 +586,7 @@ function verifiedStage(taskId: string, rows: FlowRow[], caseFiles: readonly Task
 
 function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: Map<string, string | null>,
   rowsByTask: Map<string, FlowRow[]>): RepairUnit[] {
+  const reworkCosts = repairCostsByPull(ctx.rows, ctx.repo);
   const windowMs = FOLLOW_UP_WINDOW_DAYS * DAY_MS;
   const scanComplete = ctx.store?.cursors.pulls.state === "complete";
   const mergedByTask = new Map<string, GithubPull[]>();
@@ -577,9 +605,13 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
       : Date.parse(ctx.asOf) - mergedAt < windowMs ? "window-immature"
         : !scanComplete ? "unknown" : "no-adverse-signal-in-window";
     const detail = pull.detail.state === "observed" ? pull.detail : null;
+    const green = observedCurrentHeadGreen(pull, ctx.asOf);
     return withDigest({ key: `${ctx.label}|${periodOf(pull.mergedAt)}|${task === undefined ? "unlinked" : stratum(classOf.get(task) ?? null)}`,
       firstPass: detail === null ? "unavailable" : detail.checks.state, reviewRounds: detail?.reviews.changesRequested ?? null,
+      toFirstObservedCurrentHeadGreen: green === null ? { excluded: "missing-join" as const }
+        : { ms: Date.parse(green.completedAt) - Date.parse(pull.createdAt!), observed: true },
       repairCommits: detail === null ? null : Math.max(0, detail.commits.count - 1),
+      reworkCost: reworkCosts.get(pull.number) ?? repairCostCells([]),
       fixDispatches: (rowsByTask.get(task ?? "") ?? []).filter((row) => row.step === "fix.dispatch").length,
       reverted, followUp, bucket });
   });
@@ -654,6 +686,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
     learning: [] as LearningUnit[] };
   const transitions: ModelTransition[] = [];
+  const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
+  const trialCohorts: NonNullable<FieldTrialsFlowSnapshot["servedTrialCohorts"]> = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
   const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
@@ -679,6 +713,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         deploymentsKnown: Object.keys(store?.deployments ?? {}).length } });
     privateKeys.add(source.repo);
     const pulls = Object.values(store?.pulls ?? {});
+    preventionSources.push({ source: source.label, repo: source.repo, evidence: preventionAdoption(ledgerRows, input.asOf) });
+    trialCohorts.push({ source: source.label, repo: source.repo, evidence: servedTrialCohorts(ledgerRows, input.asOf, periodOf) });
     const ctx: SourceContext = { label: source.label, repo: source.repo, store, rows: ledgerRows, asOf: input.asOf,
       boots: ledgerRows.filter((row) => row.step === "daemon.boot"),
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
@@ -697,7 +733,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         const counts = assignmentTelemetry.get(key) ?? { source: source.label, selectedModel, assignments: 0,
           taskClass: 0, risk: 0, workLane: 0, harnessPinned: 0, promptPinned: 0, toolPinned: 0,
           scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 0,
-          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 };
+          costMissingAssignments: 0, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0,
+          servedModelKnownAssignments: 0, workerOutcomeKnownAssignments: 0, servedModelUnavailableReasons: {} };
         counts.assignments += 1;
         counts.taskClass += Number(row.taskClass !== null);
         counts.risk += Number(row.risk !== null);
@@ -710,10 +747,23 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         const attempt = row.assignmentId === null ? undefined : attemptByAssignment.get(row.assignmentId);
         if (attempt === undefined) counts.nonStarterAssignments += 1;
         else counts.attemptReceipts += 1;
-        if (attempt?.costUsd === null || attempt?.costUsd === undefined || attempt.billingMode === null)
+        counts.servedModelKnownAssignments += Number(attempt?.servedModel != null);
+        counts.workerOutcomeKnownAssignments += Number(attempt?.success != null);
+        if (attempt !== undefined && attempt.servedModel === null) {
+          const reason = (attempt.servedModelReason ?? "provider-did-not-report-served-model").slice(0, 256);
+          const bucket = Object.hasOwn(counts.servedModelUnavailableReasons, reason) || Object.keys(counts.servedModelUnavailableReasons).length < 20
+            ? reason : "other-unavailable-reason";
+          const hits = Object.hasOwn(counts.servedModelUnavailableReasons, bucket) ? counts.servedModelUnavailableReasons[bucket] : 0;
+          Object.defineProperty(counts.servedModelUnavailableReasons, bucket, { value: hits + 1, enumerable: true, configurable: true });
+        }
+        const cost = attempt?.billingMode === "subscription"
+          ? attempt.notionalCostReported ? attempt.notionalCostUsd
+            : (attempt.provider ?? row.provider) === "codex" ? null : attempt.costUsd
+          : attempt?.costUsd;
+        if (cost === null || cost === undefined || attempt?.billingMode == null)
           counts.costMissingAssignments += 1;
-        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += attempt.costUsd;
-        else counts.subscriptionNotionalUsd += attempt.costUsd;
+        else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += cost;
+        else counts.subscriptionNotionalUsd += cost;
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
@@ -793,7 +843,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes, reviewFindingEvidence,
+    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources, servedTrialCohorts: trialCohorts,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,

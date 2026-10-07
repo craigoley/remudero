@@ -60,7 +60,7 @@ function fakeConfigWithRoot(): Config {
 function settingsFile(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-isolation-reason-settings-"));
   const path = join(dir, "worker.json");
-  writeFileSync(path, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true }, permissions: { deny: [], allow: [], ask: [] } }));
+  writeFileSync(path, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false }, permissions: { deny: [], allow: [], ask: [] } }));
   return path;
 }
 

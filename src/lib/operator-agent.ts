@@ -668,6 +668,16 @@ function readOperatorAgentUnion(stateDir: string, opts: PanelUnionReadOptions): 
   return read.rows;
 }
 
+export function withOperatorAgentRows<T>(ledgerPath: string, rows: ReadonlyArray<Record<string, unknown>>, read: () => T): T {
+  const was = servedPanelRows;
+  servedPanelRows = { stateDir: dirname(ledgerPath), rows };
+  try {
+    return read();
+  } finally {
+    servedPanelRows = was;
+  }
+}
+
 function servedGet(deps: OperatorAgentRouteDependencies, handler: RouteHandler): RouteHandler {
   const source = deps.panelRows;
   if (!source) return handler;
@@ -3086,12 +3096,15 @@ function readEmergencyControlState(rows: readonly Record<string, unknown>[]): Em
   return { stops, clearedIds };
 }
 
-/** The currently ACTIVE stops — already filtered by {@link isEmergencyStopActive} — this task's
- *  admission call sites pass straight to {@link checkEmergencyStop}. */
-function activeEmergencyStops(deps: OperatorAgentRouteDependencies, rows = emergencyStopRows(deps.ledgerPath)): EmergencyStop[] {
+/** The stops active at `now` among emergency `rows`: the status route's `active` and the incidents view's (W1-T5054). */
+export function activeEmergencyStopsAt(rows: readonly Record<string, unknown>[], now: number): EmergencyStop[] {
   const { stops, clearedIds } = readEmergencyControlState(rows);
-  const now = deps.now?.() ?? Date.now();
   return [...stops.values()].filter((stop) => isEmergencyStopActive(stop, clearedIds, now));
+}
+
+/** The currently ACTIVE stops, which admission call sites pass straight to {@link checkEmergencyStop}. */
+function activeEmergencyStops(deps: OperatorAgentRouteDependencies, rows = emergencyStopRows(deps.ledgerPath)): EmergencyStop[] {
+  return activeEmergencyStopsAt(rows, deps.now?.() ?? Date.now());
 }
 
 /** POST /v1/operator-agent/emergency/stop — issue a bounded, incident-linked emergency stop. */
@@ -3921,12 +3934,16 @@ function projectPlan(deps: OperatorAgentRouteDependencies, state: IntentPlanStat
   return projectIntentPlan(state, planLinkedActions(deps, state), clockFromMillisFn(deps.now), planDelegation(deps, state));
 }
 
+export function readOperatorAgentIntentPlans(deps: OperatorAgentRouteDependencies) {
+  return { version: INTENT_PLAN_VERSION, state: "verified" as const, intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" as const };
+}
+
 export function buildOperatorAgentIntentPlanReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
     method: "GET",
     path: OPERATOR_AGENT_INTENT_PLANS_PATH,
     scope: "read",
-    handler: servedGet(deps, (_req, res) => sendJson(res, 200, { version: INTENT_PLAN_VERSION, state: "verified", intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" })),
+    handler: servedGet(deps, (_req, res) => sendJson(res, 200, readOperatorAgentIntentPlans(deps))),
   };
 }
 

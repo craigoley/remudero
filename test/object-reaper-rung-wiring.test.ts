@@ -24,10 +24,10 @@ const noSweeps = {
   ratifications: new Map(),
 };
 
-test("W1-T3092: a disabled rung SURVEYS and never prunes", () => {
+test("W1-T3092: a disabled rung SURVEYS and never prunes", async () => {
   let sawDryRun: boolean | undefined;
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
+  const out = await logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
     ...noSweeps,
     objectPolicy: () => ({ enabled: false }),
     reapObjects: ((_r: string, _i: string, d: { dryRun?: boolean }) => {
@@ -42,9 +42,9 @@ test("W1-T3092: a disabled rung SURVEYS and never prunes", () => {
   assert.equal(reclaim?.[1].objects_would_prune, 42, "and it reaches the ledger, or the survey is unreadable");
 });
 
-test("W1-T3092: an armed rung prunes when quiet — arming is the flag and nothing else", () => {
+test("W1-T3092: an armed rung prunes when quiet — arming is the flag and nothing else", async () => {
   let sawDryRun: boolean | undefined;
-  const out = logDiskReclaimRung(cfg(), () => {}, {
+  const out = await logDiskReclaimRung(cfg(), () => {}, {
     ...noSweeps,
     objectPolicy: () => ({ enabled: true }),
     reapObjects: ((_r: string, _i: string, d: { dryRun?: boolean }) => {
@@ -60,14 +60,15 @@ test("W1-T3092: survey and armed share ONE predicate — the survey returns past
   // Driven through the REAL reaper, not a double: a survey that reached different probes would
   // report a disposition nobody will ever act on.
   const repoDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pred-`));
-  const held = { listWorktrees: () => ["/w/live"], listInflightLocks: () => [], openFileCount: () => 0, looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1 };
+  // 2026-10-06 operator ruling: only an open handle under .git still refuses, so that is the held arm.
+  const held = { listWorktrees: () => [], listInflightLocks: () => [], openFileCount: () => 2, looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1 };
   const dry = reapGitObjects(repoDir, "/i", { ...held, dryRun: true, countPrunable: () => 5 });
   const armed = reapGitObjects(repoDir, "/i", { ...held, runPrune: () => assert.fail("refused") });
   assert.equal(dry.refusedBecause, armed.refusedBecause, "both refuse identically, for the same stated cause");
   assert.equal(dry.wouldPrune, undefined, "a REFUSED survey reports no estimate — it never got that far");
 
   // ...and when quiet, the survey counts and the armed path prunes, from the same starting point.
-  const quiet = { ...held, listWorktrees: () => [] };
+  const quiet = { ...held, openFileCount: () => 0 };
   const dry2 = reapGitObjects(repoDir, "/i", { ...quiet, dryRun: true, countPrunable: () => 5 });
   assert.equal(dry2.refusedBecause, undefined);
   assert.equal(dry2.wouldPrune, 5);
@@ -89,8 +90,8 @@ test("W1-T3092: a surveying pass spawns NOTHING and leaves gc.log alone", () => 
   assert.equal(r.wouldPrune, 7);
 });
 
-test("W1-T3092: a throwing object sweep does not break the rung or its three siblings", () => {
-  const out = logDiskReclaimRung(cfg(), () => {}, {
+test("W1-T3092: a throwing object sweep does not break the rung or its three siblings", async () => {
+  const out = await logDiskReclaimRung(cfg(), () => {}, {
     ...noSweeps,
     sweepTempDirs: () => ({ removed: ["a"] }) as never,
     objectPolicy: () => { throw new Error("policy exploded"); },
@@ -100,9 +101,9 @@ test("W1-T3092: a throwing object sweep does not break the rung or its three sib
   assert.equal(out.tempDirsRemoved, 1, "and its SIBLING still ran — the guard is per-sweep, not per-rung");
 });
 
-test("W1-T3092: the decline is ledgered, because 'how often is the fleet quiet' IS the survey result", () => {
+test("W1-T3092: the decline is ledgered, because 'how often is the fleet quiet' IS the survey result", async () => {
   const rows: Array<[string, Record<string, unknown>]> = [];
-  logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
+  await logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
     ...noSweeps,
     objectPolicy: () => ({ enabled: false }),
     reapObjects: (() => ({ pruned: 0, looseBefore: 9000, refusedBecause: "3 worktree(s) registered" })) as never,

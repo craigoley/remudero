@@ -80,6 +80,11 @@ worker's `gh` runs outside Seatbelt (it fails TLS verification under it); and th
 own push is commented as "the ONE orchestrator-initiated push in this file (the worker itself
 normally pushes from inside its own sandbox)" — a FALLBACK, not the route.
 
+SINCE REMOVED: both the `excludedCommands` exclusion and the `.config/gh` grant are gone. The bundled
+CLI ran a whole compound command unsandboxed when any part matched `gh *`, and the grant let a worker
+write the operator's own gh config. A worker's `gh` now runs sandboxed and authenticates with
+`GH_TOKEN` alone (test/a-claude-worker-gh-runs-inside-the-sandbox.test.ts).
+
 AND THE WORKER ALREADY HOLDS THIS CREDENTIAL ON MACOS. `WORKER_HOME_SYMLINKS` (worker-home.ts)
 grants `.config/gh` into every per-run worker HOME, with the reason recorded verbatim as "gh CLI
 auth token, so a worker can open/merge PRs". A container simply stores the same secret in a
@@ -256,6 +261,11 @@ call — it is that its `recordedVersion` argument HAD NO PRODUCER ANYWHERE IN T
 carries `claudeBin`, a PATH, and no version; `resolveClaudeExecutable` runs `--version` with
 `stdio: "ignore"` and discards the output. Wiring it therefore required deciding what "recorded"
 means, which is the whole of the design below.
+
+**2026-10-07 — the declaration moved to deploy/package.json.** Its exact `@anthropic-ai/claude-code` and
+`@openai/codex` dependencies are now the one declaration: the image layer checks them against the lock,
+deploy/verify-image.sh and `readBinaryPin` read them, and the Dockerfile carries no version ARG. The ARGs
+were a second copy dependabot never bumped, so every CLI bump went red until hand-edited (#9768).
 
 THE SOURCE OF TRUTH IS THE ONE DECLARATION THIS REPO ALREADY MAKES: `ARG CLAUDE_CODE_VERSION` in
 deploy/Dockerfile. Two reasons, and the second is why nothing else was chosen:

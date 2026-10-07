@@ -1,5 +1,6 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
+import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
@@ -347,13 +348,14 @@ export interface BenchmarkRunAssignmentInput {
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
   work: BenchmarkWorkInput,
-  stackEvidence: BenchmarkStackEvidence = {},
+  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
 ) {
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
   // actual prompt/tools/scorer used by this worker call or grants this instance publication.
   return {
     version: BENCHMARK_RUN_VERSION,
     phase: "assignment" as const,
+    loadedModule: importedModuleOf(stackEvidence.loadedModule),
     work: {
       taskClass: observedString(work.taskClass, "not-recorded-at-assignment"),
       risk: observedString(work.risk, "not-recorded-at-assignment"),
@@ -389,13 +391,20 @@ function callEvidence(row: Record<string, unknown>) {
     ? row.tokens as Record<string, unknown> : undefined;
   const input = observedNonnegative(rawTokens?.input, "worker-tokens-not-reported");
   const output = observedNonnegative(rawTokens?.output, "worker-tokens-not-reported");
-  const tokens: Evidence<{ input: number; output: number }> = input.state === "observed" && output.state === "observed"
+  const usageState = row.token_usage_state;
+  const completeUsage = usageState === undefined || usageState === "observed";
+  const tokenReason = usageState === "partial" ? "worker-token-usage-partial"
+    : usageState === "unavailable" ? "worker-token-usage-unavailable"
+      : !completeUsage ? "worker-token-usage-invalid" : "worker-tokens-not-reported";
+  const tokens: Evidence<{ input: number; output: number }> = completeUsage && input.state === "observed" && output.state === "observed"
     ? { state: "observed", value: { input: input.value, output: output.value } }
-    : unavailable("worker-tokens-not-reported");
+    : unavailable(tokenReason);
   const workerCall: Outcome = row.success === true ? { state: "observed", value: true }
     : row.success === false ? { state: "failed", value: false }
       : unavailable("worker-outcome-not-reported");
   const cost = observedNonnegative(row.total_cost_usd, "worker-cost-not-reported");
+  const notional = observedNonnegative(Object.hasOwn(row, "notional_cost_usd") ? row.notional_cost_usd
+    : row.provider === "codex" ? undefined : row.total_cost_usd, "worker-cost-not-reported");
   const billingMode = row.billing_mode === "api" || row.billing_mode === "subscription"
     ? row.billing_mode : undefined;
   const otherMode = unavailable("different-billing-mode");
@@ -408,7 +417,7 @@ function callEvidence(row: Record<string, unknown>) {
       source: "worker-result-estimate-not-invoice" as const,
       billingMode: billingMode ? { state: "observed" as const, value: billingMode } : unavailable("billing-mode-not-reported"),
       apiCostUsd: billingMode === "api" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
-      subscriptionNotionalUsd: billingMode === "subscription" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
+      subscriptionNotionalUsd: billingMode === "subscription" ? notional : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
     },
   };
 }
@@ -421,8 +430,10 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
   const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
   const codexPlaceholder = result.provider === "codex";
   const costObserved = observedEnvelope && !(codexPlaceholder && result.costUsd === 0);
-  const tokensObserved = observedEnvelope && !(codexPlaceholder && result.tokens.input === 0
-    && result.tokens.output === 0 && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0);
+  const tokensObserved = observedEnvelope && (fields.token_usage_state === undefined
+    ? !(codexPlaceholder && result.tokens.input === 0 && result.tokens.output === 0
+      && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
+    : fields.token_usage_state === "observed");
   return {
     served_model: fields.served_model,
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
@@ -430,7 +441,9 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     worker_duration_ms: fields.worker_duration_ms,
     ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
     ...(tokensObserved ? { tokens: fields.tokens } : {}),
+    ...(fields.token_usage_state === undefined ? {} : { token_usage_state: fields.token_usage_state }),
     ...(costObserved ? { total_cost_usd: fields.total_cost_usd } : {}),
+    ...(observedEnvelope && fields.notional_cost_usd !== undefined ? { notional_cost_usd: fields.notional_cost_usd } : {}),
   };
 }
 

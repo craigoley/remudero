@@ -1,0 +1,65 @@
+- id: W1-T6077
+  title: "A MAIN GUARD RED DECIDES ONLY FROM A RECENT MAIN RUN — W1-T6023 (#9627) let a completed run decide the required-check fallback only when its head sha is among main's last 50 first-parent commits, because GitHub sometimes answers `actions/runs?branch=main&event=push` with a days-old page; failedMainGuardRuns reads the SAME page with no such window, so a stale page whose newest main-plan-guard run is one of the 21 failures of 2026-10-02 to 10-04 would read a healthy main red, and a stale green guard run would hide a current red one"
+  repo: remudero
+  depends_on: [W1-T6023]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which main push runs may give the main-guard verdict; two src files in the daemon's main-health lane
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up of #9627 (W1-T6023)"
+  plan_refs: [W1-T6023, W1-T5490, W1-T1266, W1-T5630]
+  files: [src/lib/sweep.ts, src/lib/main-health-rung.ts, test/a-main-guard-red-decides-only-from-a-recent-main-run.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a76291b3, against GitHub and the ledger.
+    WHAT IT COUNTS. src/lib/sweep.ts failedMainGuardRuns(history) walks the newest-first push-run history and,
+    for each MAIN_GUARD_WORKFLOWS member (only "main-plan-guard"), takes the first run that is a verdict
+    (mainRunIsVerdict: a conclusion that is not CANCELLED, SKIPPED or STALE), then returns it if
+    mainHealthFailureConclusion says failed. A newer success supersedes an older failure.
+    OVER WHAT POPULATION. The history is one page, mainPushRunHistoryRestArgs
+    `actions/runs?branch=<main>&event=push&per_page=100`, completed runs only since W1-T6023. It is read on
+    every observation, cached per head (runHistoryCacheKey, MAIN_HEALTH_RUN_HISTORY_TTL_MS). In
+    src/lib/main-health-rung.ts the caller is
+    `const guardFailures = runHistory ? failedMainGuardRuns(runHistory) : [];`, and any failure sets
+    `state: "red"`, prefixes the reason `main guard workflow(s) failed on main: ...`, and sets decidedBySha to
+    that run's head sha. W1-T6023's recentShas window (readMainFirstParentWindow,
+    MAIN_HEALTH_FALLBACK_WINDOW_COMMITS = 50) is read only when the head is inconclusive, and only
+    mainHealthFallbackRuns uses it.
+    WHY NO WINDOW IS WRONG HERE. Old reds do NOT count forever on a fresh page. main-plan-guard runs on every
+    push to main (main-plan-guard.yml has `on: push: branches: [main]` with no paths filter), so its newest
+    completed run is a commit or two behind the head. The failure is the stale page that W1-T6023 measured:
+    on 2026-10-06 the same request returned pages whose newest run was 22397b6d (1856 first-parent commits
+    back) and ca9be1f7 (124 back). The guard takes its verdict from whatever page arrives.
+    MEASURED POPULATION. gh api actions/workflows/main-plan-guard.yml/runs?branch=main (the newest 1000 runs,
+    2026-10-01T12:52Z to 2026-10-06T22:25Z): 817 success, 162 cancelled, 21 failure. All 21 failures fall
+    between 2026-10-02T17:50Z and 2026-10-04T00:41Z (the unloadable-plan outages W1-T5490 answered).
+    On the two stale shas W1-T6023 saw, main-plan-guard was success (22397b6d 2026-09-24, ca9be1f7
+    2026-10-05), so neither stale page flipped the guard. Ledger union (402 .gz rotations, 0 plain rotations,
+    live ledger.ndjson): 28,916 distinct main.health.observed rows (2026-09-02 to 2026-10-06T22:28Z), 0 whose
+    reason names a main guard failure. That zero matches GitHub: the guard read went live with #8961 at
+    2026-10-04T05:43Z, after the last guard failure at 00:41Z. So the defect is latent: no false red has been
+    observed. It is the repo's recurring "a bound that fires on a healthy condition" shape, and the population it
+    would misfire on (a stale page from the 10-02 to 10-04 window) has existed since 10-04.
+  design: |
+    (1) src/lib/sweep.ts failedMainGuardRuns takes `recentShas: ReadonlySet<string>` and considers only runs whose
+    head sha is in it. The newest in-window verdict of each guard workflow decides. A guard verdict outside the
+    window is returned separately as `skipped`, mirroring mainHealthFallbackRuns' `{ runs, skipped }`.
+    (2) src/lib/main-health-rung.ts: read the guard verdict without the window first. When it would read red,
+    read main's first-parent window through the same readMainFirstParentWindow and runHistoryCache.recentShas as
+    the fallback (at most one extra read per head, and only while a guard failure is on the page), then decide
+    with (1). A guard failure outside the window does not turn main red. The reason names the skipped run's head
+    sha and the window size. If the window read fails, main is not turned red by the guard. The existing
+    `main.health.recent_commits_unreadable` row is logged and the reason names the failed read, as W1-T6023 does
+    for the fallback.
+    (3) No new constant: the guard uses MAIN_HEALTH_FALLBACK_WINDOW_COMMITS, whose derivation (the slowest
+    legitimate lag behind main's head) applies unchanged to a workflow that runs on every push.
+  acceptance:
+    - claim: "a run-history page whose only failed main-plan-guard run is for a sha outside main's recent first-parent window leaves the guard silent and names that sha in the reason; the same failure for a sha inside the window reads main red as today; a newer in-window guard success still supersedes an older in-window failure; and an unreadable window never turns main red through the guard"
+      proof: "unit test: test/a-main-guard-red-decides-only-from-a-recent-main-run.test.ts"
+  falsifier: |
+    Call failedMainGuardRuns without the window: the stale-page fixture (newest guard run a failure on a sha
+    1856 commits back, every in-window required check green) reads main red, and the test fails.

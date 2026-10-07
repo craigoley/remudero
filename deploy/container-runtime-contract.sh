@@ -8,7 +8,7 @@
 #
 # Usage:
 #   container-runtime-contract.sh --container <name> \
-#     --expect <host-source> <container-destination> rw [--expect ...]
+#     --expect <host-source> <container-destination> rw|ro [--expect ...]
 #
 # Exit 0 = healthy, 1 = drift, 2 = Docker inspection unreadable, 64 = invalid invocation.
 
@@ -17,6 +17,7 @@ set -u -o pipefail
 CONTAINER=""
 EXPECT_SOURCES=()
 EXPECT_DESTINATIONS=()
+EXPECT_MODES=()
 MAX_EXPECTATIONS=16
 
 json_escape() {
@@ -47,12 +48,13 @@ while [ "$#" -gt 0 ]; do
       ;;
     --expect)
       [ "$#" -ge 4 ] || usage_error
-      [ "$4" = "rw" ] || usage_error
+      case "$4" in rw|ro) : ;; *) usage_error ;; esac
       [ "${#EXPECT_SOURCES[@]}" -lt "${MAX_EXPECTATIONS}" ] || usage_error
       safe_argument "$2" 4096 || usage_error
       safe_argument "$3" 512 || usage_error
       EXPECT_SOURCES+=("$2")
       EXPECT_DESTINATIONS+=("$3")
+      EXPECT_MODES+=("$4")
       shift 4
       ;;
     -h|--help)
@@ -80,6 +82,8 @@ index=0
 while [ "${index}" -lt "${#EXPECT_SOURCES[@]}" ]; do
   expected_source="${EXPECT_SOURCES[${index}]}"
   expected_destination="${EXPECT_DESTINATIONS[${index}]}"
+  expected_rw=true
+  [ "${EXPECT_MODES[${index}]}" = "rw" ] || expected_rw=false
   found_destination=0
   found_source=0
   found_exact=0
@@ -89,7 +93,7 @@ while [ "${index}" -lt "${#EXPECT_SOURCES[@]}" ]; do
     found_destination=1
     [ "${actual_source:-}" = "${expected_source}" ] || continue
     found_source=1
-    if [ "${actual_rw:-}" = "true" ]; then
+    if [ "${actual_rw:-}" = "${expected_rw}" ]; then
       found_exact=1
       break
     fi
@@ -103,7 +107,7 @@ EOF_MOUNTS
     elif [ "${found_source}" -ne 1 ]; then
       reason="wrong_source"
     else
-      reason="read_only"
+      if [ "$expected_rw" = "true" ]; then reason="read_only"; else reason="read_write"; fi
     fi
     if [ "${DRIFT_COUNT}" -gt 0 ]; then DRIFT_JSON="${DRIFT_JSON},"; fi
     DRIFT_JSON="${DRIFT_JSON}{\"destination\":\"$(json_escape "${expected_destination}")\",\"reason\":\"${reason}\"}"

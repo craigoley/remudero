@@ -31,7 +31,7 @@ could spawn. That is fixed below. UNVERIFIED until the next build runs and someo
 FIVE REQUIREMENTS, each established rather than assumed — see the report in
 state/recon-container-build.md for the execution evidence behind each one.
 
-## `FROM node:22.22.3-bookworm-slim@sha256:…` — the exact-version and digest pin
+## `FROM node:24.21.0-bookworm-slim@sha256:…` — the exact-version and digest pin
 
 W1-T2770: PINNED TO THE EXACT `.nvmrc` VERSION, NOT THE FLOATING `node:22-bookworm-slim` TAG.
 `scripts/coverage-merge-ratchet.mjs` reaches into `internal/test_runner/coverage` (Node's own
@@ -52,7 +52,8 @@ caused the outage.
 UPDATING THE PIN. Bump `.nvmrc`, the `FROM` tag, and its digest in the same reviewed change; the
 Docker Dependabot lane handles routine digest refreshes, while a Node version bump remains a
 coordinated change. The cluster's self-expiry then re-arms itself around the new pin the moment
-the image lands.
+the image lands. 2026-10-05: 22.22.3 -> 24.21.0 (W1-T5883), after W1-T5882 made the code behave the
+same on both runtimes; the merge recycles all three daemons, so stage it with DEPLOY_IMAGE_MANUAL.
 
 ## `RUN apt-get install … tini ca-certificates curl git` — REQ 1, an init that reaps
 
@@ -267,6 +268,11 @@ that no worker can ever spawn.
 REQ 11 blamed for the shipped root-owned cache; it does create one, but the chown below repairs it,
 so it was never the layer that survived to the image. It is fixed here anyway — the throwaway cache
 also stops the chown having to rewrite the whole tree into a second layer.
+
+**2026-10-07 — the declaration moved to deploy/package.json.** Its exact `@anthropic-ai/claude-code` and
+`@openai/codex` dependencies are now the one declaration: the image layer checks them against the lock,
+deploy/verify-image.sh and `readBinaryPin` read them, and the Dockerfile carries no version ARG. The ARGs
+were a second copy dependabot never bumped, so every CLI bump went red until hand-edited (#9768).
 
 ## `ARG CODEX_VERSION` and the global `codex` install
 

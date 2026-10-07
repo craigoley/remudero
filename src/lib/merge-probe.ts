@@ -1,8 +1,11 @@
-import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
+import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
 export const MERGE_PROBE_STEP = "sweep.merge_probe";
@@ -122,7 +125,7 @@ export async function probeOpenPrMerges(
   }
 }
 
-/** W1-T5658: the bound on one `tsc --noEmit`; past it the precheck is unavailable and the push proceeds. */
+/** W1-T5658: BACKSTOP on one `tsc --noEmit`; past it the precheck is unavailable and the push proceeds. */
 const MERGED_TYPECHECK_TIMEOUT_MS = 10 * 60_000;
 const MERGED_TYPECHECK_TEXT_CAP = 4000;
 
@@ -141,16 +144,50 @@ export type MergedTypecheckResult =
   | { outcome: "head_fails"; mainSha: string }
   | { outcome: "skipped"; reason: string };
 
+/** The one spawn the default typecheck makes; a port so a test can observe its argv and env. */
+export type TypecheckSpawn = (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+
 export type MergedTypecheckPorts = {
   git?: MergeProbeGit;
-  /** Runs the typecheck in `dir`; the default spawns the worktree's own `tsc` asynchronously. */
+  /** Runs the typecheck in `dir`; the default spawns the HARNESS's own `tsc` asynchronously. */
   typecheck?: (dir: string, nodeModules: string) => Promise<TypecheckRun>;
+  spawn?: TypecheckSpawn;
   /** The ref the head is merged with. */
   mainRef?: string;
 };
 
-const defaultTypecheck = (dir: string, nodeModules: string): Promise<TypecheckRun> =>
-  new Promise((resolveRun) => {
+/** W1-T6155: the harness's OWN typescript, found from this module's location — never from a worktree, whose
+ *  `node_modules` entry the worker owns. TS 7's `bin/tsc` is a launcher that execs the native compiler resolved from
+ *  its own install, so the program that runs is wholly the harness's. */
+function harnessTypescript(): { tsc: string; version: string; modules: string } {
+  const pkgPath = createRequire(import.meta.url).resolve("typescript/package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version: string; bin: { tsc: string } };
+  const pkgDir = realpathSync(dirname(pkgPath));
+  return { tsc: join(pkgDir, pkg.bin.tsc), version: pkg.version, modules: dirname(pkgDir) };
+}
+
+const within = (path: string, root: string): boolean => path === root || path.startsWith(root + sep);
+const realOrUndefined = (path: string): string | undefined => (existsSync(path) ? realpathSync(path) : undefined);
+
+/** Options a tree's tsconfig could use to make the compiler WRITE outside the scratch dir (tsBuildInfoFile, a trace
+ *  directory, a cpu profile) are reset by a harness-owned wrapper config that `extends` the tree's; the rest of the
+ *  tree's config is read as data. `references` is not inherited through `extends`, which `--noEmit -p` never builds.
+ *  The wrapper sits at the materialised tree's root so default `typeRoots` resolve from there, as they would in CI. */
+const WRAPPER_CONFIG = "tsconfig.rmd-merged-typecheck.json";
+const WRAPPER_COMPILER_OPTIONS = {
+  noEmit: true, incremental: false, composite: false, tsBuildInfoFile: null, generateTrace: null, generateCpuProfile: null,
+};
+
+function harnessTypecheck(
+  tsc: string, scratch: string, spawnChild: TypecheckSpawn,
+): (dir: string, nodeModules: string) => Promise<TypecheckRun> {
+  let n = 0;
+  return (dir) => new Promise((resolveRun) => {
+    n += 1;
+    const home = join(scratch, `home-${n}`);
+    mkdirSync(home);
+    const config = join(dir, WRAPPER_CONFIG);
+    writeFileSync(config, JSON.stringify({ extends: "./tsconfig.json", compilerOptions: WRAPPER_COMPILER_OPTIONS }));
     let output = "";
     let timedOut = false;
     let settled = false;
@@ -160,16 +197,29 @@ const defaultTypecheck = (dir: string, nodeModules: string): Promise<TypecheckRu
       clearTimeout(timer);
       resolveRun({ status, output: output + extra, timedOut });
     };
-    const child = spawn(process.execPath, [join(nodeModules, "typescript", "bin", "tsc"), "--noEmit", "-p", "tsconfig.json"], {
-      cwd: dir, stdio: ["ignore", "pipe", "pipe"],
+    const child = spawnChild(process.execPath, [tsc, "--noEmit", "-p", config], {
+      cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
     });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
     const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };
-    child.stdout.on("data", take);
-    child.stderr.on("data", take);
+    child.stdout?.on("data", take);
+    child.stderr?.on("data", take);
     child.on("error", (e) => finish(null, `\nspawn failed: ${e.message}`));
     child.on("close", (code) => finish(code));
   });
+}
+
+/** Where a worktree's `node_modules` may resolve and still be read as type DATA: inside the worktree, the harness's own
+ *  install, or the managed checkout's `node_modules` — found from the gitdir {@link pinWorktreeGit} vouches for, never
+ *  from the worktree's own `.git` text. A plain repository has no separate managed checkout. */
+function declarationRoots(wt: string, harnessModules: string): string[] {
+  const roots = [realpathSync(wt), harnessModules];
+  const pin = pinWorktreeGit(wt);
+  if (pin.source === "git-directory") return roots;
+  const common = resolve(pin.gitDir, readFileSync(join(pin.gitDir, "commondir"), "utf8").trim());
+  const managed = realOrUndefined(join(dirname(common), "node_modules"));
+  return managed === undefined ? roots : [...roots, managed];
+}
 
 /**
  * W1-T5658: would CI's `refs/pull/N/merge` — this head merged with main — still typecheck? Two sides can add
@@ -177,6 +227,9 @@ const defaultTypecheck = (dir: string, nodeModules: string): Promise<TypecheckRu
  * compiles alone says nothing about the tree CI builds. Run `git merge-tree --write-tree`, materialise a clean
  * merge in a scratch directory with the worktree's node_modules linked, and run `tsc --noEmit` there — async,
  * off the daemon's loop. Only when that fails AND the head alone passes is the push refused.
+ * W1-T6155: the compiler is the harness's, its env the proof allowlist with a throwaway HOME (W1-T6124); the trees
+ * and their declarations are data. A tree whose installed typescript is not the harness's version is skipped by
+ * name rather than judged by a compiler CI would not run.
  */
 export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPorts = {}): Promise<MergedTypecheckResult> {
   const git = ports.git ?? defaultMergeProbeGit(wt);
@@ -195,19 +248,37 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     if (probe.verdict !== "clean") return { outcome: "skipped", reason: `merge ${probe.verdict}` };
     const nodeModules = join(wt, "node_modules");
     if (!existsSync(nodeModules) || !existsSync(join(wt, "tsconfig.json"))) return { outcome: "skipped", reason: "no tsconfig or node_modules to typecheck with" };
-    const typecheck = ports.typecheck ?? defaultTypecheck;
-    scratch = mkdtempSync(join(tmpdir(), "rmd-merged-typecheck-"));
-    const tar = join(scratch, "tree.tar");
-    const tree = join(scratch, "tree");
-    mkdirSync(tree);
-    const archived = await git(["archive", "--format=tar", `--output=${tar}`, probe.tree]);
-    if (archived.status !== 0) return { outcome: "skipped", reason: `git archive exited ${archived.status}` };
-    await new Promise<void>((done, fail) => execFile("tar", ["-xf", tar, "-C", tree], (e) => (e ? fail(e) : done())));
-    symlinkSync(realpathSync(nodeModules), join(tree, "node_modules"));
+    const harness = harnessTypescript();
+    const realModules = realpathSync(nodeModules);
+    if (!declarationRoots(wt, harness.modules).some((root) => within(realModules, root))) {
+      return { outcome: "skipped", reason: `node_modules resolves outside the worktree, the managed checkout and the harness install: ${realModules}` };
+    }
+    const treeTs = join(realModules, "typescript", "package.json");
+    const treeVersion = existsSync(treeTs) ? (JSON.parse(readFileSync(treeTs, "utf8")) as { version?: unknown }).version : undefined;
+    if (treeVersion !== undefined && treeVersion !== harness.version) {
+      return { outcome: "skipped", reason: `typescript version skew: harness ${harness.version}, tree ${String(treeVersion)}` };
+    }
+    const root = mkdtempSync(join(tmpdir(), "rmd-merged-typecheck-"));
+    scratch = root;
+    const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn);
+    const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
+      const tar = join(root, `${name}.tar`);
+      const dir = join(root, name);
+      mkdirSync(dir);
+      if ((await git(["archive", "--format=tar", `--output=${tar}`, treeish])).status !== 0) return undefined;
+      await new Promise<void>((done, fail) => execFile("tar", ["-xf", tar, "-C", dir], (e) => (e ? fail(e) : done())));
+      symlinkSync(realModules, join(dir, "node_modules"));
+      return dir;
+    };
+    const tree = await materialise(probe.tree, "tree");
+    if (tree === undefined) return { outcome: "skipped", reason: "git archive of the merged tree failed" };
     const merged = await typecheck(tree, join(tree, "node_modules"));
     if (merged.timedOut) return { outcome: "skipped", reason: "typecheck timed out" };
+    if (merged.status === null) return { outcome: "skipped", reason: `typecheck could not run:${merged.output.slice(-200)}` };
     if (merged.status === 0) return { outcome: "passes", mainSha };
-    const alone = await typecheck(wt, nodeModules);
+    const headTree = await materialise(headSha, "head");
+    if (headTree === undefined) return { outcome: "skipped", reason: "git archive of the head failed" };
+    const alone = await typecheck(headTree, join(headTree, "node_modules"));
     if (alone.timedOut) return { outcome: "skipped", reason: "head typecheck timed out" };
     if (alone.status !== 0) return { outcome: "head_fails", mainSha };
     return { outcome: "merged_fails", mainSha, text: merged.output.slice(0, MERGED_TYPECHECK_TEXT_CAP) };

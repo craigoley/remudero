@@ -51,13 +51,29 @@ export interface ViewSource {
   budgetMs?: number;
 }
 
+/**
+ * A reading both sides copy from one input that moves between their reads: a file a writer rewrites in place, or
+ * the newest ledger row of a step. `at` is the path, inside the part, of the reading's own observation time;
+ * `verdicts` maps a path judged at read time to the deadline path it is judged against; `viewReadAt` names the
+ * body source whose as-of is the instant the view read the input. `fields` narrows the reading to those paths of
+ * the part (each with its children), for a part that carries several readings; absent, it covers the whole part.
+ */
+export interface ShadowReadingSpec {
+  at: string;
+  verdicts?: Readonly<Record<string, string>>;
+  viewReadAt: string;
+  fields?: readonly string[];
+}
+
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
+  /** Per data path, the reading (or each reading) it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
+  shadowReadings?: Readonly<Record<string, ShadowReadingSpec | readonly ShadowReadingSpec[]>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
   compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
-  /** Per data path, the one source its value is computed from wholly: the shadow pairs the two sides' reads of it (view-shadow.ts). */
-  shadowSources?: Readonly<Record<string, string>>;
+  /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */
+  shadowSources?: Readonly<Record<string, string | readonly string[]>>;
 }
 
 export interface ViewBody<T = unknown> {
@@ -132,6 +148,12 @@ export function viewKey(params: URLSearchParams): string {
     .join("&");
 }
 
+/** The newest row a body reflects: the latest `asOf` among its `ledger:<instance>` sources, and `rowTs` when given. */
+export function newestLedgerRow(sources: readonly ViewSource[], rowTs?: string): string | undefined {
+  const rows = sources.filter((source) => source.name.startsWith("ledger:") && source.asOf !== null).map((source) => source.asOf!);
+  return (rowTs === undefined ? rows : [...rows, rowTs]).sort().pop();
+}
+
 /** One materialized body as the read-model worker stores and posts it. */
 export interface ViewBodyEntry {
   view: string;
@@ -142,6 +164,9 @@ export interface ViewBodyEntry {
   body: ViewBody;
   /** When the build that produced it began (its first bounded step); absent on a stored or slow-lane body. Not persisted. */
   buildStartedMs?: number;
+  /** The newest ledger row it reflects when its own sources do not carry it: a body decorated from other views'
+   *  bodies (serve's nav-badge carries the now bodies' decisions). Not persisted. */
+  rowTs?: string;
 }
 
 /** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */

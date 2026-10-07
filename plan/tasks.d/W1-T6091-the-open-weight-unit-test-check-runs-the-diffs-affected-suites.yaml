@@ -1,0 +1,37 @@
+- id: W1-T6091
+  title: "THE OPEN-WEIGHT unit_test CHECK RUNS THE DIFF'S AFFECTED SUITES, BOUNDED, AND EVERY run_check IS LEDGERED — OPENWEIGHT_CHECKS.unit_test is `node --test` with no file list, so it runs the whole suite (~21 min) under OPENWEIGHT_CHECK_TIMEOUT_MS (10 min): it always times out, burns ~70 core-minutes per call at default concurrency, and leaves no ledger row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — what the open-weight unit_test check runs and what it records
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT draft B, research-selection ranked item 5)"
+  plan_refs: [W1-T3656, W1-T3617, W1-T4404, W1-T6090]
+  files: [src/lib/worker-provider.ts, test/the-open-weight-unit-test-check-runs-the-diffs-affected-suites.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main src/lib/worker-provider.ts: `OPENWEIGHT_CHECKS.unit_test` is
+    `["node", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test", "--test-reporter=tap"]`
+    (the setup preload arrived in #9703); openWeightCheckArgv refuses caller paths (the CodeQL reason in its
+    doc comment: no model-derived value may reach a command line) and its own comment states the cost: a lane
+    "runs the whole suite". OPENWEIGHT_CHECK_TIMEOUT_MS is 10 min. MEASURED (research-coverage): the whole
+    suite is ~21 min, so every call times out, at ~70 core-minutes each, and run_check is offered to the
+    review, recon, diagnose, retro and fix lanes. No ledger row records a run_check, so the burn is invisible.
+  design: |
+    unit_test resolves its file list INSIDE the harness: selectAffectedSuites (src/lib/affected-suites.ts,
+    narrow arm when present) over the worktree's own diff against its merge base, computed by the orchestrator
+    from git, never from a model argument, so the CodeQL boundary holds. An empty selection runs nothing and
+    says so; a fullRun selection or one over a bound (say 40 suites) is refused with its size and reason,
+    never run whole. The argv keeps the preload and adds an explicit --test-concurrency cap (W1-T6090's
+    testRunConcurrency when present, else a small constant) under nice. Every run_check call, any check,
+    appends one ledger row with the check name, selected suite count, duration and exit (or timeout).
+  acceptance:
+    - claim: "the open-weight unit_test argv names only the harness-derived affected suites of the worktree diff, never the whole tree, and refuses a full or oversized selection with its reason; the open-weight unit_test argv caps test concurrency; a run_check call reaches the ledger with its check name, duration and exit"
+      proof: "unit test: test/the-open-weight-unit-test-check-runs-the-diffs-affected-suites.test.ts"
+  falsifier: |
+    Keep the fixed whole-tree argv: the fixture worktree's one-file diff yields an argv with no file operand
+    and the first test fails.

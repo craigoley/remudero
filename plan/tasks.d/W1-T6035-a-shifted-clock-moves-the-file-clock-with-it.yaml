@@ -1,0 +1,60 @@
+- id: W1-T6035
+  title: "A SHIFTED CLOCK MOVES THE FILE CLOCK WITH IT — since #8902 (W1-T5407, 2026-10-03) the ledger flags any row stamped more than 10 minutes past its file's fstat mtime, and scripts/clock-shift.mjs moves Date.now() but not fs stat times, so every ledger-writing suite run under a shift of more than 10 minutes gains a ledger.future_stamp row and fails for a reason that is not a fixture date; measured 2026-10-06, test/a-dismissed-escalation-records-why.test.ts passes at FK_SHIFT_DAYS=0.001 and fails at 0.01 (2 ledger rows, not 1)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — what scripts/clock-shift.mjs shifts; its probe suite is the second file
+  band_meaning: span
+  origin: "operator session 2026-10-06: main red at 12:00Z on the W1-T4053 fixture (#9561); time-bomb census research"
+  plan_refs: [W1-T5407, W1-T3270, W1-T3276, W1-T5027, W1-T5102, W1-T5539]
+  files: [scripts/clock-shift.mjs, test/a-shifted-clock-moves-the-file-clock-with-it.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a6a28515, in a detached worktree. scripts/clock-shift.mjs replaces
+    globalThis.Date only. src/lib/ledger.ts futureStampRow (W1-T5407, #8902, merged 2026-10-03) appends a
+    ledger.future_stamp row when a record's ts is more than LEDGER_FUTURE_STAMP_TOLERANCE_MS (10 min) past
+    fstatSync(fd).mtimeMs, a kernel clock the shift does not move. So any shift over 10 minutes adds a row to
+    every ledger append. test/a-dismissed-escalation-records-why.test.ts "W1-T4677: mark-handled records the
+    disposition": FK_SHIFT_DAYS=0.001 pass 14/14; 0.01, 0.05, 0.2 to 30: fail, `2 !== 1` at :152. The dumped
+    ledger holds the real row plus {"step":"ledger.future_stamp","skew_ms":4319996.7,...} at +0.05 d.
+    test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts fails the same way from +1 day.
+    SCALE: a +30 d sweep of 448 of the 599 suites scripts/clock-sweep.mjs derives (plain clock-shift.mjs)
+    failed 48. On the 48 re-run with the prototype below, most still fail at +0 on this host (they are
+    environment-bound daemonCommand wiring suites, not clock drift), and the two above pass at +30. The weekly
+    clock-sweep runs at +400 d, so since 10-03 its drift list is inflated by this artifact on top of the
+    30-minute cancellations on 09-28 and 10-05 (W1-T5102).
+    PROTOTYPE (r-timebomb/clock-shift-fs.mjs, not committed): the same Date shift plus wrappers on
+    fs.statSync/lstatSync/fstatSync, the callback and promises forms, that add SHIFT to atime/mtime/ctime/
+    birthtime (Ms and Date), then module.syncBuiltinESMExports() so named `node:fs` imports see them. With it,
+    test/a-dismissed-escalation-records-why.test.ts passes 14/14 at +30, and the W1-T4053 control still flips
+    (pre-#9561 tree 49a4c8ed: -1 d pass 5/5, +20 d fail "control: the ordinary pass re-queues"; a6a28515 +20
+    and +30 pass 5/5), so the discriminator is kept. Without (2) below the prototype is itself an artifact:
+    the-transport-paces-its-own-reads, worktree-reap-liveness and agent-history-does-not-fill-the-root-disk
+    fail at +0.05 d, because a utimesSync(now) written with a shifted Date reads back shifted twice. With
+    (2), all three pass at +0.001 and +30.
+  design: |
+    (1) In scripts/clock-shift.mjs, when SHIFT is non-zero, wrap the fs stat family (sync, callback,
+    promises, FileHandle.stat) so every returned Stats has its four time fields moved by SHIFT, and call
+    syncBuiltinESMExports() after patching. Leave bigint stats alone and say so. (2) Wrap utimesSync/utimes/
+    futimes(Sync) to subtract SHIFT from Date or number arguments, so a time a test writes with a shifted
+    `new Date()` reads back as that instant and is not shifted twice. (3) Keep the INVARIANT the header
+    states: Date.parse, Date.UTC and dated constructors are untouched. (4) State in the header what still
+    cannot move: a child process's clock (git, find, docker), which only an LD_PRELOAD tool such as
+    libfaketime reaches. CLOCK_ARTIFACTS in scripts/clock-sweep.mjs is not edited here: prune-liveness
+    still fails under the prototype, so its exclusion does not go stale. worktree-reap-liveness, a name in
+    scripts/clock-sweep-baseline.json driftingSuitesAtCapture, passes at +30 under the prototype. That reads
+    as BELOW CEILING, and the baseline is lowered in a follow-up once a CI sweep confirms it.
+  acceptance:
+    - claim: "under a shift of one day, a file written now reads back with an mtime one day ahead, and a ledger append followed by a read returns exactly the one row written, with no ledger.future_stamp row"
+      proof: "unit test: test/a-shifted-clock-moves-the-file-clock-with-it.test.ts"
+    - claim: "the probe re-exports the patched fs functions to ES-module importers"
+      proof: "grep: syncBuiltinESMExports in scripts/clock-shift.mjs"
+  falsifier: |
+    Delete the fs wrappers from scripts/clock-shift.mjs: the suite's child process, run with FK_SHIFT_DAYS=1,
+    appends one ledger row and reads back two (the second a ledger.future_stamp), so the test fails.
+

@@ -5,7 +5,8 @@
 #
 # INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch (the state
 # root's and repos/'s), the read model's DB files (rebuilt from the ledger on an empty dir), the
-# per-spawn worker homes (made and reaped per spawn) and each container's /tmp are bound here;
+# per-spawn worker homes (made and reaped per spawn), each container's /tmp and the HOST-WIDE test
+# slots (one dir for every container and the host, src/lib/test-slot.ts) are bound here;
 # the ledger, repos, lanes, plan and every state file, the read-model switch file included, stay put.
 # DARK until RMD_SCRATCH=on or the switch file exists; an unmounted or unwritable scratch root makes
 # the launch run exactly as before and say why. Falsifier: test/scratch-mounts.test.ts.
@@ -25,9 +26,17 @@
 SCRATCH_STATE_DEST="/home/node/Remudero"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
 SCRATCH_WORKER_HOME_DEST="/home/node/rmd-scratch/worker-homes"
+SCRATCH_TEST_SLOT_DEST="/home/node/rmd-scratch/test-slots"
 SCRATCH_MANIFEST_NAME=".scratch-mounts"
 
 scratch_root() { printf '%s' "${RMD_SCRATCH_ROOT:-/mnt/scratch}"; }
+
+# A TEST PROCESS NEVER RESOLVES THE HOST'S REAL SCRATCH ROOT. W1-T5631's dead switch lives in the
+# suite's --import setup, so a run without it (a bare `node --import tsx --test <file>` on the host)
+# still read the real switch and mkdir'd ~70 fixture state dirs (recycle-state-*, state-root, ...)
+# under /mnt/scratch/rmd. Under the node test runner only an explicit RMD_SCRATCH_ROOT is used.
+scratch_root_refused() { [ -n "${NODE_TEST_CONTEXT:-}" ] && [ -z "${RMD_SCRATCH_ROOT:-}" ]; }
+SCRATCH_REFUSED_NOTE="NOT USED — a test process (NODE_TEST_CONTEXT) never uses the host's /mnt/scratch; set RMD_SCRATCH_ROOT"
 
 # True when the scratch root is itself a mounted filesystem: a bare directory at that path sits on
 # the 29 GB OS disk, and worktrees there would fill it.
@@ -40,6 +49,19 @@ scratch_root_is_mounted() {
     [ "${mnt}" = "${root}" ] && return 0
   done < "${mounts}"
   return 1
+}
+
+# ONE directory for the whole host, not per state dir: every container and the host operator's own
+# runs (test-slot.ts resolves /mnt/scratch/rmd/test-slots) must see the same slot files.
+scratch_test_slot_dir() { printf '%s/rmd/test-slots' "$(scratch_root)"; }
+
+# Every container user and the host operator reclaim each other's slot records, so the directory is
+# 0777 and NOT sticky (a sticky bit would stop one uid unlinking another's dead record). Never fatal.
+scratch_open_test_slots() {
+  local dir="$1"
+  [ "${dir}" = "$(scratch_test_slot_dir)" ] || return 0
+  chmod 0777 "${dir}" 2>/dev/null || true
+  return 0
 }
 
 scratch_enabled() {
@@ -64,6 +86,10 @@ scratch_plan() {
     SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage and the read model stay on the state disk"
     return 1
   fi
+  if scratch_root_refused; then
+    SCRATCH_NOTE="${SCRATCH_REFUSED_NOTE}"
+    return 1
+  fi
   if ! scratch_root_is_mounted; then
     SCRATCH_NOTE="NOT USED — $(scratch_root) is not a mounted filesystem; launching with everything on the state disk"
     return 1
@@ -79,7 +105,8 @@ ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
 ${base}/repos-coverage	${SCRATCH_STATE_DEST}/repos/.remudero-coverage
 ${base}/read-model	${SCRATCH_READ_MODEL_DEST}
 ${base}/worker-homes	${SCRATCH_WORKER_HOME_DEST}
-${SCRATCH_CONTAINER_TMP}	/tmp"
+${SCRATCH_CONTAINER_TMP}	/tmp
+$(scratch_test_slot_dir)	${SCRATCH_TEST_SLOT_DEST}"
   local src dest
   while IFS='	' read -r src dest; do
     SCRATCH_DIRS+=("${src}")
@@ -89,7 +116,8 @@ ${SCRATCH_BINDS}
 EOF
   SCRATCH_ARGS+=(-e "RMD_READ_MODEL_DB_DIR=${SCRATCH_STATE_DEST}/state:${SCRATCH_READ_MODEL_DEST}")
   SCRATCH_ARGS+=(-e "RMD_WORKER_HOME_DIR=${SCRATCH_STATE_DEST}:${SCRATCH_WORKER_HOME_DEST}")
-  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}"
+  SCRATCH_ARGS+=(-e "RMD_TEST_SLOT_DIR=${SCRATCH_TEST_SLOT_DEST}")
+  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}; test slots shared at $(scratch_test_slot_dir)"
   return 0
 }
 
@@ -99,6 +127,14 @@ scratch_prepare() {
   [ "${#SCRATCH_ARGS[@]}" -gt 0 ] || return 1
   local dir manifest tmp
   for dir in "${SCRATCH_DIRS[@]}"; do
+    if [ "${dir}" = "$(scratch_test_slot_dir)" ]; then
+      # Shared with other uids: one it cannot write degrades only the slot (test-slot.ts names
+      # slot_unavailable), never the launch's other binds.
+      mkdir -p "${dir}" 2>/dev/null || true
+      scratch_open_test_slots "${dir}"
+      { [ -d "${dir}" ] && [ -w "${dir}" ]; } || SCRATCH_NOTE="${SCRATCH_NOTE}; WARNING: ${dir} is not a writable directory, so test runs here go unslotted"
+      continue
+    fi
     if ! mkdir -p "${dir}" 2>/dev/null || [ ! -w "${dir}" ]; then
       SCRATCH_NOTE="NOT USED — could not create a writable ${dir}; launching with everything on the state disk"
       SCRATCH_ARGS=()
@@ -142,6 +178,10 @@ scratch_fresh_tmp() {
 # launch's record. Only under the scratch root, and only when it is mounted. Never fails docker.
 scratch_restore() {
   local state_dir manifest owner dir path
+  if scratch_root_refused; then
+    echo "scratch-mounts: ${SCRATCH_REFUSED_NOTE}; nothing restored"
+    return 0
+  fi
   if ! scratch_root_is_mounted; then
     echo "scratch-mounts: $(scratch_root) is not mounted; nothing restored"
     return 0
@@ -159,6 +199,7 @@ scratch_restore() {
         chown "${owner}" "${path}" 2>/dev/null || true
         path="$(dirname "${path}")"
       done
+      scratch_open_test_slots "${dir}"
       echo "scratch-mounts: restored ${dir}"
     done < "${manifest}"
   done

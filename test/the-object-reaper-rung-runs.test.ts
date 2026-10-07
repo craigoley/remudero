@@ -27,7 +27,7 @@ import { test } from "node:test";
 
 import { clockFromIsoFn } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { defaultOpenFileCount } from "../src/lib/clone-reaper.js";
+import * as cloneReaperLib from "../src/lib/clone-reaper.js";
 import {
   LOOSE_OBJECT_FLOOR,
   reapGitObjects,
@@ -65,7 +65,7 @@ const quietDeps = {
 
 // ── claim 1: the rung loads the DAEMON's policy, so it runs at all ─────────────────────────────
 
-test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
+test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", async () => {
   // config.root deliberately carries NO plan/policy.yaml — mirrors exactly the daemon checkout
   // the amended note measured: `loadPolicy(policyPath(config.root))` threw here on every tick.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-policy-`));
@@ -73,7 +73,7 @@ test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
 
   let reached = false;
   let sawDryRun: boolean | undefined;
-  const out = logDiskReclaimRung({ root } as never, () => {}, {
+  const out = await logDiskReclaimRung({ root } as never, () => {}, {
     ...noSweeps,
     objectRepoDir: () => "/unused-repo",
     objectInflightDir: () => "/unused-inflight",
@@ -94,9 +94,9 @@ test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
   assert.equal(out.objectsPruned, 0);
 });
 
-test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", () => {
+test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", async () => {
   const rows: Array<[string, Record<string, unknown>]> = [];
-  logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
+  await logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
     objectPolicy: () => {
       throw new Error("policy.yaml is not valid YAML");
@@ -112,23 +112,25 @@ test("W1-T4022: a policy load failure is logged, not silently folded into the ge
 
 // ── claim 2: the open-file refusal reads a REAL count, not the fail-closed constant ────────────
 
-test("W1-T4022: the open-file refusal reads a real count", () => {
-  let captured: { openFileCount?: (dir: string) => number } | undefined;
-  logDiskReclaimRung({ root: scratch() } as never, () => {}, {
+test("W1-T4022: the open-file refusal reads a real count", async () => {
+  let captured: { openFileCount?: unknown; openFileCountAsync?: unknown } | undefined;
+  await logDiskReclaimRung({ root: scratch() } as never, () => {}, {
     ...noSweeps,
     objectPolicy: () => ({ enabled: false }),
-    reapObjects: ((_r: string, _i: string, d: { openFileCount?: (dir: string) => number }) => {
+    reapObjects: ((_r: string, _i: string, d: { openFileCount?: unknown; openFileCountAsync?: unknown }) => {
       captured = d;
       return { pruned: 0, looseBefore: 9000 };
     }) as never,
   });
+  // 2026-10-06: the REAL lsof-backed counter is now the AWAITED, bounded one, off the daemon loop.
   assert.equal(
-    captured?.openFileCount,
-    defaultOpenFileCount,
+    captured?.openFileCountAsync,
+    cloneReaperLib.defaultOpenFileCountAsync,
     "production must wire the REAL lsof-backed counter (src/lib/clone-reaper.ts) as the DEFAULT " +
       "— not the fail-closed `() => 1` object-reaper.ts falls back to when nothing supplies one, " +
       "which refused unconditionally and made the other two conditions moot",
   );
+  assert.equal(captured?.openFileCount, undefined, "the sync lsof walk must not also be wired onto the loop");
 });
 
 test("W1-T4022: an injected real open-file count of zero is not treated as held", () => {
@@ -139,7 +141,7 @@ test("W1-T4022: an injected real open-file count of zero is not treated as held"
     listWorktrees: () => [],
     listInflightLocks: () => [],
     looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1,
-    openFileCount: (dir) => defaultOpenFileCount(dir), // the real probe, against a dir nothing holds open
+    openFileCount: (dir) => cloneReaperLib.defaultOpenFileCount(dir), // the real probe, against a dir nothing holds open
     runPrune: () => {},
   });
   assert.equal(r.refusedBecause, undefined, "nothing holds this throwaway directory open");
@@ -156,7 +158,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
   const busy = { repoDir: repoWithGcLog().repoDir };
   const r1 = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
@@ -166,7 +168,7 @@ test("W1-T4022: consecutive refusals accumulate, and reset the instant the fleet
 
   const r2 = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     clock: clockFromIsoFn(now),
     runPrune: () => assert.fail("refused"),
@@ -193,7 +195,7 @@ test("W1-T4022: the default refusal timestamp uses the shared system clock", () 
   const busy = { repoDir: repoWithGcLog().repoDir };
   const result = reapGitObjects(busy.repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1, // the one arm that still refuses (2026-10-06 ruling)
     streakPath,
     runPrune: () => assert.fail("refused"),
   });
@@ -226,20 +228,20 @@ test("W1-T4022: below-the-floor never touches the refusal streak, a different co
 
 test("W1-T4022: a quiesced window closes between the two checks and the prune never spawns", () => {
   const { repoDir, gcLog } = repoWithGcLog();
-  let worktreeCalls = 0;
+  let handleCalls = 0;
   const r = reapGitObjects(repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => {
-      worktreeCalls++;
-      // Quiet on the FIRST sample, busy by the SECOND — exactly what a fleet that dispatches
-      // between the two checks produces. Neither call is skipped: both ends are real reads.
-      return worktreeCalls === 1 ? [] : ["/w/late-arrival"];
+    openFileCount: () => {
+      handleCalls++;
+      // Clear on the FIRST sample, held by the SECOND — a process that opened the store between
+      // the two checks. Neither call is skipped: both ends are real reads.
+      return handleCalls === 1 ? 0 : 2;
     },
     runPrune: () => assert.fail("a window that closed before the prune must never spawn one"),
   });
-  assert.equal(worktreeCalls, 2, "the predicate must be sampled twice — once per end of the window");
+  assert.equal(handleCalls, 2, "the predicate must be sampled twice — once per end of the window");
   assert.match(r.refusedBecause ?? "", /quiesced window closed/);
-  assert.match(r.refusedBecause ?? "", /worktree/);
+  assert.match(r.refusedBecause ?? "", /open handle/);
   assert.equal(existsSync(gcLog), true, "a window that closed must leave gc.log exactly where a first-check refusal would");
 });
 

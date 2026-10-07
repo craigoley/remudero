@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ensureDeps, pinnedVitestCli, registerReviewerCheckout } from "../src/lib/review.js";
+import { ensureDeps, pinnedVitestCli, PROOF_INSTALL_ARGS, registerReviewerCheckout } from "../src/lib/review.js";
 
 function checkout(withNodeModules: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1t4587-"));
@@ -44,12 +44,12 @@ test("W1-T4587: a fresh checkout and a reviewer-created checkout are still prime
   try {
     const a = recorder();
     ensureDeps(fresh, a.exec, pinnedVitestCli(fresh));
-    assert.deepEqual(a.calls, [["npm", "ci"]], "a checkout with no node_modules gets its one install, as documented");
+    assert.deepEqual(a.calls, [["npm", ...PROOF_INSTALL_ARGS]], "a checkout with no node_modules gets its one install, as documented");
 
     registerReviewerCheckout(owned);
     const b = recorder();
     ensureDeps(owned, b.exec, pinnedVitestCli(owned));
-    assert.deepEqual(b.calls, [["npm", "ci"]], "the reviewer's own proof checkout may replace a partial install");
+    assert.deepEqual(b.calls, [["npm", ...PROOF_INSTALL_ARGS]], "the reviewer's own proof checkout may replace a partial install");
   } finally {
     rmSync(fresh, { recursive: true, force: true });
     rmSync(owned, { recursive: true, force: true });

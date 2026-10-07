@@ -1,0 +1,37 @@
+- id: W1-T6053
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — stale-reviewer-withheld:checks green, remudero-review owner proven dead cost 1.75 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.42
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:stale-reviewer-withheld:checks green, remudero-review owner proven dead"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-stale-reviewer-withheld-checks-green-remudero-review-owner-proven-dead.test.ts
+  acceptance:
+    - claim: "stale-reviewer-withheld:checks green, remudero-review owner proven dead is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6053: flow-stale-reviewer-withheld-checks-green-remudero-review-owner-proven-dead clears without a person\" in test/flow-stale-reviewer-withheld-checks-green-remudero-review-owner-proven-dead.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    stale-reviewer-withheld:checks green, remudero-review owner proven dead cost 1.75 PR-hours; owner deploy-freshness
+    Owner deploy-freshness failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9119: 0.97 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9119
+    - PR #9121: 0.88 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9121
+    - PR #9288: 0.29 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9288
+    - PR #9342: 0.01 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9342
+    - PR #9617: 0.00 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9617
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearance of a remudero-review withholding condition, placing the proposed remedy at a review-control boundary.; on the change's description/files alone, no diff was read — The supplied record does not specify how reviewer death is established or what action clears the withholding; its grep proof checks for test text, so preservation of review policy cannot be verified from what is shown."
+    judged_at: "2026-10-06T22:30:52.592Z"
+    pin: "38f07aaa45419ffd90079869b458a0c4e0db8ceac5162eb9ee12be37c22e5784"

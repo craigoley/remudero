@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,13 +19,13 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures,
+  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
 import {
-  armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   decideArmReprobeFromFacts,
   armFailureAction,
@@ -35,7 +36,7 @@ import {
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
-  realArmDeps,
+  realArmDepsAsync,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
@@ -54,7 +55,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1066,15 +1067,16 @@ function prNumberFromRef(ref: string): number | undefined {
   return bareMatch ? Number(bareMatch[1]) : undefined;
 }
 
-function armAndLogOutcome(
+async function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = armAutoMergeDetailedAsync,
   lane: ArmLane = "operator",
   headSha?: string,
-): ArmOutcome {
-  const result = arm(prUrl, taskId);
+): Promise<ArmOutcome> {
+  // W1-T5781: awaited, so the production arm's plan merge-safety reads run off the daemon loop.
+  const result = await arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
@@ -1325,7 +1327,7 @@ export interface BuildSweepEffectsDeps {
     verdict: PostReviewStallVerdict,
     ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   ) => void;
-  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps, isDraft?: boolean) => ArmOutcome | ArmAttemptResult;
+  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps<true>, isDraft?: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult>;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
@@ -1417,7 +1419,7 @@ export interface BuildSweepEffectsDeps {
    *  observes the call instead of cutting a real one. */
   worktreeAddImpl?: typeof worktreeAdd;
   /** Same coverage seam for the branch push this rung performs. */
-  gitPushRunBranchImpl?: typeof gitPushRunBranch;
+  gitPushRunBranchImpl?: (worktreePath: string, opts?: Parameters<typeof gitPushRunBranchAsync>[1]) => void | Promise<void>;
   /** Same coverage seam for the two REST calls (dedup probe + PR create) this rung performs.
    *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
    *  spawns `gh`. */
@@ -1503,12 +1505,36 @@ function defaultDirtyFleetRebaseGit(
   args: readonly string[],
   opts: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding } = {},
 ): string {
-  return execFileSync(file, [...args], {
+  // The cut checks out the PR's bytes and runs post-checkout there, so it carries the leaf's overrides.
+  const hardened = args[2] === "worktree" ? HOST_GIT_CONFIG.flatMap(([k, v]) => ["-c", `${k}=${v}`]) : [];
+  return execFileSync(file, [...hardened, ...args], {
     cwd: opts.cwd,
     encoding: opts.encoding ?? "utf8",
     stdio: opts.stdio ?? "pipe",
     maxBuffer: 1 << 24,
   }) as string;
+}
+
+/**
+ * W1-T6133 — the git seam for a tree cut at a PR's OWN head. It takes the `-C <worktreePath> …` argv
+ * the callers' seams already build and runs it through the leaf (pinned gitdir, the harness's hooks);
+ * a push goes through the push leaf, whose pre-push gate is the harness's copy, never the tree's.
+ */
+export function prHeadTreeGit(worktreePath: string): (file: string, args: readonly string[]) => string {
+  return (file, args) => {
+    if (args[0] !== "-C" || args[1] !== worktreePath) {
+      throw new Error(`sweep: a PR-head tree step must address ${worktreePath} with -C; got ${args.slice(0, 2).join(" ")}`);
+    }
+    if (args[2] !== "push") return hostWorktreeGit(worktreePath, args.slice(2), { maxBuffer: 1 << 24 });
+    worktreePushExec(worktreePath)(file, [...args], { stdio: "inherit" });
+    return "";
+  };
+}
+
+/** {@link rebaseDirtyFleetBranchViaGit}'s default: the managed checkout raw (CHECKOUT), its PR-head tree via the leaf. */
+function dirtyFleetRebaseGit(repoDir: string, worktreePath: string): DirtyFleetRebaseGit {
+  const tree = prHeadTreeGit(worktreePath);
+  return (file, args, opts) => (args[1] === repoDir ? defaultDirtyFleetRebaseGit(file, args, opts) : tree(file, args));
 }
 
 /** Default for {@link BuildSweepEffectsDeps.planRepairGitImpl} — the real spawn, appended last
@@ -1529,7 +1555,7 @@ export function rebaseDirtyFleetBranchViaGit(
 ): DirtyFleetRebaseOutcome {
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: `PR #${pr.prNumber} has no headRefName to rebase` };
-  const git = deps.git ?? defaultDirtyFleetRebaseGit;
+  const git = deps.git ?? dirtyFleetRebaseGit(repoDir, worktreePath);
   const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
   const ref = `refs/heads/${branch}`;
   const remoteRef = `refs/remotes/origin/${branch}`;
@@ -1617,6 +1643,8 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+/** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
+const prFileSources = new Map<string, string>();
 
 /**
  * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
@@ -1653,6 +1681,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "repushAbsent",
   "updateBranch",
   "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
+  "readPrFileSource", // W1-T6022
   "captureRepairFeedback",
   "disarmAutoMerge",
   "stackPrerequisite",
@@ -1719,6 +1748,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repushAbsent"
   | "updateBranch"
   | "mergeQueue"
+  | "readPrFileSource"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -1774,7 +1804,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     pushEmptyCommit = gitPushEmptyCommit,
     issuesImpl,
     stallNotice = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["stallNotice"]>>("stallNotice"),
-    armImpl = armAutoMergeDetailed,
+    armImpl = armAutoMergeDetailedAsync,
     armSessionPrsOverride,
     updateBranchImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updateBranchImpl"]>>("updateBranchImpl"),
     readyDraftImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["readyDraftImpl"]>>("readyDraftImpl"),
@@ -1829,7 +1859,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     planRepairGitImpl: planRepairGit = defaultPlanRepairGit,
     worktreeAddImpl: worktreeAddForBuild = worktreeAdd,
-    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranch,
+    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranchAsync,
     ghJsonImpl: ghJsonForBuild = ghJson,
     ghBufferImpl: ghBufferForBuild = readMutationVerdictZip,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -1950,9 +1980,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
-    const armDeps = realArmDeps(() => config);
+    const armDeps = realArmDepsAsync(() => config);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
       { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl) });
   };
@@ -2102,7 +2132,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       if (committed.changed !== true || typeof committed.sha !== "string" || committed.sha.length === 0) {
         return decline("generator_commit_empty", { scripts: ratchetScripts });
       }
-      gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
+      await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: committed.sha });
       log("sweep.ratchet_repair_executor_applied", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
@@ -2191,7 +2221,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: (pr, mode) => {
+    arm: async (pr, mode) => {
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2201,8 +2231,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return "shadow-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
-      const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
-        ...realArmDeps(() => config),
+      const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
+        ...realArmDepsAsync(() => config),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
@@ -2220,14 +2250,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         },
       } : undefined;
       let attemptError: string | undefined;
-      const outcome = armAndLogOutcome(
+      const outcome = await armAndLogOutcome(
         pr.prUrl,
         pr.taskId,
         log,
-        (prUrl, taskId) => {
-          const result = idleDeps
+        async (prUrl, taskId) => {
+          const result = await (idleDeps
             ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
-            : sweepArmImpl(prUrl, taskId);
+            : sweepArmImpl(prUrl, taskId));
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
@@ -2825,8 +2855,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           },
           push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
             expectedHeadSha: sha,
-            capture: (file, args) => planRepairGit(file, args),
-            exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+            capture: (file, args) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, args),
+            exec: async (file, args) => {
+              await (deps.planRepairGitImpl ?? defaultGitCaptureAsync)(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]);
+            },
           }),
           updateMetadata: async (metadata: { title: string; body: string }) => {
             const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
@@ -3712,6 +3744,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
 
+    // W1-T6022 — a source at one head never changes, so a read is kept; a failed one is not.
+    readPrFileSource: (pr, path) => {
+      const key = `${owner}/${repo}@${pr.headSha}:${path}`;
+      if (prFileSources.has(key)) return prFileSources.get(key);
+      try {
+        const file = ghJsonForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]) as
+          { content?: unknown; encoding?: unknown } | undefined;
+        if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
+        if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
+        prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
+        return prFileSources.get(key);
+      } catch {
+        return undefined; // unread: the ready arm names it ready-unknown, never "no overlap"
+      }
+    },
+
     readyDraft: (pr) => readyDraftImpl(pr),
 
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
@@ -3783,7 +3831,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
                 }
-                gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+                await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
                 assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
                 return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
               } finally {
@@ -4106,7 +4154,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
           return true;
         }
-        gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+        await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
         const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
         planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
@@ -4294,6 +4342,13 @@ function reviewDemandLooping(pr: OpenPrView): boolean {
     loop.postsSinceLastAdmission >= 1;
 }
 
+/** W1-T6047 — a DELIVERED verdict dedups a re-post only while GitHub does not contradict it. A
+ *  status still `pending` that the post-review row already judged dead or stale proves the delivery
+ *  never reached the status; deduping on it would strand the PR on "re-running" without a re-run. */
+export function deliveredVerdictDedupsPostReview(pr: Pick<OpenPrView, "reviewState">, delivered: boolean): boolean {
+  return delivered && pr.reviewState !== "pending";
+}
+
 /** One of the dispositions every open PR is reconciled into. */
 export type Disposition =
   | "mergeable"
@@ -4339,6 +4394,9 @@ export type Disposition =
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** The check run's posted title, where the read carries it. A bundled check (W1-T3720) keeps its
+   *  required NAME and titles itself by the gate(s) that refused — see {@link refusingGatesOf}. */
+  title?: string;
   /** Latest check conclusion preserved from the rollup so narrow infrastructure classifiers do
    * not have to infer FAILURE from the presence of a log. */
   conclusion?: string;
@@ -5741,10 +5799,11 @@ export function decideFixSuperseded(
 /** W1-T4105 — true when `sha` is already in the fix worktree's own history (the worker pushed it). */
 export function headIsInWorktree(worktreePath: string, sha: string): boolean {
   try {
-    execFileSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
     return true;
   } catch {
-    // Not an ancestor (exit 1) or unreadable: either way not provably the worker's own push.
+    // Not an ancestor (exit 1), unreadable, or a refused `.git` pointer (W1-T6122, its own
+    // worktree_git.pointer_refused row): none of them is provably the worker's own push.
     return false;
   }
 }
@@ -6371,13 +6430,36 @@ export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[
   return failed;
 }
 
-/** Completed, non-guard main runs (newest first) whose jobs may stand in for a head whose own
- *  required runs were cancelled or are still pending. */
+/** W1-T6023 — PRIMARY CONTROL: how many of main's newest first-parent commits (the head included)
+ *  a fallback run's head sha must be among. GitHub sometimes answered the push-run history with a
+ *  days-old page (2026-10-06: main read green on 22397b6d, 1856 first-parent commits back, and red on
+ *  ca9be1f7, 124 back). DERIVATION, measured 2026-10-06: a `ci` push run on main took at most 37.8
+ *  min (p90 33.6, 43 completed runs), and ci.yml cancels in progress on pull requests only, so the
+ *  push lane holds one running and one pending run: main's newest completed run began at most two
+ *  run lengths (~76 min) ago. The most first-parent merges in any 90-minute window of the 1320 since
+ *  2026-09-29 was 38; the deepest legitimate fallback that day's 100 push runs replay was 9 behind.
+ *  50 is 38 with ~30% headroom, and still well short of the nearest stale run (124). */
+export const MAIN_HEALTH_FALLBACK_WINDOW_COMMITS = 50;
+
+/** Completed, non-guard main runs (newest first) that concluded something. */
+export function mainHealthFallbackCandidates(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run));
+}
+
+/** The {@link mainHealthFallbackCandidates} whose jobs may stand in for a head whose own required
+ *  runs were cancelled or are still pending: W1-T6023, only a run whose head sha is in `recentShas`
+ *  (main's newest {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits). Every other
+ *  candidate is returned as `skipped`, newest first, so the caller can name what it passed over. */
 export function mainHealthFallbackRuns(
   history: readonly MainHealthRunHistoryEntry[],
+  recentShas: ReadonlySet<string>,
   limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
-): MainHealthRunHistoryEntry[] {
-  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run)).slice(0, limit);
+): { runs: MainHealthRunHistoryEntry[]; skipped: MainHealthRunHistoryEntry[] } {
+  const candidates = mainHealthFallbackCandidates(history);
+  return {
+    runs: candidates.filter((run) => recentShas.has(run.headSha)).slice(0, limit),
+    skipped: candidates.filter((run) => !recentShas.has(run.headSha)),
+  };
 }
 
 /** True when the head's own rollup concluded nothing: no required check yet, or one still pending
@@ -6705,6 +6787,66 @@ export function recordableRatchetScripts(
   return new Set(Object.values(generators));
 }
 
+/** W1-T5769 — the `<gate>: BLOCKED` headline scripts/bundled-gate-report.mjs reads, optionally behind
+ *  GitHub's `##[error]` rendering or a raw `::error …::` command. Anchored per line. */
+const GATE_BLOCKED_HEADLINE = /^(?:##\[error\]|::error[^\n]*?::)?([a-z][a-z0-9-]*): BLOCKED\b/gm;
+const GATE_NAME = /^[a-z][a-z0-9-]*$/;
+
+function blockedHeadlines(text: string | undefined): string[] {
+  return [...new Set([...(text ?? "").matchAll(GATE_BLOCKED_HEADLINE)].map((m) => m[1]))].sort();
+}
+
+/**
+ * W1-T5769 — the gates a failing check names as refusing: `title` when the posted title is a gate
+ * list (W1-T3720's `a, b` form) or carries BLOCKED headlines, else `log` from the tail's own
+ * headlines, else `undefined`. PURE.
+ *
+ * ⚠ ONLY A TITLE REPLACES THE NAME. A tail is the hosting JOB's log, which can carry a SIBLING
+ * check's headline (ci.yml's commitlint job hosts several bundles), so {@link redGateNames} adds log
+ * gates beside the check's own name: that can only narrow what reads recordable, never widen it.
+ */
+export function refusingGatesOf(
+  failure: Pick<CiFailure, "title" | "logTail">,
+): { source: "title" | "log"; gates: string[] } | undefined {
+  const title = failure.title?.trim() ?? "";
+  const titled = blockedHeadlines(title);
+  if (titled.length > 0) return { source: "title", gates: titled };
+  const listed = title.split(",").map((gate) => gate.trim());
+  if (title !== "" && listed.every((gate) => GATE_NAME.test(gate))) return { source: "title", gates: [...new Set(listed)].sort() };
+  const logged = blockedHeadlines(failure.logTail);
+  return logged.length > 0 ? { source: "log", gates: logged } : undefined;
+}
+
+/** W1-T5769 — the red set keyed by REFUSING GATE, via {@link refusingGatesOf}. A check that names no
+ *  gate keeps its own name, which is exactly the pre-W1-T5769 set. */
+export function redGateNames(pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures">): string[] {
+  const named = new Map<string, Set<string>>();
+  for (const failure of pr.ciFailures ?? []) {
+    if (!failure.name) continue;
+    const refused = refusingGatesOf(failure);
+    const gates = named.get(failure.name) ?? new Set<string>();
+    if (refused?.source !== "title") gates.add(failure.name);
+    for (const gate of refused?.gates ?? []) gates.add(gate);
+    named.set(failure.name, gates);
+  }
+  const checks = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  return [...new Set(checks.flatMap((check) => [...(named.get(check) ?? [check])]))];
+}
+
+/** W1-T5769 — `<check> refused by <gates>` for each red check whose refusing gates are not just
+ *  itself, so a dispatch reason names the gate a worker must clear. Empty when none is. */
+export function bundledRefusalNote(pr: Pick<OpenPrView, "ciFailures">): string {
+  const notes = new Map<string, Set<string>>();
+  for (const failure of pr.ciFailures ?? []) {
+    const others = (refusingGatesOf(failure)?.gates ?? []).filter((gate) => gate !== failure.name);
+    if (!failure.name || others.length === 0) continue;
+    const gates = notes.get(failure.name) ?? new Set<string>();
+    for (const gate of others) gates.add(gate);
+    notes.set(failure.name, gates);
+  }
+  return [...notes].map(([check, gates]) => `${check} refused by ${[...gates].sort().join(", ")}`).join("; ");
+}
+
 /**
  * W1-T2998 — the generator scripts that would repair this PR's red required checks, or `undefined`
  * when even one red check is not of that class. PURE.
@@ -6723,7 +6865,7 @@ export function recordableRatchetRepairFor(
 ): string[] | undefined {
   // A dirty PR runs no checks at all (W1-T106), so a red name on one is stale by construction.
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((f) => f.name)])].filter(Boolean);
+  const red = redGateNames(pr);
   if (red.length === 0) return undefined;
   const admitted = recordableRatchetScripts(generators);
   const scripts: string[] = [];
@@ -6767,7 +6909,7 @@ export function ratifiedBaselineRatchetRepairFor(
   pr: Pick<OpenPrView, "redRequiredChecks" | "ciFailures" | "mergeState">,
 ): RatifiedBaselineRatchetScript[] | undefined {
   if (pr.mergeState === "dirty") return undefined;
-  const red = [...new Set([...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)])].filter(Boolean);
+  const red = redGateNames(pr);
   if (red.length === 0) return undefined;
   const scripts: RatifiedBaselineRatchetScript[] = [];
   for (const checkName of red) {
@@ -6792,23 +6934,14 @@ export interface BaselineRatchetWorktreeState {
  */
 export function readBaselineRatchetWorktreeState(worktreePath: string): BaselineRatchetWorktreeState | undefined {
   try {
-    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim();
-    const tracked = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "-z", "HEAD"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    })
-      .split("\0")
-      .filter(Boolean);
-    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    })
-      .split("\0")
-      .filter(Boolean);
+    const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+    const tracked = hostWorktreeGit(worktreePath, ["diff", "--name-only", "-z", "HEAD"]).split("\0").filter(Boolean);
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
     if (headSha.length === 0) return undefined;
     return { headSha, changedPaths: [...new Set([...tracked, ...untracked])].sort() };
   } catch {
-    // An unreadable git worktree is a refusal, never evidence that it is clean.
+    // An unreadable git worktree — or one whose `.git` pointer the leaf refused (W1-T6122) — is a
+    // refusal, never evidence that it is clean.
     return undefined;
   }
 }
@@ -6897,7 +7030,7 @@ export function missingTaskTrailerRepairDecision(
       reason: "missing trailer repair refused: head branch does not match run-<taskId>-<epoch>, so no task id is derivable",
     };
   }
-  if (pr.taskExistsOnMain !== true) {
+  if (taskId !== "unfiled" && pr.taskExistsOnMain !== true) {
     return {
       action: "stand-down",
       reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
@@ -7329,21 +7462,26 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 
-/** Per `pr@head`: the check a prior pass stood down as a base red, and whether its one refresh was
- *  already spent. Together they bound the lane to one record and one refresh per head. */
+/** Per `pr@head`: the check a prior pass stood down as a base red, whether its one refresh was
+ *  spent, and (W1-T6024) whether a probe reproduced its red on main before main next went green. */
 export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>[]): {
   stoodDown: Map<string, string>;
   refreshed: Set<string>;
+  reproducedBeforeGreen: Set<string>;
 } {
   const stoodDown = new Map<string, string>();
   const refreshed = new Set<string>();
+  const reproduced = new Set<string>();
+  const reproducedBeforeGreen = new Set<string>();
   for (const line of lines) {
+    if (isMainGreenOnItsOwnHead(line)) for (const key of reproduced) reproducedBeforeGreen.add(key);
     if (typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
     const key = `${line.pr_number}@${line.head_sha}`;
     if (line.step === BASE_RED_STOOD_DOWN_STEP && typeof line.check_name === "string") stoodDown.set(key, line.check_name);
     if (line.step === BASE_RED_REFRESH_STEP) refreshed.add(key);
+    if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
-  return { stoodDown, refreshed };
+  return { stoodDown, refreshed, reproducedBeforeGreen };
 }
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
@@ -7368,8 +7506,11 @@ export function decideBaseRed(
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
-  if (recorded === undefined || !names.includes(recorded) || history.refreshed.has(key)) return { kind: "own" };
-  return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (history.refreshed.has(key)) return { kind: "own" };
+  if (recorded !== undefined && names.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
+  const named = names[0];
+  return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
 }
 
 // ── W1-T5349 — the plan-repair rung ─────────────────────────────────────────────────────────────
@@ -7533,7 +7674,7 @@ export async function renumberPlanPrIds(
     owner,
     repo,
     log,
-    planRepairGitImpl: run = defaultPlanRepairGit,
+    planRepairGitImpl: run = prHeadTreeGit(wt),
     worktreeAddImpl: add = worktreeAdd,
     worktreeRemoveImpl: remove = worktreeRemove,
     planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
@@ -7588,11 +7729,18 @@ export async function renumberPlanPrIds(
   }
 }
 
-/** A git runner in `cwd`, the shape {@link gitRemoteRefReserver} takes. */
+/** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gitRemoteRefReserver} takes.
+ *  A refused pointer is not an exit status and propagates: renumberPlanPrIds reports it as its error. */
 export function planRepairGitRun(cwd: string): RemoteReserveDeps["run"] {
   return (args) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    try {
+      return { status: 0, stdout: hostWorktreeGit(cwd, args), stderr: "" };
+    } catch (error) {
+      if (error instanceof WorktreePointerRefusedError) throw error;
+      const failed = error as { status?: unknown; stdout?: unknown; stderr?: unknown };
+      // A signalled git reports a null status; 1 keeps it a failure, as spawnSync's `?? 1` did.
+      return { status: typeof failed.status === "number" ? failed.status : 1, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? "") };
+    }
   };
 }
 
@@ -8439,7 +8587,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
     reason: (pr, policy) => {
-      const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}`;
+      const refusal = bundledRefusalNote(pr); // W1-T5769: name the gate a worker must actually clear.
+      const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}${refusal ? ` — ${refusal}` : ""}`;
       if ((pr.fixRefusalsAtHead ?? 0) > 0) return `${base} — refused (${pr.fixRefusalsAtHead} at this head) — retrying the fix round`;
       // W1-T2998 — NAME THE DETERMINISTIC REMEDY WHENEVER ONE EXISTS, INDEPENDENTLY OF WHETHER IT
       // MAY BE TAKEN. With `recordableRatchetRepairEnabled` false this sentence is the ONLY effect
@@ -8752,7 +8901,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".
     disposition: "mergeable",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "success",
+    when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
     reason: () => "review success, required checks green — arming auto-merge",
   },
@@ -9114,7 +9263,9 @@ export interface ArmedStalledPr {
     | "distance-overlap"
     | "distance-baseline"
     | "distance-ceiling"
-    | "distance-unknown";
+    | "distance-unknown"
+    | "ready-overlap"
+    | "ready-unknown";
   /** W1-T5696: the main-side files that made a distance refresh worth its CI run and re-review. */
   matchingBaseFiles?: readonly string[];
 }
@@ -9168,6 +9319,44 @@ export function distanceRefreshCause(
   return { reason: undefined, files: [] };
 }
 
+/** P22's "required contexts green, review success": the `mergeable` disposition row's own match. */
+function checksGreenReviewSuccess(pr: Pick<OpenPrView, "checksState" | "reviewState">): boolean {
+  return pr.checksState === "green" && pr.reviewState === "success";
+}
+
+/** W1-T6022 — what the ready refresh reads beyond the PR: W1-T5939's incident hold, the `<pr>@<head>`
+ *  keys W1-T5921's one update per (PR, head) already spent, and a changed file's source at the head
+ *  (`undefined` is unread, never empty). */
+export interface ReadyRefreshFacts {
+  incidentHold?: boolean;
+  spentHeads?: ReadonlySet<string>;
+  readSource?: (pr: OpenPrView, path: string) => string | undefined;
+}
+
+/** W1-T6022 — W1-T5696's overlap and baseline arms without the distance gate, plus one reach rule: a
+ *  changed test file whose source names a path literal prefixing (at a segment) a main-changed path. */
+function readyRefreshCause(
+  pr: OpenPrView,
+  base: BaseChangedFiles | undefined,
+  readSource: ReadyRefreshFacts["readSource"],
+): { reason: "ready-overlap" | "ready-unknown" | undefined; files: string[] } {
+  const cause = distanceRefreshCause(0, pr.changedFiles, base, Infinity);
+  if (cause.reason === "distance-unknown") return { reason: "ready-unknown", files: [] };
+  if (cause.reason !== undefined) return { reason: "ready-overlap", files: cause.files };
+  let unread = false;
+  const reached = new Set<string>();
+  for (const path of readSource ? (pr.changedFiles ?? []).filter((f) => /\.test\.[cm]?[jt]s$/.test(f)) : []) {
+    const source = readSource!(pr, path);
+    if (source === undefined) unread = true;
+    const literals = source?.match(/[\w.-]+(?:\/[\w.-]+)+\/?/g) ?? [];
+    for (const f of base?.files ?? []) {
+      if (literals.some((l) => f === l || f.startsWith(l.endsWith("/") ? l : `${l}/`))) reached.add(f);
+    }
+  }
+  if (reached.size > 0) return { reason: "ready-overlap", files: [...reached] };
+  return { reason: unread ? "ready-unknown" : undefined, files: [] };
+}
+
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request. `"updated"`: GitHub ACCEPTED
  *  the request, and the update completes asynchronously. `"conflict"`: GitHub refused — a real
  *  conflict, or a diverged head — reported and never retried by this call. W1-T5933: `"head-moved"`
@@ -9205,6 +9394,7 @@ export function openPrsBehindMain(
     Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">>,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready: ReadyRefreshFacts = {},
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
@@ -9228,13 +9418,22 @@ export function openPrsBehindMain(
       pr.checksState === "green" &&
       pr.reviewState === "success" &&
       pr.isDraft !== true;
-    if (!staleBlocked && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
+    // W1-T6022: a READY PR (armed, or the `mergeable` row's match) below the gate whose base files were read.
+    const readyBelowGate = !staleBlocked && behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold &&
+      baseChangedFilesByPr !== undefined && pr.isDraft !== true && (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+    if (!staleBlocked && !readyBelowGate && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
     // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
     // own files and every refresh-relevant path are untouched by main stays put.
     let reason: NonNullable<ArmedStalledPr["updateReason"]> = staleBlocked ? "stale-blocked" : "distance";
     let matching: string[] = [];
-    if (!staleBlocked && baseChangedFilesByPr !== undefined) {
+    if (readyBelowGate) {
+      if (ready.incidentHold === true || ready.spentHeads?.has(`${pr.prNumber}@${pr.headSha}`)) continue;
+      const cause = readyRefreshCause(pr, baseChangedFilesByPr.get(pr.prNumber), ready.readSource);
+      if (cause.reason === undefined) continue;
+      reason = cause.reason;
+      matching = cause.files;
+    } else if (!staleBlocked && baseChangedFilesByPr !== undefined) {
       const cause = distanceRefreshCause(
         behindBy,
         pr.changedFiles,
@@ -9343,8 +9542,10 @@ export function queuedBehindMainSkips(
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
   queued: (pr: ArmedStalledPr) => boolean,
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready?: ReadyRefreshFacts,
 ): ArmedStalledPr[] {
-  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr).filter(queued);
+  return openPrsBehindMain(prs, behindMainByPr, policy, new Set(), baseChangedFilesByPr, ready)
+    .filter((c) => c.updateReason !== "ready-unknown" && queued(c));
 }
 
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
@@ -9362,6 +9563,7 @@ export function selectUpdateBranchTarget(
     Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">> = DEFAULT_SWEEP_POLICY,
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready?: ReadyRefreshFacts,
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -9370,7 +9572,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr, ready),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -9380,7 +9582,7 @@ export function selectUpdateBranchTarget(
   const eligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
-    if (view.isDraft === true) return false;
+    if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
@@ -10620,6 +10822,8 @@ export interface SweepDeps {
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
   mergeQueue?: (prUrl: string) => boolean;
+  /** W1-T6022 — a changed file's source at the PR head, for the ready refresh's reach rule. */
+  readPrFileSource?: (pr: OpenPrView, path: string) => string | undefined;
   /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
    *  one safe mechanical repair: rebase that head onto current main and push it back with an
    *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
@@ -13420,7 +13624,25 @@ export async function runSweep(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    // W1-T6052: an old pending snapshot is not proof CI is still running. The arm reader
+    // proves every required context on a fresh head; only that exact open head can clear it.
+    if (pr.checksState === "pending" &&
+        (pendingAgeMinutes(pr, now) ?? 0) >= policy.pendingCeilingMinutes && deps.readArmFacts) {
+      try {
+        const fresh = await deps.readArmFacts(pr);
+        if (fresh?.prNumber === pr.prNumber && fresh.headSha === pr.headSha &&
+            fresh.state === "open" && fresh.checksGreen) {
+          pr = { ...pr, checksState: "green", checksPendingSince: undefined,
+            ciFailures: undefined, cancelledRequiredChecks: undefined, redRequiredChecks: undefined };
+          log("sweep.stale_pending_cleared", { pr_number: pr.prNumber, head_sha: pr.headSha,
+            reason: "fresh exact-head required checks concluded green" });
+        }
+      } catch (error) {
+        log("sweep.stale_pending_read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha,
+          reason: String(error) });
+      }
+    }
     let stackParentWithdrawal:
       | { check: StackPrerequisiteCheck; outcome?: DisarmOutcome; error?: string }
       | undefined;
@@ -13891,7 +14113,7 @@ export async function runSweep(
         // also suppresses UNLESS it was the stale "PR is already closed" refusal, in which case
         // reaching this check already proves the PR is open again.
         const reviewKey = reviewOutcomeKeyForPr(pr);
-        const reviewDelivered = prior.reviewDelivered.has(reviewKey);
+        const reviewDelivered = deliveredVerdictDedupsPostReview(pr, prior.reviewDelivered.has(reviewKey));
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
@@ -14659,6 +14881,16 @@ export async function runSweep(
                   break;
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
+                // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
+                const mainFailing = verdict === "clear" ? undefined : mainFailingTestFiles(reproductionHistory);
+                if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
+                  acted = false;
+                  const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
+                  if (!baseRedHistory.stoodDown.has(key)) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, check_name: check, main_sha: mainTipSha, step: BASE_RED_STOOD_DOWN_STEP });
+                  standDownReason = `base red: ${reproductionFiles.join(", ")} failed on main since it was last green, and this ${verdict} probe at ${mainTipSha} does not clear them — no fix dispatched, the branch refreshes once main is green`;
+                  baseRedStandDownPrs.add(pr.prNumber);
+                  break;
+                }
                 const previouslyReproduced = reproductionHistory.some((line) => line.step === "sweep.base_reproduction" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.verdict === "reproduced" && line.main_sha !== mainTipSha);
                 if (verdict === "clear" && previouslyReproduced && !baseRedHistory.refreshed.has(key)) {
@@ -15675,6 +15907,21 @@ export async function runSweep(
   if (!deps.dryRun && deps.updateBranch) {
     const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
+    // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.
+    const readyCandidate = deps.baseChangedFilesByPr !== undefined && refreshPrs.some((pr) => {
+      const behindBy = behindMainByPr.get(pr.prNumber) ?? 0;
+      return behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold && pr.isDraft !== true &&
+        (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+    });
+    const readyFacts: ReadyRefreshFacts = {
+      incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&
+        actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold",
+      spentHeads: new Set(ledgerLines
+        .filter((l) => l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted")
+        .map((l) => `${String(l.pr_number)}@${String(l.head_sha)}`)),
+      readSource: deps.readPrFileSource,
+    };
     // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
     // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
     // reads as "no queue", so the pre-queue refresh is unchanged.
@@ -15687,7 +15934,7 @@ export async function runSweep(
         } catch {
           return false; // a queue read that fails is "no queue": the refresh below is unchanged
         }
-      }, deps.baseChangedFilesByPr);
+      }, deps.baseChangedFilesByPr, readyFacts);
       for (const c of skipped) {
         queuedPrNumbers.add(c.prNumber);
         const already = ledgerLines.some(
@@ -15715,6 +15962,7 @@ export async function runSweep(
       policy,
       queuedPrNumbers,
       deps.baseChangedFilesByPr,
+      readyFacts,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra

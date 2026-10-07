@@ -3,7 +3,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -13,11 +13,14 @@ import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, readBlobsAtRef, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
+import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { makeTempDir } from "./tmp.js";
+import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
   COMPANION_PATH_CLASSES,
@@ -26,8 +29,10 @@ import {
   isCompanionPath,
 } from "./companion-paths.js";
 import {
+  gitReservationRunnerAsync,
   parsePrefixedTaskId,
   readReservationAnchors,
+  readReservationAnchorsAsync,
   reservationHolderBranch,
   taskIdCollisions,
   type ReservationAnchorRead,
@@ -412,6 +417,9 @@ export interface ReviewEvidence {
   headRefName?: string;
   /** The reservation read that keyed this decision, so the judge never races a second remote read. */
   reservationOwnership?: TaskIdOwnershipFinding[];
+  /** origin/main's task-id declarations, read AWAITED by runReview ({@link reviewTaskIdEvidenceAsync}); present, the
+   *  judge's collision check uses it instead of a second, synchronous `ls-tree` + `cat-file --batch`. */
+  baseTaskIdDeclarations?: TaskIdDeclaration[];
   /** The implementation worker's full report. Kept distinct from the PR body: body integrity
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
@@ -502,6 +510,9 @@ export interface ReviewVerdict {
   state: ReviewState;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
+  /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
+   *  ProofSandboxStatus}). It rides `review.posted`'s `decision_verdict`, so a degraded review is on the record. */
+  proofSandboxDegraded?: string;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -1555,6 +1566,8 @@ export const PROOF_ENV_ALLOWLIST = [
   "GIT_CONFIG_KEY_0",
   "GIT_CONFIG_VALUE_0",
   "GIT_TERMINAL_PROMPT",
+  // W1-T6124: the browser cache's location, set by {@link proofChildEnv} so a throwaway HOME still finds Chromium.
+  "PLAYWRIGHT_BROWSERS_PATH",
 ] as const;
 
 /** The `GIT_CONFIG_*` keys {@link buildProofEnv} only ever forwards TOGETHER (W1-T1096). This allowlist names index 0
@@ -1580,14 +1593,350 @@ export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.P
   return child;
 }
 
+// ── W1-T6124: A REVIEW PROOF RUNS SANDBOXED, WITHOUT THE DAEMON'S CREDENTIALS ─────────────────────────────────────
+// A proof is the PR's OWN test code, run by design. W1-T499's allowlist kept GH_TOKEN out of its env, but the child
+// still ran as the daemon's uid with the daemon's HOME: it could write ~/.gitconfig (where deploy/entrypoint.sh keeps
+// the GH_TOKEN credential helper every later daemon git call honours), write the daemon's checkout and state, and read
+// the GitHub App key at GH_APP_PRIVATE_KEY_PATH. Two layers now: EVERY platform gets a throwaway HOME plus the env
+// allowlist; Linux additionally runs the child under bubblewrap in the shape of worker-provider.ts
+// `openWeightCheckSandboxArgv` (deploy/Dockerfile REQ 8 ships it) — new user/net/pid/ipc namespaces, only the checkout,
+// its git and node_modules link targets and a small runtime mounted. NETWORK: none is granted; a grep over test/ found
+// no proof that needs it, and loopback still works inside the namespace for tests that start a local server.
+
+/** The Linux runner a proof child starts under (W1-T6124). */
+export const PROOF_SANDBOX_BINARY = "bwrap";
+
+/** Host runtime roots bound read-only into a proof sandbox, the same set the open-weight check sandbox binds. */
+const PROOF_SANDBOX_RUNTIME_ROOTS = ["/usr", "/lib", "/lib64", "/bin", "/usr/local"] as const;
+
+/** The /etc entries a test runtime reads (user lookup, localhost, linker cache, TLS roots) — never /etc wholesale. */
+const PROOF_SANDBOX_ETC = [
+  "/etc/passwd",
+  "/etc/group",
+  "/etc/hosts",
+  "/etc/nsswitch.conf",
+  "/etc/localtime",
+  "/etc/ld.so.cache",
+  "/etc/ssl",
+  "/etc/ca-certificates",
+  "/etc/alternatives",
+  "/etc/fonts",
+] as const;
+
+/** How this process runs proof children: under bwrap, or UNSANDBOXED with the named reason — the reason is what
+ *  {@link ReviewVerdict.proofSandboxDegraded} records, so a degraded review is never silently read as a sandboxed one. */
+export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string };
+
+/** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
+ *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
+export class ProofSandboxUnavailableError extends RmdError {
+  constructor(readonly sandboxReason: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof sandbox could not start: ${sandboxReason}`, { sandboxReason });
+  }
+}
+
+let proofSandboxMemo: ProofSandboxStatus | undefined;
+let unsandboxedProofSpawns = 0;
+
+/** Test-only: pin (or with no argument, forget) the process's sandbox status. Production probes once. */
+export function setProofSandboxForTests(status?: ProofSandboxStatus): void {
+  proofSandboxMemo = status;
+}
+
+/** A spawn failure's first useful line, bounded for a ledger row. */
+function spawnFailureText(error: unknown): string {
+  const err = error as NodeJS.ErrnoException & { stderr?: string | Buffer | null };
+  if (err.code === "ENOENT") return `${PROOF_SANDBOX_BINARY} is not installed`;
+  const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
+  const line = stderr.split("\n").find((l) => l.trim() !== "") ?? String(err.message ?? error);
+  return line.trim().slice(0, 160);
+}
+
+/** Decide, once per process, whether proof children can run under bwrap. Off Linux there is no bwrap and the review
+ *  still runs (an operator's darwin review must not be refused), recorded as degraded. On Linux the probe starts the
+ *  REAL sandbox argv around node itself, so a pass also proves the runtime is visible inside it. */
+export function probeProofSandbox(
+  platform: NodeJS.Platform = process.platform,
+  exec: typeof execFileSync = execFileSync,
+): ProofSandboxStatus {
+  if (platform !== "linux") {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap is Linux-only; this ${platform} host ran the proof with a throwaway HOME and the env allowlist only`,
+    };
+  }
+  const dir = makeTempDir("proof-sandbox-probe");
+  try {
+    exec(PROOF_SANDBOX_BINARY, [...proofSandboxArgv({ cwd: dir, home: dir }), process.execPath, "-e", ""], {
+      cwd: dir,
+      env: buildProofEnv(),
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+    return { mode: "bwrap", binary: PROOF_SANDBOX_BINARY };
+  } catch (error) {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap cannot start on this Linux host (${spawnFailureText(error)}); ran with a throwaway HOME and the env allowlist only`,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The process's memoised {@link probeProofSandbox} answer. */
+export function proofSandboxStatus(): ProofSandboxStatus {
+  proofSandboxMemo ??= probeProofSandbox();
+  return proofSandboxMemo;
+}
+
+/** A path's real location, or `undefined` when nothing is there to mount or mask. */
+function realpathIfPresent(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    return undefined; // absent: there is nothing at this path for a bind to expose
+  }
+}
+
+function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(pathSep) ? root : `${root}${pathSep}`);
+}
+
+/** The git directories a checkout's own `git` calls need: a worktree's private gitdir and the shared common dir it
+ *  names. Read by OPENING `.git` once (EISDIR means an ordinary clone), never by a stat-then-read pair. */
+export function proofCheckoutGitDirs(cwd: string): { common?: string; worktree?: string } {
+  const dotGit = join(cwd, ".git");
+  let text: string;
+  try {
+    text = readFileSync(dotGit, "utf8");
+  } catch (error) {
+    // EISDIR: an ordinary clone, whose .git sits inside the bound checkout. Anything else: no git dir to bind.
+    return (error as NodeJS.ErrnoException).code === "EISDIR" ? { common: dotGit } : {};
+  }
+  const gitdir = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
+  if (gitdir === undefined) return {};
+  const worktree = resolve(cwd, gitdir);
+  let common = worktree;
+  try {
+    common = resolve(worktree, readFileSync(join(worktree, "commondir"), "utf8").trim());
+  } catch (error) {
+    // No commondir file: a gitdir that is its own common dir. Any other read failure is the same answer.
+  }
+  return existsSync(worktree) ? { common, worktree } : {};
+}
+
+/** Where a checkout's `node_modules` really lives when it is a link to a shared install, plus every top-level package
+ *  link out of that install (npm workspaces link `node_modules/@scope/pkg` to the install's own `packages/`). */
+export function proofLinkedModuleRoots(cwd: string): string[] {
+  let target: string;
+  try {
+    target = realpathSync(join(cwd, "node_modules"));
+  } catch (error) {
+    // No node_modules (or a dangling link): nothing outside the checkout to mount.
+    return [];
+  }
+  const checkout = realpathSync(cwd);
+  const roots = isWithin(target, checkout) ? [] : [target];
+  const scan = (dir: string, depth: number): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (depth === 0 && entry.isDirectory() && entry.name.startsWith("@")) scan(path, 1);
+      if (!entry.isSymbolicLink()) continue;
+      let real: string;
+      try {
+        real = realpathSync(path);
+      } catch (error) {
+        continue; // a dangling package link resolves to nothing the sandbox could mount
+      }
+      if (!isWithin(real, target) && !isWithin(real, checkout)) roots.push(real);
+    }
+  };
+  scan(target, 0);
+  return roots;
+}
+
+export interface ProofSandboxArgvInput {
+  cwd: string;
+  home: string;
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+}
+
+/** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
+ *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
+ *  masked by an empty file), the node_modules link targets and the browser cache. NOT mounted: the daemon's HOME, its
+ *  checkout and state, and the App key — masked by /dev/null too if some bind happens to contain it. */
+export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
+  const env = input.env ?? process.env;
+  const cwd = realpathSync(input.cwd);
+  const home = realpathSync(input.home);
+  if (cwd === "/" || home === "/") throw new ProofSandboxUnavailableError("refusing / as a writable sandbox bind");
+  const runtime: string[] = PROOF_SANDBOX_RUNTIME_ROOTS.filter((p) => existsSync(p));
+  const binds: { path: string; writable: boolean }[] = [];
+  const nodePrefix = dirname(dirname(realpathSync(input.execPath ?? process.execPath)));
+  if (!runtime.some((root) => isWithin(nodePrefix, root))) binds.push({ path: nodePrefix, writable: false });
+  for (const path of PROOF_SANDBOX_ETC) if (existsSync(path)) binds.push({ path, writable: false });
+  const browsers = realpathIfPresent(playwrightCacheRoot(env, "linux", env.HOME ?? home));
+  if (browsers !== undefined) binds.push({ path: browsers, writable: false });
+  for (const path of proofLinkedModuleRoots(cwd)) binds.push({ path, writable: false });
+  const found = proofCheckoutGitDirs(cwd);
+  const git = {
+    common: found.common === undefined ? undefined : realpathSync(found.common),
+    worktree: found.worktree === undefined ? undefined : realpathSync(found.worktree),
+  };
+  if (git.common !== undefined && !isWithin(git.common, cwd)) binds.push({ path: git.common, writable: false });
+  if (git.worktree !== undefined && !isWithin(git.worktree, cwd)) binds.push({ path: git.worktree, writable: true });
+  binds.push({ path: cwd, writable: true });
+  if (home !== cwd) binds.push({ path: home, writable: true });
+  // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
+  binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
+  // bwrap mounts binds nodev, so a /dev/null bound over a file reads as EACCES: right for the App key, fatal
+  // for git, which refuses an unreadable config. The config is masked by an EMPTY file in the throwaway HOME.
+  const masks: { from: string; path: string }[] = [];
+  if (git.common !== undefined && existsSync(join(git.common, "config"))) {
+    const empty = join(home, ".rmd-masked-git-config");
+    try {
+      writeFileSync(empty, "", { mode: 0o444, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; // this HOME's earlier argv already made it
+    }
+    masks.push({ from: empty, path: join(git.common, "config") });
+  }
+  const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
+  if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });
+  const dirs = new Set<string>();
+  for (const { path } of binds) {
+    for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
+  }
+  const createDirs = [...dirs].sort((a, b) => a.split(pathSep).length - b.split(pathSep).length);
+  return [
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-user",
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    ...runtime.flatMap((path) => ["--ro-bind", path, path]),
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    ...createDirs.flatMap((path) => ["--dir", path]),
+    ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
+    ...masks.flatMap(({ from, path }) => ["--ro-bind", from, path]),
+    "--chdir", cwd,
+    "--",
+  ];
+}
+
+/** The proof child's env: {@link buildProofEnv}'s allowlist with HOME replaced by a throwaway one, and the browser
+ *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
+export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...buildProofEnv(parent),
+    HOME: home,
+    PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
+  };
+}
+
+interface PreparedProofChild {
+  file: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  /** The sandbox argv around node itself, run first: a sandbox that cannot start must not read as the proof's exit. */
+  startCheck?: { file: string; args: string[] };
+  cleanup: () => void;
+}
+
+/** One proof child's argv and env, with its throwaway HOME made (`rmd-proof-home-*`) and the cleanup that removes it. */
+function prepareProofChild(command: string, args: readonly string[], cwd: string): PreparedProofChild {
+  const child = proofChildCommand(command, args);
+  const home = makeTempDir("proof-home");
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  const env = proofChildEnv(home);
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") {
+    unsandboxedProofSpawns += 1;
+    return { ...child, env, cleanup };
+  }
+  try {
+    const sandbox = proofSandboxArgv({ cwd, home });
+    return {
+      file: status.binary,
+      args: [...sandbox, child.file, ...child.args],
+      env,
+      startCheck: { file: status.binary, args: [...sandbox, process.execPath, "-e", ""] },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    throw error instanceof ProofSandboxUnavailableError ? error : new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+function startCheckSync(child: PreparedProofChild, cwd: string): void {
+  try {
+    execFileSync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<void> {
+  try {
+    await execFileAsync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
 /** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout, and a DECLARED env ({@link buildProofEnv})
  *  rather than an implicit inherit of `process.env` (W1-T499), which once let a proof inherit the orchestrator's whole
  *  environment. Exported (W1-T387) so `checkProofCommand` can wrap it for diagnostics, never for the verdict. TRAP:
  *  `NODE_V8_COVERAGE: undefined` closes a side channel the allowlist cannot, Node force-injecting that var regardless. */
-export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileSync(command, args as string[], {
+/** A `node --test` proof's child, re-spelled to start niced with an explicit `--test-concurrency` (test-slot.ts); every
+ *  other proof (grep, vitest) runs as given. NO HOST-WIDE SLOT, deliberately: a proof is one file (or a narrowed
+ *  name-filtered set), the review it gates is what the slot exists to protect, and a proof waiting behind a 40-minute
+ *  coverage run would be the starvation, not its cure. Bounded to one slot's share, so it never outruns a slotted run. */
+export function proofChildCommand(
+  command: string,
+  args: readonly string[],
+  load: HostLoad = readHostLoad(),
+  exists?: BinaryProbe,
+): { file: string; args: string[] } {
+  if (!args.includes("--test")) return { file: command, args: [...args] };
+  const concurrency = testRunConcurrency(load, defaultTestSlots(load.cores));
+  return lowPriorityCommand(command, testRunArgv(args, concurrency), exists);
+}
+
+export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) => {
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) startCheckSync(child, cwd);
+    return spawnPreparedProofSync(child, cwd, timeoutMs);
+  } finally {
+    child.cleanup();
+  }
+};
+
+function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutMs: number): string {
+  return execFileSync(child.file, child.args, {
     cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
+    env: { ...child.env, NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
     // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
@@ -1601,6 +1950,7 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     killSignal: "SIGKILL",
     encoding: "utf8",
   });
+}
 
 /** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
 function execFileAsync(
@@ -1626,13 +1976,20 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileAsync(command, args, {
-    cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-  });
+export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) await startCheckAsync(child, cwd);
+    return await execFileAsync(child.file, child.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+  } finally {
+    child.cleanup();
+  }
+};
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
@@ -1642,6 +1999,19 @@ const reviewerOwnedCheckouts = new Set<string>();
 const failedProofToolchainInstalls = new Set<string>();
 export function registerReviewerCheckout(path: string): void {
   reviewerOwnedCheckouts.add(resolve(path));
+}
+
+/** W1-T6124: how a PR checkout is installed. `--ignore-scripts` because npm ci otherwise runs the PR's OWN root
+ *  lifecycle scripts (preinstall/install/postinstall/prepare); this repo's package.json and workspaces declare none,
+ *  and esbuild/@swc/core (the only dependencies with install scripts) resolve their platform binary from an optional
+ *  dependency without them — measured: `npm ci --ignore-scripts` then `node --import tsx` runs. */
+export const PROOF_INSTALL_ARGS: readonly string[] = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
+
+/** The install's env: {@link buildProofEnv}'s allowlist, so no GH_TOKEN, GH_APP_* or other credential reaches npm or
+ *  an `${VAR}` a PR's own .npmrc interpolates. HOME stays the daemon's so npm's cache keeps a fresh install inside its
+ *  120s bound; with scripts off, npm itself is the only code that runs. */
+export function proofInstallEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return buildProofEnv(parent);
 }
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
@@ -1684,7 +2054,7 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -1710,7 +2080,7 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const install = execFileAsync("npm", ["ci"], { cwd, timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const install = execFileAsync("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
     () => undefined,
     () => undefined, // Best effort; the runner check below decides availability.
   );
@@ -3384,6 +3754,13 @@ export function judgeCriterion(
             loadError = e.loadError;
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofSandboxUnavailableError) {
+            // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
+            proofExec = "not_executable";
+            proofSkip = "runner-absent";
+            reason =
+              `${reason} — NOTE: the proof sandbox could not start (${e.sandboxReason}); ` +
+              "not executed, keyword floor applied";
           } else if (e instanceof ProofRunnerUnavailableError) {
             proofExec = "not_executable";
             proofSkip = "runner-absent";
@@ -4401,6 +4778,7 @@ export function judgeReview(
   // byte-identical to pre-W1-T65. W1-T2743: ONE memo per judgeReview call. Built here rather than inside
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
   const proofMemo = evidence.headCheckoutDir ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof) : undefined;
+  const unsandboxedBefore = unsandboxedProofSpawns;
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
@@ -4438,9 +4816,10 @@ export function judgeReview(
 
   const idDecls = taskIdDeclarationsInDiff(evidence.diff);
   const baseIdDecls =
-    idDecls.added.length > 0 && evidence.headCheckoutDir
+    evidence.baseTaskIdDeclarations ??
+    (idDecls.added.length > 0 && evidence.headCheckoutDir
       ? taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main") // the TIP: #1699 merged after #1695 branched
-      : [];
+      : []);
   const idCollisions = baseIdDecls.length > 0 ? taskIdCollisions(idDecls.added, baseIdDecls, idDecls.removed) : [];
   const idOwnership =
     evidence.reservationOwnership ?? (idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
@@ -4612,6 +4991,7 @@ export function judgeReview(
   return {
     state,
     cannotEvaluate,
+    ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,
     testTheater,
     summary,
@@ -4650,12 +5030,20 @@ export function judgeReview(
   };
 }
 
+/** W1-T6124: the verdict's degraded-sandbox record when a proof child started unsandboxed since `before`. */
+function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDegraded"> {
+  if (unsandboxedProofSpawns === before) return {};
+  const status = proofSandboxStatus();
+  return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
+}
+
 /** Resolve each requested head/base observation without blocking, then fold with the same judge. */
 export async function judgeReviewAsync(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
+  const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
     | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string }
     | { error: unknown };
@@ -4680,7 +5068,7 @@ export async function judgeReviewAsync(
       throw new Error("async proof observation pending");
     };
     const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
-    if (pending.size === 0) return verdict;
+    if (pending.size === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
@@ -6678,17 +7066,85 @@ export function taskIdDeclarationsAtRef(
   let files: string[];
   let texts: string[];
   try {
-    files = runGit(["ls-tree", "-r", "--name-only", ref, "plan/"]).split("\n").filter((f) => SHARD_PATH_RE.test(f));
+    files = planShardPathsIn(runGit(DECLARATIONS_LISTING_ARGS(ref)));
     texts = readBlobsAtRef(runGit, ref, files);
   } catch {
     return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
   }
+  return declarationsInShards(files, texts);
+}
+
+/** {@link taskIdDeclarationsAtRef} through awaited, bounded git: the same listing, batch and parse. A git that
+ *  FAILS declares nothing, exactly as the sync read; one killed at its bound REJECTS with {@link ReviewGitTimeout}. */
+export async function taskIdDeclarationsAtRefAsync(
+  repoDir: string,
+  ref: string,
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
+): Promise<TaskIdDeclaration[]> {
+  let files: string[];
+  let texts: string[];
+  try {
+    files = planShardPathsIn(await runGit(DECLARATIONS_LISTING_ARGS(ref)));
+    texts = await readBlobsAtRefAsync(runGit, ref, files);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as an empty base
+    return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
+  }
+  return declarationsInShards(files, texts);
+}
+
+const DECLARATIONS_LISTING_ARGS = (ref: string): string[] => ["ls-tree", "-r", "--name-only", ref, "plan/"];
+
+function planShardPathsIn(listing: string): string[] {
+  return listing.split("\n").filter((f) => SHARD_PATH_RE.test(f));
+}
+
+function declarationsInShards(files: readonly string[], texts: readonly string[]): TaskIdDeclaration[] {
   return files.flatMap((file, i) =>
     texts[i].split("\n").flatMap((l) => {
       const m = l.match(TASK_ID_LINE_RE);
       return m ? [{ id: m[1], file }] : [];
     }),
   );
+}
+
+/** An awaited {@link GitBlobRunner}: resolves stdout, rejects on any failure. */
+export type AsyncGitBlobRunner = (args: string[], stdin?: string) => Promise<string>;
+
+/** BACKSTOP per git call on the review's base reads (ls-tree, cat-file --batch, show). MEASURED 2026-09-05: one
+ *  batch over 1,079 shards took 208 ms, so this fires only on a hung git, never on a slow healthy one. */
+export const REVIEW_BASE_READ_GIT_TIMEOUT_MS = 120_000;
+
+/** A review base read killed at its bound. Named, so the evidence reads `unknown` and never an empty base. */
+export class ReviewGitTimeout extends RmdError {
+  constructor(message: string) {
+    super("git", GENERIC_EXIT_CODE, message);
+    this.name = "ReviewGitTimeout";
+  }
+}
+
+/** The real {@link AsyncGitBlobRunner}: `git -C <repoDir>` off the event loop, `stdin` piped, killed at its bound
+ *  (SIGTERM, then SIGKILL after grace) and rejecting with {@link ReviewGitTimeout}, which names the bound. */
+export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {}): AsyncGitBlobRunner {
+  const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve(stdout);
+        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
+        reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
+      });
+      // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
 }
 
 /** W1-T4414: an added id whose reservation does not name this PR's head as its holder. */
@@ -6700,12 +7156,36 @@ export type TaskIdOwnershipFinding =
 /** Base-committed, so a PR can never exempt its own ids: `[{ "id": ..., "reason": ... }]`, reasonless rows ignored. */
 export const TASK_ID_RESERVATION_BASELINE = "plan/task-id-reservation-baseline.json";
 
+const BASELINE_SHOW_ARGS = ["show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`];
+
 function reservationBaselineIds(repoDir: string): Set<string> {
+  let text: string;
+  try {
+    text = execFileSync("git", ["-C", repoDir, ...BASELINE_SHOW_ARGS], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+/** {@link reservationBaselineIds} through awaited, bounded git; killed at its bound it REJECTS with {@link ReviewGitTimeout}. */
+async function reservationBaselineIdsAsync(runGit: AsyncGitBlobRunner): Promise<Set<string>> {
+  let text: string;
+  try {
+    text = await runGit(BASELINE_SHOW_ARGS);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as "no baseline"
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+function baselineIdsIn(text: string): Set<string> {
   let rows: unknown;
   try {
-    rows = JSON.parse(execFileSync("git", ["-C", repoDir, "show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    rows = JSON.parse(text);
   } catch {
-    return new Set(); // no baseline (or an unparseable one) exempts nothing — the strict direction
+    return new Set(); // an unparseable baseline exempts nothing — the strict direction
   }
   const ok = (r: unknown): r is { id: string; reason: string } =>
     typeof (r as { id?: unknown })?.id === "string" && typeof (r as { reason?: unknown }).reason === "string" && (r as { reason: string }).reason.trim() !== "";
@@ -6722,6 +7202,33 @@ function recordsHandoff(diff: string, file: string, holder: string, head: string
   });
 }
 
+/** The ids `added` files that neither the base declares nor the baseline exempts, each with its file. */
+function filedTaskIds(added: readonly TaskIdDeclaration[], baseDecls: readonly TaskIdDeclaration[], baselineIds: ReadonlySet<string>): Map<string, string> {
+  const exempt = new Set([...baseDecls.map((d) => d.id), ...baselineIds]);
+  const filed = new Map<string, string>();
+  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
+  return filed;
+}
+
+function judgeTaskIdOwnership(
+  diff: string,
+  filed: ReadonlyMap<string, string>,
+  reads: ReadonlyMap<string, ReservationAnchorRead>,
+  headRef: string,
+): TaskIdOwnershipFinding[] {
+  const findings: TaskIdOwnershipFinding[] = [];
+  for (const [id, file] of filed) {
+    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
+    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
+    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
+    else {
+      const holder = reservationHolderBranch(r.message) ?? "unknown";
+      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
+    }
+  }
+  return findings;
+}
+
 /** Every id this diff ADDS to plan/ that the base does not declare, judged against refs/rmd-id/<id> on
  *  `repoDir`'s origin: absent, or held by a branch other than `headRef`, fails; unreadable is UNKNOWN. */
 export function taskIdOwnershipFindings(
@@ -6736,21 +7243,39 @@ export function taskIdOwnershipFindings(
       return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? String(r.error ?? "") };
     }),
 ): TaskIdOwnershipFinding[] {
-  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
-  const filed = new Map<string, string>();
-  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
-  const reads = read([...filed.keys()]);
-  const findings: TaskIdOwnershipFinding[] = [];
-  for (const [id, file] of filed) {
-    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
-    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
-    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
-    else {
-      const holder = reservationHolderBranch(r.message) ?? "unknown";
-      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
-    }
-  }
-  return findings;
+  const filed = filedTaskIds(added, baseDecls, reservationBaselineIds(repoDir));
+  return judgeTaskIdOwnership(diff, filed, read([...filed.keys()]), headRef);
+}
+
+/** {@link taskIdOwnershipFindings} with an AWAITED, bounded anchor read; a timeout reads `unknown`. */
+export async function taskIdOwnershipFindingsAsync(
+  diff: string,
+  added: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+  headRef: string,
+  repoDir: string,
+  read: (ids: string[]) => Map<string, ReservationAnchorRead> | Promise<Map<string, ReservationAnchorRead>> = (ids) =>
+    readReservationAnchorsAsync(ids, gitReservationRunnerAsync(repoDir)),
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
+): Promise<TaskIdOwnershipFinding[]> {
+  const filed = filedTaskIds(added, baseDecls, await reservationBaselineIdsAsync(runGit));
+  return judgeTaskIdOwnership(diff, filed, await read([...filed.keys()]), headRef);
+}
+
+type OwnershipEvidenceInputs =
+  | { done: true; findings: TaskIdOwnershipFinding[] | undefined }
+  | { done: false; added: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
+
+/** Every prefixed id `added` declares, each read `unknown` for `reason`. */
+function unknownOwnership(added: readonly TaskIdDeclaration[], reason: string): TaskIdOwnershipFinding[] {
+  const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
+  return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason }));
+}
+
+function ownershipEvidenceInputs(added: TaskIdDeclaration[], headRefName: string | undefined, headCheckoutDir: string | undefined): OwnershipEvidenceInputs {
+  if (added.length === 0) return { done: true, findings: undefined };
+  if (!headRefName || !headCheckoutDir) return { done: true, findings: unknownOwnership(added, !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable") };
+  return { done: false, added, headRefName, headCheckoutDir };
 }
 
 /** Snapshot the external reservation before decision replay, then reuse this exact read in the judge. */
@@ -6760,14 +7285,60 @@ export function reviewReservationOwnershipEvidence(
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindings>[5],
 ): TaskIdOwnershipFinding[] | undefined {
+  const i = ownershipEvidenceInputs(taskIdDeclarationsInDiff(diff).added, headRefName, headCheckoutDir);
+  return i.done ? i.findings : taskIdOwnershipFindings(diff, i.added, taskIdDeclarationsAtRef(i.headCheckoutDir, "origin/main"), i.headRefName, i.headCheckoutDir, read);
+}
+
+/** {@link reviewReservationOwnershipEvidence}, awaited: the ownership half of {@link reviewTaskIdEvidenceAsync}. */
+export async function reviewReservationOwnershipEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit?: AsyncGitBlobRunner,
+): Promise<TaskIdOwnershipFinding[] | undefined> {
+  return (await reviewTaskIdEvidenceAsync(diff, headRefName, headCheckoutDir, read, runGit)).ownership;
+}
+
+/** What runReview hands the judge: the reservation ownership snapshot, and origin/main's declarations the judge's
+ *  collision check would otherwise re-read synchronously (`undefined` exactly when the judge would not read them). */
+export interface ReviewTaskIdEvidence {
+  ownership: TaskIdOwnershipFinding[] | undefined;
+  baseDeclarations: TaskIdDeclaration[] | undefined;
+}
+
+/**
+ * The daemon's runReview takes this one: every git read of the task-id evidence awaited and bounded — the base
+ * declarations (ls-tree + cat-file --batch), the reservation baseline (show) and the anchors (ls-remote, fetch, log).
+ * Before this, only the anchor read was awaited (#9644): both base reads ran execFileSync and the judge re-read the
+ * declarations. A base read killed at its bound reads every filed id `unknown`, NAMING the timeout, and the judge
+ * sees an empty base, as on any unreadable ref — never a fabricated collision.
+ */
+export async function reviewTaskIdEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(headCheckoutDir ?? "."),
+): Promise<ReviewTaskIdEvidence> {
   const added = taskIdDeclarationsInDiff(diff).added;
-  if (added.length === 0) return undefined;
-  if (!headRefName || !headCheckoutDir) {
-    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
-    return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason: !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable" }));
+  const i = ownershipEvidenceInputs(added, headRefName, headCheckoutDir);
+  // The judge reads the base exactly when ids are added and a checkout exists; no checkout is always `done` above.
+  if (added.length === 0 || !headCheckoutDir) return { ownership: i.done ? i.findings : undefined, baseDeclarations: undefined };
+  let base: TaskIdDeclaration[];
+  try {
+    base = await taskIdDeclarationsAtRefAsync(headCheckoutDir, "origin/main", runGit);
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `base-unreadable: ${error.message}`), baseDeclarations: [] };
   }
-  const base = taskIdDeclarationsAtRef(headCheckoutDir, "origin/main");
-  return taskIdOwnershipFindings(diff, added, base, headRefName, headCheckoutDir, read);
+  if (i.done) return { ownership: i.findings, baseDeclarations: base };
+  try {
+    return { ownership: await taskIdOwnershipFindingsAsync(diff, i.added, base, i.headRefName, i.headCheckoutDir, read, runGit), baseDeclarations: base };
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `baseline-unreadable: ${error.message}`), baseDeclarations: base };
+  }
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
@@ -7168,8 +7739,15 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/test-tier-manifest.json":
     "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
+  "scripts/test-tier-coverage-manifest.json":
+    "the coverage lane's instrumented per-file duration ledger (W1-T5923) — DATA the coverage shard split " +
+    "weighs, not rule logic, same shape as scripts/test-tier-manifest.json above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/test-duration-reporter.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
+    "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +
+    "it cannot turn a failing suite green. Its numbers reach the split only through a reviewed ledger.",
   "scripts/diff-coverage-local.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T4084) — a local convenience exposed only as the " +
     "`diff-coverage:local` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +

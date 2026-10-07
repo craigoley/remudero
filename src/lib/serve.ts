@@ -95,6 +95,9 @@ import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
 import { WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
+import { ACTIONS_VIEW_NAME } from "./actions-view.js";
+import { AGENT_VIEW_NAME } from "./agent-view.js";
+import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
@@ -160,7 +163,7 @@ import {
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
-import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -335,7 +338,8 @@ export interface ServeDeps {
   /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
    *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
   resolveCurrentSha?: () => string;
-  board: BoardDeps;
+  /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
+  board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
   /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
   modelApprovals?: readonly ModelApproval[];
   /**
@@ -1382,6 +1386,8 @@ export interface GatewayCheckoutAssessment {
   /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
   restartDue: boolean;
   reloadPlanAt?: string;
+  /** origin/main's sha when the checkout is behind: what a handoff requested now would serve. */
+  targetSha?: string;
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1481,9 +1487,21 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
   const relevant = svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths);
-  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && !relevant && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
-  return { state, restartDue: !svc.dirty && relevant, ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }) };
+  // RELOADED EVEN WHEN RELEVANT: a code handoff now waits out SERVE_HANDOFF_COALESCE_MS, and the plan
+  // half of a mixed merge must not wait with it. A plan the old code cannot parse keeps the old one.
+  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  return {
+    state,
+    restartDue: !svc.dirty && relevant,
+    ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+    ...(svc.behind === null ? {} : { targetSha: svc.behind.newSha }),
+  };
 }
+
+/** OPERATOR RULING 2026-10-06: a generation asks for a code handoff at most once per this window,
+ *  measured from its boot or its last ask, so every merge landing meanwhile rides ONE handoff (each
+ *  cost ~55 s of cold prewarm, ~95 a day). Plan-only advances still reload in place at once. */
+export const SERVE_HANDOFF_COALESCE_MS = 15 * 60_000;
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
 export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
@@ -1525,6 +1543,8 @@ export interface StaleCodeExitDeps {
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
   requestHandoff?: (detail: Record<string, unknown>) => void;
+  /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
+  bootedAt?: number;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1609,6 +1629,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let handoffAsked: string | undefined;
   let exited: Promise<void> | undefined;
   let dirtyReported: string | undefined;
+  let windowFrom = deps.bootedAt ?? clock.now();
+  let coalescing: { firstSeenSha: string; firstSeenAt: number } | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
   let headPlanRef: string | undefined;
@@ -1658,6 +1680,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
+      coalescing = undefined;
       return;
     }
     staleSince ??= clock.now();
@@ -1681,12 +1704,23 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       staleForMs,
       patienceMs,
       msSinceLastRead,
+      ...(checkout?.targetSha === undefined ? {} : { targetSha: checkout.targetSha }),
       ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
     };
     if (deps.requestHandoff) {
       const key = `${currentSha} ${originBehind ?? ""}`;
       if (key === handoffAsked) return;
+      const targetSha = checkout?.targetSha ?? currentSha;
+      coalescing ??= { firstSeenSha: targetSha, firstSeenAt: clock.now() };
+      const dueAt = windowFrom + SERVE_HANDOFF_COALESCE_MS;
+      if (clock.now() < dueAt) return;
       handoffAsked = key;
+      windowFrom = clock.now();
+      // ONE ROW PER WINDOW, written when the deferred ask finally goes out, never per poll.
+      if (coalescing.firstSeenAt < dueAt) {
+        log("serve.handoff_coalesced", { firstSeenSha: coalescing.firstSeenSha, targetSha, waitedMs: clock.now() - coalescing.firstSeenAt, mergesAbsorbed: commitsBehind, windowMs: SERVE_HANDOFF_COALESCE_MS });
+      }
+      coalescing = undefined;
       log("serve.handoff_requested", decision);
       return deps.requestHandoff(decision);
     }
@@ -2651,7 +2685,7 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2703,7 +2737,7 @@ function assembleServeRoutes(
   // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
   // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
   // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
-  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -2750,7 +2784,8 @@ function assembleServeRoutes(
     ...(readModel ? { panelRows: createOperatorAgentRowsSource(readModel, { instance: deps.instances?.coreInstance ?? CORE_INSTANCE }) } : {}),
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
-      if (state?.state === "unavailable") return undefined;
+      // An unavailable plan source is a placeholder plan, never an empty goal board.
+      if (state?.state === "unavailable" || deps.board.planSource?.state === "unavailable") return undefined;
       return { plan: deps.board.plan, snapshot: state?.snapshot ?? (goalBoard = goalBoardCache.get(deps.board)) };
     },
   });
@@ -2793,7 +2828,8 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME],
+    requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +11,7 @@ import {
   type WhitelistedProof,
 } from "./review.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /**
  * W1-T4921 — A `grep:` PROOF THE REVIEWER WILL GRADE STALE, ASKED IN MILLISECONDS AND IN-PROCESS.
@@ -50,12 +50,8 @@ export function certainStaleProofs(
 ): StaleProofRow[] {
   const showBlob =
     deps.showBlob ??
-    ((dir: string, rev: string, rel: string) =>
-      execFileSync("git", ["-C", dir, "show", `${rev}:${rel}`], {
-        encoding: "utf8",
-        maxBuffer: 1 << 26,
-        stdio: ["ignore", "pipe", "pipe"],
-      }));
+    // W1-T6136: the harness pre-push gate passes the worker worktree being pushed, so through the leaf.
+    ((dir: string, rev: string, rel: string) => hostWorktreeGit(dir, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26 }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-base-stale-`)));
   const exec = deps.exec ?? execWhitelistedProof;
 

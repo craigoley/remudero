@@ -1,0 +1,37 @@
+- id: W1-T5998
+  title: "THE ORPHAN SWEEP NEVER KILLS A WORKER OF A RUN THIS DAEMON IS STILL RUNNING — runDaemon's sweepOrphans closure treats a run as active only when its run id holds a state/inflight/*.lock, but review workers (run id review-PR<n>-<ms>) take no lock and a sweep fix worker carries the daemon's own DAEMON-<ms> run id while its lock records DAEMON-<ms>:fix-claim:<pr>:<ms>, so the per-poll sweep kills live workers of the running daemon: 13 worker_orphan_killed rows on 2026-10-06, among them three live reviews at 06:02:58Z and the current daemon's own fix worker at 11:21:19Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — which runs the orphan sweep treats as active; it decides what it kills
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (#9528 lost its build)"
+  plan_refs: [W1-T117, W1-T356, W1-T2402]
+  files: [src/run-task.ts, test/the-orphan-sweep-never-kills-a-worker-of-a-run-this-daemon-is-running.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only; live file plus 8 rotated archives). worker_orphan_killed rows, all with
+    this host's worker_scope: 04:02 review-PR9461, 05:08 review-PR9471, 06:02:58 review-PR9475 / review-PR9483 /
+    review-PR9450, 06:42 review-PR9497, 07:20 review-PR9502, 07:47 review-PR9510, 09:50:14 and 10:02:15
+    DAEMON-1791279951516 / DAEMON-1791280567066 (codex fix workers for W1-T5682, #9528), 11:21:19 review-PR9539,
+    review-PR9535 and DAEMON-1791285335358 (PR-9505's fix worker; that daemon booted 11:15:35 and was still
+    running). Each kill lands 4-6 min after a boot (the first per-poll sweep). Consequences: reviews re-run; each
+    killed codex fix worker returned no COMMIT_MESSAGE, was recorded fix.commit_refused, and two such rounds made
+    "refused twice", so #9528 was closed at 10:11 and its build discarded. The closure (src/run-task.ts, runDaemon,
+    `isRunActive: (id) => liveInflightRuns(inflightDir).some((r) => r.runId === id)`) only knows lock-holding runs.
+  design: |
+    Treat a run as active when its id is the running daemon's own run id, when it is the run-id prefix of a live
+    inflight lock (DAEMON-<ms>:fix-claim:...), or when this daemon process spawned it and has not reaped it (an
+    in-process registry of spawned worker run ids, filled where review and fix workers are spawned). A process
+    attributed to an ENDED run, including a previous daemon's run id, is still killed exactly as today.
+  acceptance:
+    - claim: "the orphan sweep leaves alone a review worker and a fix worker of runs this daemon is still running, and still kills a worker attributed to a previous daemon's ended run"
+      proof: "unit test: test/the-orphan-sweep-never-kills-a-worker-of-a-run-this-daemon-is-running.test.ts"
+  falsifier: |
+    Keep the lock-only isRunActive: a live review-PR<n> worker and a DAEMON-<own> fix worker are killed and the
+    test fails.

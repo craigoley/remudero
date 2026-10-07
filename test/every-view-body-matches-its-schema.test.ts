@@ -4,16 +4,19 @@
 // worker's ticker materializes them over a real ledger into the read model, and the assembled serve
 // server warm-loads and answers them over HTTP.
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
+import { AGENT_VIEW_PARTS, createAgentView, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
 import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { analyticsSourceBodies, type AnalyticsViewData } from "../src/lib/analytics-view.js";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createHostView, type HostViewData } from "../src/lib/host-view.js";
+import { writeIncidentLifecycleStore } from "../src/lib/incident-lifecycle.js";
+import { createIncidentsView, type IncidentsViewData } from "../src/lib/incidents-view.js";
 import { createInstancesView, type InstancesData } from "../src/lib/instances-view.js";
 import { createNowView, nowActions, type NowViewData } from "../src/lib/now-view.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -24,8 +27,11 @@ import { makeTempDir } from "../src/lib/tmp.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "../src/lib/feedback-view.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "../src/lib/inbox-view.js";
 import type { NeedsYouData } from "../src/lib/needs-you-view.js";
+import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
+import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "../src/lib/operator-agent.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
+import { createActionsView, type ActionsData } from "../src/lib/actions-view.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
 
@@ -76,6 +82,13 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
     { ts: iso(2 * 3_600_000), step: "run.start", run_id: "r2", task_id: "W1-T2", repo: "craigoley/remudero", run_type: "implement" },
     { ts: iso(90 * 60_000), step: "escalation.issue_opened", task_id: "W1-T3", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" },
     { ts: iso(60_000), step: "daemon.tick" },
+    // W1-T5052: one reconciled external effect, so the actions view's results are validated, not an empty array.
+    { ts: iso(30_000), step: "external_effect.reconciled", task_id: "W1-T1", external_effect: {
+      version: "external-effect-v1", originatingActionId: "action-1", originatingReceiptId: "receipt-1", capabilityGrantId: "grant-1",
+      connector: "provider", targetIdentity: "provider:account", requestedOperation: "rotate-secret", preconditionSnapshot: { status: "ready" },
+      expectedPostconditions: [{ path: "status", equals: { state: "ready" } }], observation: { status: "fresh", observedAt: iso(30_000), maxAgeMs: 5_000 },
+      idempotencyKey: "key-1", reconciliationState: "applied", retryPath: { kind: "none", allowed: false, reason: "applied" },
+      evidenceReference: `sha256:${"0".repeat(64)}`, safeToComplete: true } },
   ];
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
   // One open decision of each store-backed kind, so `decisions` items are validated, not an empty array.
@@ -108,7 +121,15 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", host: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve" } }));
+  // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
+  appendFileSync(join(stateDir, "ledger.ndjson"), [
+    { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
+    { ts: iso(110_000), step: OPERATOR_AGENT_SETTINGS_STEP, task_id: "operator-agent", settings: { enabled: true, confidenceThreshold: 0.9 }, scope: { kind: "repository", repository: "craigoley/remudero" } },
+    // W1-T5054: an active emergency stop, so the incidents view's `emergency.active` items are validated.
+    { ts: iso(100_000), step: EMERGENCY_STOP_ISSUED_LEDGER_STEP, task_id: "estop-schema", stop: { schema: "emergency-stop-v1", id: "estop-schema", scope: "fleet", reason: "r",
+      issuedBy: "operator", issuedAt: iso(100_000), clearPolicy: "explicit-clear-required", affectedCapabilities: "*", affectedDelegationClasses: "*", incidentReceiptId: "incident-1" } },
+  ].map((row) => `${JSON.stringify(row)}\n`).join(""));
   // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
   writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -128,7 +149,12 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   const host = createHostView({ config: { controlRoot: root, ledgerPath: deps.ledgerPath, skillsRoot: root, accountFilePath }, ledgerSource, clock,
     rateLimit: async () => 4321, diskFree: () => 10_000, selfMeasurement: async () => ({ status: "ok", rows: [{ ts: iso(0), result: { autonomyRate: { status: "measured", zeroTouchRate: 0.5 } } }] }) });
   const workstreams = createWorkstreamsView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", planPath: deps.panelGraph.planPath }], ledgerSource });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, host], clock, holder: "schema-test", post: () => {} });
+  const actions = createActionsView({ instances: [{ name: "core", ledgerDir: stateDir }], ledgerSource });
+  const agent = createAgentView({ instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero" }], ledgerSource });
+  // W1-T5054: one incident record in core's lifecycle store, so the incidents view's store items are validated.
+  writeIncidentLifecycleStore(stateDir, { fp1: { fingerprint: "fp1", title: "t", source: "daemon", kind: "invariant", status: "filed", firstSeenMs: NOW - 60_000, lastSeenMs: NOW, count24h: 2, feedbackId: null, pr: null } });
+  const incidents = createIncidentsView({ instances: [{ name: "core", ledgerDir: stateDir }], ledgerSource });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -153,7 +179,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", host: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -193,6 +219,21 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
   const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
+  const actions = bodies.get("actions")!.data as ActionsData;
+  assert.deepEqual(actions.instances.map((i) => [i.instance, i.results.state, i.results.results?.length]), [["core", "verified", 1]], JSON.stringify(actions));
+  // W1-T5051: every agent part, not only the one read above, validates against the one AgentView schema.
+  const parts = new Map<string, AgentViewData>();
+  for (const part of Object.keys(AGENT_VIEW_PARTS)) {
+    const body = (await (await fetch(`${url}/v1/views/agent?instance=core&part=${part}`, { headers: READ })).json()) as Record<string, unknown>;
+    assert.deepEqual(violations(body, declaredBody("/v1/views/agent", "GET", 200)), [], `agent part ${part} sent ${JSON.stringify(body)}`);
+    parts.set(part, body.data as AgentViewData);
+  }
+  assert.deepEqual((parts.get("history")!.body as { proposals: Array<{ proposalId: string }> }).proposals.map((p) => p.proposalId), ["operator-agent:schema:fix:slow-runs"]);
+  assert.equal((parts.get("settings")!.scoped as { source: string }).source, "ledger", "the scoped settings read is populated");
+  assert.ok(Array.isArray((parts.get("proposals")!.body as AgentProposalsBody).proposals), "the proposals part read the committed analytics snapshot");
+  const incidents = bodies.get("incidents")!.data as IncidentsViewData;
+  assert.deepEqual([incidents.store.state === "ok" && incidents.store.incidents.length, incidents.instances.map((i) => [i.instance, i.emergency.active.length, i.liveness.state])],
+    [1, [["core", 1, "up"]]], JSON.stringify(incidents));
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
   assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 

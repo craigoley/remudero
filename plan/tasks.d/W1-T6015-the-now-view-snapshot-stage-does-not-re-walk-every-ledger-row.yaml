@@ -1,0 +1,35 @@
+- id: W1-T6015
+  title: "THE NOW VIEW'S SNAPSHOT STAGE DOES NOT RE-WALK EVERY LEDGER ROW — now-view.ts's `snapshot` stage calls computeBoardSnapshot over the projection's whole row array, which walks every row in lastActivityByTask (a result the stage then overwrites from readTaskActivity) and again in liveRunSpend once per in-flight task, ~0.6 s per build (SLOWVIEW, 2026-10-01)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — what the now view's snapshot stage reads per build, across the modules it spans
+  band_meaning: span
+  origin: "2026-10-06 core-console architecture plan backlog E14 (SLOWVIEW follow-up (b), after #8324/#8325/#8329)"
+  plan_refs: [W1-T5066, W1-T157, W1-T184]
+  files: [src/lib/board.ts, src/lib/board-projection.ts, src/lib/now-view.ts, test/the-now-view-snapshot-stage-does-not-re-walk-every-ledger-row.test.ts]
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: now-view.ts's `snapshot` stage runs
+    `computeBoardSnapshot(depsOf(instance, b), { reuseProjection: … })` with b.rows = h.board.rows() (every
+    projected row), then replaces each task's lastActivityAt from readTaskActivity(b.db). computeBoardSnapshot
+    (board.ts) calls lastActivityByTask(lines) over every row and, for each task with a phase,
+    liveRunSpend(lines, taskId) over every row again, so the stage is O(rows x in-flight tasks) even when the
+    projections are all reused. MEASURED 2026-10-01 (SLOWVIEW): computeBoardSnapshot ~0.6 s per build on the
+    host-size corpus. Scope-time checks: no plan record, run- branch or open PR head changes this stage.
+  design: |
+    computeBoardSnapshot accepts precomputed per-task last-activity and live-spend lookups (an option, absent for
+    the legacy GET path, which keeps its behaviour); BoardProjection maintains both incrementally in ingest (it
+    already tracks lastRunStartMs per task), and the now view's snapshot stage passes them, so it never iterates
+    the row array. The legacy route's body is unchanged and the now view's body is deep-equal to before.
+  acceptance:
+    - claim: "the now view's snapshot stage builds its board without iterating the projection's row array, and its body is deep-equal to the one built by walking the rows"
+      proof: "unit test: test/the-now-view-snapshot-stage-does-not-re-walk-every-ledger-row.test.ts"
+  falsifier: |
+    Keep the row walk: the fixture's counting row array records iterations during the snapshot stage and the
+    test fails.

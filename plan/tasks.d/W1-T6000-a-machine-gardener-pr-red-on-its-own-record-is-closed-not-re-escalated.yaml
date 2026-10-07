@@ -1,0 +1,34 @@
+- id: W1-T6000
+  title: "A MACHINE GARDENER PR RED ON ITS OWN RECORD IS CLOSED, NOT UPDATED AND RE-ESCALATED ON EVERY HEAD — #9505 (a flow-remedy filing whose record could never pass lint-plan) was updated with main twice (08:43, 10:53Z), and each new head opened a fresh escalation (#9507, #9523, #9544), a CI run, a review and a fix round over 4 hours; a garden PR whose only change is its own refused record cannot be fixed by any of those"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — the sweep's disposition of a garden plan PR whose own record is refused
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (#9505)"
+  plan_refs: [W1-T5995, W1-T5348, W1-T5349, W1-T5538]
+  files: [src/lib/sweep.ts, test/a-machine-gardener-pr-red-on-its-own-record-is-closed-not-re-escalated.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06: #9505 (branch flow-remedy-garden-1791271733067, one file: its W1-T5984 shard) was red on
+    lint-plan's machine-filing-admission refusal of that shard from 07:29Z. The sweep dispositioned it
+    refused-escalate / plan-proof-unrunnable, ran update-branch twice, and each head move opened a new escalation
+    issue (#9507, #9523, #9544) plus a CI run, a review and a fix round (itself orphan-killed, W1-T5998). W1-T5995
+    stops the flow gardener drafting that refusal, but any garden PR (GARDEN_BRANCH_RE) whose sole change is a
+    machine record its own lint refuses has the same shape: no fix round, update or review can change the verdict.
+  design: |
+    When a garden-branch plan PR's red is a lint-plan refusal of a record the PR itself adds (author_class
+    machine), close it once with a comment naming the refusal and log one row; do not update-branch, review or
+    escalate it per head. The gardener files again on its next pass if the cause still prices, which W1-T5995's
+    pre-file admission now guards.
+  acceptance:
+    - claim: "a garden plan PR red only on a lint-plan refusal of its own machine record is closed once with the refusal named, and gets no update-branch, review or per-head escalation"
+      proof: "unit test: test/a-machine-gardener-pr-red-on-its-own-record-is-closed-not-re-escalated.test.ts"
+  falsifier: |
+    Keep the refused-escalate disposition: the fixture PR is updated and escalated again on its next head and the
+    test fails.

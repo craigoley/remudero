@@ -595,6 +595,7 @@ export interface components {
     };
     /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
     InboxSectionResult: {
+      planSource?: PlanSource;
       ready?: (InboxReadyItem)[];
       drafting?: (InboxDraftingItem)[];
       notReady?: (InboxNotReadyItem)[];
@@ -1856,10 +1857,10 @@ export interface components {
       clearPolicy: "expires" | "explicit-clear-required";
       /** Present only when `clearPolicy` is `expires`. */
       expiresAt?: string;
-      /** The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every capability. This document's OpenAPI subset (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here -- a consumer must accept the string "*" as well. */
-      affectedCapabilities: (string)[];
-      /** The delegation classes this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every class; as for `affectedCapabilities`, only the array arm is typed here and a consumer must accept "*" as well. */
-      affectedDelegationClasses: (string)[];
+      /** The capabilities this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every capability (the code's `string[] | "*"`). */
+      affectedCapabilities: ((string)[]) | ("*");
+      /** The delegation classes this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every class (the code's `string[] | "*"`). */
+      affectedDelegationClasses: ((string)[]) | ("*");
       /** The incident record this stop is accountable to; every receipt of its lifecycle links back to it. */
       incidentReceiptId: string;
     };
@@ -2532,8 +2533,24 @@ export interface components {
       reasonKind: "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked";
       reason: string;
     };
-    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. */
+    /** W1-T5639 (src/lib/serve-plan-reload.ts's `PlanSourceOutcome`): where the plan behind a response came from. `loaded` is a successful read, an intentionally empty plan included. `unavailable` is a plan serve has not yet read: nothing derived from it is evidence, so a count, classification or decision is never served from it. `stale` is a dated last-known-good plan whose latest refresh failed (`failure`); it is never a current generation. `generation` moves only on a successful read. Never inferred from a task count. */
+    PlanSource: {
+      state: "loaded" | "unavailable" | "stale";
+      /** Plans adopted so far; 0 while the first read has not succeeded. */
+      generation: number;
+      /** What was read -- a commit (`ref:<repo>@<sha>`) or the plan files' identity. Absent while unavailable. */
+      identity?: string;
+      /** When the plan this response carries was read. Absent while unavailable. */
+      observedAt?: string;
+      /** The latest failed read, present on `unavailable` and `stale`. The reason is bounded text. */
+      failure?: {
+        reason: string;
+        failedAt: string;
+      };
+    };
+    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. Under an `unavailable` `planSource` it carries `progress.unknown` with no counts, and empty `sections` and `frontier` that are NOT evidence of an empty plan. */
     PlanViewResult: {
+      planSource?: PlanSource;
       progress: PlanProgress;
       sections: (PlanSectionCount)[];
       frontier: (FrontierRow)[];
@@ -3048,6 +3065,81 @@ export interface components {
           reasons?: Record<string, string>;
         };
       };
+    };
+    /** GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for that instance, built by the same function in the read-model worker from the projector's `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until state/read-model/switches.json sets `actions` to `serve`. */
+    ActionsView: {
+      view: "actions";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          results: ExternalActionResultsEnvelope;
+        })[];
+      };
+    };
+    /** GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers for that instance, computed by the route's own readers over the instance's `panel.*` facts in the read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass. `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics snapshot; without one it carries a `reason`, never an empty list. Dark until state/read-model/switches.json sets `agent` to `serve`. */
+    AgentView: {
+      view: "agent";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instance: string;
+        part: "proposals" | "history" | "settings" | "experiments" | "delegations" | "follow-ups" | "promotions" | "actions" | "consequences" | "intent-plans";
+        /** The instance's `owner/name`, when serve names one. */
+        repository?: string;
+        /** The part's route body: proposals = AgentProposals; history = GET /v1/operator-agent/proposals; settings = GET /v1/operator-agent/settings; experiments, delegations, follow-ups, promotions, actions, consequences and intent-plans = the GET of that name under /v1/operator-agent/. */
+        body: (AgentProposals) | (OperatorAgentProposalList) | (OperatorAgentSettingsResult) | (OperatorAgentExperimentList) | (DelegationProfileList) | (FollowUpList) | (OperatorAgentPromotionList) | (OperatorAgentActionList) | (OperatorAgentPendingConsequenceRead) | (IntentPlanList);
+        /** The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>. */
+        scoped?: OperatorAgentSettingsResult;
+      };
+    };
+    /** GET /v1/views/incidents (docs/views.md, src/lib/incidents-view.ts; W1-T5054, P4-T15): the console's /incidents page as one body across instances. `store` is GET /v1/incidents' list (or the reason it answers 503), re-read when the store file's fingerprint moves. Each instance's `emergency.active` is GET /v1/operator-agent/emergency/status's `active`, computed by the same function over the agent view's persisted `panel.*` fold. `liveness` is a band over the newest projected `daemon.*` row, never the raw heartbeat time. Dark until state/read-model/switches.json sets `incidents` to `serve`. */
+    IncidentsView: {
+      view: "incidents";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        store: ({
+          state: "ok";
+          incidents: (IncidentRecord)[];
+        }) | ({
+          state: "unavailable";
+          /** `malformed` or `unreadable`, as GET /v1/incidents' 503 names it. */
+          reason: string;
+        });
+        instances: ({
+          instance: string;
+          emergency: {
+            active: (EmergencyStop)[];
+          };
+          /** A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any. */
+          liveness: {
+            state: "up" | "down" | "unknown";
+            since?: string;
+          };
+        })[];
+      };
+    };
+    /** The agent view's `proposals` part (W1-T5051): the proposals core's engine generates for the instance from its committed analytics snapshot and its operator-agent history, not terminal in that history and at or above its repository's confidence threshold, highest confidence first. Either `proposals` or `reason`. */
+    AgentProposals: {
+      proposals?: ({
+        proposalId: string;
+        category: string;
+        signal: string;
+        confidence: number;
+      })[];
+      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      reason?: string;
     };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
@@ -3614,6 +3706,7 @@ export interface components {
     };
     /** GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and retired proposals are never returned. The four top-level lanes hold every owner's items; `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are optional ONLY because the console cache's cold fallback body (serve.ts's `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every handler-computed body carries all six. */
     InboxResult: {
+      planSource?: PlanSource;
       ready: (InboxReadyItem)[];
       drafting: (InboxDraftingItem)[];
       notReady: (InboxNotReadyItem)[];
@@ -3690,6 +3783,7 @@ export interface components {
     };
     /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
     InboxThreadsResult: {
+      planSource?: PlanSource;
       threads: (InboxThreadSummary)[];
     };
     InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
@@ -3713,6 +3807,7 @@ export interface components {
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";
       countSemantics: "observed_snapshot_not_verified";
@@ -3842,10 +3937,12 @@ export interface components {
       proposalId: string;
       restored: boolean;
     };
-    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet). */
+    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet), `plan_source_unavailable` (W1-T5639: serve has not read the plan, so nothing is derived from a placeholder). */
     InboxRefusal: {
-      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable" | "inbox_not_ready";
+      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable" | "inbox_not_ready" | "plan_source_unavailable";
       detail: string;
+      /** Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason. */
+      planSource?: PlanSource;
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
@@ -5359,6 +5456,40 @@ export interface paths {
         };
     };
   };
+  "/v1/views/actions": {
+    get: {
+      responses: {
+          "200": ActionsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/agent": {
+    get: {
+      responses: {
+          "200": AgentView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/incidents": {
+    get: {
+      responses: {
+          "200": IncidentsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
   "/v1/views/events": {
     get: {
       responses: {
@@ -5580,6 +5711,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };

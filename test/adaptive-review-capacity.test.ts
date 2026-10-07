@@ -109,8 +109,13 @@ test("direct pressure signals shed subsequent admissions without changing in-fli
       "review-unhealthy",
     ],
     [
+      // 2026-10-06: latency sheds only while PSI is above a low watermark (8 > 5 here); with PSI
+      // calm it is a lagging symptom and holds base — see the latency-governor suite.
       "latency expansion",
-      { settlements: { successes: 4, failures: 0, timeouts: 0, baselineLatencyMs: 100, recentLatencyMs: 250 } },
+      {
+        memoryPsiSomeAvg10Pct: 8,
+        settlements: { successes: 4, failures: 0, timeouts: 0, baselineLatencyMs: 100, recentLatencyMs: 250 },
+      },
       "review-latency-expanded",
     ],
   ];
@@ -229,15 +234,20 @@ test("host PSI/memory readers preserve measured values and make failures explici
       return "some avg10=10.99 avg60=1.00 avg300=1.00 total=10\nfull avg10=0.42 avg60=0.10 avg300=0.05 total=4\n";
     if (target === "/sys/fs/cgroup/memory.pressure") return "some avg10=31.40 avg60=2.00 avg300=2.00 total=20\n";
     throw new Error(`unexpected ${target}`);
-  });
+  }, () => ({ load1: 33.4, cpuCount: 8 }));
   assert.deepEqual(measured, {
+    hostLoad1: 33.4,
+    hostCpuCount: 8,
     memAvailableMib: 4370720 / 1024,
     cpuPsiSomeAvg10Pct: 10.99,
     cpuPsiFullAvg10Pct: 0.42,
     memoryPsiSomeAvg10Pct: 31.40,
   });
 
-  const unavailable = readReviewHostObservation(() => { throw new Error("unreadable"); });
+  const unavailable = readReviewHostObservation(
+    () => { throw new Error("unreadable"); },
+    () => ({ load1: Number.NaN, cpuCount: 0 }),
+  );
   assert.deepEqual(unavailable, {});
 });
 
@@ -260,10 +270,12 @@ test("provider projection uses the best fresh readable subscription and preserve
     reservePct: 5,
     ageMs: 1_000,
   });
-  assert.deepEqual(reviewProviderObservation({ ...fresh, freshness: "stale" }, 2_000), {
+  // A reading past the daemon-cadence bound is stale for the widener; a merely router-lapsed one is
+  // not (test/review-widener-judges-provider-age-by-the-daemon-cadence.test.ts).
+  assert.deepEqual(reviewProviderObservation({ ...fresh, freshness: "stale" }, 1_000 + 900_001), {
     fresh: false,
     readable: false,
-    ageMs: 1_000,
+    ageMs: 900_001,
   });
   assert.equal(
     reviewProviderObservation({ ...fresh, state: "blocked", providers: [] }, 2_000).refused,
@@ -274,18 +286,24 @@ test("provider projection uses the best fresh readable subscription and preserve
 test("review settlement fold derives failures, timeouts and recent-vs-baseline latency", () => {
   const at = (ms: number) => new Date(ms).toISOString();
   const lines: Array<Record<string, unknown>> = [];
-  for (const [i, duration] of [100, 100, 250, 250].entries()) {
+  // 2026-10-06: the last five completions (at least three) against the OTHER completions' median.
+  for (const [i, duration] of [100, 100, 100, 250, 250, 250].entries()) {
     const start = 1_000 + i * 1_000;
     lines.push({ step: "sweep.post_review.attempt", pr_number: i, head_sha: `sha${i}`, ts: at(start) });
     lines.push({ step: "sweep.post_review.done", pr_number: i, head_sha: `sha${i}`, ts: at(start + duration) });
   }
   lines.push({ step: "sweep.post_review.failed", pr_number: 9, head_sha: "sha9", ts: at(7_000), error: "timed out" });
-  assert.deepEqual(summarizeReviewSettlements(lines, 10_000, 10_000), {
-    successes: 4,
+  // Settlement window 4 s: the three 250 ms reviews (t=4-6 s) are recent; the baseline window
+  // (6 x 4 s) still holds the three 100 ms ones.
+  assert.deepEqual(summarizeReviewSettlements(lines, 7_500, 4_000), {
+    successes: 3,
     failures: 1,
     timeouts: 1,
     baselineLatencyMs: 100,
     recentLatencyMs: 250,
+    recentLatencySamples: 3,
+    baselineLatencySamples: 3,
+    recentLatencyMaxMs: 250,
   });
   assert.deepEqual(summarizeReviewSettlements(lines, 20_000, 1_000), {
     successes: 0,
@@ -329,6 +347,17 @@ test("runtime adapter reads only the local provider snapshot/host telemetry and 
   assert.equal(logs[0]?.step, "review.capacity");
   assert.equal(logs[0]?.extra?.queue_depth, 4);
   assert.equal(logs[0]?.extra?.provider_headroom_pct, 80);
+  // 2026-10-06: the robust latency inputs and the load attribution ride on every row. The load
+  // reading is the REAL os seam here, so it is a finite number on any host.
+  for (const key of [
+    "review_recent_latency_samples", "review_baseline_latency_samples", "review_recent_latency_max_ms",
+    "review_baseline_latency_per_unit_ms", "review_recent_latency_per_unit_ms", "review_latency_ratio",
+    "pressure_source",
+  ]) {
+    assert.ok(logs[0]?.extra && key in logs[0].extra, `row carries ${key}`);
+  }
+  assert.equal(typeof logs[0]?.extra?.host_load1, "number");
+  assert.equal(typeof logs[0]?.extra?.host_cpu_count, "number");
 });
 
 test("production buildSweepEffects wires the runtime controller at the real sweep boundary", () => {

@@ -9,11 +9,11 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
-import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
+import { fleetLaneStorePath, persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { inboxLegacyView, refreshInboxClassification, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildInboxThreadsRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createViewShadow, legacyViewSampler, type ShadowRequest } from "../src/lib/view-shadow.js";
+import { createViewShadow, legacyViewSampler, type ShadowPairedRead, type ShadowRequest } from "../src/lib/view-shadow.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService, type Route } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -155,7 +155,7 @@ test("the inbox view's legacy side reads the same snapshot as the slow lane's bo
   const compare = (request: ShadowRequest) => shadow.compare({ view: "inbox", key: request.key, requests: 1, legacy: request.legacy!, body: { data: body.data, asOf: body.sources[0]!.asOf, sources: body.sources } });
 
   const paired = sample(Date.parse("2026-10-05T12:01:00.000Z"));
-  assert.equal(paired.legacy?.paired?.items?.asOf, first.generatedAt, "legacy read the snapshot the body was built from");
+  assert.equal((paired.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, first.generatedAt, "legacy read the snapshot the body was built from");
   assert.deepEqual(compare(paired).diffs, [], "one snapshot, two computations over it: nothing differs");
   const late = inboxLegacyView(deps, fixedClock(Date.parse("2026-10-05T13:00:00.000Z"))).compute(new URLSearchParams({ section: "needsYou" }));
   assert.ok(!("error" in late) && late.sources[0]?.state === "stale", "a snapshot past its budget is labelled stale, as of its own generatedAt");
@@ -166,11 +166,58 @@ test("the inbox view's legacy side reads the same snapshot as the slow lane's bo
   const second = await refreshInboxClassification(laneDeps, memo, fixedClock(Date.parse("2026-10-05T12:02:00.000Z")));
   assert.ok(second.changed);
   const later = sample(Date.parse("2026-10-05T12:03:00.000Z"));
-  assert.equal(later.legacy?.paired?.items?.asOf, second.generatedAt);
+  assert.equal((later.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, second.generatedAt);
   const diffs = compare(later).diffs;
   assert.ok(diffs.length > 0, "the newer snapshot differs from the body built over the older one");
   assert.deepEqual([...new Set(diffs.map((d) => d.classification))], ["timing"], "a diff between two snapshots is timing, never real");
   assert.equal(passes(), 0);
+});
+
+test("unit test: a fleet-lane decision written after the slow lane's pass reaches the inbox legacy side only with the next pass", async (t) => {
+  // 2026-10-06 20:30:14Z, 20:31:00Z and 20:32:00Z: the fleet page diffed items[27].decision "file" vs undefined and
+  // its reason, judged real, both sides paired on inbox-store:core as of 20:29:23.437Z. inboxLanes read the fleet
+  // lane's decision store at render, so legacy saw a decision the lane made after the pass the body was built from.
+  const finding = "adoption:symbol-no-caller:src/lib/a.ts:x";
+  const { stateDir, laneDeps } = world(t, ["ruling:a", finding]);
+  const memo: InboxRefreshMemo = {};
+  const first = await refreshInboxClassification(laneDeps, memo, fixedClock(Date.parse("2026-10-06T20:29:23.437Z")));
+  const body = first.bodies.find((b) => b.key === "section=fleet")!;
+  assert.deepEqual(body.data.items.map((i) => i.proposalId), [finding], "positive control: the finding is on the fleet page");
+
+  // The fleet lane's `decide`: the store, then its ledger row.
+  writeFileSync(fleetLaneStorePath(stateDir), `${JSON.stringify({ [finding]: { decision: "file", ts: "2026-10-06T20:29:50.000Z" } })}\n`);
+  appendFileSync(laneDeps.ledgerPath, `${JSON.stringify({ ts: "2026-10-06T20:29:50.000Z", step: "fleet_lane.decided", task_id: finding, decision: "file", reason: "The fleet turned this finding into planned work." })}\n`);
+
+  const { deps } = freshGeneration(laneDeps);
+  const sample = (atMs: number): ShadowRequest => {
+    const posted: ShadowRequest[] = [];
+    legacyViewSampler({ legacy: [inboxLegacyView(deps, fixedClock(atMs))], post: (r) => posted.push(r), clock: fixedClock(atMs), defer: (run) => run() })(
+      "inbox", "section=fleet", new URLSearchParams({ section: "fleet" }));
+    return posted[0]!;
+  };
+  const evidence = () => ({ legacyAsOfMs: null, viewAsOfMs: null, named: new Set<string>(), namedBeforeHorizon: new Set<string>(), namedInGap: new Set<string>(), rowsInGap: 0, duplicateIds: new Set<string>(), duplicateRows: 0 });
+  const shadow = createViewShadow({ clock: fixedClock(Date.parse("2026-10-06T20:35:00.000Z")), log: () => {}, evidence });
+  const compare = (request: ShadowRequest, data: unknown = body.data) =>
+    shadow.compare({ view: "inbox", key: request.key, requests: 1, legacy: request.legacy!, body: { data, asOf: body.sources[0]!.asOf, sources: body.sources } });
+
+  const same = sample(Date.parse("2026-10-06T20:30:14.129Z"));
+  assert.equal((same.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, first.generatedAt, "legacy read the pass the body was built from");
+  assert.deepEqual(compare(same).diffs, [], "one pass pages one snapshot of the decision store on both sides");
+
+  // CONTROL: over that same pass, a body whose decision genuinely differs still diffs real.
+  const tampered = { ...body.data, items: body.data.items.map((i) => ({ ...i, decision: "merge" })) };
+  const control = compare(same, tampered).diffs;
+  assert.ok(control.length > 0 && control.every((d) => d.classification === "real"), JSON.stringify(control));
+
+  // The next pass carries the decision and stamps a new snapshot, so the old body against it reads timing.
+  const second = await refreshInboxClassification(laneDeps, memo, fixedClock(Date.parse("2026-10-06T20:30:23.000Z")));
+  assert.ok(second.changed, "a store change is a new snapshot");
+  const filed = second.bodies.find((b) => b.key === "section=fleet")!.data.items[0] as { decision?: string };
+  assert.equal(filed.decision, "file", "the next pass pages the decision");
+  const later = sample(Date.parse("2026-10-06T20:31:00.385Z"));
+  const diffs = compare(later).diffs;
+  assert.ok(diffs.some((d) => d.path.endsWith(".decision")), JSON.stringify(diffs));
+  assert.deepEqual([...new Set(diffs.map((d) => d.classification))], ["timing"]);
 });
 
 test("serve under its slow lane answers GET /v1/inbox from the persisted classification", async (t) => {

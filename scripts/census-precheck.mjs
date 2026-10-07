@@ -384,13 +384,44 @@ function failingSuitesFromTap(stdout, files) {
 }
 
 /**
+ * How a census suite child starts: niced, with an explicit `--test-concurrency` (src/lib/test-slot.ts, loaded through
+ * tsx's own API because this script runs under plain node). No host-wide slot: a pre-push census is seconds of work
+ * and must not wait behind a coverage run. A tree whose tsx or test-slot.ts cannot load gets `priority: "none"` and
+ * a reason, so the run says it went unwrapped instead of reading as niced.
+ */
+export async function loadTestPriority(importSlot = defaultImportTestSlot) {
+  try {
+    const slot = await importSlot();
+    return {
+      priority: "nice",
+      wrap: (file, args) => {
+        const load = slot.readHostLoad();
+        return slot.lowPriorityCommand(file, slot.testRunArgv(args, slot.testRunConcurrency(load, slot.defaultTestSlots(load.cores))));
+      },
+    };
+  } catch (e) {
+    // A named third value, not a silent unwrapped run: the caller prints `reason` beside its result.
+    return { priority: "none", reason: `test-slot.ts did not load (${String(e?.message ?? e)})`, wrap: (file, args) => ({ file, args: [...args] }) };
+  }
+}
+
+async function defaultImportTestSlot() {
+  const { tsImport } = await import("tsx/esm/api");
+  return tsImport(pathToFileURL(join(SCRIPT_REPO, "src", "lib", "test-slot.ts")).href, import.meta.url);
+}
+
+const TEST_PRIORITY = await loadTestPriority();
+
+/**
  * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync }) {
+export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
-  const res = run(process.execPath, args, childOptions(root));
+  if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
+  const child = priority.wrap(process.execPath, args);
+  const res = run(child.file, child.args, childOptions(root));
   assertChildFinished(res, "census suite");
   const stdout = String(res.stdout ?? "");
   const total = stdout.match(/^# tests (\d+)$/m);
@@ -535,6 +566,17 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
     trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
     remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
+  { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", script: "census:no-nested-preflight",
+    trigger: (input) =>
+      input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
+      addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
+    remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
+  // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
+  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
+    trigger: (input) =>
+      input.changed.includes("src/lib/worktree-git.ts") ||
+      addsMatch(input, CLOCK_SCOPE_RE, (text) => text.split("\n").filter((line) => /"-C",\s*(?:wt|worktreePath|[\w$]+\.worktreePath|worktreeRoot|batchWorktree|ownerPath)\b/.test(line))),
+    remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
 ];
 
 /**

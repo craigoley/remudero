@@ -13,17 +13,23 @@
  *
  * A ring insert, a plan change or a GitHub snapshot re-save marks the body dirty; it is rebuilt once the
  * first unbuilt change is {@link WORKSTREAMS_DEBOUNCE_MS} old, so a burst of inserts costs one build.
+ *
+ * A build is staged (ring, plan, github, ledger, projection, assemble per instance) and `prepare` runs one
+ * stage per step, so a cold plan parse or a projection holds the shared views thread for that stage only:
+ * 2026-10-06 builds took 2.5 to 33 s in one go while the `host` view went 3 min without its 60 s re-probe.
+ * Each stage's ms rides the worker's `read_model.slow_view` row.
  * Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
  */
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, type LedgerRotationMemo } from "./ledger-union.js";
 import { gitPlanBehind, nowPlanPath, planSource, planStamp, snapshotGeneration, snapshotGithub, type NowInstance, type PlanBehind } from "./now-view.js";
 import { buildOperatorActivityProjection, OPERATOR_ACTIVITY_CONTRACT_VERSION, operatorActivityCandidates, type OperatorActivityEnvelope } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
-import { projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerLines, type StatusProjection } from "./status.js";
+import { projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerFsDeps, type LedgerLines, type StatusProjection } from "./status.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { judgeSource } from "./view-freshness.js";
 import type { ShadowLegacy } from "./view-shadow.js";
@@ -47,6 +53,8 @@ export interface WorkstreamsViewOptions<S extends { instance: string; newestTs: 
   /** The worker's `ledger:<i>` source judge. */
   ledgerSource: (state: S, now: number) => ViewSource;
   debounceMs?: number;
+  /** Times each build's stages for the worker's `read_model.slow_view` row. */
+  clock?: Clock;
   log?: (step: string, extra: Record<string, unknown>) => void;
   /** Seams; production reads the checkout's plan, the persisted GitHub snapshot, the live ledger and git. */
   readPlan?: (instance: NowInstance) => Plan;
@@ -64,6 +72,93 @@ interface Built {
   githubFailureReason?: string;
   /** The ring's newest row: legacy reads the union up to it, so a row the projector had not applied is not a diff. */
   ringNewestMs: number;
+  /** The live file's bytes the projector had applied when the ring was read ({@link readLiveApplied}). */
+  liveApplied?: LiveApplied;
+}
+
+/**
+ * The live file as far as the projector had applied it: its inode and the byte offset it stopped at. A writer
+ * appends a row whose `ts` it stamped earlier (a `pr.stuck` lands 14 to 60 s after its `ts`), so a row at or
+ * before the ring's newest `ts` can still sit past the projector's offset: the ring has not seen it yet.
+ */
+interface LiveApplied {
+  ino: string;
+  off: number;
+}
+
+function readLiveApplied(db: ReadModelDb): LiveApplied | undefined {
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'source_file'").get() === undefined) return undefined;
+  const row = db.prepare("SELECT ino, off FROM source_file WHERE name = ?").get(LEDGER_FILENAME);
+  return row ? { ino: String(row.ino), off: Number(row.off) } : undefined;
+}
+
+/** The ring and the live offset it was applied to, read in one snapshot so a commit between them cannot split them. */
+function readRingWithOffset(db: ReadModelDb): { ring: Row[]; applied?: LiveApplied } {
+  const own = !db.inTransaction();
+  if (own) db.exec("BEGIN");
+  try {
+    const ring = readActivityRing(db);
+    const applied = readLiveApplied(db);
+    return { ring, ...(applied ? { applied } : {}) };
+  } finally {
+    if (own) db.exec("COMMIT");
+  }
+}
+
+/**
+ * Reads the live ledger only up to the bytes the projector had applied, while it is still the same file; a
+ * rotation since (another inode) reads it whole, bounded by the ring's newest `ts` alone as before.
+ */
+function appliedLedgerFs(livePath: string, applied: LiveApplied): LedgerFsDeps {
+  return {
+    existsSync: (path) => existsSync(path),
+    readFileSync: (path, encoding) => {
+      if (path !== livePath) return readFileSync(path, encoding);
+      const fd = openSync(path, "r");
+      try {
+        const st = fstatSync(fd, { bigint: true });
+        if (String(st.ino) !== applied.ino) return readFileSync(fd, encoding);
+        const buf = Buffer.alloc(Math.min(applied.off, Number(st.size)));
+        readSync(fd, buf, 0, buf.length, 0);
+        return buf.toString(encoding);
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
+}
+
+interface Slot<S> {
+  state: S;
+  db?: ReadModelDb;
+  instance: NowInstance;
+}
+
+/** One instance's values as its stages read them. */
+interface Work {
+  ring?: Row[];
+  applied?: LiveApplied;
+  plan?: Plan;
+  gateway?: Gateway;
+  live?: LedgerLines;
+  projection?: ReadonlyMap<string, StatusProjection>;
+  githubReadFailed?: boolean;
+  githubFailureReason?: string;
+}
+
+/** A build in flight: every instance's entry is observed at its `now`, whichever pass finishes it. */
+interface Pending {
+  /** What the build started from; a change seen while it runs dates the next build's debounce. */
+  fingerprint: string;
+  dirtySince?: number;
+  now: number;
+  instances: NowInstance[];
+  entries: Map<string, Built>;
+  activities: OperatorActivityEnvelope[];
+  /** The next stage to run: `instances[slot]`'s `STAGES[stage]`. */
+  slot: number;
+  stage: number;
+  work: Work;
 }
 
 /** Whether the store holds the ring this view reads: a version-1 ring, with no `seq`, is one the projector has not rebuilt yet. */
@@ -72,9 +167,9 @@ function ringBuilt(db: ReadModelDb): boolean {
 }
 
 /**
- * The ring's rows, oldest first and same-millisecond rows in the order the projector applied them (the
- * file's order), which is the order the route hands {@link buildOperatorActivityProjection}; none for a
- * store that has not built the projection.
+ * The ring's rows, oldest first and same-millisecond rows in the order the projector applied them; none for
+ * a store that has not built the projection. {@link buildOperatorActivityProjection} ranks ties by their own
+ * text, so this order and the route's union order give the same body.
  */
 export function readActivityRing(db: ReadModelDb): Row[] {
   if (!ringBuilt(db)) return [];
@@ -108,10 +203,13 @@ function unavailable(now: number, error: unknown): OperatorActivityEnvelope {
 export function createWorkstreamsView<S extends { instance: string; newestTs: string | null }>(opts: WorkstreamsViewOptions<S>): {
   name: string;
   version: number;
+  prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: WorkstreamsData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  stages(): Record<string, number> | undefined;
 } {
   const debounceMs = opts.debounceMs ?? WORKSTREAMS_DEBOUNCE_MS;
+  const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
   const ownerRepo = (instance: NowInstance): [string, string] => {
@@ -145,62 +243,142 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   let body: WorkstreamsData | undefined;
   let builtFingerprint: string | undefined;
   let dirtySince: number | undefined;
+  /** The build in flight: started by one `prepare`, advanced a stage at a time, published by `materialize`. */
+  let pending: Pending | undefined;
+  /** Whether this worker call began with `prepare`, so `materialize` does not clear the stages it timed. */
+  let prepared = false;
+  /** Each `<instance>.<stage>`'s ms in this worker call, for `read_model.slow_view` (W1-T5066's shape). */
+  let ran: Record<string, number> = {};
+  const lap = (name: string, stage: string, since: number): void => {
+    ran[`${name}.${stage}`] = (ran[`${name}.${stage}`] ?? 0) + clock.now() - since;
+  };
 
-  const buildEntry = (instance: NowInstance, db: ReadModelDb | undefined, now: number, entries: Map<string, Built>): OperatorActivityEnvelope => {
-    try {
-      const ring = db ? readActivityRing(db) : [];
-      const plan = readPlan(instance);
-      const gateway = github(instance);
-      gatewaySources.set(instance.name, gateway.source);
-      // ledger-read-intent: live — the frontier and projection read what /v1/plan/view and the route read.
-      const live = readLedgerLines(join(instance.ledgerDir, LEDGER_FILENAME));
-      const projection = projectPlan(plan, { ledgerPath: join(instance.ledgerDir, LEDGER_FILENAME), github: gateway.github, readLedger: () => live, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
-      const githubReadFailed = gateway.github.readFailed?.() === true;
-      const githubFailureReason = gateway.github.readFailureReason?.();
-      const ringNewestMs = Math.max(Number.NEGATIVE_INFINITY, ...ring.map((row) => Date.parse(String(row.ts))).filter(Number.isFinite));
-      entries.set(instance.name, { instance, plan, projection, live, githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), ringNewestMs });
-      return buildOperatorActivityProjection({
-        plan, projection, ledgerLines: withMeta(ring, live.present !== false), frontierLedgerLines: live,
-        githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), now: () => now,
+  /**
+   * One instance's stages, in the order a one-pass build read them. Each is a step `prepare` may end a pass
+   * after, so a cold plan parse or a projection holds the views thread for that stage alone, not the build.
+   */
+  const STAGES: ReadonlyArray<[string, (instance: NowInstance, w: Work, b: Pending, db: ReadModelDb | undefined) => void]> = [
+    ["ring", (_instance, w, _b, db) => {
+      const read = db ? readRingWithOffset(db) : { ring: [] };
+      w.ring = read.ring;
+      if (read.applied) w.applied = read.applied;
+    }],
+    ["plan", (instance, w) => void (w.plan = readPlan(instance))],
+    ["github", (instance, w) => {
+      w.gateway = github(instance);
+      gatewaySources.set(instance.name, w.gateway.source);
+    }],
+    // ledger-read-intent: live — the frontier and projection read what /v1/plan/view and the route read.
+    ["ledger", (instance, w) => void (w.live = readLedgerLines(join(instance.ledgerDir, LEDGER_FILENAME)))],
+    ["projection", (instance, w) => {
+      const github = w.gateway!.github;
+      // No reader of this body reads `uncreditedBuild`, so the pass skips the warning and its walk of every merged PR.
+      w.projection = projectPlan(w.plan!, {
+        ledgerPath: join(instance.ledgerDir, LEDGER_FILENAME), github, readLedger: () => w.live!,
+        writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, skipUncreditedBuildWarning: true,
       });
+      w.githubReadFailed = github.readFailed?.() === true;
+      w.githubFailureReason = github.readFailureReason?.();
+    }],
+    ["assemble", (instance, w, b) => {
+      const { ring, plan, projection, live, githubReadFailed, githubFailureReason } = w as Required<Work>;
+      const liveApplied = w.applied;
+      const ringNewestMs = Math.max(Number.NEGATIVE_INFINITY, ...ring.map((row) => Date.parse(String(row.ts))).filter(Number.isFinite));
+      b.entries.set(instance.name, { instance, plan, projection, live, githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), ringNewestMs,
+        ...(liveApplied ? { liveApplied } : {}) });
+      b.activities.push(buildOperatorActivityProjection({
+        plan, projection, ledgerLines: withMeta(ring, live.present !== false), frontierLedgerLines: live,
+        githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), now: () => b.now,
+      }));
+    }],
+  ];
+
+  const slotsOf = (instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>): Slot<S>[] => instances.flatMap(({ state, db }) => {
+    const instance = byName.get(state.instance);
+    return instance ? [{ state, db, instance }] : [];
+  });
+
+  /** Runs the in-flight build's next stage; an instance whose stage throws answers unavailable and the build moves on. */
+  const step = (b: Pending, slots: readonly Slot<S>[]): void => {
+    const instance = b.instances[b.slot]!;
+    const [stage, run] = STAGES[b.stage]!;
+    const started = clock.now();
+    try {
+      run(instance, b.work, b, slots.find((slot) => slot.instance === instance)?.db);
+      b.stage++;
     } catch (error) {
       // An instance whose plan, snapshot or ledger cannot be read answers as the route does then, and only it.
       log("workstreams.instance_unavailable", { instance: instance.name, error: (error as Error).message });
-      return unavailable(now, error);
+      b.activities.push(unavailable(b.now, error));
+      b.stage = STAGES.length;
     }
+    lap(instance.name, stage, started);
+    if (b.stage < STAGES.length) return;
+    b.slot++;
+    b.stage = 0;
+    b.work = {};
+  };
+
+  /** Notes a change, starts a build once one is due, and runs its stages while `more` allows; true once none is in flight. */
+  const advance = (now: number, slots: readonly Slot<S>[], more: () => boolean): boolean => {
+    const fingerprint = slots.map(({ instance, db }) => `${instance.name}=${db ? ringFingerprint(db) : "-"}|${planKey(instance)}|${githubKey(instance)}`).join(";");
+    // A build whose instances left the context is abandoned: the next is built over the ones there now.
+    if (pending && pending.instances.map((i) => i.name).join(";") !== slots.map((s) => s.instance.name).join(";")) pending = undefined;
+    if (fingerprint !== (pending?.fingerprint ?? builtFingerprint)) {
+      if (pending) pending.dirtySince ??= now;
+      else dirtySince ??= now;
+    }
+    if (!pending && (body === undefined || (dirtySince !== undefined && now - dirtySince >= debounceMs))) {
+      pending = { fingerprint, now, instances: slots.map((s) => s.instance), entries: new Map(), activities: [], slot: 0, stage: 0, work: {} };
+      dirtySince = undefined;
+    }
+    while (pending && pending.slot < pending.instances.length && more()) step(pending, slots);
+    return !pending || pending.slot >= pending.instances.length;
   };
 
   return {
     name: WORKSTREAMS_VIEW_NAME,
     version: WORKSTREAMS_VIEW_VERSION,
+    /** One bounded stage per `more()`: the worker builds no body until every instance's stages are done. */
+    prepare: ({ now, instances }, more) => {
+      ran = {};
+      prepared = true;
+      return advance(now, slotsOf(instances), more);
+    },
+    /** Publishes a finished build; one with no `prepare` before it is built here in one go. */
     materialize: ({ now, instances }) => {
-      const slots = instances.flatMap(({ state, db }) => {
-        const instance = byName.get(state.instance);
-        return instance ? [{ state, db, instance }] : [];
-      });
-      const fingerprint = slots.map(({ instance, db }) => `${instance.name}=${db ? ringFingerprint(db) : "-"}|${planKey(instance)}|${githubKey(instance)}`).join(";");
-      if (fingerprint !== builtFingerprint) dirtySince ??= now;
-      if (body === undefined || (dirtySince !== undefined && now - dirtySince >= debounceMs)) {
-        const entries = new Map<string, Built>();
-        body = { instances: slots.map(({ instance, db }) => ({ instance: instance.name, activity: buildEntry(instance, db, now, entries) })) };
-        shown.set(body, { builtMs: now, entries });
-        builtFingerprint = fingerprint;
-        dirtySince = undefined;
-        log("workstreams.built", { instances: slots.length });
+      if (!prepared) ran = {};
+      prepared = false;
+      const slots = slotsOf(instances);
+      advance(now, slots, () => true);
+      if (pending) {
+        const b = pending;
+        body = { instances: b.instances.map((instance, i) => ({ instance: instance.name, activity: b.activities[i]! })) };
+        shown.set(body, { builtMs: b.now, entries: b.entries });
+        builtFingerprint = b.fingerprint;
+        dirtySince = b.dirtySince;
+        pending = undefined;
+        log("workstreams.built", { instances: b.instances.length });
       }
       const sources = slots.flatMap(({ state, instance }) => {
         const gateway = gatewaySources.get(instance.name);
+        const started = clock.now();
+        const behind = planBehind(instance);
+        lap(instance.name, "behind", started);
         return [
           opts.ledgerSource(state, now),
-          planSource(`plan:${instance.name}`, planBehind(instance), now),
+          planSource(`plan:${instance.name}`, behind, now),
           ...(gateway ? [judgeSource({ name: `github:${instance.name}`, ...gateway }, now)] : []),
         ];
       });
-      return [{ key: "", data: body, sources }];
+      return [{ key: "", data: body!, sources }];
     },
+    /** `ReadModelView.stages`: each `<instance>.<stage>`'s ms in the last `materialize`, for `read_model.slow_view`. */
+    stages: () => (Object.keys(ran).length > 0 ? { ...ran } : undefined),
     /**
      * The shadow side: what GET /v1/operator-activity answers over the same build's plan half, with its
-     * activity read the route's way (the memoized ledger union) up to the ring's newest row.
+     * activity read the route's way (the memoized ledger union) up to the ring's newest row, and of the live
+     * file only the bytes the projector had applied when the ring was read.
      */
     legacy: (_key, _now, data) => {
       const view = data as WorkstreamsData;
@@ -212,7 +390,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         const memo = legacyMemos.get(instance) ?? createLedgerRotationMemo(operatorActivityCandidates);
         legacyMemos.set(instance, memo);
         const pass = memo.pass({ parseMissing: true });
-        const union = readLedgerUnionBounded(join(b.instance.ledgerDir, LEDGER_FILENAME), { rotationRecords: pass.rotationRecords });
+        const livePath = join(b.instance.ledgerDir, LEDGER_FILENAME);
+        const union = readLedgerUnionBounded(livePath, { rotationRecords: pass.rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });
         pass.complete();
         const rows = operatorActivityCandidates(union.filter((row) => !(Date.parse(String(row.ts)) > b.ringNewestMs)));
         return { instance, activity: buildOperatorActivityProjection({

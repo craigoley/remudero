@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -13,6 +13,7 @@ import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { acquireTestSlot, lowPriorityCommand, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -37,6 +38,9 @@ const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.ur
 export const CI_COVERAGE_SHARD_COUNT = 4;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
+/** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */
+const HOST_SCRATCH_ROOT = "/mnt/scratch";
+const SCRATCH_ROOT_ENV_NAME = "RMD_SCRATCH_ROOT";
 
 /** A local route is deliberately narrower than CI parity: it is permission to re-drive one stale
  * verdict, not permission to run an arbitrary check name copied from GitHub. */
@@ -446,7 +450,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -811,6 +815,67 @@ export function coverageScratchDir(repoRoot: string): string {
   return join(base, name);
 }
 
+/** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
+export interface CoverageScratchPolicy {
+  /** The scratch root to prefer; `null` disables the preference, absent resolves it from the host. */
+  root?: string | null;
+  /** Whether two directories sit on one device; defaults to comparing `st_dev`. */
+  sameVolume?: (a: string, b: string) => boolean;
+}
+
+function sameDevice(a: string, b: string): boolean {
+  try {
+    return statSync(a).dev === statSync(b).dev;
+  } catch {
+    // A path that cannot be stat'ed cannot be shown to share a volume; the caller then weighs both.
+    return false;
+  }
+}
+
+/** The scratch root a host run prefers: `RMD_SCRATCH_ROOT`, else /mnt/scratch when it is a mount.
+ *  A test process resolves nothing, so no expectation depends on the host it runs on. */
+function resolveCoverageScratchRoot(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.NODE_TEST_CONTEXT) return undefined;
+  const configured = env[SCRATCH_ROOT_ENV_NAME];
+  if (configured) return configured;
+  return existsSync(HOST_SCRATCH_ROOT) && !sameDevice(HOST_SCRATCH_ROOT, dirname(HOST_SCRATCH_ROOT)) ? HOST_SCRATCH_ROOT : undefined;
+}
+
+type CoverageScratchChoice = { ok: true; dir: string; note: string } | { ok: false; detail: string };
+
+/** Prefers the scratch root over a TMPDIR on another device when the scratch root has the reserve;
+ *  refuses only when neither volume has it, naming both free figures. */
+function chooseCoverageScratch(
+  repoRoot: string,
+  freeBytes: (path: string) => number,
+  policy: CoverageScratchPolicy,
+): CoverageScratchChoice {
+  const tmpDir = coverageScratchDir(repoRoot);
+  const tmpBase = dirname(tmpDir);
+  let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
+  if (root !== undefined) {
+    try {
+      root = realpathSync(root);
+    } catch {
+      // Deliberate: a scratch root that does not resolve is not a candidate; TMPDIR's own check decides.
+      root = undefined;
+    }
+  }
+  const tmpNote = `scratch=${tmpBase} (TMPDIR volume)`;
+  if (root === undefined || (policy.sameVolume ?? sameDevice)(root, tmpBase)) return { ok: true, dir: tmpDir, note: tmpNote };
+  const scratchFree = freeBytes(root);
+  if (scratchFree >= COVERAGE_FREE_RESERVE_BYTES) {
+    return { ok: true, dir: join(root, basename(tmpDir)), note: `scratch=${root} (scratch root, preferred over TMPDIR volume ${tmpBase})` };
+  }
+  const tmpFree = freeBytes(tmpBase);
+  if (tmpFree >= COVERAGE_FREE_RESERVE_BYTES) return { ok: true, dir: tmpDir, note: tmpNote };
+  return {
+    ok: false,
+    detail: `FAIL — coverage-ratchet: neither volume has the ${COVERAGE_FREE_RESERVE_BYTES} byte reserve before starting coverage shards: ` +
+      `scratch root ${root} has ${scratchFree} free bytes, TMPDIR volume ${tmpBase} has ${tmpFree} free bytes. Free space on one of them.`,
+  };
+}
+
 export function coverageGateLockDir(repoRoot: string, discriminator?: string): string {
   const hash = createHash("sha256").update(realpathSync(repoRoot));
   if (discriminator) hash.update(`\0${discriminator}`);
@@ -852,8 +917,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[]): string[] {
-  return [
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
+  return testRunArgv([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -869,7 +934,7 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ];
+  ], concurrency);
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -901,6 +966,9 @@ function testWithCoverageShards(
   lcovPath: string,
   scratchDir: string,
   shardRoot: string,
+  slot: TestSlotLease,
+  testSlot: TestSlotOptions,
+  scratchNote: string,
 ): CiParityLeafResult {
   let retainedCompactBytes = 0;
   let peakBytes = 0;
@@ -933,7 +1001,10 @@ function testWithCoverageShards(
     if (testFiles.length === 0) {
       return { ok: false, detail: `FAIL — ${label} duration-balanced test selection returned no files` };
     }
-    const res = spawn(process.execPath, coverageShardArgs(shardRoot, shard, testFiles), {
+    // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
+    slot.refresh();
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    const res = spawn(child.file, child.args, {
       cwd: repoRoot,
       env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
     });
@@ -980,7 +1051,7 @@ function testWithCoverageShards(
   peakBytes = Math.max(peakBytes, Number(mergeMetrics[3]));
   return {
     ok: true,
-    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ` +
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ${scratchNote}; ${slot.note}; ` +
       `merged coverage/lcov.info; rawBytes=${rawBytes} compactBytes=${retainedCompactBytes} ` +
       `mergeInputBytes=${mergeMetrics[1]} stagingBytes=${mergeMetrics[2]} peakBytes=${peakBytes}`,
   };
@@ -1041,8 +1112,12 @@ export function testWithCoverageLeaf(
     return Number(stats.bavail * stats.bsize);
   },
   lockDiscriminator?: string,
+  testSlot: TestSlotOptions = {},
+  scratchPolicy: CoverageScratchPolicy = {},
 ): CiParityLeafResult {
-  const stableScratch = coverageScratchDir(repoRoot);
+  const chosen = chooseCoverageScratch(repoRoot, freeBytes, scratchPolicy);
+  if (!chosen.ok) return { ok: false, detail: chosen.detail };
+  const stableScratch = chosen.dir;
   const activeTmp = process.env.TMPDIR;
   if (pathIsWithin(repoRoot, stableScratch) || stableScratch.length > MAX_COVERAGE_SCRATCH_PATH) {
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch path ${stableScratch} must be outside the checkout and at most ${MAX_COVERAGE_SCRATCH_PATH} characters; set TMPDIR to a short isolated scratch volume.` };
@@ -1058,6 +1133,7 @@ export function testWithCoverageLeaf(
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
+  let slot: TestSlotLease | undefined;
   try {
     const holder: CoverageLockHolder = {
       pid: process.pid, host: hostname(), startedAt: systemClock.iso(),
@@ -1076,8 +1152,13 @@ export function testWithCoverageLeaf(
       scratchDir = realpathSync(stableScratch);
     }
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"));
+    // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
+    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", testSlot);
+    const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
+    // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
+    return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
   } finally {
+    slot?.release();
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
     } else if (!nested) {
@@ -1786,10 +1867,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined) => {
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator));
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot));
       if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
@@ -2073,6 +2154,8 @@ export interface CiParityDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates a fake nested parity fixture from its parent's real coverage lock. Production omits this. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2167,7 +2250,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -2657,6 +2740,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
   // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  // The nested-preflight census (#9724). Its one real `git ls-files` is scoped to `test/*.ts`, the
+  // TEST corpus; the `src/` text the recognizer sees is its fixture import line. Same route as above.
+  refusedForPredicate(
+    "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+    "a",
+    "the nested-preflight census. Its `git ls-files` is scoped to `test/*.ts`, the test corpus; its `src/` " +
+      "text is a fixture import line, so it is not a src-population walk",
+  ),
   // W1-T3086's shard-lint ratchet. The recognizer matches it on the `src/` text of its two imports
   // (src/lib/plan.js, src/lib/task-linter.js) plus a real `git ls-files` — but that call is
   // `git ls-files plan/tasks.d/*.yaml plan/tasks.d/*.yml`, the PLAN shard population, and the
@@ -3691,6 +3782,8 @@ export interface PreflightCoverageDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates fake coverage-mode fixtures from the parent full gate's real checkout lock. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3760,7 +3853,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 

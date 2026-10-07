@@ -1,0 +1,51 @@
+- id: W1-T6029
+  title: "THE TEST-RUNNER LIVE-LEDGER FALLBACK DENIES THE FIXTURE AND ADMITS THE OPERATOR — with no RMD_TEST_LIVE_DENY_ROOT, assertLedgerPathNotLive resolves the deny root from env.HOME at CALL time, after a fixture has redirected HOME, so it refuses the fixture's own scratch ledger and allows /home/<op>/rmd-state2/state/ledger.ndjson; 8 run-task.test.ts tests fail on any run without the setup preload"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — which root the test-runner ledger guard denies when the preload did not pin one
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: run-task.test.ts reds that pass on CI (research r-env)"
+  plan_refs: [W1-T4923, W1-T4068, W1-T4805]
+  files: [src/lib/live-write-guard.ts, test/the-live-ledger-fallback-ignores-a-redirected-home.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a6a28515, node 22.23.2, git 2.43.0: `node --test --import tsx
+    test/run-task.test.ts` (no `--import ./test/setup/tmp-hygiene.ts`) fails 8 of 324: digestCommand
+    W1-T144 and W1-T163, escalateCommand W1-T144, daemonCommand W1-T254, sweepCommand --repo, and the
+    main() onboard, alert-fix and SERVICE-command tests. The same run with the preload passes 324/324.
+    `env -i HOME=$HOME PATH=$PATH` gives the same split, so no ambient variable is involved. Five fail
+    with "live-write-guard: REFUSED ledger-append ... <scratch>/state/ledger.ndjson is inside the
+    operator state root <scratch>". The three main() tests fail with ENOENT on
+    <scratch>/fixture-root/state/ledger.ndjson because the cli.invoked append was refused and
+    swallowed. Setting only RMD_TEST_LIVE_DENY_ROOT=$HOME/Remudero, still without the preload, makes
+    all 8 pass.
+    The cause is assertLedgerPathNotLive in src/lib/live-write-guard.ts. With no
+    RMD_TEST_LIVE_DENY_ROOT it calls discoverLiveLedgerRoot(env), which reads env.HOME at call time,
+    after the test has pointed HOME at its own fixture. The deny root becomes the fixture's root. A
+    direct call (NODE_TEST_CONTEXT=child-v8, HOME=<fixture>) REFUSED <fixture>/Remudero/state/ledger.ndjson
+    and ALLOWED /home/craigoleyagent/rmd-state2/state/ledger.ndjson, the real operator ledger. The
+    fallback therefore fails in both directions. The preload hides this by pinning the env var before
+    any HOME redirect (test/setup/tmp-hygiene.ts, W1-T4068).
+  design: |
+    In assertLedgerPathNotLive, resolve the fallback from the operator's account home, not env.HOME.
+    Add an injected seam, operatorHome, that defaults to os.userInfo().homedir and is read through
+    discoverLiveLedgerRoot({ HOME: operatorHome() }). os.userInfo() throws when the uid has no passwd
+    entry, which happens in some containers. In that case use the HOME captured when the module was
+    loaded, before any fixture could redirect it, and test that path. Do not return a literal from a
+    bare catch. When the deny root comes from the fallback, the refusal text must say that
+    RMD_TEST_LIVE_DENY_ROOT is unset, meaning the run did not load test/setup/tmp-hygiene.ts, and that
+    a scratch HOME alone is not the fix. Production behavior does not change: isTestRunner is false
+    there, so no deny root applies.
+  acceptance:
+    - claim: "with no RMD_TEST_LIVE_DENY_ROOT and HOME redirected to a fixture, the test-runner guard admits the fixture's scratch ledger, refuses the account home's configured root, and its refusal names the missing setup preload"
+      proof: "unit test: test/the-live-ledger-fallback-ignores-a-redirected-home.test.ts"
+  falsifier: |
+    Restore discoverLiveLedgerRoot(env) in the fallback. The fixture ledger is then refused, the
+    account-home root is admitted, and the test fails.
+

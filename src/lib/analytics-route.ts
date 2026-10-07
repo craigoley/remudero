@@ -49,10 +49,12 @@ import { goalObservationFromRow, type GoalObservation } from "./goals.js";
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
-import { LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_COLD_STORE_DIRNAME } from "./ledger-compact.js";
 import {
   buildAnalyticsTimeSeries,
   createHistoricalSeriesAccumulator,
@@ -68,12 +70,21 @@ import {
 } from "./analytics-breakdowns.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { fingerprintLedgerLine, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerFileRangeDigests, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
-import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
-import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal } from "./operator-agent-decisions.js";
-import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
+import {
+  adaptOperatorAgentCapacityRows, emptyOperatorAgentCapacityFold, finishOperatorAgentCapacity, foldOperatorAgentCapacityRow,
+  type OperatorAgentCapacityFold, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal,
+} from "./operator-agent-capacity.js";
+import {
+  adaptOperatorDecisionRows, emptyOperatorDecisionFold, finishOperatorDecisions, foldOperatorDecisionRow,
+  type OperatorDecisionFold, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal,
+} from "./operator-agent-decisions.js";
+import {
+  adaptOperatorAgentProofRows, emptyOperatorAgentProofFold, finishOperatorAgentProof, foldOperatorAgentProofRow,
+  type OperatorAgentProofFold, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal,
+} from "./operator-agent-proof.js";
 import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
 import {
   selectOperatorAgentMemoryRow,
@@ -105,10 +116,17 @@ import {
 } from "./benchmark-evidence.js";
 import { ABILITY_MAP_VERSION, abilityObservation, fitAbilityMap, unavailableAbilityMap, type AbilityMap, type AbilityObservation } from "./ability-map.js";
 import { buildEvalCard, EVAL_CARD_VERSION, emptyEvalCardEvidence, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
-import { deriveWorkIntegrity, unavailableWorkIntegrity, WORK_INTEGRITY_VERSION, workIntegrityRow, type WorkIntegrity } from "./work-integrity.js";
 import {
-  deriveJudgeCalibration,
+  emptyWorkIntegrityFold, finishWorkIntegrity, foldWorkIntegrityRow, unavailableWorkIntegrity, WORK_INTEGRITY_VERSION,
+  workIntegrityFoldFromJson, workIntegrityFoldToJson, workIntegrityRow, type WorkIntegrity, type WorkIntegrityFold,
+} from "./work-integrity.js";
+import {
+  emptyJudgeVerdictFold,
   fileJudgeLabelStore,
+  finishJudgeCalibration,
+  foldJudgeVerdictRow,
+  judgeVerdictFoldFromJson,
+  judgeVerdictFoldToJson,
   JUDGE_CALIBRATION_VERSION,
   judgeCalibrationRow,
   loadJudgeLabels,
@@ -116,6 +134,7 @@ import {
   type JudgeCalibration,
   type JudgeLabelsInput,
   type JudgeLabelStore,
+  type JudgeVerdictFold,
 } from "./judge-calibration.js";
 import { isCashSpendProducer, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
@@ -621,21 +640,19 @@ interface AnalyticsAccumulator {
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: RoutingTelemetryAccumulator;
   usage: UsageTelemetryState;
-  /** Sanitized rows retained only for the four operator-agent evidence adapters. */
-  operatorAgentRows: {
-    proof: OperatorAgentProofLedgerRow[];
-    decisions: OperatorDecisionLedgerRow[];
-    capacity: OperatorAgentCapacityLedgerRow[];
-    memory: OperatorAgentMemoryLedgerRow[];
-  };
+  /** The operator-agent evidence adapters' folds, and the newest memory rows. */
+  operatorAgentFolds: OperatorAgentFolds;
+  operatorAgentRows: { memory: OperatorAgentMemoryLedgerRow[] };
   historicalSeries: HistoricalSeriesAccumulator;
   breakdowns: AnalyticsBreakdownAccumulator;
   checkpointHistory: CheckpointHistoryState;
   checkpointBreakdowns: CheckpointBreakdownState;
   checkpointHydrated: boolean;
-  workIntegrityRows: Array<Record<string, unknown>>;
-  judgeCalibrationRows: Array<Record<string, unknown>>;
+  workIntegrity: WorkIntegrityFold;
+  judgeCalibration: JudgeVerdictFold;
 }
+
+type OperatorAgentFolds = { proof: OperatorAgentProofFold; decisions: OperatorDecisionFold; capacity: OperatorAgentCapacityFold };
 
 type CheckpointHistoryBucket = {
   observed: boolean;
@@ -672,16 +689,26 @@ type CheckpointBreakdownState = {
 
 const CHECKPOINT_VERSION = 2 as const;
 const CHECKPOINT_FILENAME = ".analytics-console-v1.checkpoint.json";
+/** A budgeted scan's partial fold: never the checkpoint, whose snapshot a booting serve publishes. */
+const PROGRESS_FILENAME = ".analytics-console-v1.progress.json";
 const CHECKPOINT_HISTORY_BUCKETS = 30;
 const CHECKPOINT_DAY_MS = 24 * 60 * 60 * 1000;
 const CHECKPOINT_SUCCESS_VERDICTS = new Set(["merged", "already_satisfied"]);
 
 type AnalyticsCheckpointSource = {
   archives: Array<{ name: string; size: number; mtimeMs: number }>;
-  live: { size: number; mtimeMs: number } | null;
+  live: { size: number; mtimeMs: number; ino?: number } | null;
   lastArchive: string | null;
   liveOffset: number;
+  liveAnchor?: LiveAnchor;
 };
+
+/** The live file read: inode, carried prefix, and digest of the bytes before `liveOffset` past that prefix. */
+export type LiveAnchor = { ino: number; prefixBytes: number; prefixSha256: string; tailBytes: number; tailSha256: string };
+
+type LivePosition = { liveStartOffset: number; rotationStart?: { name: string; offset: number } };
+
+const LIVE_ANCHOR_TAIL_BYTES = 4096;
 
 type AnalyticsCheckpointState = {
   goalObservations?: GoalObservation[];
@@ -729,10 +756,14 @@ type AnalyticsCheckpointState = {
       count: number;
     }>;
   };
-  operatorAgentRows: Omit<AnalyticsAccumulator["operatorAgentRows"], "memory"> & {
-    /** Optional for checkpoints written before W1-T4001. */
+  operatorAgentRows: {
+    /** Optional for checkpoints written before W1-T4001; the other three are rows a checkpoint before folds kept. */
     memory?: OperatorAgentMemoryLedgerRow[];
+    proof?: OperatorAgentProofLedgerRow[];
+    decisions?: OperatorDecisionLedgerRow[];
+    capacity?: OperatorAgentCapacityLedgerRow[];
   };
+  operatorAgentFolds?: OperatorAgentFolds;
   history: {
     days: Array<[string, CheckpointHistoryBucket]>;
     starts: Array<[string, number]>;
@@ -747,6 +778,8 @@ type AnalyticsCheckpointState = {
   };
   workIntegrityRows?: Array<Record<string, unknown>>;
   judgeCalibrationRows?: Array<Record<string, unknown>>;
+  workIntegrityFold?: Record<string, unknown>;
+  judgeCalibrationFold?: Record<string, unknown>;
 };
 
 export interface AnalyticsCheckpoint {
@@ -755,6 +788,25 @@ export interface AnalyticsCheckpoint {
   tail: Array<{ step: string; fingerprint: string }>;
   state: AnalyticsCheckpointState;
   snapshot: AnalyticsSnapshot;
+}
+
+/** Where a scan can pick up: a complete checkpoint, or the progress a budgeted scan persisted. */
+export interface AnalyticsResumePoint {
+  version: typeof CHECKPOINT_VERSION;
+  source: AnalyticsCheckpointSource;
+  tail: Array<{ step: string; fingerprint: string }>;
+  state: AnalyticsCheckpointState;
+  /** Progress only: rotations an earlier leg could not read, so the finished fold still says so. */
+  unreadRotations?: number;
+}
+
+/** How a scan was served, for the refresh's ledger rows: the evidence a stuck refresh needs. */
+export interface AnalyticsScanReport {
+  mode: "resume" | "continue" | "full";
+  reason?: string;
+  progressRefused?: string;
+  rotationsRead: number;
+  rotationsRemaining: number;
 }
 
 type RoutingAssignment = {
@@ -871,14 +923,15 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
     usage: usageTelemetryState(),
-    operatorAgentRows: { proof: [], decisions: [], capacity: [], memory: [] },
+    operatorAgentFolds: { proof: emptyOperatorAgentProofFold(), decisions: emptyOperatorDecisionFold(), capacity: emptyOperatorAgentCapacityFold() },
+    operatorAgentRows: { memory: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
     checkpointHistory: { days: new Map(), starts: new Map() },
     checkpointBreakdowns: { starts: new Set(), terminals: new Map(), startsWithoutRunId: 0, terminalsWithoutRunId: 0, workCategories: new Map() },
     checkpointHydrated: false,
-    workIntegrityRows: [],
-    judgeCalibrationRows: [],
+    workIntegrity: emptyWorkIntegrityFold(),
+    judgeCalibration: emptyJudgeVerdictFold(),
   };
 }
 
@@ -1542,9 +1595,9 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     if (acc.operatorAgentRows.memory.length > 2_000) {
       acc.operatorAgentRows.memory.splice(0, acc.operatorAgentRows.memory.length - 2_000);
     }
-  } else if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
-  else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
-  else if (selectedOperatorAgentRow?.family === "capacity") acc.operatorAgentRows.capacity.push(selectedOperatorAgentRow.row);
+  } else if (selectedOperatorAgentRow?.family === "proof") foldOperatorAgentProofRow(acc.operatorAgentFolds.proof, selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "decisions") foldOperatorDecisionRow(acc.operatorAgentFolds.decisions, selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "capacity") foldOperatorAgentCapacityRow(acc.operatorAgentFolds.capacity, selectedOperatorAgentRow.row);
 
   // Assignment/terminal attribution is folded from this SAME union pass. It has its
   // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
@@ -1552,9 +1605,9 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
   accumulateUsageLine(acc.usage, line);
   const workIntegrityLine = workIntegrityRow(line);
-  if (workIntegrityLine) acc.workIntegrityRows.push(workIntegrityLine);
+  if (workIntegrityLine) foldWorkIntegrityRow(acc.workIntegrity, workIntegrityLine);
   const judgeLine = judgeCalibrationRow(line);
-  if (judgeLine) acc.judgeCalibrationRows.push(judgeLine);
+  if (judgeLine) foldJudgeVerdictRow(acc.judgeCalibration, judgeLine);
 
   const goal = goalObservationFromRow(line);
   if (goal) {
@@ -1630,6 +1683,9 @@ export interface AnalyticsDeriveOptions {
   operatorAgentOutcomes?: OperatorAgentTaskOutcomeSignal;
   judgeLabels?: JudgeLabelsInput;
   judgeLabelStore?: JudgeLabelStore;
+  progress?: AnalyticsResumePoint;
+  /** On the scan's clock: past this, stop at the next rotation boundary and return the progress. */
+  yieldAtMs?: number;
 }
 
 function snapshotFromAccumulator(
@@ -1674,12 +1730,13 @@ function snapshotFromAccumulator(
       cacheReuseTokens: acc.tokensTotal,
       costModeledUsd,
       taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
-      operatorAgent: buildOperatorAgentProjection({
-        proofRows: acc.operatorAgentRows.proof,
-        decisionRows: acc.operatorAgentRows.decisions,
-        capacityRows: acc.operatorAgentRows.capacity,
-        outcomes: options.operatorAgentOutcomes,
-      }),
+      operatorAgent: {
+        version: "operator-agent-v1",
+        proof: finishOperatorAgentProof(acc.operatorAgentFolds.proof),
+        outcomes: options.operatorAgentOutcomes ?? adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+        decisions: finishOperatorDecisions(acc.operatorAgentFolds.decisions),
+        capacity: finishOperatorAgentCapacity(acc.operatorAgentFolds.capacity),
+      },
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
     benchmarkEvidence: snapshotBenchmarkEvidence(acc.routingTelemetry, nowIso),
@@ -1710,8 +1767,8 @@ function snapshotFromAccumulator(
   });
   Object.defineProperty(out, "cacheReuseTokens", { value: { input: acc.tokensTotal.input, cacheRead: acc.tokensTotal.cacheRead, cacheCreation: acc.tokensTotal.cacheCreation }, enumerable: false, writable: false });
   Object.defineProperty(out, "abilityMap", { value: snapshotAbilityMap(acc.routingTelemetry), enumerable: false, writable: false });
-  Object.defineProperty(out, "workIntegrity", { value: deriveWorkIntegrity(acc.workIntegrityRows, { asOf: nowIso }), enumerable: false, writable: false });
-  const judgeCalibration = deriveJudgeCalibration(acc.judgeCalibrationRows, {
+  Object.defineProperty(out, "workIntegrity", { value: finishWorkIntegrity(acc.workIntegrity, { asOf: nowIso }), enumerable: false, writable: false });
+  const judgeCalibration = finishJudgeCalibration(acc.judgeCalibration, {
     asOf: nowIso,
     labels: options.judgeLabels ?? { unavailable: "no-label-store-supplied" },
   });
@@ -1719,6 +1776,15 @@ function snapshotFromAccumulator(
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   return out;
+}
+
+/** The non-enumerable `cache.reuse` terms JSON left out of a checkpoint's snapshot, from the `state.tokensTotal` it
+ *  was built from: the snapshot's own terms. A checkpoint without them restores none, never zeros. */
+function restoreCacheReuseTokens(snapshot: AnalyticsSnapshot, state: Partial<AnalyticsCheckpointState>): AnalyticsSnapshot {
+  const terms = state.tokensTotal;
+  if (snapshot.cacheReuseTokens !== undefined || !terms || ![terms.input, terms.cacheRead, terms.cacheCreation].every(Number.isFinite)) return snapshot;
+  Object.defineProperty(snapshot, "cacheReuseTokens", { value: { input: terms.input, cacheRead: terms.cacheRead, cacheCreation: terms.cacheCreation }, enumerable: false, writable: false });
+  return snapshot;
 }
 
 function attachUsageProjection(snapshot: AnalyticsSnapshot, state: UsageTelemetryState | undefined): AnalyticsSnapshot {
@@ -1811,7 +1877,12 @@ function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefin
     });
     const livePath = join(stateDir, LEDGER_FILENAME);
     const live = existsSync(livePath) ? statSync(livePath) : null;
-    return { archives, live: live ? { size: live.size, mtimeMs: live.mtimeMs } : null, lastArchive: archives.at(-1)?.name ?? null, liveOffset: live?.size ?? 0 };
+    return {
+      archives,
+      live: live ? { size: live.size, mtimeMs: live.mtimeMs, ino: live.ino } : null,
+      lastArchive: archives.at(-1)?.name ?? null,
+      liveOffset: live?.size ?? 0,
+    };
   } catch {
     // A missing or unreadable source manifest is an explicit non-resumable state; callers must
     // fall back to the full union rather than treating it as a healthy empty source.
@@ -1819,18 +1890,141 @@ function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefin
   }
 }
 
-function checkpointSourceCanResume(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource): boolean {
-  if (current.archives.length < previous.archives.length) return false;
-  if (current.live === null) return previous.live === null && current.archives.every((entry, index) => {
-    const prior = previous.archives[index];
-    return prior?.name === entry.name && prior.size === entry.size && prior.mtimeMs === entry.mtimeMs;
-  });
-  if (previous.live !== null && current.live.size < previous.liveOffset && current.archives.length <= previous.archives.length) return false;
-  for (const prior of previous.archives) {
-    const currentEntry = current.archives.find((entry) => entry.name === prior.name);
-    if (!currentEntry || currentEntry.size !== prior.size || currentEntry.mtimeMs !== prior.mtimeMs) return false;
+function supersededArchiveNames(stateDir: string): Set<string> | undefined {
+  try {
+    return new Set(readdirSync(join(stateDir, LEDGER_COLD_STORE_DIRNAME)));
+  } catch {
+    // No cold store: a vanished archive is unexplained, so the caller refuses to resume.
+    return undefined;
   }
-  return true;
+}
+
+/** Why `previous` cannot resume against `current`. Compaction MOVES folded rotations to the cold store and
+ *  names its output no later than its newest source, so `afterRotation` skips it; refusing that rescanned
+ *  the whole corpus on every refresh, and each one timed out (2026-10-06). */
+function checkpointSourceResumeRefusal(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource, stateDir: string): string | undefined {
+  const last = previous.lastArchive;
+  const unread = (name: string): boolean => last === null || name > last;
+  if (current.live === null) {
+    const same = previous.live === null && current.archives.length === previous.archives.length && current.archives.every((entry, index) => {
+      const prior = previous.archives[index];
+      return prior?.name === entry.name && prior.size === entry.size && prior.mtimeMs === entry.mtimeMs;
+    });
+    return same ? undefined : "live-missing";
+  }
+  const rotated = current.archives.some((entry) => unread(entry.name));
+  if (previous.live !== null && current.live.size < previous.liveOffset && !rotated) return "live-truncated";
+  const byName = new Map(current.archives.map((entry) => [entry.name, entry]));
+  const missing: string[] = [];
+  for (const prior of previous.archives) {
+    const entry = byName.get(prior.name);
+    if (entry === undefined) missing.push(prior.name);
+    else if (entry.size !== prior.size || entry.mtimeMs !== prior.mtimeMs) return "archive-rewritten";
+  }
+  if (missing.length === 0) return undefined;
+  const superseded = supersededArchiveNames(stateDir);
+  if (superseded === undefined || !missing.every((name) => superseded.has(name))) return "archive-missing";
+  // A compaction that consumed a rotation this fold never read put unread rows behind `afterRotation`.
+  if ([...superseded].some(unread)) return "compaction-consumed-unread";
+  return undefined;
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function carriedPrefixClaim(livePath: string): { bytes: number; sha256: string } | undefined {
+  try {
+    const carried = JSON.parse(readFileSync(`${livePath}${LEDGER_CARRIED_PREFIX_SUFFIX}`, "utf8")) as { bytes?: unknown; sha256?: unknown };
+    return typeof carried.bytes === "number" && Number.isSafeInteger(carried.bytes) && carried.bytes > 0 && typeof carried.sha256 === "string"
+      ? { bytes: carried.bytes, sha256: carried.sha256 } : undefined;
+  } catch {
+    // deliberate: no readable sidecar is the rotation's own "unknown prefix", which archives the whole file.
+    return undefined;
+  }
+}
+
+export function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor | undefined {
+  const livePath = join(stateDir, LEDGER_FILENAME);
+  let fd: number;
+  try {
+    fd = openSync(livePath, "r");
+  } catch {
+    // deliberate: a live file gone since the read leaves no anchor, which the resume names as unanchored.
+    return undefined;
+  }
+  try {
+    if (fstatSync(fd).ino !== ino) return undefined;
+    const read = (start: number, end: number): Buffer => {
+      const bytes = Buffer.alloc(Math.max(0, end - start));
+      return bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, start));
+    };
+    const claim = carriedPrefixClaim(livePath);
+    const prefixBytes = claim !== undefined && claim.bytes <= offset && sha256Hex(read(0, claim.bytes)) === claim.sha256 ? claim.bytes : 0;
+    const tailStart = Math.max(prefixBytes, offset - LIVE_ANCHOR_TAIL_BYTES);
+    const tail = read(tailStart, offset);
+    if (tail.length !== offset - tailStart) return undefined;
+    return {
+      ino,
+      prefixBytes,
+      prefixSha256: prefixBytes > 0 ? claim!.sha256 : sha256Hex(Buffer.alloc(0)),
+      tailBytes: tail.length,
+      tailSha256: sha256Hex(tail),
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** A replaced live file's unread tail opens the first new rotation, at the offset less the carried prefix
+ *  or (archived whole) at the offset, whichever the digests prove; the new live file then reads from 0. */
+async function resumeLivePosition(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource, stateDir: string): Promise<LivePosition | string> {
+  if (previous.live === null || current.live === null) return { liveStartOffset: 0 };
+  const offset = previous.liveOffset;
+  const last = previous.lastArchive;
+  const rotations = current.archives.filter((entry) => last === null || entry.name > last);
+  const anchor = previous.liveAnchor;
+  if (anchor === undefined) {
+    // A checkpoint written before the anchor existed: the old reading, only while nothing can have rotated.
+    return rotations.length === 0 && current.live.size >= offset ? { liveStartOffset: offset } : "live-position-unanchored";
+  }
+  const livePath = join(stateDir, LEDGER_FILENAME);
+  if (current.live.ino === anchor.ino) {
+    const [tail] = await ledgerFileRangeDigests(livePath, "plain", [{ start: offset - anchor.tailBytes, end: offset }]);
+    if (tail === anchor.tailSha256) return { liveStartOffset: offset };
+  }
+  const first = rotations[0];
+  if (first === undefined) {
+    // An empty delta archives nothing: only a fold that stopped at the end of the carried prefix lost nothing.
+    return offset === anchor.prefixBytes ? { liveStartOffset: 0 } : "live-replaced-without-rotation";
+  }
+  const candidates = [
+    { offset, prefix: anchor.prefixBytes > 0 },
+    ...(anchor.prefixBytes > 0 ? [{ offset: offset - anchor.prefixBytes, prefix: false }] : []),
+  ];
+  const ranges = candidates.flatMap((candidate) => [
+    { start: candidate.offset - anchor.tailBytes, end: candidate.offset },
+    { start: 0, end: candidate.prefix ? anchor.prefixBytes : 0 },
+  ]);
+  const digests = await ledgerFileRangeDigests(join(stateDir, first.name), first.name.endsWith(".gz") ? "gzip" : "plain", ranges);
+  const found = candidates.find((candidate, index) =>
+    digests[2 * index] === anchor.tailSha256 && (!candidate.prefix || digests[2 * index + 1] === anchor.prefixSha256));
+  return found === undefined ? "live-rotation-unreconciled" : { liveStartOffset: 0, rotationStart: { name: first.name, offset: found.offset } };
+}
+
+function resumeRefusal(prior: AnalyticsResumePoint | undefined, current: AnalyticsCheckpointSource | undefined, stateDir: string): string | undefined {
+  if (prior === undefined) return "no-checkpoint";
+  const state = prior.state;
+  if (!(state.goalAccountingVersion === 1 && state.usage?.costAccountingVersion === 1 && state.usage?.cashAccountingVersion === 1 &&
+    state.usage?.trialAccountingVersion === 1 && state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION)) return "checkpoint-version";
+  if (state.routingTelemetry.benchmarkCounters === undefined || !Array.isArray(state.routingTelemetry.malformedSources) ||
+    (state.workIntegrityFold === undefined && !Array.isArray(state.workIntegrityRows)) ||
+    (state.judgeCalibrationFold === undefined && !Array.isArray(state.judgeCalibrationRows))) return "checkpoint-incomplete";
+  if (current === undefined) return "source-unreadable";
+  const last = prior.source.lastArchive;
+  const liveMalformed = state.routingTelemetry.malformedSources.some(([, finding]) => finding.form === "live");
+  if (liveMalformed && current.archives.some((entry) => last === null || entry.name > last)) return "live-malformed-rotated";
+  return checkpointSourceResumeRefusal(prior.source, current, stateDir);
 }
 
 function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpointState {
@@ -1866,12 +2060,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       stepUps: [...acc.routingTelemetry.stepUpsByKey.values()].map((row) => ({ ...row })),
       preferenceOutcomes: [...acc.routingTelemetry.preferenceOutcomesByKey.values()].map((row) => ({ ...row })),
     },
-    operatorAgentRows: {
-      proof: acc.operatorAgentRows.proof.map((row) => ({ ...row })),
-      decisions: acc.operatorAgentRows.decisions.map((row) => ({ ...row })),
-      capacity: acc.operatorAgentRows.capacity.map((row) => ({ ...row })),
-      memory: acc.operatorAgentRows.memory.map((row) => ({ ...row })),
-    },
+    operatorAgentRows: { memory: acc.operatorAgentRows.memory.map((row) => ({ ...row })) },
+    operatorAgentFolds: JSON.parse(JSON.stringify(acc.operatorAgentFolds)) as OperatorAgentFolds,
     history: {
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
       starts: [...acc.checkpointHistory.starts.entries()],
@@ -1884,8 +2074,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       terminalsWithoutRunId: acc.checkpointBreakdowns.terminalsWithoutRunId,
       workCategories: [...acc.checkpointBreakdowns.workCategories.entries()],
     },
-    workIntegrityRows: acc.workIntegrityRows.map((row) => ({ ...row })),
-    judgeCalibrationRows: acc.judgeCalibrationRows.map((row) => ({ ...row })),
+    workIntegrityFold: workIntegrityFoldToJson(acc.workIntegrity),
+    judgeCalibrationFold: judgeVerdictFoldToJson(acc.judgeCalibration),
   };
 }
 
@@ -1925,12 +2115,13 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
     const key = [row.preferredProvider, row.selectedProvider, row.selectedModel, row.outcome, row.reason ?? ""].join("\0");
     acc.routingTelemetry.preferenceOutcomesByKey.set(key, { ...row });
   }
-  acc.operatorAgentRows = {
-    proof: state.operatorAgentRows.proof.map((row) => ({ ...row })),
-    decisions: state.operatorAgentRows.decisions.map((row) => ({ ...row })),
-    capacity: state.operatorAgentRows.capacity.map((row) => ({ ...row })),
-    memory: (state.operatorAgentRows.memory ?? []).map((row) => ({ ...row })),
-  };
+  acc.operatorAgentRows = { memory: (state.operatorAgentRows.memory ?? []).map((row) => ({ ...row })) };
+  if (state.operatorAgentFolds !== undefined) acc.operatorAgentFolds = JSON.parse(JSON.stringify(state.operatorAgentFolds)) as OperatorAgentFolds;
+  else {
+    for (const row of state.operatorAgentRows.proof ?? []) foldOperatorAgentProofRow(acc.operatorAgentFolds.proof, row);
+    for (const row of state.operatorAgentRows.decisions ?? []) foldOperatorDecisionRow(acc.operatorAgentFolds.decisions, row);
+    for (const row of state.operatorAgentRows.capacity ?? []) foldOperatorAgentCapacityRow(acc.operatorAgentFolds.capacity, row);
+  }
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
   acc.usage = JSON.parse(JSON.stringify(state.usage ?? usageTelemetryState())) as UsageTelemetryState;
@@ -1939,8 +2130,10 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.checkpointBreakdowns.startsWithoutRunId = state.breakdowns.startsWithoutRunId;
   acc.checkpointBreakdowns.terminalsWithoutRunId = state.breakdowns.terminalsWithoutRunId;
   acc.checkpointBreakdowns.workCategories = new Map(state.breakdowns.workCategories);
-  acc.workIntegrityRows = (state.workIntegrityRows ?? []).map((row) => ({ ...row }));
-  acc.judgeCalibrationRows = (state.judgeCalibrationRows ?? []).map((row) => ({ ...row }));
+  if (state.workIntegrityFold !== undefined) acc.workIntegrity = workIntegrityFoldFromJson(state.workIntegrityFold);
+  else for (const row of state.workIntegrityRows ?? []) foldWorkIntegrityRow(acc.workIntegrity, row);
+  if (state.judgeCalibrationFold !== undefined) acc.judgeCalibration = judgeVerdictFoldFromJson(state.judgeCalibrationFold);
+  else for (const row of state.judgeCalibrationRows ?? []) foldJudgeVerdictRow(acc.judgeCalibration, row);
   acc.checkpointHydrated = true;
   return acc;
 }
@@ -1951,26 +2144,80 @@ function validCheckpoint(value: unknown): value is AnalyticsCheckpoint {
   return checkpoint.version === CHECKPOINT_VERSION && checkpoint.source !== undefined && checkpoint.state !== undefined && checkpoint.snapshot !== undefined && Array.isArray(checkpoint.tail);
 }
 
-export function readAnalyticsCheckpoint(stateDir: string): AnalyticsCheckpoint | undefined {
+/** Non-enumerable snapshot fields by owner: JSON.stringify drops them, so the checkpoint carries them. */
+type HiddenSnapshotFields = { top: Record<string, unknown>; routingTelemetry: Record<string, unknown> };
+
+function hiddenFields(owner: object | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (owner === undefined) return out;
+  for (const name of Object.getOwnPropertyNames(owner)) {
+    if (!Object.prototype.propertyIsEnumerable.call(owner, name)) out[name] = (owner as Record<string, unknown>)[name];
+  }
+  return out;
+}
+
+function restoreHiddenFields(owner: object | undefined, fields: Record<string, unknown> | undefined): void {
+  if (owner === undefined || fields === undefined) return;
+  // Configurable so the boot path can still re-attach the usage projection it recomputes from state.
+  for (const [name, value] of Object.entries(fields)) {
+    Object.defineProperty(owner, name, { value, enumerable: false, writable: false, configurable: true });
+  }
+}
+
+function readJson(path: string): unknown {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(checkpointPath(stateDir), "utf8"));
-    return validCheckpoint(parsed) ? parsed : undefined;
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    // A missing or malformed checkpoint is intentionally indistinguishable from no prior cache;
-    // the next refresh performs the full union and publishes fresh evidence when available.
+    // A missing or malformed file is no prior cache: the next refresh performs the full union.
     return undefined;
   }
 }
 
-export function writeAnalyticsCheckpoint(stateDir: string, checkpoint: AnalyticsCheckpoint): void {
-  const target = checkpointPath(stateDir);
+export function readAnalyticsCheckpoint(stateDir: string): AnalyticsCheckpoint | undefined {
+  const parsed = readJson(checkpointPath(stateDir));
+  if (!validCheckpoint(parsed)) return undefined;
+  const carried = parsed as AnalyticsCheckpoint & { snapshotHidden?: HiddenSnapshotFields };
+  restoreHiddenFields(carried.snapshot, carried.snapshotHidden?.top);
+  restoreHiddenFields(carried.snapshot.routingTelemetry, carried.snapshotHidden?.routingTelemetry);
+  delete carried.snapshotHidden;
+  return carried;
+}
+
+function writeJsonAtomic(target: string, value: unknown): void {
   const temporary = `${target}.tmp-${process.pid}`;
   try {
-    writeFileSync(temporary, JSON.stringify(checkpoint));
+    writeFileSync(temporary, JSON.stringify(value));
     renameSync(temporary, target);
   } catch {
     try { if (existsSync(temporary)) renameSync(temporary, `${temporary}.discarded`); } catch { /* best effort cleanup */ }
   }
+}
+
+export function writeAnalyticsCheckpoint(stateDir: string, checkpoint: AnalyticsCheckpoint): void {
+  const snapshotHidden: HiddenSnapshotFields = {
+    top: hiddenFields(checkpoint.snapshot),
+    routingTelemetry: hiddenFields(checkpoint.snapshot.routingTelemetry),
+  };
+  writeJsonAtomic(checkpointPath(stateDir), { ...checkpoint, snapshotHidden });
+}
+
+function progressPath(stateDir: string): string {
+  return join(stateDir, PROGRESS_FILENAME);
+}
+
+export function readAnalyticsProgress(stateDir: string): AnalyticsResumePoint | undefined {
+  const parsed = readJson(progressPath(stateDir)) as Partial<AnalyticsResumePoint> | undefined;
+  return parsed?.version === CHECKPOINT_VERSION && parsed.source !== undefined && parsed.state !== undefined && Array.isArray(parsed.tail)
+    ? parsed as AnalyticsResumePoint
+    : undefined;
+}
+
+export function writeAnalyticsProgress(stateDir: string, progress: AnalyticsResumePoint): void {
+  writeJsonAtomic(progressPath(stateDir), progress);
+}
+
+function clearAnalyticsProgress(stateDir: string): void {
+  rmSync(progressPath(stateDir), { force: true });
 }
 
 function appendCheckpointTail(
@@ -1990,6 +2237,12 @@ function appendCheckpointTail(
 export interface AnalyticsSnapshotReadResult {
   snapshot: AnalyticsSnapshot;
   checkpoint: AnalyticsCheckpoint;
+  scan?: AnalyticsScanReport;
+}
+
+export interface AnalyticsPartialReadResult {
+  progress: AnalyticsResumePoint;
+  scan: AnalyticsScanReport;
 }
 
 export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
@@ -1999,50 +2252,72 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   priorCheckpoint?: AnalyticsCheckpoint,
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult> {
+  return await scanAnalyticsLedger(stateDir, clock, signal, priorCheckpoint, { ...options, yieldAtMs: undefined }) as AnalyticsSnapshotReadResult;
+}
+
+/** Fold the union from a persisted progress, else the checkpoint, else the first rotation. Past `yieldAtMs`
+ *  it stops on a rotation boundary and returns the partial fold, so a corpus too large for one refresh
+ *  is folded across several instead of restarted by each. */
+export async function scanAnalyticsLedger(
+  stateDir: string,
+  clock: Clock,
+  signal?: AbortSignal,
+  priorCheckpoint?: AnalyticsCheckpoint,
+  options: AnalyticsDeriveOptions = {},
+): Promise<AnalyticsSnapshotReadResult | AnalyticsPartialReadResult> {
   const currentSource = checkpointSource(stateDir);
-  const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
-  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.goalAccountingVersion === 1 &&
-    priorCheckpoint.state.usage?.costAccountingVersion === 1 && priorCheckpoint.state.usage?.cashAccountingVersion === 1 && priorCheckpoint.state.usage?.trialAccountingVersion === 1 &&
-    priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
-    priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
-    Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
-    Array.isArray(priorCheckpoint.state.workIntegrityRows) &&
-    Array.isArray(priorCheckpoint.state.judgeCalibrationRows) &&
-    !(priorLiveMalformed && currentSource?.archives.length !== priorCheckpoint.source.archives.length) &&
-    currentSource !== undefined && checkpointSourceCanResume(priorCheckpoint.source, currentSource);
-  let acc: AnalyticsAccumulator;
-  let resumeCheckpoint: AnalyticsCheckpoint | undefined;
-  let resumeSource: AnalyticsCheckpointSource | undefined;
-  if (canResume) {
+  const positionOf = async (point: AnalyticsResumePoint | undefined): Promise<LivePosition | string> => {
+    const refused = resumeRefusal(point, currentSource, stateDir);
+    return refused ?? await resumeLivePosition(point!.source, currentSource!, stateDir);
+  };
+  const progressPosition = options.progress === undefined ? undefined : await positionOf(options.progress);
+  const checkpointPosition = await positionOf(priorCheckpoint);
+  const progressRefused = typeof progressPosition === "string" ? progressPosition : undefined;
+  const checkpointRefused = typeof checkpointPosition === "string" ? checkpointPosition : undefined;
+  const candidates: Array<{ point: AnalyticsResumePoint; mode: "continue" | "resume"; position: LivePosition }> = [];
+  if (options.progress !== undefined && typeof progressPosition === "object") candidates.push({ point: options.progress, mode: "continue", position: progressPosition });
+  if (priorCheckpoint !== undefined && typeof checkpointPosition === "object") candidates.push({ point: priorCheckpoint, mode: "resume", position: checkpointPosition });
+  let hydrated: AnalyticsAccumulator | undefined;
+  let resumePoint: AnalyticsResumePoint | undefined;
+  let position: LivePosition = { liveStartOffset: 0 };
+  let mode: AnalyticsScanReport["mode"] = "full";
+  let corrupt = false;
+  for (const candidate of candidates) {
     try {
-      acc = hydrateCheckpointState(priorCheckpoint!.state);
-      resumeCheckpoint = priorCheckpoint;
-      resumeSource = currentSource;
+      hydrated = hydrateCheckpointState(candidate.point.state);
+      resumePoint = candidate.point;
+      position = candidate.position;
+      mode = candidate.mode;
+      break;
     } catch {
       // JSON shape validation is intentionally shallow so future checkpoint fields can be added
       // without making older readers reject the file. A structurally corrupt state must still
-      // fail closed into the existing full union scan rather than strand the cache or fabricate
-      // an empty aggregate.
-      acc = analyticsAccumulator();
+      // fail closed into the next candidate or the full union scan rather than strand the cache.
+      corrupt = true;
     }
-  } else {
-    acc = analyticsAccumulator();
   }
+  const acc = hydrated ?? analyticsAccumulator();
+  const reason = mode === "resume" ? undefined : checkpointRefused ?? (corrupt ? "checkpoint-corrupt" : undefined);
   if (currentSource === undefined || (currentSource.archives.length === 0 && currentSource.live === null)) {
     acc.routingTelemetry.sourceUnavailableReason = "ledger-source-missing";
   }
-  const liveOffset = resumeCheckpoint !== undefined && resumeSource !== undefined && resumeCheckpoint.source.live !== null && resumeSource.live !== null && resumeSource.live.size < resumeCheckpoint.source.liveOffset
-    ? 0
-    : resumeCheckpoint?.source.liveOffset ?? 0;
-  const accepted: Array<{ step: string; fingerprint: string }> = [];
-  let unreadArchives = 0;
+  const lastArchive = resumePoint?.source.lastArchive ?? null;
+  const rotationsPending = (currentSource?.archives ?? []).filter((entry) => lastArchive === null || entry.name > lastArchive).length;
+  // Only the newest window per step seeds a resume; a fingerprint per row held ~700 MB on 4.0M rows.
+  const acceptedByStep = new Map<string, string[]>();
+  let unreadArchives = resumePoint?.unreadRotations ?? 0;
   let unreadLive = 0;
   let tornLiveStartOffset: number | undefined;
+  let liveRead: { ino?: number; endOffset: number } | undefined;
+  let rotationsRead = 0;
+  let stoppedAfter: string | undefined;
   const union = openLedgerUnion(stateDir, {
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     signal,
-    ...(resumeCheckpoint !== undefined && resumeCheckpoint.source.lastArchive !== null ? { afterRotation: resumeCheckpoint.source.lastArchive } : {}),
-    ...(resumeCheckpoint ? { liveStartOffset: liveOffset, dedupeSeed: resumeCheckpoint.tail } : {}),
+    ...(lastArchive !== null ? { afterRotation: lastArchive } : {}),
+    ...(resumePoint ? { liveStartOffset: position.liveStartOffset, dedupeSeed: resumePoint.tail } : {}),
+    ...(position.rotationStart !== undefined ? { rotationStartOffset: position.rotationStart } : {}),
+    onLiveRead: (read) => { liveRead = read; },
     onUnreadArchive: () => { unreadArchives += 1; },
     onUnreadLive: () => { unreadLive += 1; },
     onMalformedRow: (finding) => {
@@ -2054,7 +2329,17 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     },
     onAcceptedRecord: (row, raw) => {
       const step = str(row.step);
-      if (step) accepted.push({ step, fingerprint: fingerprintLedgerLine(raw) });
+      if (!step) return;
+      const window = acceptedByStep.get(step) ?? [];
+      if (window.length === 0) acceptedByStep.set(step, window);
+      window.push(raw);
+      if (window.length >= 2 * MAX_RETAINED_LINES_PER_STEP) window.splice(0, window.length - MAX_RETAINED_LINES_PER_STEP);
+    },
+    stopAfterRotation: (path) => {
+      rotationsRead += 1;
+      if (options.yieldAtMs === undefined || clock.now() < options.yieldAtMs) return false;
+      stoppedAfter = basename(path);
+      return true;
     },
   });
   for await (const line of union) {
@@ -2062,18 +2347,48 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
     accumulateAnalyticsLine(acc, line);
   }
   signal?.throwIfAborted();
+  const accepted = [...acceptedByStep.entries()].flatMap(([step, window]) =>
+    window.slice(-MAX_RETAINED_LINES_PER_STEP).map((raw) => ({ step, fingerprint: fingerprintLedgerLine(raw) })));
+  const scan: AnalyticsScanReport = {
+    mode,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(progressRefused !== undefined ? { progressRefused } : {}),
+    rotationsRead,
+    rotationsRemaining: Math.max(0, rotationsPending - rotationsRead),
+  };
+  const tail = appendCheckpointTail(resumePoint?.tail, accepted);
+  if (stoppedAfter !== undefined && currentSource !== undefined) {
+    // Folded through `stoppedAfter`, live unread: the next leg resumes as from a checkpoint taken then.
+    const through = stoppedAfter;
+    const archives = currentSource.archives.filter((entry) => entry.name <= through);
+    return {
+      progress: {
+        version: CHECKPOINT_VERSION,
+        source: { archives, live: null, lastArchive: through, liveOffset: 0 },
+        tail,
+        state: serializeCheckpointState(acc),
+        ...(unreadArchives > 0 ? { unreadRotations: unreadArchives } : {}),
+      },
+      scan,
+    };
+  }
   finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
   const snapshot = snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
-  const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
+  // The rotations listed BEFORE the read and the live bytes it consumed: anything landing later is unread.
+  const source: AnalyticsCheckpointSource = currentSource === undefined
+    ? { archives: [], live: null, lastArchive: null, liveOffset: 0 }
+    : { ...currentSource, liveOffset: liveRead?.endOffset ?? 0 };
   if (tornLiveStartOffset !== undefined) source.liveOffset = Math.min(source.liveOffset, tornLiveStartOffset);
+  const anchor = liveRead?.ino === undefined ? undefined : liveAnchor(stateDir, liveRead.ino, source.liveOffset);
+  if (anchor !== undefined) source.liveAnchor = anchor;
   const checkpoint: AnalyticsCheckpoint = {
     version: CHECKPOINT_VERSION,
     source,
-    tail: appendCheckpointTail(resumeCheckpoint?.tail, accepted),
+    tail,
     state: serializeCheckpointState(acc),
     snapshot,
   };
-  return { snapshot, checkpoint };
+  return { snapshot, checkpoint, scan };
 }
 
 /** One unref'ed timeout owned by the analytics cache. A wrapper rather than Node's concrete
@@ -2088,7 +2403,21 @@ export type AnalyticsSnapshotReader = (
   clock: Clock,
   signal: AbortSignal,
   priorCheckpoint?: AnalyticsCheckpoint,
-) => AnalyticsSnapshot | AnalyticsSnapshotReadResult | Promise<AnalyticsSnapshot | AnalyticsSnapshotReadResult>;
+  scan?: Pick<AnalyticsDeriveOptions, "progress" | "yieldAtMs">,
+) => AnalyticsReaderResult | Promise<AnalyticsReaderResult>;
+
+type AnalyticsReaderResult = AnalyticsSnapshot | AnalyticsSnapshotReadResult | AnalyticsPartialReadResult;
+
+function scanFields(scan: AnalyticsScanReport | undefined): Record<string, unknown> {
+  if (scan === undefined) return {};
+  return {
+    scan_mode: scan.mode,
+    ...(scan.reason !== undefined ? { scan_reason: scan.reason } : {}),
+    ...(scan.progressRefused !== undefined ? { progress_refused: scan.progressRefused } : {}),
+    rotations_read: scan.rotationsRead,
+    rotations_remaining: scan.rotationsRemaining,
+  };
+}
 
 export interface AnalyticsSnapshotCacheDeps {
   stateDir: string;
@@ -2280,9 +2609,8 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     drilldowns: breakdowns.drilldowns,
     operatorAgentMemory: { state: "cold", asOf: null, rows: [] },
   };
-  // Keep the pre-existing cold-cache object enumerable shape stable for callers that compare
-  // the retained cache value directly; buildAnalyticsRoute materializes these fields on the
-  // wire, and property access remains available to process-owned consumers.
+  // Keep the cold-cache enumerable shape stable for callers comparing the cache value directly; buildAnalyticsRoute
+  // materializes these fields on the wire, and property access remains available to process-owned consumers.
   Object.defineProperties(snapshot, {
     dimensions: { value: snapshot.dimensions, enumerable: false, writable: false },
     drilldowns: { value: snapshot.drilldowns, enumerable: false, writable: false },
@@ -2313,20 +2641,21 @@ function errorText(error: unknown): string {
  * generic route cache; its AbortController and evidence semantics are analytics-specific. */
 export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): AnalyticsSnapshotCache {
   const clock = deps.clock ?? systemClock;
-  const readSnapshot: AnalyticsSnapshotReader = deps.readSnapshot ?? ((stateDir, refreshClock, signal, priorCheckpoint) =>
-    deriveAnalyticsSnapshotFromCheckpointedLedger(stateDir, refreshClock, signal, priorCheckpoint));
+  const readSnapshot: AnalyticsSnapshotReader = deps.readSnapshot ?? ((stateDir, refreshClock, signal, priorCheckpoint, scan) =>
+    scanAnalyticsLedger(stateDir, refreshClock, signal, priorCheckpoint, { ...scan }));
   const refreshIntervalMs = deps.refreshIntervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
   const refreshTimeoutMs = deps.refreshTimeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(restoreCacheReuseTokens(checkpoint.snapshot, checkpoint.state), checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
   let started = false;
   let stopped = false;
   let shedPending = false;
+  let progress: AnalyticsResumePoint | undefined;
 
   const cancelTimer = (): void => {
     timer?.cancel();
@@ -2339,13 +2668,13 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     return handle;
   };
 
-  const scheduleNext = (): void => {
+  const scheduleNext = (delayMs: number): void => {
     if (!started || stopped) return;
     let handle: AnalyticsTimer;
     handle = arm(() => {
       if (timer === handle) timer = undefined;
       void refresh();
-    }, refreshIntervalMs);
+    }, delayMs);
     timer = handle;
   };
 
@@ -2357,6 +2686,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     controller = refreshController;
     const beganAt = clock.now();
     let timedOut = false;
+    let continueAfterMs: number | undefined;
     log("serve.analytics_refresh.started", { retained_as_of: value.asOf, timeout_ms: refreshTimeoutMs });
 
     const safetyTimer = arm(() => {
@@ -2373,9 +2703,25 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
 
     let operation!: Promise<void>;
     operation = Promise.resolve()
-      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, (checkpoint ??= readAnalyticsCheckpoint(deps.stateDir))))
+      // Half the bound is the scan's budget; the rest covers the rotation in hand and persisting the fold.
+      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, (checkpoint ??= readAnalyticsCheckpoint(deps.stateDir)), {
+        progress: (progress ??= readAnalyticsProgress(deps.stateDir)),
+        yieldAtMs: beganAt + refreshTimeoutMs / 2,
+      }))
       .then((result) => {
         refreshController.signal.throwIfAborted();
+        if ("progress" in result) {
+          // Not a snapshot: the prior value stays served, stale and dated, while the fold advances on disk.
+          progress = result.progress;
+          writeAnalyticsProgress(deps.stateDir, result.progress);
+          continueAfterMs = Math.max(0, clock.now() - beganAt);
+          log("serve.analytics_refresh.partial", {
+            duration_ms: continueAfterMs,
+            retained_as_of: value.asOf,
+            ...scanFields(result.scan),
+          });
+          return;
+        }
         const next = "snapshot" in result ? result.snapshot : result;
         if ("snapshot" in result) {
           const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
@@ -2383,12 +2729,15 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
           const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
             (result.checkpoint.source.live?.size ?? 0) > 0;
           if (hasRetainedEvidence && sourceReadable) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
+          if (progress !== undefined) clearAnalyticsProgress(deps.stateDir);
+          progress = undefined;
         }
         value = freezeAnalyticsSnapshot(next);
         shedPending = false;
         log("serve.analytics_refresh.completed", {
           duration_ms: Math.max(0, clock.now() - beganAt),
           as_of: value.asOf,
+          ...scanFields("snapshot" in result ? result.scan : undefined),
         });
       })
       .catch((error: unknown) => {
@@ -2409,7 +2758,8 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         }
         if (controller === refreshController) controller = undefined;
         if (inFlight === operation) inFlight = undefined;
-        scheduleNext();
+        // A partial fold continues after a pause as long as its leg, not the 15-minute interval.
+        scheduleNext(continueAfterMs ?? refreshIntervalMs);
       });
     inFlight = operation;
     return operation;
@@ -2435,6 +2785,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     shed: () => {
       value = coldAnalyticsSnapshot();
       checkpoint = undefined;
+      progress = undefined;
       shedPending = true;
       log("serve.analytics_shed", {});
     },
@@ -2473,8 +2824,7 @@ export function buildAnalyticsRoute(deps: {
       const params = new URL(req.url ?? "/", "http://local").searchParams;
       const requestedVersion = params.get("projectionVersion") ?? params.get("projection") ?? undefined;
       const base = deps.currentSnapshot();
-      // The analytics cache owns historical refreshes. Live metrics are a separate, already
-      // captured process-owned value, so this handler never starts a refresh or provider read.
+      // The cache owns historical refreshes; live metrics are already captured, so this never starts a refresh or a read.
       const live = deps.currentLiveMetrics?.() ?? adaptLiveAnalyticsMetrics();
       // W1-T4024: a snapshot restored from a pre-W1-T4024 checkpoint has no `spend` until the first
       // refresh; say so explicitly rather than let the field vanish from the payload.

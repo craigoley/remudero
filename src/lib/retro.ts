@@ -3,8 +3,9 @@
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
-import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { hostWorktreeGit } from "./worktree-git.js";
+import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
 // writes: named `node:fs` bindings are non-configurable and mocking one throws (W1-T207).
 import fsMarker from "node:fs";
@@ -689,8 +690,19 @@ export const GITHUB_THROTTLE_REFUSAL_RE = /rate limit|secondary rate|abuse detec
  *       `source: github` on a census built from three refused fetches. W1-T3132.
  */
 export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbeRun): string | undefined {
-  // (1) the primary buckets, unchanged in behaviour.
-  const buckets = run(["api", "rate_limit", "--jq", ".rate.remaining"]);
+  return throttleFromBuckets(run(THROTTLE_BUCKETS_ARGS)) ?? throttleFromLiveCall(run(THROTTLE_LIVE_ARGS));
+}
+
+/** {@link probeGithubThrottle} through awaited, bounded `gh`: the same two calls, in order, judged the same way. */
+export async function probeGithubThrottleAsync(run: ThrottleProbeRunAsync = throttleProbeRunAsync()): Promise<string | undefined> {
+  return throttleFromBuckets(await run(THROTTLE_BUCKETS_ARGS)) ?? throttleFromLiveCall(await run(THROTTLE_LIVE_ARGS));
+}
+
+const THROTTLE_BUCKETS_ARGS = ["api", "rate_limit", "--jq", ".rate.remaining"];
+const THROTTLE_LIVE_ARGS = ["api", "user", "--jq", ".login"];
+
+/** (1) the primary buckets: a failed read or an exhausted bucket names the throttle; otherwise undefined. */
+function throttleFromBuckets(buckets: ReturnType<ThrottleProbeRun>): string | undefined {
   if (!buckets.ok) {
     return `gh rate_limit probe failed: ${buckets.stderr || "unknown error"}`;
   }
@@ -698,14 +710,38 @@ export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbe
   if (Number.isFinite(remaining) && remaining <= 0) {
     return "GitHub API rate limit exhausted (0 remaining)";
   }
-  // (2) the call the buckets cannot speak for. ONLY a refusal that NAMES rate limiting counts: a
-  // 404, a network drop or a permissions error is a different condition and keeps whatever handling
-  // it has, rather than being relabelled a throttle.
-  const live = run(["api", "user", "--jq", ".login"]);
+  return undefined;
+}
+
+/** (2) the call the buckets cannot speak for. ONLY a refusal that NAMES rate limiting counts: a 404, a network drop
+ *  or a permissions error is a different condition and keeps whatever handling it has, rather than being relabelled
+ *  a throttle. */
+function throttleFromLiveCall(live: ReturnType<ThrottleProbeRun>): string | undefined {
   if (!live.ok && GITHUB_THROTTLE_REFUSAL_RE.test(live.stderr)) {
     return `GitHub is refusing calls as rate-limited while /rate_limit still reports quota (secondary limit): ${live.stderr.slice(0, 200)}`;
   }
   return undefined;
+}
+
+/** {@link ThrottleProbeRun}, awaited. */
+export type ThrottleProbeRunAsync = (args: readonly string[]) => Promise<ReturnType<ThrottleProbeRun>>;
+
+/** BACKSTOP per probe call: the sync probe's own default `gh` bound, so it fires only on a hung `gh`. */
+export const GITHUB_THROTTLE_PROBE_TIMEOUT_MS = 60_000;
+
+/** The real {@link ThrottleProbeRunAsync}: `gh` off the event loop through {@link ghTextAsync} (paced, SIGTERM then
+ *  SIGKILL past its bound). A call killed at its bound fails NAMING the timeout, so the probe reads it as unavailable. */
+export function throttleProbeRunAsync(opts: { timeoutMs?: number; execAsync?: GhAsyncExecutor } = {}): ThrottleProbeRunAsync {
+  const timeoutMs = opts.timeoutMs ?? GITHUB_THROTTLE_PROBE_TIMEOUT_MS;
+  return async (args) => {
+    try {
+      return { ok: true, stdout: await ghTextAsync([...args], { timeout: timeoutMs }, opts.execAsync), stderr: "" };
+    } catch (e) {
+      const err = e as { killed?: boolean; stderr?: string; message?: string };
+      if (err.killed) return { ok: false, stdout: "", stderr: `gh ${args.slice(0, 2).join(" ")} timed out after ${timeoutMs}ms and was killed` };
+      return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "").trim() };
+    }
+  };
 }
 
 /** One credited SHIPPED entry — either a ledger-native merge or a GitHub-discovered gate-side merge. */
@@ -858,6 +894,34 @@ export function shippedSince(
 
   shipped.sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
   return { shipped, discrepancies };
+}
+
+/** A gateway read {@link shippedSinceAsync} must await before {@link shippedSince} can answer: thrown by an awaitable
+ *  gateway in place of a blocking read. `load` performs it; the walk then re-runs over the loaded answers. */
+export class ShippedReadPending extends RmdError {
+  constructor(readonly load: () => Promise<void>) {
+    super("github", GENERIC_EXIT_CODE, "a shipped-since gateway read is pending");
+  }
+}
+
+/** An awaited shipped-since read killed at its bound. NAMED, never success-shaped: the trigger declines with it. */
+export class ShippedReadTimeoutError extends RmdError {
+  constructor(message: string) {
+    super("github", GENERIC_EXIT_CODE, message);
+  }
+}
+
+/** {@link shippedSince}, awaited: the ONE body, re-run after each {@link ShippedReadPending} load until the gateway
+ *  answers from memory. A gateway that never throws one (every sync fixture) is walked exactly once. */
+export async function shippedSinceAsync(runs: RunSummary[], sinceTs: string | undefined, github: ShippedGithub): Promise<ShippedResult> {
+  for (;;) {
+    try {
+      return shippedSince(runs, sinceTs, github);
+    } catch (error) {
+      if (!(error instanceof ShippedReadPending)) throw error;
+      await error.load();
+    }
+  }
 }
 
 function ledgerCreditAnnotation(r: RunSummary): string {
@@ -4121,7 +4185,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     if (!fetchAttempted) {
       fetchAttempted = true;
       try {
-        execFileSync("git", ["-C", worktreePath, "fetch", "--quiet", "origin", "main"], { stdio: "pipe" });
+        hostWorktreeGit(worktreePath, ["fetch", "--quiet", "origin", "main"]);
         fetchOk = true;
       } catch {
         fetchOk = false;
@@ -4129,7 +4193,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     }
     if (!fetchOk) return undefined;
     try {
-      return execFileSync("git", ["-C", worktreePath, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+      return hostWorktreeGit(worktreePath, ["show", `origin/main:${relPath}`]);
     } catch {
       return undefined; // e.g. a brand-new shard not yet on origin/main
     }
@@ -4220,18 +4284,16 @@ export function stampCitationsAndCommit(opts: {
     }
   }
   if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [...stampedIds], refused };
-  execFileSync("git", ["-C", opts.worktreePath, "add", ...touchedRelPaths]);
+  // W1-T6122: the Architect worker wrote this worktree, so every git call below is the leaf's.
+  hostWorktreeGit(opts.worktreePath, ["add", ...touchedRelPaths]);
   try {
-    execFileSync("git", ["-C", opts.worktreePath, "diff", "--cached", "--quiet"]);
+    hostWorktreeGit(opts.worktreePath, ["diff", "--cached", "--quiet"]);
     // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
     return { committed: false, stampedIds: [...stampedIds], refused };
   } catch {
     // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
-    execFileSync("git", ["-C", opts.worktreePath, "commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
-    const diff = execFileSync("git", ["-C", opts.worktreePath, "show", "--stat=200", "-p", "HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 24,
-    });
+    hostWorktreeGit(opts.worktreePath, ["commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
+    const diff = hostWorktreeGit(opts.worktreePath, ["show", "--stat=200", "-p", "HEAD"], { maxBuffer: 1 << 24 });
     return { committed: true, stampedIds: [...stampedIds], refused, diff };
   }
 }

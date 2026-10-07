@@ -1,0 +1,43 @@
+- id: W1-T6159
+  title: "THE CONTROL-PLANE PRECHECK CALLS ITS CAPABILITY-SNAPSHOT RUNNER — runCiControlPlanePrecheck reads its runCapabilitySnapshot option as an already-computed result and never calls it, while its own default is a function it does call, so a caller that passes a runner function always reads status undefined and refuses a fresh snapshot as stale"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low  # Rule 19: one concern — the type of one option of one precheck
+  band_meaning: span
+  origin: "operator session 2026-10-07: security follow-up batch 3, raised by W1-T6138's builder (#9818); premise verified read-only on origin/main 44513355a and the #9818 head 8b79b0624 before filing"
+  plan_refs: [W1-T6138, W1-T6120]
+  files: [scripts/ci-control-plane-precheck.mjs, hooks/pre-push, test/the-control-plane-precheck-calls-its-capability-snapshot-runner.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 44513355a and #9818 (run-W1-T6138-1791356120939, open, head 8b79b0624).
+    THE LINE. scripts/ci-control-plane-precheck.mjs `runCiControlPlanePrecheck({ ..., runCapabilitySnapshot = undefined,
+    ... })` computes `const result = runCapabilitySnapshot ?? (() => spawnSync(process.execPath, ["--import", "tsx",
+    "scripts/generate-capability-snapshot.mjs", "--check"], ...))();` — the trailing `()` binds to the parenthesised
+    default only. So a passed option is used AS the result, and `result.status !== 0` decides. Pass a function (what the
+    name and the default's shape both say it is) and `result.status` is undefined: REFUSED -- capability snapshot is
+    stale, on every call. #9818's head keeps the same expression with a new `run = spawnSync` seam.
+    THE ONE CALLER. hooks/pre-push (W1-T6138, #9815) passes a VALUE: `runCapabilitySnapshot = run(process.execPath,
+    [...])` computed through `createPrePushSandboxRunner`, so production works today; the defect is the contract, and
+    the next caller that reads the name gets a permanent refusal. Tests on main
+    (test/ci-control-plane-precheck-refuses-before-push.test.ts) never pass the option.
+  design: |
+    One contract, either way the builder picks, stated in the JSDoc: (a) the option is a RUNNER, called exactly once
+    when the capability arm applies and never otherwise, and hooks/pre-push passes the sandbox runner as a function
+    (its skip-by-name arm when the sandbox cannot start is unchanged); or (b) the option is renamed to say it is a
+    RESULT (e.g. `capabilitySnapshotResult`) and a function value is refused by name rather than read as stale. Exit
+    codes and messages are otherwise unchanged.
+  acceptance:
+    - claim: "runCiControlPlanePrecheck given a capability-snapshot input diff and a passing snapshot runner or result per the chosen contract returns 0, a failing one returns 1 with the stale message, the snapshot is never run when the diff touches no capability input, and the pre-push hook's call matches the contract"
+      proof: "unit test: test/the-control-plane-precheck-calls-its-capability-snapshot-runner.test.ts"
+  falsifier: |
+    At origin/main 44513355a, `runCiControlPlanePrecheck({ readChangedFiles: () => [<a capability input>],
+    runCapabilitySnapshot: () => ({ status: 0 }) })` returns 1 with "capability snapshot is stale", so the test fails.
+  notes: |
+    No sandbox or git is run by the test; the runner is a stub. ORDER: #9818 (W1-T6138 follow-up, open at filing) edits
+    the same function signature and hooks/pre-push's capability arm; whichever merges second rebases one hunk.

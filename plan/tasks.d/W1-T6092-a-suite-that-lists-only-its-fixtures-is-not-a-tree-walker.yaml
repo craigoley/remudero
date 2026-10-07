@@ -1,0 +1,39 @@
+- id: W1-T6092
+  title: "A CENSUS SUITE IS ONE THAT WALKS THE REPOSITORY TREE, NOT ONE THAT CALLS readdirSync — enumeratesPopulation matches any readdir, ls-files or glob call, so suites that list only their own tmp fixtures (run-task.test.ts 120 s, live-write-guard-command-sites 170 s, recycle-container 94 s) join the census set of every src change, ~400 s of the 850 s it costs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern — the census predicate in scripts/diff-class.mjs
+  origin: "operator session 2026-10-06: test-cost research (research-selection REPORT, census finding)"
+  plan_refs: [W1-T4787, W1-T2680, W1-T6084]
+  files: [scripts/diff-class.mjs, test/a-suite-that-lists-only-its-fixtures-is-not-a-tree-walker.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main scripts/diff-class.mjs: `enumeratesPopulation(content)` is true for any
+    `ls-files`, `readdirSync`/`readdir`, or `globSync`/`glob(` anywhere in a file, and censusSuiteFiles adds a
+    suite when that holds and it names a changed area loosely. MEASURED (research-selection): a src change
+    pulls 109 census suites costing 850 s; ten take 568 s and several are not whole-tree walkers:
+    test/run-task.test.ts (120 s), test/live-write-guard-command-sites.test.ts (170 s),
+    test/recycle-container.test.ts (94 s). Narrowing to real walks saves ~400 s per census set. W1-T4787
+    is the opposite error (walkers through a helper were missed); the predicate must keep those.
+  design: |
+    A suite enumerates the population only when the enumeration's ROOT is the repository: a readdir/glob/
+    ls-files whose path argument resolves from REPO_ROOT, a fileURLToPath(new URL("..", import.meta.url))
+    root, process.cwd() or a literal repo area (src, test, scripts, plan, docs), or a call to a shared
+    helper that does so (the W1-T4787 case). A readdir of a mkdtemp, tmpdir() or fixture variable is not
+    one. Keep W1-T4787's five suites selected. Report the census set size and its summed manifest duration
+    for a one-line src change before and after.
+  acceptance:
+    - claim: "a suite that lists only a tmpdir fixture is not a census suite, and one that lists REPO_ROOT/src directly or through a helper is; run-task.test.ts, live-write-guard-command-sites and recycle-container leave the census set of a one-line src change while W1-T4787's five whole-tree suites stay in it"
+      proof: "unit test: test/a-suite-that-lists-only-its-fixtures-is-not-a-tree-walker.test.ts"
+  falsifier: |
+    Keep matching any readdirSync: the tmpdir-only fixture is classified a census suite and the first test
+    fails.
+  note: |
+    The static half. W1-T6084's read map replaces this predicate with observed reads when its map exists;
+    this task is the cheap fix that does not wait for it.

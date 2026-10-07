@@ -267,7 +267,8 @@
 # ── Daemon commissioning gotchas, observed in the W1-T12d drill (chore/t12d-commissioning-record). ──
 - id: daemon-launchd-keepalive-restart
   subsystem: platform
-  lifecycle: active
+  # knowledge gardener: retire daemon-launchd-keepalive-restart
+  lifecycle: superseded
   files: [src/lib/launchd.ts, src/lib/daemon.ts]
   fact: >-
     The launchd unit runs the daemon with KeepAlive, so launchd restarts it on ANY exit — a kill-9
@@ -303,7 +304,8 @@
   cited: "2026-09-06"
 - id: canonical-checkout-lags-by-design
   subsystem: worktrees
-  lifecycle: active
+  # knowledge gardener: retire canonical-checkout-lags-by-design
+  lifecycle: superseded
   files: [ src/lib/worker.ts ]
   fact: >-
     The fleet host's canonical checkout (`~/Remudero/repos/remudero`) has a

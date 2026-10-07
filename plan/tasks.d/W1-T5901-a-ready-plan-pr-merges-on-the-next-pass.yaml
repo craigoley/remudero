@@ -11,8 +11,7 @@
   origin: "operator session 2026-10-05: throughput research (plan updates and task adds lack a fast lane)"
   plan_refs: [W1-T5615, W1-T5748, W1-T5472, W1-T4405]
   files: [src/lib/sweep.ts, test/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
-  status: queued
-  priority: 1
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-05 over 32 plan PRs merged in the prior 24 h: time to merge median 25 min,
@@ -37,3 +36,5 @@
   falsifier: |
     Keep the light-pass deferral: the ready plan PR is not merged by the light pass and the test
     fails.
+  note: |
+    CREDIT 2026-10-06 (hand flip): shipped as #9396 (head run-W1-T5901-1791229131593, merged 2026-10-05T22:32Z as 1cb2436cd). rmd plan-reconcile names it WINDOW-SHORT (merged outside its credit scan windows) and asks for a hand flip in a plan-only PR, which this is.

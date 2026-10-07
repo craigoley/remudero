@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: found by W1-T5957's build (#9480)"
   plan_refs: [W1-T5958, W1-T5935, W1-T5957]
   files: [src/lib/ledger.ts, test/a-retained-start-step-keeps-its-terminal-steps-across-rotation.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -1,0 +1,11 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -9,0 +10,6 @@
++- id: codeql-read-model-lane
++  subsystem: ci
++  lifecycle: active
++  files: [src/lib/ledger-projector.ts, src/lib/read-model-worker.ts]
++  fact: Inspect the CodeQL findings on the read-model lane before retrying the gate.
++  src: "ci-learning:8075:CodeQL"

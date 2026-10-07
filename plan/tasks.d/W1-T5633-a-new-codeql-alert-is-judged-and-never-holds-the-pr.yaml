@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: #9034 merged with open alert #311 js/incomplete-sanitization, fixed by #9045; amended 2026-10-04 by operator ruling: the judge decides, automate, never stuck"
   plan_refs: [W1-T3980, W1-T1131, W1-T4400, W1-T5199, W1-T3725, W1-T5403, W1-T5523, W1-T5659, W1-T5671]
   files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/risk-judge.ts, src/run-task.ts, test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

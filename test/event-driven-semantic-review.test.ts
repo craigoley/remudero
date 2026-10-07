@@ -7,8 +7,8 @@ import test from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
-import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
-import { reviewCommand, runReview } from "../src/run-task.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "../src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, reviewCommand, runReview } from "../src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -146,7 +146,7 @@ test("a semantic provider failure still posts the binding deterministic verdict"
   const settingsFile = join(root, "settings.json");
   try {
     writeFileSync(diffPath, "diff --git a/src/x.ts b/src/x.ts\n+const semantic = true;\n", "utf8");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const fakeClaude = join(bin, "claude");
     writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     chmodSync(fakeClaude, 0o755);
@@ -186,6 +186,10 @@ esac
       account: (result) => result,
       spawnReviewer: true,
       reviewerMount: { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 },
+      // Synthetic provider, synthetic file preflight: never enter the host's Mac keychain.
+      reviewerSpawnWorker: ledgeredNonDispatchSpawn("review", (args) => spawnWorker({
+        ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" },
+      })),
       reviewerQueryFn: (() => {
         providerInvoked = true;
         throw new Error("provider unavailable fixture");

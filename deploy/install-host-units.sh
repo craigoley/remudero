@@ -48,6 +48,7 @@
 # OVERRIDES (all optional; the *_DIR ones exist so the test suite can run this against a temp tree)
 #   RMD_STATE_DIR RMD_IMAGE RMD_SERVICE_USER RMD_NODE_MAX_OLD_SPACE_MB
 #   RMD_GH_APP_ID RMD_GH_APP_INSTALLATION_ID RMD_GH_APP_PRIVATE_KEY_PATH
+#   RMD_GH_APP_PRIVATE_KEY_HOST_PATH                   optional explicit read-only file mount
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
@@ -171,6 +172,7 @@ fi
 GH_APP_ID_V="${RMD_GH_APP_ID:-4648213}"
 GH_APP_INST_V="${RMD_GH_APP_INSTALLATION_ID:-155256285}"
 GH_APP_KEY_V="${RMD_GH_APP_PRIVATE_KEY_PATH:-/home/node/.claude/rmd-app.pem}"
+GH_APP_KEY_HOST_V="${RMD_GH_APP_PRIVATE_KEY_HOST_PATH:-}"
 CLAUDE_DIR="${RMD_CLAUDE_DIR:-/home/${SERVICE_USER}/.claude}"
 CODEX_DIR="${RMD_CODEX_DIR:-/home/${SERVICE_USER}/.codex}"
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-/home/${SERVICE_USER}/.config/remudero-container}"
@@ -222,6 +224,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       gh_app_id) gh_app_id="$value" ;;
       gh_app_installation_id) gh_app_installation_id="$value" ;;
       gh_app_private_key_path) gh_app_private_key_path="$value" ;;
+      gh_app_private_key_host_path) GH_APP_KEY_HOST_V="$value" ;;
       claude_dir) claude_dir="$value" ;;
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
@@ -300,6 +303,17 @@ require_abs_path "codex_dir" "$CODEX_DIR"
 require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
 require_abs_path "cash_secret_dir" "$CASH_SECRET_DIR"
 CASH_SECRET_DIR_SHELL="$(printf '%q' "$CASH_SECRET_DIR")"
+if [ -n "$GH_APP_KEY_HOST_V" ]; then
+  . "$SCRIPT_DIR/app-private-key-mount.sh"
+  app_private_key_mount_args "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V" || exit 2
+fi
+GH_APP_KEY_SHELL="$(printf '%q' "$GH_APP_KEY_V")"
+
+render_app_private_key_mount() {
+  [ -n "$GH_APP_KEY_HOST_V" ] || return 0
+  cat "$SCRIPT_DIR/app-private-key-mount.sh"
+  printf '\napp_private_key_mount_args %q %q || exit 1\n' "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V"
+}
 
 # Insert literal shell into the rendered launcher. The outer launcher heredoc is expanded by the
 # installer, so writing dollar signs directly there would read the installer's environment instead
@@ -573,6 +587,34 @@ hold_revive_on_verdict() {
 PROGRESS_WATCHDOG_LADDER
 }
 
+# tsx caches every transpile under os.tmpdir()/tsx-<uid> and has no cache-dir setting. This
+# launcher's ticks run bin/rmd (tsx) on the HOST: under systemd TMPDIR is unset, so the cache sat
+# in /tmp on the 29 GB root disk -- 2.7 GB on 2026-10-06, ~2 GB/day of fresh entries. Move it to
+# the local scratch disk only when that is a mounted filesystem (a bare /mnt/scratch directory IS
+# the root disk); otherwise, or with TMPDIR already set, leave the default. A cache only: the
+# janitor's /mnt/scratch/tmp root prunes stale tsx entries there too. Literal shell, not expanded.
+render_host_tmpdir() {
+  cat <<'HOST_TMPDIR'
+host_tmpdir_on_scratch() {
+  local root mounts mnt dir
+  [ -z "${TMPDIR:-}" ] || return 0
+  root="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
+  mounts="${RMD_SCRATCH_MOUNTS_FILE:-/proc/mounts}"
+  [ -r "$mounts" ] || return 0
+  while IFS=' ' read -r _ mnt _; do
+    [ "$mnt" = "$root" ] || continue
+    dir="$root/tmp"
+    # Sticky and world-writable like /tmp. `|| true`: the launcher runs under set -e.
+    if [ ! -d "$dir" ]; then { mkdir -p "$dir" && chmod 1777 "$dir"; } 2>/dev/null || true; fi
+    if [ -d "$dir" ] && [ -w "$dir" ]; then export TMPDIR="$dir"; fi
+    return 0
+  done < "$mounts"
+  return 0
+}
+host_tmpdir_on_scratch
+HOST_TMPDIR
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -598,6 +640,8 @@ INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
+
+$(render_host_tmpdir)
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
@@ -897,11 +941,20 @@ fi
 
 $(render_cash_boot_secrets)
 
+APP_PRIVATE_KEY_ARGS=()
+$(render_app_private_key_mount)
+
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
+# W1-T6110 -- THE CHECKOUT'S PLAN FIRST. The installed copy changes only at --install, so a bind
+# merged since then reached the deploy tick's drift reading (which reads the checkout) but not this
+# relaunch; the copy stays as the fallback for a host whose checkout is missing.
 SCRATCH_ARGS=()
-if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
-  . ${BIN_DIR}/rmd-scratch-mounts
+SCRATCH_LIB="\$CHECKOUT/deploy/scratch-mounts.sh"
+[ -r "\$SCRATCH_LIB" ] || SCRATCH_LIB=${BIN_DIR}/rmd-scratch-mounts
+if [ -r "\$SCRATCH_LIB" ]; then
+  . "\$SCRATCH_LIB"
+  echo "rmd-relaunch: scratch plan from \$SCRATCH_LIB"
   if scratch_plan "\$STATE_DIR" ${CONTAINER_NAME} && scratch_prepare; then scratch_fresh_tmp; fi
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
@@ -921,7 +974,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   --user 1000:1000 \\
   -e GH_APP_ID=${GH_APP_ID_V} \\
   -e GH_APP_INSTALLATION_ID=${GH_APP_INST_V} \\
-  -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_V} \\
+  -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_SHELL} \\
   -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
@@ -932,6 +985,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${APP_PRIVATE_KEY_ARGS[@]+"\${APP_PRIVATE_KEY_ARGS[@]}"}" \\
   "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\

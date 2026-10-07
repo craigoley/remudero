@@ -20,6 +20,7 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
@@ -28,6 +29,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { systemClock } from "./clock.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -67,7 +69,7 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
 /** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
  *  symlinked rather than copied so it is always current. */
 export interface WorkerHomeSymlink {
-  /** Path relative to HOME, e.g. `.claude` or `.config/gh`. */
+  /** Path relative to HOME, e.g. `.claude` or `.gitconfig`. */
   relPath: string;
   /** Why this one path is granted back — never a wholesale HOME copy. */
   reason: string;
@@ -168,7 +170,6 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "(transcripts, history, settings, skills), falling back to today's wholesale grant only when that " +
       "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
   },
-  { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open and update its PR" },
   {
     relPath: playwrightCacheRelPath(),
     reason:
@@ -177,7 +178,7 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "and every run downloads its own — MEASURED on the container at the great majority of a completed " +
       "worker home. READ-ONLY IN PRACTICE: on a populated cache every browser directory's mtime is its " +
       "INSTALL date and nothing under the tree is modified across repeated launches, so this grant adds " +
-      "no writable path and no bind — it is a symlink inside the worker home, exactly like the four " +
+      "no writable path and no bind — it is a symlink inside the worker home, exactly like the others " +
       "beside it. AN ABSENT CACHE IS A SKIPPED GRANT, inherited from materializeWorkerHome's existing " +
       "contract: a target that does not exist is recorded `absent` and skipped silently, so a host " +
       "that never populated one still materializes a working home and the worker falls back to its own " +
@@ -197,6 +198,12 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "macOS login keychain holds the Claude Code OAuth token ('Claude Code-credentials'); the keychain is HOME-relative ($HOME/Library/Keychains/login.keychain-db), so a redirected HOME hides it and Claude Code exits 'Not logged in' at $0 before any turn (W1-T18 spawn deadlock, verified live). ONLY this single DB file is granted — not the whole ~/Library — and securityd still gates per-item access by code identity.",
   },
 ];
+
+/** Slots that USED to be granted and are now refused. `.config/gh` linked the operator's real gh
+ *  config into every worker HOME: a worker could read its hosts.yml and, through the then-unsandboxed
+ *  `gh`, write aliases, `pager` or `http_unix_socket` into the config the operator's own gh reads. A
+ *  container worker authenticates with `GH_TOKEN` and needs no config dir at all. */
+export const REVOKED_WORKER_HOME_GRANTS: readonly string[] = [join(".config", "gh")];
 
 /** PURE plan of what {@link materializeWorkerHome} will do, so the redirection logic is unit-testable
  *  without touching the filesystem. INVARIANT: every `from` is under the redirected `workerHome` and
@@ -514,6 +521,22 @@ export function materializeWorkerHome(opts: {
     }
   }
 
+  // A link in a REVOKED slot is cleared even when an earlier materialization made it, so a reused home
+  // stops reaching the operator's gh config the moment this module stops granting it. A slot that
+  // cannot even be inspected throws: a revocation nobody could confirm is not one.
+  for (const rel of REVOKED_WORKER_HOME_GRANTS) {
+    const slot = join(plan.workerHome, rel);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(slot);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue; // nothing can sit in the slot
+      throw e;
+    }
+    if (st.isSymbolicLink()) unlinkSync(slot);
+  }
+
   // W1-T981: bound the CLI's own `.claude.json` backups at the SAME resolved grant target this call
   // just symlinked `.claude` toward, so the sweep tracks W1-T505's narrowing automatically.
   const claudeConfigBackupSweep = sweepClaudeConfigBackups(plan.claudeGrantTarget!);
@@ -523,12 +546,14 @@ export function materializeWorkerHome(opts: {
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──
 // INVARIANT: every concurrent worker gets its own home, with its own empty rc files and its own
-// keychain/.claude/.config/gh symlinks. TRAP: two overlapping spawns truncating and symlinking the
+// keychain/.claude/.gitconfig symlinks. TRAP: two overlapping spawns truncating and symlinking the
 // SAME rc files and keychain slot turn #100's deterministic, already-fixed HOME-relative keychain miss
 // into an intermittent one. // Why: docs/forensics/worker-home.md#per-run-worker-homes (W1-T170).
 
 const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSync };
 type WorkerHomeFsOps = typeof workerHomeFsOps;
+const workerHomeFsOpsAsync = { readdir, readFile, rm, stat };
+type WorkerHomeFsOpsAsync = typeof workerHomeFsOpsAsync;
 
 /** W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its per-spawn
  *  uniqueness token. INVARIANT: a dot can never collide with a runId's own characters — every runId in
@@ -605,6 +630,8 @@ export function reapWorkerHome(
 export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerHomeSweepOpts {
+  /** {@link sweepStaleWorkerHomesAsync} only: the awaited fs surface (tests). Defaults to `node:fs/promises`. */
+  fsAsync?: Partial<WorkerHomeFsOpsAsync>;
   /** Reap a worker-home dir older than this, when its run id resolves to nothing — no live lock and
    *  no terminal ledger verdict. Default 24h. */
   maxAgeMs?: number;
@@ -669,6 +696,11 @@ function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHo
   } catch {
     return false; // absent/unreadable ledger — nothing to find
   }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/** The line scan both ledger readers share, so the sync and awaited sweeps cannot drift. */
+function ledgerTextHasVerdict(raw: string, runId: string): boolean {
   for (const rawLine of raw.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -769,6 +801,111 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
     } catch {
       kept.push(name); // a permissions hiccup on one entry never blocks the rest
     }
+  }
+  log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
+  return { removed, kept };
+}
+
+/** {@link findLiveInflightLockForRun}, awaited: the same KEEP-only signal. */
+async function findLiveInflightLockForRunAsync(inflightDir: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await f.readdir(inflightDir);
+  } catch {
+    return false; // absent/unreadable inflight dir proves nothing, as the sync read answers
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".lock")) continue;
+    let raw: string;
+    try {
+      raw = await f.readFile(join(inflightDir, entry), "utf8");
+    } catch {
+      continue; // vanished between readdir and read, as the sync read skips it
+    }
+    if (parseInflightLockInfo(raw)?.run_id === runId) return true;
+  }
+  return false;
+}
+
+/** {@link hasTerminalLedgerVerdict}, awaited, through the same line scan. */
+async function hasTerminalLedgerVerdictAsync(ledgerPath: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await f.readFile(ledgerPath, "utf8");
+  } catch {
+    return false; // absent/unreadable ledger has nothing to find, as the sync read answers
+  }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/**
+ * {@link sweepStaleWorkerHomes} OFF THE EVENT LOOP: the same W1-T1064 predicate in the same order
+ * (live lock keeps, terminal verdict removes, else the age backstop), the same log rows, with every
+ * fs read and removal awaited. The ledger read alone is a whole-file read per candidate, which the
+ * sync sweep did on the daemon loop. Never rejects.
+ */
+export async function sweepStaleWorkerHomesAsync(root: string, opts: WorkerHomeSweepOpts = {}): Promise<WorkerHomeSweepSummary> {
+  const f = { ...workerHomeFsOpsAsync, ...opts.fsAsync };
+  const now = opts.now ?? systemClock.now;
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS;
+  const log = opts.log;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const parent = dirname(root);
+  const prefix = `${basename(root)}-`;
+  const stateRoot = opts.stateRoot ?? parent;
+  const inflightDir = opts.inflightDir ?? join(stateRoot, "state", "inflight");
+  const ledgerPath = opts.ledgerPath ?? join(stateRoot, "state", LEDGER_FILENAME);
+  let entries: string[];
+  try {
+    entries = await f.readdir(parent);
+  } catch {
+    return { removed, kept }; // parent unreadable/absent, as the sync sweep answers
+  }
+  const remove = async (name: string, full: string, fields: Record<string, unknown>): Promise<void> => {
+    try {
+      await f.rm(full, { recursive: true, force: true });
+      removed.push(name);
+      log?.("worker_home_reap.removed", { name, ...fields });
+    } catch {
+      kept.push(name); // a failed removal on one entry never blocks the rest
+    }
+  };
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = join(parent, name);
+    let st: Awaited<ReturnType<typeof stat>>;
+    try {
+      st = await f.stat(full);
+    } catch {
+      continue; // vanished between readdir and stat, as the sync sweep skips it
+    }
+    if (!st.isDirectory()) {
+      kept.push(name);
+      continue;
+    }
+    const runId = stripPerSpawnToken(name.slice(prefix.length));
+    if (await findLiveInflightLockForRunAsync(inflightDir, runId, f)) {
+      kept.push(name);
+      continue;
+    }
+    if (await hasTerminalLedgerVerdictAsync(ledgerPath, runId, f)) {
+      await remove(name, full, {
+        run_id: runId,
+        reason: "terminal-verdict",
+        detail: `terminal ledger verdict for run ${runId}, no live inflight lock — removed before the age ceiling`,
+      });
+      continue;
+    }
+    if (now() - st.mtimeMs <= maxAgeMs) {
+      kept.push(name);
+      continue;
+    }
+    await remove(name, full, {
+      run_id: runId,
+      reason: "age-ceiling",
+      detail: `no live lock or ledger verdict for run ${runId}; aged past the ${maxAgeMs}ms ceiling`,
+    });
   }
   log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
   return { removed, kept };

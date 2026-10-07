@@ -16,6 +16,12 @@ symlinkSync(join(REPO_ROOT, "node_modules"), join(GATE_CHECKOUT.root, "node_modu
 
 after(() => GATE_CHECKOUT.cleanup());
 
+// The detector reads tracked-file state and completed native status. Gate output is not its
+// subject: retaining the whole plan census can kill a real child at spawnSync's buffer ceiling.
+function runProbe(command: string, args: string[], cwd = GATE_CHECKOUT.root) {
+  return spawnSync(command, args, { cwd, stdio: "ignore", timeout: 120_000 });
+}
+
 /**
  * test/a-gate-run-leaves-the-tracked-tree-clean.test.ts — W1-T2791.
  *
@@ -83,7 +89,7 @@ test("W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leav
   assert.equal(entry.script, "source-size-signal", "and it is the non-writing form");
 
   const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
-    const r = spawnSync("npm", ["run", "--silent", entry.script], { cwd: GATE_CHECKOUT.root, encoding: "utf8" });
+    const r = runProbe("npm", ["run", "--silent", entry.script]);
     // The exit code is NOT the assertion — it is recorded only so a failure here is diagnosable.
     assert.ok(r.status === 0 || r.status === 1, `the step ran (status ${r.status}): ${r.stderr}`);
   });
@@ -107,7 +113,7 @@ test("W1-T2791 (acceptance 3): EVERY step the fast gate runs leaves the tracked 
   for (const entry of FAST_GATE_STEPS) {
     let status: number | null = null;
     const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
-      status = spawnSync("npm", ["run", "--silent", entry.script], { cwd: GATE_CHECKOUT.root, encoding: "utf8" }).status;
+      status = runProbe("npm", ["run", "--silent", entry.script]).status;
     });
     // A step that never RAN dirties nothing and would pass this loop for the wrong reason — the
     // vacuity acceptance 1 guards with the same assertion. Exit code is otherwise not the subject.
@@ -202,4 +208,12 @@ test("W1-T2791: the detector itself is not blind — it reports a mutation made 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("a tracked-tree gate probe completes beyond the capture ceiling and preserves native launch failure", () => {
+  const completed = runProbe(process.execPath, ["-e", "process.stderr.write(Buffer.alloc(2 * 1024 * 1024, 120));" ]);
+  assert.equal(completed.status, 0); assert.equal(completed.signal, null); assert.equal(completed.error, undefined);
+  const refused = runProbe("/nonexistent-remudero-probe-command", []);
+  assert.equal(refused.status, null); assert.equal((refused.error as NodeJS.ErrnoException).code, "ENOENT");
 });

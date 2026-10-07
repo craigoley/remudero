@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { CENSUS_ADMITTED_MEMBERS } from "../src/lib/ci-parity.js";
 import { censusPushRefusal } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { unwrapLowPriority } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // A NAMESPACE import, so a tree without these exports fails each test below rather than the load.
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -146,7 +147,10 @@ test("W1-T5617: the child reads each failing suite from its TAP, top-level only,
       tapSummary(4, 2);
     const { failing, calls } = viaChild({ status: 1, stdout: tap });
     assert.deepEqual(failing(), [BOUNDS.testFile]);
-    const [call] = calls;
+    const [wrapped] = calls;
+    // W1-T6090: the child starts niced with an explicit concurrency; unwrap to read the node argv itself.
+    const inner = wrapped && unwrapLowPriority(wrapped.cmd, wrapped.args);
+    const call = wrapped && inner && { cmd: inner.file, args: inner.args.filter((a) => !a.startsWith("--test-concurrency=")), opts: wrapped.opts };
     assert.equal(call?.cmd, process.execPath);
     assert.deepEqual(call?.args.slice(0, 2), ["--test", "--test-reporter=tap"]);
     assert.deepEqual(call?.args.slice(-2), [BOUNDS.testFile, TESTS.testFile]);

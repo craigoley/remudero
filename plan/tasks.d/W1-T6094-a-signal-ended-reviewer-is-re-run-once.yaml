@@ -1,0 +1,60 @@
+- id: W1-T6094
+  title: "A SIGNAL-ENDED REVIEWER IS RE-RUN ONCE — today a paid reviewer ended by a signal returns no verdict and the deterministic floor posts alone (28 floor-only review.posted rows); re-run the reviewer once, and only if the re-run is also signal-ended does the floor post alone, with a ledger row naming both signals"
+  repo: remudero
+  depends_on: [W1-T6074]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what the review lane does when its reviewer ends by a signal; a pure rule in review.ts and its one caller in run-task.ts
+  band_meaning: span
+  origin: "operator ruling 2026-10-06 on the question W1-T6074's design leaves out of scope"
+  plan_refs: [W1-T6074, W1-T6027, W1-T6073, W1-T5998]
+  files: [src/lib/review.ts, src/run-task.ts, test/a-signal-ended-reviewer-is-re-run-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-06, answering W1-T6074's design ("Out of scope, for the operator: whether a
+    signal-ended reviewer should be re-run rather than posted floor-only"). When the paid reviewer is ended by a
+    signal with no verdict, re-run it once. If the re-run is also signal-ended, the floor reviewer posts alone,
+    with a ledger row naming both signals.
+    WHY THIS IS NOT PART OF W1-T6074. W1-T6074 only RECORDS how a worker ended: worker_exit on
+    workerLedgerFields, and reviewer_outcome signal_terminated. It states that "the floor's verdict and the posted
+    state do not change". This ruling CHANGES what the review lane does, adding a second reviewer spawn, so it is
+    its own concern. It reads the signal end W1-T6074 makes legible, so it comes after it. W1-T6074 has no
+    run-W1-T6074-* branch, no dispatch ref and no PR at filing (git ls-remote and a PR search, 2026-10-06 23:23Z), and its shard is
+    left unchanged.
+    MEASURED in W1-T6074's rationale over the ledger union: 28 review.posted rows with `reviewer_outcome:
+    error_exit_null`, all `state: success` from the floor. 15 of the 33 error_exit_null review.reviewer rows fall
+    within 10 s of an orphan-sweep row. W1-T5998 (#9567) has since stopped the sweep killing its own daemon's live
+    workers, so the remaining signal ends are restarts, deploys and host pressure. Each is a one-off that a
+    second attempt usually outlives.
+    WHERE IT HAPPENS. run-task.ts spawns the reviewer once through reviewerSpawnWorker inside the review's
+    snapshot, logs review.reviewer, and passes reviewer.subtype to src/lib/review.ts reviewerOutcome. Nothing
+    re-spawns it.
+  design: |
+    (1) src/lib/review.ts gains a pure `reviewerRerunDecision(first, priorSignal?)`. It returns `rerun` when
+    `first.exit?.kind === "signal"` and there is no prior signal, and `accept` otherwise. ONCE is the operator's
+    ruling, so there is no counter to tune.
+    (2) src/run-task.ts: after the first reviewer returns, on `rerun` it writes one `review.reviewer.rerun` row
+    (first_signal, session_id) and spawns the reviewer again with the same mount, prompt, snapshot and clock
+    bound. The second spawn is fresh, never a resume. The re-run's result is the one the verdict reads, so a
+    re-run that returns a verdict is an ordinary reviewed post.
+    (3) If the re-run is also signal-ended, the floor posts alone exactly as today. One
+    `review.reviewer.signal_ended_twice` row names first_signal and second_signal, and reviewer_outcome stays
+    W1-T6074's signal_terminated.
+    (4) A re-run that ends any other way (a crash, a budget wall, an abandonment) is read as today. Only a signal
+    earns the re-run, and only the first one does.
+    (5) The re-run stays inside the review's existing decision claim and snapshot. assertReviewerSnapshotIntegrity
+    runs after it as after the first spawn, and both spawns are accounted through args.account.
+  acceptance:
+    - claim: "a reviewer fixture ended by SIGTERM is re-spawned once and the re-run's verdict is the one posted; a re-run also ended by a signal posts the floor's verdict alone and ledgers review.reviewer.signal_ended_twice with both signal names; a reviewer that exited 1, or a re-run that crashed, is not re-spawned"
+      proof: "unit test: test/a-signal-ended-reviewer-is-re-run-once.test.ts"
+    - claim: "the re-run rule lives in the review library"
+      proof: "grep: reviewerRerunDecision in src/lib/review.ts"
+    - claim: "the review lane ledgers the twice-signal-ended floor post"
+      proof: "grep: review\\.reviewer\\.signal_ended_twice in src/run-task.ts"
+  falsifier: |
+    Drop the rerun branch in run-task.ts, and the SIGTERM fixture's spawn count stays 1, so the test fails.
+    Re-run on any non-success subtype, and the exit-1 fixture spawns twice, so the test fails.

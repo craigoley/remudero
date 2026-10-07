@@ -1542,24 +1542,24 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
     const claimReserver = { mintAnchor: () => "a", attempt: () => "created", claimedIds: () => new Map() } as never;
     const args = { config, policy, now: new Date(), deferralPending: true, dispatchCount: 1, laneBudget: 1, claimReserver };
     const [head] = candidates;
-    const before = autoTriageCheck({ ...args, readRefusalRows: () => [] });
+    const before = await autoTriageCheck({ ...args, readRefusalRows: () => [] });
     assert.equal(before.fire && before.feedbackId, head, "unrefused, the oldest entry fires");
     const allRefused = candidates.map((c, i) => refusal(c, `2026-01-01T00:00:0${i % 10}Z`));
-    const blocked = autoTriageCheck({ ...args, readRefusalRows: () => allRefused });
+    const blocked = await autoTriageCheck({ ...args, readRefusalRows: () => allRefused });
     assert.equal(blocked.fire, false, "every candidate refused: nothing fires");
     assert.match(blocked.reason, /refused triage commit/);
-    const headOnly = autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01")] });
+    const headOnly = await autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01")] });
     assert.notEqual(headOnly.fire && headOnly.feedbackId, head, "the refused head is passed over");
-    const after = autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01"), cleared(head, "2026-01-02")] });
+    const after = await autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01"), cleared(head, "2026-01-02")] });
     assert.equal(after.fire && after.feedbackId, head, "a clearing row makes it eligible again");
     // The DEFAULT read: a real ledger on disk, written through the real append path.
     const { appendLedger } = await import("../src/lib/ledger.js");
     const { ledgerPathFor } = await import("../src/lib/ledger-path.js");
     for (const c of candidates) appendLedger(ledgerPathFor(config), { run_id: "TRIAGE-x", task_id: `TRIAGE-${c}`, step: TRIAGE_COMMIT_REFUSED_STEP, feedback_id: c });
-    const real = autoTriageCheck(args);
+    const real = await autoTriageCheck(args);
     assert.equal(real.fire, false, "the default ledger read sees the written refusal rows");
     // An unreadable ledger retries (today's behaviour), never starves the rung.
-    const unreadable = autoTriageCheck({ ...args, readRefusalRows: () => undefined });
+    const unreadable = await autoTriageCheck({ ...args, readRefusalRows: () => undefined });
     assert.equal(unreadable.fire && unreadable.feedbackId, head);
   } finally {
     rmSync(root, { recursive: true, force: true });

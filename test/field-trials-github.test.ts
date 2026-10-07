@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  authorClassOf, emptyRepoStore, ghApiFetch, GITHUB_PAGE_SIZE, ingestFieldTrialsGithub, pageOf, parseGithubStore, pullOf,
+  authorClassOf, emptyRepoStore, ghApiFetch, GITHUB_PAGE_SIZE, ingestFieldTrialsGithub, observedCurrentHeadGreen, pageOf, parseGithubStore, pullOf,
   REVERTS_LINE_RE, revertedPrNumber, RUN_BRANCH_RE, summarizeChecks, TRAILER_LINE_RE, trailerTaskIds,
   type FieldTrialsGithubStore, type GithubPage,
 } from "../src/lib/field-trials-github.js";
@@ -20,6 +20,8 @@ type Fixture = {
   pulls?: unknown[]; commits?: unknown[]; deployments?: unknown[];
   reviews?: Record<number, unknown[]>; prCommits?: Record<number, unknown[]>;
   checkRuns?: Record<string, unknown[]>; statuses?: Record<number, unknown[]>;
+  workflowRuns?: Record<number, unknown[]>; jobs?: Record<number, unknown[]>;
+  associatedPulls?: Record<string, unknown[]>;
 };
 
 /** A fake page seam over per-repo fixture lists, paged exactly like the REST API. */
@@ -37,8 +39,11 @@ function githubFake(fixtures: Record<string, Fixture>, failing: (path: string) =
     if (rest[0] === "pulls" && rest[2] === "commits") return slice(fixture.prCommits?.[Number(rest[1])]);
     if (rest[0] === "commits" && rest.length === 1) return slice(fixture.commits);
     if (rest[0] === "commits" && rest[2] === "check-runs") return slice(fixture.checkRuns?.[rest[1]!]);
+    if (rest[0] === "commits" && rest[2] === "pulls") return slice(fixture.associatedPulls?.[rest[1]!]);
     if (rest[0] === "deployments" && rest.length === 1) return slice(fixture.deployments);
     if (rest[0] === "deployments" && rest[2] === "statuses") return slice(fixture.statuses?.[Number(rest[1])]);
+    if (rest[0] === "actions" && rest[1] === "runs") return slice(fixture.workflowRuns?.[Number(rest[2])]);
+    if (rest[0] === "actions" && rest[1] === "jobs") return slice(fixture.jobs?.[Number(rest[2])]);
     return { ok: false, reason: "unrouted" };
   };
   return { fetch, calls };
@@ -295,5 +300,365 @@ test("the daily field-trial budget observes every repository during backfill eve
     assert.equal(saved.cursors.pulls.state, "partial");
     assert.equal(saved.cursors.pulls.watermark, null);
     assert.ok((saved.backfillResourceIndex ?? -1) >= 0);
+  }
+});
+
+function headGateFixture(repo = 'o/r', workflow = '.github/workflows/ci.yml') {
+  const sha = 'a'.repeat(40);
+  const pull = pr(1, 5, { head: { ref: 'feature', sha } });
+  const check = { id: 11, name: 'ci-gate', head_sha: sha, status: 'completed', conclusion: 'success',
+    completed_at: at(4), app: { slug: 'github-actions' }, check_suite: { id: 22 },
+    details_url: `https://github.com/${repo}/actions/runs/33/job/44` };
+  const run = { id: 33, head_sha: sha, check_suite_id: 22, repository: { full_name: repo },
+    workflow_id: 55, path: workflow, event: 'pull_request', pull_requests: [{ number: 1, head: { sha } }] };
+  const job = { id: 44, run_id: 33, head_sha: sha, name: 'ci-gate', status: 'completed', conclusion: 'success',
+    completed_at: at(4), check_run_url: `https://api.github.com/repos/${repo}/check-runs/11` };
+  const fixture: Fixture = { pulls: [pull], prCommits: { 1: [{ sha: 'first-commit' }] },
+    checkRuns: { 'first-commit': [{ id: 99, name: 'ci-gate', status: 'completed', conclusion: 'success' }], [sha]: [check] },
+    workflowRuns: { 33: [run] }, jobs: { 44: [job] } };
+  return { sha, pull, check, run, job, fixture };
+}
+
+test('current-head green preserves successful producer identity and never claims first-ever history', async () => {
+  for (const workflow of ['.github/workflows/ci.yml', '.github/workflows/ci-gate.yml']) {
+    const f = headGateFixture('o/r', workflow); const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    const first = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 4);
+    assert.ok(first.requestsMade! <= 4);
+    const pull = store.repos['o/r']!.pulls.PR_1!;
+    assert.equal(observedCurrentHeadGreen(pull, at(10)), null, 'producer metadata is pending, not successful work');
+    const spent = fake.calls.length;
+    await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11), 12);
+    assert.ok(fake.calls.length - spent <= 12);
+    const found = observedCurrentHeadGreen(pull, at(11))!;
+    assert.equal(found.completedAt, at(4)); assert.equal(found.firstReadAt, at(10)); assert.equal(found.validatedAt, at(11));
+    assert.deepEqual([found.checkId, found.suiteId, found.runId, found.jobId, found.producer.path], [11, 22, 33, 44, workflow]);
+    assert.equal(pull.headGreen!.firstEver, 'unavailable-retention-uncertified');
+    assert.ok(fake.calls.includes(`repos/o/r/commits/${f.sha}/check-runs?check_name=ci-gate&filter=all&per_page=100&page=1`));
+    const updated = store.repos['o/r']!.pulls.PR_1!;
+    assert.equal(updated.detail.state === 'observed' && updated.detail.checks.state, 'green', 'legacy first-commit classification stays separate');
+  }
+});
+
+test('a first-commit success cannot describe a changed head even when updated-at does not change', async () => {
+  const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11), 8);
+  const old = store.repos['o/r']!.pulls.PR_1!; assert.ok(observedCurrentHeadGreen(old, at(11)));
+  f.pull.head = { ref: 'feature', sha: 'b'.repeat(40) };
+  const before = fake.calls.length;
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(12), 8);
+  const next = store.repos['o/r']!.pulls.PR_1!;
+  assert.equal(next.updatedAt, old.updatedAt); assert.notEqual(next.headSha, old.headSha);
+  assert.equal(observedCurrentHeadGreen(next, at(12)), null);
+  assert.notEqual(next.headGreen, old.headGreen);
+  assert.ok(fake.calls.slice(before).includes('repos/o/r/pulls/1/commits?per_page=100'), 'the head change also invalidates cached detail');
+});
+
+test('a green check needs the actual PR workflow run and physical job identities', async () => {
+  const mutations = [
+    (f: ReturnType<typeof headGateFixture>) => { f.check.app.slug = 'other-app'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.head_sha = 'b'.repeat(40); },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.completed_at = at(30); },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.conclusion = 'neutral'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.details_url = 'https://github.com/foreign/repo/actions/runs/33/job/44'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.details_url = 'not a URL'; },
+    (f: ReturnType<typeof headGateFixture>) => { Object.assign(f.check, { check_suite: undefined }); },
+    (f: ReturnType<typeof headGateFixture>) => { f.check.check_suite.id = 0; },
+    (f: ReturnType<typeof headGateFixture>) => { f.run.event = 'merge_group'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.run.path = '.github/workflows/spoof.yml'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.run.repository.full_name = 'foreign/repo'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.run.check_suite_id = 23; },
+    (f: ReturnType<typeof headGateFixture>) => { f.run.pull_requests[0]!.head.sha = 'b'.repeat(40); },
+    (f: ReturnType<typeof headGateFixture>) => { f.job.head_sha = 'b'.repeat(40); },
+    (f: ReturnType<typeof headGateFixture>) => { f.job.run_id = 34; },
+    (f: ReturnType<typeof headGateFixture>) => { f.job.check_run_url = 'https://api.github.com/repos/o/r/check-runs/12'; },
+    (f: ReturnType<typeof headGateFixture>) => { f.job.completed_at = at(30); },
+    (f: ReturnType<typeof headGateFixture>) => { f.job.conclusion = 'failure'; },
+  ];
+  for (const change of mutations) {
+    const f = headGateFixture(); change(f); const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+    await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11), 8);
+    assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(11)), null);
+  }
+});
+
+test('the fixed daily budget keeps all repositories fresh while head identities resume privately', async () => {
+  const repos = ['o/core', 'o/site', 'o/console'];
+  const fixtures = Object.fromEntries(repos.map((repo) => [repo, headGateFixture(repo).fixture]));
+  const fake = githubFake(fixtures); const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (const minute of [10, 11]) {
+    const before = fake.calls.length;
+    const pass = await ingestFieldTrialsGithub(fake.fetch, repos, store, at(minute), 24);
+    assert.equal(pass.requestsMade, fake.calls.length - before); assert.ok(pass.requestsMade! <= 24);
+    for (const repo of repos) for (const cursor of Object.values(store.repos[repo]!.cursors)) assert.equal(cursor.head?.asOf, at(minute));
+  }
+  for (const repo of repos) assert.ok(observedCurrentHeadGreen(store.repos[repo]!.pulls.PR_1!, at(11)));
+});
+
+test('a pending open head is re-read after checks finish without an updated-at bump', async () => {
+  const f = headGateFixture(); f.pull.state = 'open'; f.fixture.checkRuns![f.sha] = [];
+  const fake = githubFake({ 'o/r': f.fixture }); const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  f.fixture.checkRuns![f.sha] = [f.check];
+  for (const minute of [11, 12, 13]) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 8);
+  assert.ok(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(13)));
+});
+
+test('the existing default GitHub seam decodes real action objects and reports malformed responses', async () => {
+  const f = headGateFixture();
+  assert.deepEqual(pageOf(JSON.stringify(f.run)), { ok: true, items: [f.run] });
+  assert.deepEqual(pageOf(JSON.stringify(f.job)), { ok: true, items: [f.job] });
+  assert.equal(pageOf('{"id":33,"message":"unavailable"}').ok, false);
+  const shim = ghShim([{ when: 'repos/o/r/actions/jobs/44', stdout: JSON.stringify(f.job) }]);
+  const oldPath = process.env.PATH; process.env.PATH = shim.dir + ':' + oldPath;
+  try { assert.deepEqual(await ghApiFetch()('repos/o/r/actions/jobs/44'), { ok: true, items: [f.job] }); }
+  finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
+test('head history pages and repeated checks keep one earliest observed physical success', async () => {
+  const f = headGateFixture();
+  f.fixture.checkRuns![f.sha] = Array.from({ length: 100 }, (_, n) => n === 0 ? f.check
+    : { ...f.check, id: n + 100, conclusion: 'failure' });
+  const earlier = { ...f.check, id: 12, completed_at: at(3), details_url: 'https://github.com/o/r/actions/runs/33/job/45' };
+  f.fixture.checkRuns![f.sha]!.push(f.check, earlier);
+  f.fixture.jobs![45] = [{ ...f.job, id: 45, completed_at: at(3), check_run_url: 'https://api.github.com/repos/o/r/check-runs/12' }];
+  const fake = githubFake({ 'o/r': f.fixture }); const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (const minute of [10, 11, 12]) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 8);
+  const saved = store.repos['o/r']!.pulls.PR_1!;
+  assert.equal(saved.headGreen!.history.state, 'complete'); assert.equal(saved.headGreen!.history.pagesRead, 2);
+  assert.equal(observedCurrentHeadGreen(saved, at(12))!.completedAt, at(3));
+  assert.equal(saved.headGreen!.seenCheckIds.length, 101, 'replayed physical check ids are counted once');
+  assert.equal(saved.headGreen!.firstEver, 'unavailable-retention-uncertified');
+});
+
+test('an unavailable producer read is attempted once per pass and remains pending under the same budget', async () => {
+  const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture }, (path) => path.includes('/actions/runs/'));
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (const minute of [10, 11]) {
+    const before = fake.calls.length;
+    const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 12);
+    const attempts = fake.calls.slice(before);
+    assert.ok(attempts.length <= 12); assert.equal(attempts.filter((path) => path.includes('/actions/runs/')).length, 1);
+    assert.equal(pass.state, 'partial'); assert.equal(pass.repos['o/r']!.headGreensPending, 1);
+  }
+  assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(11)), null);
+});
+
+test('bounded head history and damaged cached producer identities stay unavailable rather than fabricated', async () => {
+  const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 4);
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  pull.headGreen!.pending[0]!.runId = NaN;
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11), 8);
+  assert.equal(observedCurrentHeadGreen(pull, at(11)), null);
+  const saved = store.repos['o/r']!.pulls.PR_1!; assert.ok(observedCurrentHeadGreen(saved, at(11)));
+  saved.state = 'open'; saved.headGreen!.firstObserved = null; saved.headGreen!.state = 'pending';
+  saved.headGreen!.pending = []; saved.headGreen!.history.nextPage = 11;
+  saved.headGreen!.history.pagesRead = 10; saved.headGreen!.history.state = 'partial';
+  saved.headGreen!.history.reason = 'head-check-history-page-bound-or-pending';
+  const before = fake.calls.length;
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(12), 8);
+  const next = store.repos['o/r']!.pulls.PR_1!;
+  assert.equal(next.headGreen!.state, 'unavailable');
+  assert.equal(next.headGreen!.history.state, 'partial');
+  assert.equal(next.headGreen!.history.reason, 'head-check-history-page-bound-or-pending');
+  const headChecks = `/commits/${f.sha}/check-runs?`;
+  assert.ok(fake.calls.slice(0, before).some((path) => path.includes(headChecks)), 'the exact-head query has a positive earlier control');
+  assert.equal(fake.calls.slice(before).filter((path) => path.includes(headChecks)).length, 0);
+  assert.equal(observedCurrentHeadGreen(next, 'invalid cutoff'), null);
+});
+
+test('a complete first-commit all-attempt response is reused when that commit is the current head', async () => {
+  const f = headGateFixture(); f.fixture.prCommits![1] = [{ sha: f.sha }];
+  const fake = githubFake({ 'o/r': f.fixture }); const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 11);
+  assert.ok(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(10)));
+  assert.equal(pass.requestsMade, 8);
+  assert.equal(fake.calls.filter((path) => path.includes('/check-runs?')).length, 1, 'one actual all-attempt response serves both distinct signals');
+  assert.ok(fake.calls.some((path) => path.endsWith('/check-runs?filter=all&per_page=100')));
+  assert.equal(fake.calls.some((path) => path.includes('check_name=ci-gate')), false);
+});
+
+test('a merged current-head green with an empty run PR list requires the real commit PR association', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 3; pass++) {
+    const before = fake.calls.length;
+    const result = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), pass === 0 ? 5 : 8);
+    assert.ok(fake.calls.length - before <= 8);
+    assert.equal(result.requestsMade, fake.calls.length - before);
+    if (pass === 0) assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(10)), null);
+  }
+  const found = observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(12));
+  assert.ok(found); assert.equal(found.completedAt, at(4));
+  assert.deepEqual([found.checkId, found.suiteId, found.runId, found.jobId], [11, 22, 33, 44]);
+  assert.equal(found.commitAssociationPending, undefined);
+  assert.equal(fake.calls.filter(path => path === `repos/o/r/commits/${f.sha}/pulls?per_page=100&page=1`).length, 1);
+  assert.equal(store.repos['o/r']!.pulls.PR_1!.headGreen!.firstEver, 'unavailable-retention-uncertified');
+});
+
+test('an empty run PR list cannot borrow another PR head or repository association', async () => {
+  for (const associated of [[], [{ number: 2, head: { sha: 'a'.repeat(40) }, base: { repo: { full_name: 'o/r' } } }],
+    [{ number: 1, head: { sha: 'b'.repeat(40) }, base: { repo: { full_name: 'o/r' } } }],
+    [{ number: 1, head: { sha: 'a'.repeat(40) }, base: { repo: { full_name: 'other/repo' } } }]]) {
+    const f = headGateFixture(); f.run.pull_requests = []; f.fixture.associatedPulls = { [f.sha]: associated };
+    const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    const pull = store.repos['o/r']!.pulls.PR_1!;
+    assert.equal(observedCurrentHeadGreen(pull, at(12)), null);
+    assert.equal(pull.headGreen!.history.reason, 'head-gate-commit-pr-association-missing');
+    assert.ok(!fake.calls.includes('repos/o/r/actions/jobs/44'));
+  }
+});
+
+test('a failed commit association read stays pending and resumes within the unchanged request budget', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  let unavailable = true;
+  const fake = githubFake({ 'o/r': f.fixture }, path => unavailable && path.includes(`/commits/${f.sha}/pulls?`));
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 2; pass++) {
+    const before = fake.calls.length;
+    await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    assert.ok(fake.calls.length - before <= 8);
+    assert.ok(fake.calls.slice(before).filter(path => path.includes(`/commits/${f.sha}/pulls?`)).length <= 1);
+  }
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.equal(observedCurrentHeadGreen(pull, at(11)), null);
+  assert.equal(pull.headGreen!.pending[0]!.commitAssociationPending, true);
+  assert.equal(pull.headGreen!.history.reason, 'github-read-failed');
+  unavailable = false;
+  for (let pass = 0; pass < 2; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(12 + pass), 8);
+  assert.ok(observedCurrentHeadGreen(pull, at(13)));
+});
+
+test('a contradictory or missing run PR list cannot request the empty-list fallback', async () => {
+  for (const association of [undefined, [{ number: 2, head: { sha: 'a'.repeat(40) } }]]) {
+    const f = headGateFixture(); Object.assign(f.run, { pull_requests: association });
+    const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(12)), null);
+    assert.ok(!fake.calls.some(path => path.includes(`/commits/${f.sha}/pulls?`)));
+  }
+});
+
+test('pending commit association cannot masquerade as a successful cached head green', async () => {
+  const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 2; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.ok(observedCurrentHeadGreen(pull, at(11)));
+  pull.headGreen!.firstObserved!.commitAssociationPending = true;
+  assert.equal(observedCurrentHeadGreen(pull, at(11)), null);
+});
+
+test('the changed association policy revisits a historical empty-list refusal and preserves genuine cached green', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  const old = store.repos['o/r']!.pulls.PR_1!;
+  delete old.headGreen!.commitAssociationPolicy;
+  old.headGreen!.pending = []; old.headGreen!.firstObserved = null;
+  old.headGreen!.history = { state: 'complete', nextPage: 2, pagesRead: 1, reason: 'head-gate-producer-identity-mismatch' };
+  for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11 + pass), 8);
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.ok(observedCurrentHeadGreen(pull, at(13)));
+  const receipt = pull.headGreen!.firstObserved;
+  delete pull.headGreen!.commitAssociationPolicy;
+  const before = fake.calls.length;
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(14), 8);
+  assert.equal(store.repos['o/r']!.pulls.PR_1!.headGreen!.firstObserved, receipt);
+  assert.equal(fake.calls.slice(before).filter(path => path.includes('/actions/') || path.includes('check_name=ci-gate')).length, 0);
+});
+
+function scarceHeadFixture(repo: string) {
+  const f = headGateFixture(repo);
+  f.pull.number = 2; f.pull.node_id = 'PR_2'; f.run.pull_requests = [];
+  f.fixture.pulls = [f.pull, pr(1, 4, { head: { ref: 'another', sha: 'b'.repeat(40) } })];
+  f.fixture.prCommits = { 2: [{ sha: 'first-commit' }], 1: [] };
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 2, head: { sha: f.sha }, base: { repo: { full_name: repo } } }] };
+  f.fixture.commits = Array.from({ length: 100 }, (_, i) => ({ sha: `history${i}`, commit: { committer: { date: at(100 - i) } } }));
+  f.fixture.deployments = [{ id: 7, sha: f.sha, created_at: at(4) }];
+  return f;
+}
+
+test('the daily 24 request budget finishes a four-read head identity and gives legacy detail and history their next turn', async () => {
+  const repos = ['o/core', 'o/site', 'o/console'];
+  const fixtures = Object.fromEntries(repos.map(repo => [repo, scarceHeadFixture(repo).fixture]));
+  const fake = githubFake(fixtures, path => path.includes('/deployments/7/statuses'));
+  let store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  const first = await ingestFieldTrialsGithub(fake.fetch, repos, store, at(2000), 24);
+  assert.equal(first.requestsMade, 24, 'failed status attempts consume the same total bound');
+  for (const repo of repos) {
+    assert.equal(fake.calls.filter(path => path.startsWith(`repos/${repo}/`)).length, 8);
+    assert.ok(observedCurrentHeadGreen(store.repos[repo]!.pulls.PR_2!, at(2000)));
+    assert.equal(store.repos[repo]!.pulls.PR_2!.headGreen!.firstEver, 'unavailable-retention-uncertified');
+    assert.equal(store.repos[repo]!.deployments['7']!.status.state, 'unavailable');
+    assert.deepEqual(first.repos[repo]!.workAllocation, { mode: 'head-green',
+      reserved: { details: 0, statuses: 1, headGreens: 4 },
+      requests: { fresh: 3, backfill: 0, statuses: 1, details: 0, headGreens: 4 } });
+    for (const cursor of Object.values(store.repos[repo]!.cursors)) assert.equal(cursor.head?.asOf, at(2000));
+  }
+  store = parseGithubStore(JSON.parse(JSON.stringify(store)));
+  const before = fake.calls.length;
+  const second = await ingestFieldTrialsGithub(fake.fetch, repos, store, at(2001), 24);
+  assert.equal(second.requestsMade, fake.calls.length - before); assert.equal(second.requestsMade, 24);
+  for (const repo of repos) {
+    assert.equal(fake.calls.slice(before).filter(path => path.startsWith(`repos/${repo}/`)).length, 8);
+    assert.equal(store.repos[repo]!.pulls.PR_2!.detail.state, 'observed');
+    assert.ok(fake.calls.slice(before).includes(`repos/${repo}/commits?per_page=100&page=2`));
+    assert.equal(store.repos[repo]!.cursors.commits.watermark, at(100));
+    assert.deepEqual(second.repos[repo]!.workAllocation, { mode: 'legacy-detail',
+      reserved: { details: 3, statuses: 1, headGreens: 0 },
+      requests: { fresh: 3, backfill: 1, statuses: 1, details: 3, headGreens: 0 } });
+    for (const cursor of Object.values(store.repos[repo]!.cursors)) assert.equal(cursor.head?.asOf, at(2001));
+  }
+});
+
+test('a larger unchanged collector budget serves both evidence classes and a malformed lane hint cannot starve head work', async () => {
+  for (const limit of [8, 11]) {
+    const f = scarceHeadFixture('o/r'); const fake = githubFake({ 'o/r': f.fixture }, path => path.includes('/deployments/7/statuses'));
+    const store = parseGithubStore({ version: 'field-trials-github-v1', repos: { 'o/r': { ...emptyRepoStore(), evidenceLane: 'damaged' } } });
+    const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(2000), limit);
+    assert.ok(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_2!, at(2000)));
+    const allocation = pass.repos['o/r']!.workAllocation!;
+    assert.equal(allocation.mode, limit === 8 ? 'head-green' : 'all-available');
+    assert.equal(allocation.requests.details, limit === 8 ? 0 : 3);
+    assert.equal(allocation.requests.headGreens, 4);
+    assert.equal(Object.values(allocation.requests).reduce((sum, n) => sum + n, 0), fake.calls.length);
+    assert.equal(pass.requestsMade, fake.calls.length); assert.ok(fake.calls.length <= limit);
+  }
+});
+
+test('a failed head producer stays pending while scarce allocation rotates and then resumes the same identity', async () => {
+  const f = scarceHeadFixture('o/r'); let refuseRun = true;
+  const fake = githubFake({ 'o/r': f.fixture }, path => path.includes('/deployments/7/statuses') || (refuseRun && path.endsWith('/actions/runs/33')));
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (const minute of [2000, 2001, 2002]) {
+    const before = fake.calls.length;
+    const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 8);
+    assert.ok(pass.requestsMade! <= 8); assert.equal(pass.requestsMade, fake.calls.length - before);
+    assert.equal(Object.values(pass.repos['o/r']!.workAllocation!.requests).reduce((sum, n) => sum + n, 0), pass.requestsMade);
+    const pull = store.repos['o/r']!.pulls.PR_2!;
+    if (minute < 2002) {
+      assert.equal(observedCurrentHeadGreen(pull, at(minute)), null);
+      assert.equal(pull.headGreen!.pending.length, 1, 'unreadable producer is preserved for resumption');
+    } else {
+      const found = observedCurrentHeadGreen(pull, at(minute))!;
+      assert.equal(found.firstReadAt, at(2000)); assert.equal(found.validatedAt, at(2002));
+      assert.equal(found.completedAt, at(4));
+    }
+    refuseRun = false;
   }
 });

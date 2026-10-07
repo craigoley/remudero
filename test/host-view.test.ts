@@ -4,7 +4,7 @@
 // host view only read it. FALSIFIER: put the append back in the route and the first test reads no row while
 // nobody reads, and the second reads an appended one.
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -35,7 +35,8 @@ import { buildProviderRoutingRoute, buildSelfMeasurementRoute } from "../src/lib
 import type { Route } from "../src/lib/service.js";
 import type { ReadModelInstanceState } from "../src/lib/task-view.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildViewRoutes } from "../src/lib/views.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
+import { buildViewRoutes, oldestAsOf } from "../src/lib/views.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const CAPTURED = new URL("./fixtures/account-usage/claude-json.json", import.meta.url);
@@ -343,6 +344,128 @@ test("W1-T5053: the control part reads an unreadable ledger as unknown liveness,
   try {
     const body = controlStatusBody({ root: w.root, ledgerPath: w.ledgerPath, readLedger: () => { throw new Error("EACCES"); } });
     assert.deepEqual([body.paused, body.daemonLive, body.daemonLiveReason], [true, undefined, "ledger-unreadable"]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+// Host reading 2026-10-06 18:35-18:38Z: every host shadow sample diffed providerRouting (freshUntil, freshness,
+// modelHealth, providers[0].model, a window's usedPercent, selected.model), judged real: 204 of 278 samples. Both
+// sides run providerRoutingBody over the SAME state/provider-routing-status.json, which a worker rewrites in place
+// on each spawn; the view read it at its probe and legacy when serve rendered the sample, so they read two
+// different writes (observedAt was itself one of the differing paths), and a reading judged `fresh` at the probe
+// is `stale` a minute later.
+const NO_EVIDENCE: ShadowEvidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 };
+
+/** A blocked routing reading observed at `observedAtMs`, valid for `validMs`, with `reservePercent` as its payload. */
+function writeRouting(root: string, observedAtMs: number, validMs: number, reservePercent: number): void {
+  writeProviderRoutingStatus(root, { state: "blocked", enabledProviders: ["claude"], reservePercent, observedAtMs, cacheValidMs: validMs, capacities: [] });
+}
+
+/** The view probes at `viewAt`; then `between` runs; then serve renders legacy at `legacyAt` and the worker compares. */
+function compareHost(w: ReturnType<typeof world>, viewAt: number, legacyAt: number, between: () => void, tamper?: (data: HostViewData) => void) {
+  const readsAt = (ms: number) => {
+    const deps = pinned(w.config);
+    return { ...deps, providerRouting: { ...deps.providerRouting, now: () => ms } };
+  };
+  const view = createHostView({ config: w.config, ledgerSource, clock: clockAt({ ms: viewAt }), read: readsAt(viewAt), diskFree: () => 7, rateLimit: async () => 9, selfMeasurement: async () => ({ status: "ok", rows: [] }) });
+  const body = view.materialize(ctx(viewAt))[0]!;
+  between();
+  tamper?.(body.data as HostViewData);
+  const posted: ShadowRequest[] = [];
+  const legacy = hostLegacyView(readsAt(legacyAt), () => body.data as HostViewData);
+  legacyViewSampler({ legacy: [legacy], clock: clockAt({ ms: legacyAt }), defer: (run) => run(), post: (request) => void posted.push(request) })(HOST_VIEW_NAME, "", new URLSearchParams());
+  assert.ok(posted[0]?.legacy, "legacy rendered the sample");
+  const shadow = createViewShadow({ clock: clockAt({ ms: legacyAt }), log: () => {}, evidence: () => NO_EVIDENCE });
+  return shadow.compare({ view: HOST_VIEW_NAME, key: "", requests: 0, legacy: posted[0].legacy, body: { data: body.data, asOf: oldestAsOf(body.sources), sources: body.sources } });
+}
+
+const routingDiffs = (compared: { diffs: Array<{ path: string; classification: string; reason: string }> }) => compared.diffs.filter((d) => d.path.startsWith("providerRouting"));
+
+test("a host providerRouting diff from a status rewritten between the two reads is timing, not real", () => {
+  const w = world();
+  try {
+    writeRouting(w.root, NOW - 60_000, 600_000, 10);
+    const compared = compareHost(w, NOW, NOW + 60_000, () => writeRouting(w.root, NOW + 30_000, 600_000, 25));
+    const diffs = routingDiffs(compared);
+    assert.ok(diffs.some((d) => d.path === "providerRouting.reservePercent"), "the payload differs: the comparison is not vacuous");
+    assert.deepEqual(diffs.filter((d) => d.classification !== "timing"), [], "every providerRouting diff is explained by the rewrite");
+    assert.match(diffs.find((d) => d.path === "providerRouting.reservePercent")!.reason, /legacy read the providerRouting reading observed at 2026-09-22T12:00:30.000Z, the body the one observed at 2026-09-22T11:59:00.000Z/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a host provider reading judged on either side of its own deadline differs only in freshness, as timing", () => {
+  const w = world();
+  try {
+    // Valid until NOW + 30 s: fresh at the view's probe, stale when legacy renders a minute later; nothing rewritten.
+    writeRouting(w.root, NOW - 60_000, 90_000, 10);
+    const diffs = routingDiffs(compareHost(w, NOW, NOW + 60_000, () => {}));
+    assert.deepEqual(diffs.map((d) => [d.path, d.classification]), [["providerRouting.freshness", "timing"]]);
+    assert.match(diffs[0]!.reason, /deadline 2026-09-22T12:00:30.000Z/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a host providerRouting diff no rewrite or deadline between the two reads explains stays real", () => {
+  const w = world();
+  try {
+    writeRouting(w.root, NOW - 60_000, 600_000, 10);
+    // The same reading on both sides, a payload that differs anyway: nothing explains it.
+    const same = routingDiffs(compareHost(w, NOW, NOW + 60_000, () => {}, (data) => void ((data.providerRouting as { reservePercent: number }).reservePercent = 99)));
+    assert.deepEqual(same.map((d) => [d.path, d.classification]), [["providerRouting.reservePercent", "real"]]);
+    // Legacy read an OLDER reading than the view, observed before either read: not a rewrite between them.
+    const older = routingDiffs(compareHost(w, NOW, NOW + 60_000, () => writeRouting(w.root, NOW - 120_000, 600_000, 25)));
+    assert.ok(older.length > 0 && older.every((d) => d.classification === "real"), JSON.stringify(older));
+    // The same reading judged on the same side of its deadline: a freshness diff there is real.
+    writeRouting(w.root, NOW - 60_000, 600_000, 10);
+    const fresh = routingDiffs(compareHost(w, NOW, NOW + 60_000, () => {}, (data) => void ((data.providerRouting as { freshness: string }).freshness = "stale")));
+    assert.deepEqual(fresh.map((d) => [d.path, d.classification]), [["providerRouting.freshness", "real"]]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+// Host reading 2026-10-06 21:00:46Z, after #9667 deployed: the one host diff left was accountUsage.governorAsOf,
+// legacy "2026-10-06T21:00:35.781Z" vs the view's "2026-10-06T20:55:08.902Z", judged real. The posture is the
+// newest `daemon.headroom` row, appended every few minutes; the view read the ledger at its probe and legacy when
+// serve rendered the sample 46 s into the minute, so a row landing between them was in legacy's read alone.
+const HEADROOM = (ts: string, enforced: boolean): string => `${JSON.stringify({ ts, run_id: "DAEMON-1", task_id: "DAEMON", step: "daemon.headroom", enforced })}\n`;
+const accountDiffs = (compared: { diffs: Array<{ path: string; classification: string; reason: string }> }) => compared.diffs.filter((d) => d.path.startsWith("accountUsage"));
+
+test("a host governor posture from a headroom row landing between the two reads is timing, not real", () => {
+  const w = world();
+  try {
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:55:08.902Z", true));
+    const compared = compareHost(w, Date.parse("2026-10-06T21:00:00.000Z"), Date.parse("2026-10-06T21:00:46.278Z"),
+      () => appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T21:00:35.781Z", false)));
+    const diffs = accountDiffs(compared);
+    assert.deepEqual(diffs.map((d) => d.path).sort(), ["accountUsage.governor", "accountUsage.governorAsOf"], "the captured path and its state differ: not vacuous");
+    assert.deepEqual(diffs.filter((d) => d.classification !== "timing"), [], JSON.stringify(diffs));
+    assert.match(diffs[0]!.reason, /legacy read the accountUsage\.governorAsOf reading observed at 2026-10-06T21:00:35\.781Z, the body the one observed at 2026-10-06T20:55:08\.902Z/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a host governor posture no row between the two reads explains stays real", () => {
+  const w = world();
+  try {
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:55:08.902Z", true));
+    appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T20:59:30.000Z", true));
+    const [viewAt, legacyAt] = [Date.parse("2026-10-06T21:00:00.000Z"), Date.parse("2026-10-06T21:00:46.278Z")];
+    // The body holds an OLDER row than one already in the ledger at its probe: the view missed a row it read.
+    const missed = accountDiffs(compareHost(w, viewAt, legacyAt, () => {}, (data) => void (data.accountUsage.governorAsOf = "2026-10-06T20:55:08.902Z")));
+    assert.deepEqual(missed.map((d) => [d.path, d.classification]), [["accountUsage.governorAsOf", "real"]]);
+    // The same row on both sides with a posture that differs anyway: nothing explains it.
+    const posture = accountDiffs(compareHost(w, viewAt, legacyAt, () => {}, (data) => void (data.accountUsage.governor = "telemetry-only")));
+    assert.deepEqual(posture.map((d) => [d.path, d.classification]), [["accountUsage.governor", "real"]]);
+    // A row between the reads explains its own posture only: a differing usage field beside it stays real.
+    const beside = accountDiffs(compareHost(w, viewAt, legacyAt, () => appendFileSync(w.ledgerPath, HEADROOM("2026-10-06T21:00:35.781Z", true)),
+      (data) => void (data.accountUsage.measures = "tampered")));
+    assert.deepEqual(beside.map((d) => [d.path, d.classification]).sort(), [["accountUsage.governorAsOf", "timing"], ["accountUsage.measures", "real"]]);
   } finally {
     w.cleanup();
   }

@@ -17,10 +17,12 @@ import {
   readModelPath,
   readModelPointerPath,
   releaseLease,
+  readAgentFold,
   readSourceSnapshotBody,
   SOURCE_SNAPSHOT_DDL,
   sourceSnapshotStates,
   withWriteTransaction,
+  writeAgentFold,
   writeSourceSnapshot,
 } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -253,4 +255,18 @@ test("an interrupted source snapshot commit leaves the last committed snapshot w
   writeSourceSnapshot(db, got.lease, { instance: "core", ok: false, names: ["console-v1", "usage-v1"], error: "boom", atMs: T0 });
   assert.deepEqual(sourceSnapshotStates(db, "console-v1"), [{ instance: "core", asOf: first, error: "boom", errorMs: T0 }]);
   assert.deepEqual([readSourceSnapshotBody(db, "core", "console-v1"), readSourceSnapshotBody(db, "core", "usage-v1"), readSourceSnapshotBody(db, "site", "usage-v1")], [{ n: 1 }, undefined, undefined]);
+});
+
+test("an agent fold state and the fact position it consumed commit together, and a writer without the lease commits neither", (t) => {
+  const db = openReadModel({ stateDir: stateDir(t), instance: "core", schemaVersion: 1, ddl: DDL, clock: fixedClock(T0) });
+  t.after(() => db.close());
+  assert.equal(readAgentFold(db, "core"), undefined, "a store that predates the table has no fold");
+  const got = acquireLease(db, { holder: "a", clock: fixedClock(T0) });
+  assert.ok(got.ok);
+  writeAgentFold(db, got.lease, "core", { lastSeq: 7, stateJson: "{\"n\":7}" });
+  assert.equal(readAgentFold(db, "site"), undefined);
+  assert.throws(() => writeAgentFold(db, { ...got.lease, holder: "b" }, "core", { lastSeq: 9, stateJson: "{\"n\":9}" }), /no longer owns/);
+  assert.deepEqual(readAgentFold(db, "core"), { lastSeq: 7, stateJson: "{\"n\":7}" }, "the refused commit left the last whole pair");
+  writeAgentFold(db, got.lease, "core", { lastSeq: 9, stateJson: "{\"n\":9}" });
+  assert.deepEqual(readAgentFold(db, "core"), { lastSeq: 9, stateJson: "{\"n\":9}" });
 });

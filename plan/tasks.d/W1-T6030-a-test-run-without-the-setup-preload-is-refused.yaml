@@ -1,0 +1,46 @@
+- id: W1-T6030
+  title: "A HAND-RUN `node --test` WITHOUT THE SETUP PRELOAD IS UNCONTAINED AND READS AS A REGRESSION — run without `--import ./test/setup/tmp-hygiene.ts`, a suite has no gh refusal stub, no dead push URLs, the operator's real GH_TOKEN, no gc-disable and no pinned deny root; 8 run-task and 3 git-fixture-gc-hygiene tests go red as ordinary assertions, and builders keep proving 'same on main'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the deny floor refuses a test run that skipped the suite's containment preload
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: local-only reds that pass on CI (research r-env)"
+  plan_refs: [W1-T4915, W1-T4106, W1-T4805, W1-T1217, W1-T1250, W1-T3069]
+  files: [hooks/deny-floor.sh, test/a-test-run-without-the-setup-preload-is-refused.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a6a28515. Every scripted invocation already passes the preload:
+    package.json test and test:ci, ci.yml, clock-sweep.yml, recovery-drill.yml, scripts/check.mjs,
+    scripts/host-parity.ts and ci-parity.ts. W1-T1250 enforces that for workflow steps. Hand-typed runs
+    have no such check. Without the preload, `node --test --import tsx test/run-task.test.ts` fails
+    8/324. `node --test --import tsx test/git-fixture-gc-hygiene.test.ts` fails 3/6: "gc.auto and
+    receive.autogc are already on process.env when this file loads" (undefined !== '0'), "a git
+    spawned by a fixture that inherits the process environment runs with gc.auto disabled" and "a push
+    into a local bare repo cannot spawn a background repack". With the preload, both files pass, and
+    `env -i` gives the same split. Agent-rules records the same trap for drain.test (#9258, 5 false
+    failures). About 145 test files redirect process.env.HOME. The larger hazard is that a run without
+    the preload never loads test/setup/no-live-remote.ts (W1-T4805), so it runs with the shell's real
+    GH_TOKEN and live push URLs. Rule 13 of hooks/deny-floor.sh (W1-T4915) already refuses the
+    matching coverage mistake, a hand run without --enable-source-maps, at the program position.
+  design: |
+    Add rule 14 to hooks/deny-floor.sh, parsed like rule 13 (cov_segments, program position, through
+    env/timeout/time/nice/cd prefixes). Refuse a `node ... --test` segment that names a test/ path or
+    glob and has no `--import` whose value ends in test/setup/tmp-hygiene.ts, in either the
+    `--import X` or `--import=X` form. Apply the rule only when a leading `cd <dir>` target, or the
+    hook's cwd, contains test/setup/tmp-hygiene.ts, so repos without it (remudero-console, sandboxes)
+    are never refused. As in rule 13, a grep, echo, commit message or heredoc that only names the
+    command is never refused. The refusal names the fix: add `--import ./test/setup/tmp-hygiene.ts`
+    after `--import tsx`. It must not suggest `npm test -- <file>`, because the npm script's glob also
+    runs the whole suite. Keep the check to string work plus one -f test; the hook has a 5s timeout.
+  acceptance:
+    - claim: "the deny floor refuses a hand-run node --test over this repo's test files that lacks the tmp-hygiene preload, admits the same run with it in either --import form, and never refuses in a checkout without the preload file or a command that only names the run"
+      proof: "unit test: test/a-test-run-without-the-setup-preload-is-refused.test.ts"
+  falsifier: |
+    Delete rule 14. The preload-less command is admitted (exit 0) and the test fails.
+

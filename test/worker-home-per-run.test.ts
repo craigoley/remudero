@@ -129,7 +129,7 @@ test("materializeWorkerHome: EACH per-run home independently truncates its OWN i
   }
 });
 
-test("materializeWorkerHome: a per-run home's auth symlinks (.claude/.config/gh/.gitconfig) still resolve to the real HOME, per home", () => {
+test("materializeWorkerHome: a per-run home's auth symlinks (.claude/.gitconfig) still resolve to the real HOME, per home", () => {
   const root = join(tmp(), "worker-home");
   const realHome = tmp();
   const home = perRunWorkerHomeDir(root, "run-auth");
@@ -318,7 +318,7 @@ test("sweepStaleWorkerHomes: an injected old `now` reaps nothing — nothing is 
 
 function e2eSpawnWorkerArgs(dir: string, runId: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd: dir,
     permissionMode: "bypassPermissions" as const,

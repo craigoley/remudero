@@ -27,7 +27,7 @@ type PinLog = (step: string, extra?: Record<string, unknown>) => void;
 export const PLAN_PIN_ADOPTED_STEP = "serve.plan_pin_adopted";
 export const PLAN_PIN_ADOPT_FAILED_STEP = "serve.plan_pin_adopt_failed";
 
-const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true }>();
+const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true; ref?: string }>();
 const published = new Map<string, PinPost>();
 let pinLog: PinLog | undefined;
 const pinIdentity = (pin: PlanPin): string => `ref:${pin.repoDir}@${pin.ref}`;
@@ -44,7 +44,7 @@ export function adoptThreadPlan({ pin, text, gitMs }: PinPost): void {
     if (!text) throw new Error(`the pin for ${pin.ref} carried no plan text, and a thread never reads git`);
     const startedAt = systemClock.now();
     const read = mergePlanBlobsQuarantiningDuplicates(unpackPlanBlobs(text));
-    held.set(pin.path, { identity, load: { plan: read.plan, quarantined: read.quarantined }, pinned: true });
+    held.set(pin.path, { identity, load: { plan: read.plan, quarantined: read.quarantined }, pinned: true, ref: pin.ref });
     post({ type: "adopted", pin, threadId, tasks: read.plan.tasks.length, gitMs, parseMs: systemClock.now() - startedAt });
   } catch (err) {
     post({ type: "adopt_failed", pin, threadId, reason: err instanceof Error ? err.message : String(err) });
@@ -64,7 +64,7 @@ if (!isMainThread) post({ type: "ask" });
  *  one SharedArrayBuffer, so N threads share one copy and run no git. `log` receives one row per thread that adopts
  *  it, or fails to. */
 export function publishThreadPlan(pin: PlanPin, load: PlanLoad & { text?: PlanText; gitMs?: number }, log?: PinLog): void {
-  held.set(pin.path, { identity: pinIdentity(pin), load: { plan: load.plan, quarantined: load.quarantined }, pinned: true });
+  held.set(pin.path, { identity: pinIdentity(pin), load: { plan: load.plan, quarantined: load.quarantined }, pinned: true, ref: pin.ref });
   const pinned: PinPost = { pin, text: load.text, gitMs: load.gitMs };
   published.set(pin.path, pinned);
   if (log) pinLog = log;
@@ -75,6 +75,11 @@ export function publishThreadPlan(pin: PlanPin, load: PlanLoad & { text?: PlanTe
 export function threadPlanPin(path: string): string {
   const hit = held.get(path);
   return hit?.pinned ? hit.identity : "";
+}
+/** The commit a path's plan is pinned to in this thread, or undefined while it follows its files: what the plan
+ *  served here is as new as, so its freshness is judged from this ref and not the generation's unmoving HEAD. */
+export function threadPlanPinnedRef(path: string): string | undefined {
+  return held.get(path)?.ref;
 }
 let parse: (path: string) => PlanLoad = (path) => loadPlanQuarantiningDuplicates(path);
 

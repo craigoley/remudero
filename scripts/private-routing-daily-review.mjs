@@ -5,6 +5,9 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-observation.ts";
+import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
+import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
@@ -25,6 +28,8 @@ async function readSource(source, asOf) {
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
+  const windowStart = Date.parse(asOf) - DAY;
+  let retainedRowsOmitted = 0;
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   for await (const row of openLedgerUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
@@ -45,16 +50,21 @@ async function readSource(source, asOf) {
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
-    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step)
-      || row.selection_assignment_id) rows.push(row);
+    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
+      || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
+        || row.step === "ci_learning_cadence.run_failed" || String(row.step).endsWith(".gardener_judged")
+        || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
+      if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+    }
   }
   const reasons = [];
+  if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, malformedRows, unreadSources, futureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -94,7 +104,25 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
         changesSincePriorDay: prior ? { assignments: report.assignments - prior.assignments,
           tasks: report.arms.map((arm) => ({ arm: arm.arm, added: arm.tasks - (prior.arms.find((item) => item.arm === arm.arm)?.tasks ?? 0) })) } : null };
     });
-    results.push({ ...quality, reports });
+    const windowStart = fixedClock(Date.parse(asOf) - DAY).iso();
+    const reviewFlow = observeReviewFlow(rows, asOf, windowStart);
+    const learningRows = rows.filter(row => Date.parse(row.ts) >= Date.parse(windowStart));
+    const lastCiLearning = learningRows.filter(row => row.step === "ci_learning_cadence.ran")
+      .sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
+    const validCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const selfImprovement = { windowStart, sourceComplete: false, efficacyClaim: "none",
+      ciLearning: lastCiLearning ? { at: lastCiLearning.ts, status: lastCiLearning.status ?? null,
+        filed: validCount(lastCiLearning.filed), refused: validCount(lastCiLearning.refused),
+        recurredLessons: validCount(lastCiLearning.lesson_recurrences?.recurrenceCount),
+        lessonExposure: readCiLessonExposure(lastCiLearning.lesson_recurrences?.exposure, asOf, quality.state === "observed"),
+        laterExposure: "not-certified-by-this-daily-window" } : null,
+      ciLearningFailures: learningRows.filter(row => row.step === "ci_learning_cadence.run_failed").length,
+      gardenerCredits: learningRows.filter(row => String(row.step).endsWith(".gardener_judged") && row.verdict === "credit").length,
+      gardenerDebits: learningRows.filter(row => String(row.step).endsWith(".gardener_judged") && row.verdict === "debit").length,
+      gardenerFailures: learningRows.filter(row => String(row.step).endsWith(".gardener_failed")).length,
+      goals: learningRows.map(goalObservationFromRow).filter(Boolean).slice(-100).map(row => ({ id: row.goal_id,
+        at: row.ts, outcome: row.step, baseline: row.baseline, measured: row.value, costComplete: row.costComplete })) };
+    results.push({ ...quality, reports, reviewFlow, selfImprovement });
   }
   let sourceRevision = null;
   try { sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
@@ -106,8 +134,10 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
     "Operational observations; sample minimum alone does not establish a model winner."];
   for (const source of results) {
     lines.push(`${source.label}: ${source.state}; ${source.rowsRead} rows; ${source.reasons.join(", ") || "no source warnings"}`);
+    lines.push(`  review flow (uncertified retention): ${source.reviewFlow.counts.delivered} delivered exact inputs; ${source.reviewFlow.counts.superseded} superseded; ${source.reviewFlow.counts.unresolvedSourceGap} source gaps; completed-only p95 ${source.reviewFlow.completedOnly.p95Ms ?? "unavailable"} ms; ${source.reviewFlow.semantic.notAttempted} semantic not attempted`);
+    lines.push(`  self improvement: ${source.selfImprovement.gardenerFailures} observed gardener failures; ${source.selfImprovement.gardenerCredits} credits; ${source.selfImprovement.gardenerDebits} debits; ${source.selfImprovement.ciLearning?.recurredLessons ?? "unavailable"} recurring CI lessons; no efficacy claim`);
     for (const report of source.reports) {
-      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
+      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing, served identity ${arm.receiptCoverage.servedModelKnownAssignments}/${arm.receiptCoverage.assignments}, worker outcome ${arm.receiptCoverage.outcomeKnownAssignments}/${arm.receiptCoverage.assignments}, cash mean ${arm.meanCashCostUsd ?? "unavailable"}, subscription notional mean ${arm.meanNotionalCostUsd ?? "unavailable"}`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
     }
   }
   const text = lines.join("\n") + "\n";

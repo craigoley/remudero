@@ -26,6 +26,8 @@
 #                  A scratch unit kept for a repository reason still loses those two trees
 #                  (prune_scratch_caches) once it is idle, unheld and unmounted.
 #                  Git metadata itself is excluded from recency checks because Git refreshes it.
+#                  tsx's transpile cache (`tsx-*` directly under a tmp root) is a protected UNIT —
+#                  the directory itself is never removed — but its stale FILES are (prune_tsx_cache).
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
 #                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
 #   5. DRY_RUN=1 changes nothing; a pass that leaves ANY watched filesystem past its mark exits
@@ -52,6 +54,8 @@
 #   RMD_CLEANUP_TMP_ROOTS       colon-separated scratch roots
 #   RMD_CLEANUP_TMP_GLOBS       space-separated basename globs swept directly under those roots
 #   RMD_CLEANUP_BIG_MB          size (MB) at which an idle file under a scratch root is swept
+#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  age (h, positive) past which a file inside a `tsx-*` cache
+#                               directly under a tmp root is pruned (default 24)
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
@@ -111,6 +115,7 @@ COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
+TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-24}"
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -158,6 +163,10 @@ FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
 case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
+esac
+# Zero would prune the entry tsx is writing right now, so the tsx age must be a positive integer.
+case "$TSX_MAX_AGE_HOURS" in
+  ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
 esac
 case "$ONLY_TMP" in
   0|1) ;;
@@ -596,6 +605,39 @@ keep_scratch_for_repo() {
     done
   done <<< "$entries"
 }
+# tsx's transpile cache, os.tmpdir()/tsx-<uid>. Measured 2026-10-06: /tmp/tsx-1000 at 2.7 GB on the
+# 29 GB root disk (root at 91%). scratch_guard keeps `tsx-*` whole — removing the directory under a
+# running build is never right — and nothing pruned INSIDE it. tsx (4.x) writes flat, write-once
+# files and treats a missing one as a cache miss (recompile, rewrite), so a stale FILE is safely
+# disposable while the directory stays. Only regular files older than TSX_MAX_AGE_HOURS go, then
+# empty subdirectories equally old (never the cache directory itself). find runs with -P (the
+# default: no symlink is followed, and -type f never matches one) and -xdev (no other filesystem
+# is entered). No per-file lsof check: tsx reads an entry and closes it, and unlinking a file a
+# reader still holds frees nothing until it closes — but an lsof that failed still keeps everything.
+TSX_PRUNED_COUNT=0
+TSX_PRUNED_BYTES=0
+prune_tsx_cache() {
+  local dir="$1" minutes stats count bytes
+  minutes=$(( TSX_MAX_AGE_HOURS * 60 ))
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
+  if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: lsof failed (fail closed)"; return; fi
+  if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
+       | awk '{ n++; kb += $1 } END { printf "%d %d", n, kb * 1024 }')"; then
+    log "KEEP $dir: tsx cache scan failed (unknown)"; return
+  fi
+  count="${stats%% *}"; bytes="${stats##* }"
+  if [ "${count:-0}" -gt 0 ]; then
+    log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than ${TSX_MAX_AGE_HOURS} h"
+    if act find "$dir" -xdev -type f -mmin "+$minutes" -delete; then
+      TSX_PRUNED_COUNT=$((TSX_PRUNED_COUNT + count)); TSX_PRUNED_BYTES=$((TSX_PRUNED_BYTES + bytes))
+    fi
+  fi
+  if [ -n "$(find "$dir" -xdev -mindepth 1 -type d -empty -mmin "+$minutes" -print -quit 2>/dev/null)" ]; then
+    act find "$dir" -xdev -mindepth 1 -depth -type d -empty -mmin "+$minutes" -delete
+  fi
+  log "KEEP $dir: tsx cache directory (entries newer than ${TSX_MAX_AGE_HOURS} h stay)"
+}
+
 # W1-T5634. A unit another unit borrows objects from (objects/info/alternates) is kept: removing it
 # left /mnt/scratch/g and h unable to read HEAD. ONE bounded scan per pass, only inside the configured
 # roots: find -maxdepth 8 (a unit's repos sit at depth <= 4, as the repository scan below), no link
@@ -912,6 +954,9 @@ for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
   for g in $TMP_GLOBS; do
     for p in "$root"/$g; do [ -e "$p" ] && sweep_path "$p"; done
   done
+  for p in "$root"/tsx-*; do
+    { [ -e "$p" ] || [ -L "$p" ]; } && prune_tsx_cache "$p"
+  done
   # big idle scratch files that sit inside a root rather than directly under it
   find "$root" -maxdepth 3 -type f -size "+${BIG_MB}M" 2>/dev/null | while IFS= read -r f; do
     [ -e "$f" ] && sweep_path "$f"
@@ -967,6 +1012,9 @@ fi
 
 if [ "$PRUNED_COUNT" -gt 0 ]; then
   log "rmd-host-cleanup: pruned $PRUNED_COUNT regenerable trees from kept scratch units ($PRUNED_BYTES bytes)"
+fi
+if [ "$TSX_PRUNED_COUNT" -gt 0 ]; then
+  log "rmd-host-cleanup: pruned $TSX_PRUNED_COUNT stale tsx cache files ($TSX_PRUNED_BYTES bytes)"
 fi
 after_pct="$(df_field pct)"; after_avail="$(df_field avail)"
 after_pct="${after_pct:-0}"; after_avail="${after_avail:-0}"

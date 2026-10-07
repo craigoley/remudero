@@ -1,0 +1,76 @@
+- id: W1-T6036
+  title: "THE DEFUSE LANE SEES A WIRE-NAME STAMP AND FILES ONLY WHAT A SHIFTED RUN CONFIRMS — main went red at 2026-10-06T12:00Z on test/a-freshness-drain-keeps-reviewing.test.ts:228 `updated_at: \"2026-09-22T12:00:00Z\"`, a GitHub REST fixture that mapRestPr and buildOpenPrViews turn into lastActivityAt, which deriveDisposition ages against sweep.staleDays (14); the census's AGED_FIELDS keys on `lastActivityAt` only, so the census and the gate gardener's 21-day DEFUSE lead both read 'OK -- 129 fixture stamp(s)' while it crossed"
+  repo: remudero
+  depends_on: [W1-T6035]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which fixture stamps the expiring-fixture census measures and which of them the gate gardener files
+  band_meaning: span
+  origin: "operator session 2026-10-06: main red at 12:00Z on the W1-T4053 fixture (#9561); time-bomb census research"
+  plan_refs: [W1-T5539, W1-T3272, W1-T3838, W1-T3334, W1-T5825, W1-T5826, W1-T4053]
+  files: [scripts/expiring-fixture-census.mjs, src/lib/gate-gardener.ts, test/the-defuse-lane-sees-a-wire-name-stamp.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 in a detached worktree at 49a4c8ed (a6a28515^, the tree before #9561), with
+    scripts/expiring-fixture-census.mjs `censusExpiringFixtures` called with a pinned `now`:
+    WHY IT MISSED. (a) The census matches `${row.field}\s*:\s*"<ISO>"` for the AGED_FIELDS rows only
+    (lastActivityAt, deadline, snoozedUntil, freshUntil, retroAttemptAt, from, through). The fixture wrote the
+    REST wire name `updated_at`. That instant reaches the threshold through two renames: src/lib/open-prs-rest.ts
+    mapRestPr `updatedAt: row.updated_at`, then src/run-task.ts buildOpenPrViews `lastActivityAt: pr.updatedAt`,
+    then src/lib/sweep.ts selectDispositionRule `ageDays` against the DISPOSITION_RULES `stale` row
+    `ageDays >= policy.staleDays` (plan/policy.yaml sweep.staleDays: 14). (b) W1-T3838's completeness check
+    (discoverClockAgedFields) finds the field at the Date.parse site, which is lastActivityAt, so a renamed
+    alias is invisible to it by construction. (c) The file is absent from RECORDED_POPULATION_BY_FILE, so its
+    population of 0 was never noticed. (d) gate-gardener.ts defuseCandidates calls the same function, so the
+    DEFUSE_LEAD_DAYS = 21 lead was blind to it too.
+    REPRODUCED: the shipped census at now=2026-10-06T00:00Z reports 0 within 7 days and 9 within 21 days, none
+    in that file. A prototype that adds `updated_at` and `updatedAt` rows and accepts a quoted or JSON-escaped
+    key reports `test/a-freshness-drain-keeps-reviewing.test.ts:228 updated_at="2026-09-22T12:00:00Z" red
+    2026-10-06T12:00:00Z (0.5d)` at margin 7, and at now=2026-09-23 margin 21 reports it 13.5 days ahead,
+    which is when the gardener would have filed it. On a6a28515 (after #9561) it reports no row for that file.
+    A SECOND DEFECT. censusExpiringFixtures dates every row as stamp + thresholdDays (staleDays). But
+    follow-up-policy.ts compares `Date.parse(candidate.deadline) <= now` and `Date.parse(current.snoozedUntil) >
+    now`, and preference-policy.ts compares `now > Date.parse(preference.freshUntil)`: those have an offset of 0.
+    The census dates those crossings 14 days late, so it reports one 7 days after it has already fired. Today:
+    test/human-handoff-ownership.test.ts:154 deadline="2026-10-01T18:00:00.000Z" is reported "goes red
+    2026-10-15", but that instant passed on 10-01.
+    WHY WIDENING ALONE IS WRONG. On a6a28515 with now=2026-10-06T13:54Z, the widened prototype names 31 rows
+    within 30 days against the shipped 9: 22 new `updated_at`/`updatedAt` rows, 10 of them within the 7-day
+    margin (board snapshot, flow-gardener workflow-run and check-run stamps that no threshold ages). All 25
+    files were run at +0 and +30 under scripts/clock-shift.mjs. None failed only when shifted, except two that
+    fail only because of the shift-artifact W1-T6035 removes: a-dismissed-escalation-records-why, and
+    a-task-with-an-open-pull-request-never-gets-a-second-one, which under the W1-T6035 prototype passes at
+    +10.2, +10.5 and +30 across its 2026-10-16T22:32Z "crossing". So a field-name census is a CANDIDATE
+    generator. Filing on it unconfirmed would open about 20 defuse tasks for non-bombs.
+  design: |
+    (1) scripts/expiring-fixture-census.mjs: add AGED_FIELDS rows `updated_at` (evidence pinned in
+    src/lib/open-prs-rest.ts: "updatedAt: row.updated_at") and `updatedAt` (evidence in src/run-task.ts:
+    "lastActivityAt: pr.updatedAt"), so assertFieldsStillAged fails if either rename is dropped. Give every
+    row an `offsetDays` (lastActivityAt family: the sweep.staleDays policy value; deadline, snoozedUntil,
+    freshUntil: 0; the others read from their own source) and compute expiresAt = stamp + offsetDays. Match
+    the key bare, quoted or JSON-escaped (`"updated_at":"..."`, `\"updated_at\":\"...\"`) with a left word
+    boundary, in both the population scan and the base-attribution scan.
+    (2) src/lib/gate-gardener.ts defuseCandidates: before filing a finding file, CONFIRM it. Run that one
+    file with `--import scripts/clock-shift.mjs` at FK_SHIFT_DAYS = ceil(daysLeft) + 1 and at a control of
+    0.001. File only when the control passes and the shifted run fails. Otherwise ledger
+    `gate_garden.defuse_unconfirmed` with {file, line, crossingDate, outcome: "shifted_passed" |
+    "control_failed"} and file nothing. Memo the verdict in stateDir keyed by the file's blob sha and the shift
+    day, so a pass re-runs a file only when its content or crossing day changes. Inject the runner beside the
+    existing execFile seam, and give the real default one test that actually spawns.
+    (3) The CI census keeps its current blocking contract. Inherited rows warn (W1-T3655/W1-T5826), so the
+    widened set does not redden a PR that did not plant the stamp.
+  acceptance:
+    - claim: "the pre-#9561 fixture line `updated_at: \"2026-09-22T12:00:00Z\"` is reported with crossing 2026-10-06T12:00Z at now 2026-10-06T00:00Z, a quoted JSON key form of the same stamp is reported, and a deadline row is dated at its own instant rather than 14 days later"
+      proof: "unit test: test/the-defuse-lane-sees-a-wire-name-stamp.test.ts"
+    - claim: "the gate gardener files a defuse shard only for a finding whose suite fails shifted past the crossing and passes at the control, and ledgers an unconfirmed finding instead of filing it"
+      proof: "grep: gate_garden\\.defuse_unconfirmed in src/lib/gate-gardener.ts"
+    - claim: "the census pins the REST alias against its mapping source"
+      proof: "grep: updatedAt: row\\.updated_at in scripts/expiring-fixture-census.mjs"
+  falsifier: |
+    Drop the `updated_at` row: the suite's verbatim pre-#9561 line is not reported and the first case fails.
+    Drop the confirmation step: the suite's fixture, a `updated_at` stamp in a suite whose outcome does not
+    depend on it (it passes shifted), is filed as a defuse shard and the second case fails.

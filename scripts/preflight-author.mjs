@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { affectedSelectionOrFull, readAffectedSuitesInput } from '../src/lib/affected-suites.ts';
+import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, symbollessSourceFiles }
+  from '../src/lib/affected-suites.ts';
+import { callerReachableSuites } from '../src/lib/ci-parity.ts';
+import { acquireTestSlot, lowPriorityCommand, testRunArgv } from '../src/lib/test-slot.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
+import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 
 export function authorEnvironment(parent) {
   const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
@@ -32,7 +35,7 @@ export function verifiedSuites(root, suites) {
 
 export function completeTestResult(result) {
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-  return result.status === 0 && !result.signal && !result.error &&
+  return result.status === 0 && !result.signal && !result.error && result.outputComplete !== false &&
     /^# tests [1-9][0-9]*$/m.test(output) && /^# pass [1-9][0-9]*$/m.test(output) && /^# fail 0$/m.test(output);
 }
 
@@ -45,8 +48,31 @@ export function testSummary(output) {
   return fields.every((field) => summary[field] !== null) ? summary : null;
 }
 
+/** The author selection for `changed` over `range` (`<base>...<head>`): the floor, plus the NARROW
+ *  candidate (changed tests, suites naming a changed source symbol or its src/ caller, path readers,
+ *  suites naming a changed file) whenever every changed source file names a symbol. A file whose
+ *  hunks name none — an import-only edit, a deletion — leaves `narrow` absent, so the floor runs. */
+export function authorSelection(root, changed, range, spawn = spawnSync) {
+  return affectedSelectionOrFull(changed, () => {
+    const scoped = (file, args, opts = {}) => {
+      const result = spawn(file, args, { cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
+        env: authorEnvironment(process.env), ...opts });
+      return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '',
+        ...(result.error ? { error: result.error.message } : {}), ...(result.signal ? { signal: result.signal } : {}) };
+    };
+    const diff = scoped('git', ['diff', '-U0', range, '--', 'src', 'scripts', 'bin']);
+    if (diff.status !== 0) throw new Error(`git diff -U0 ${range} exited ${diff.status}: ${diff.stderr.trim().slice(0, 200)}`);
+    const readFile = (path) => readFileSync(join(root, path), 'utf8');
+    const symbolless = symbollessSourceFiles(changed, diff.stdout, readFile);
+    if (symbolless.length > 0) return readAffectedSuitesInput(root, changed);
+    const symbols = changedSymbols(diff.stdout, readFile);
+    const symbolSuites = symbols.length === 0 ? [] : callerReachableSuites(symbols, root, scoped).suites;
+    return readAffectedSuitesInput(root, changed, { symbolSuites });
+  });
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed) => affectedSelectionOrFull(changed, () => readAffectedSuitesInput(root, changed)) } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range) } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
   }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
@@ -59,6 +85,31 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
     env: authorEnvironment(process.env), ...extra,
   });
+  const ensureDiagnostics = () => {
+    if (!diagnosticsRoot) {
+      mkdirSync(join(root, 'coverage'), { recursive: true });
+      diagnosticsRoot = mkdtempSync(join(root, 'coverage', 'rmd-author-'));
+    }
+  };
+  const progress = (currentStep) => {
+    ensureDiagnostics();
+    const path = join(diagnosticsRoot, 'progress.json');
+    writeFileSync(path + '.next', JSON.stringify({ ...receipt, verdict: receipt.verdict ?? 'running',
+      authorPid: process.pid, currentStep, updatedAt: new Date().toISOString() }) + '\n',
+    { mode: 0o600, flag: 'wx', flush: true });
+    renameSync(path + '.next', path);
+  };
+  const runStep = (name, args, file = process.execPath) => {
+    progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs: AUTHOR_STEP_RUNTIME_MS });
+    const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
+      stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
+    // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
+    if (spawn !== spawnSync) return run(file, args);
+    const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
+    const result = captureStepSync(file, args, { cwd: root, env: authorEnvironment(process.env),
+      ...logs, resultPath });
+    return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
+  };
   const git = (args) => {
     const result = run('git', args);
     if (result.status !== 0 || result.error || result.signal) {
@@ -67,21 +118,22 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     return result.stdout;
   };
   const report = (name, result, ok) => {
-    if (!diagnosticsRoot) {
-      mkdirSync(join(root, 'coverage'), { recursive: true });
-      diagnosticsRoot = mkdtempSync(join(root, 'coverage', 'rmd-author-'));
-    }
+    ensureDiagnostics();
     const stdout = result.stdout ?? '';
     const stderr = result.stderr ?? '';
     const logs = { stdout: join(diagnosticsRoot, `${name}.stdout.log`), stderr: join(diagnosticsRoot, `${name}.stderr.log`) };
-    writeFileSync(logs.stdout, stdout, { mode: 0o600, flag: 'wx' });
-    writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
+    if (!result.capturedLogs) {
+      writeFileSync(logs.stdout, stdout, { mode: 0o600, flag: 'wx' });
+      writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
+    }
     receipt.steps.push({ name, ok, exitCode: result.status, signal: result.signal ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name === 'affected-tests' ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
         stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr),
-        mayBeIncomplete: Boolean(result.error || result.signal) } });
+        ...(result.nativeResult ? { nativeResult: result.nativeResult } : {}),
+        mayBeIncomplete: Boolean(result.error || result.signal || result.outputComplete === false) } });
+    progress();
     // Keep terminal feedback small even for thousands of suites. Never rerun to recover output.
     console.log(`${name}: ${ok ? 'PASS' : 'FAIL'}; ${result.error || result.signal ? 'captured output (may be incomplete)' : 'complete output'}: ${relative(root, diagnosticsRoot)}`);
     const failures = stdout.split('\n').filter((line) => /^\s*not ok [0-9]+/.test(line));
@@ -103,22 +155,28 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (![receipt.headSha, receipt.baseSha].every((sha) => /^[a-f0-9]{40}$/.test(sha))) throw new Error('unresolved head or base SHA');
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
-    const selection = select(receipt.changedFiles);
-    receipt.selection = selection.fullRun || selection.suites.length === 0 ? 'full-fallback' : 'affected-floor';
+    const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
+    // The narrow selection runs when it was computed and names a suite; else the floor; else all.
+    const narrow = selection.fullRun ? undefined : selection.narrow;
+    receipt.floorSize = selection.fullRun ? null : selection.suites.length;
+    receipt.narrowSize = narrow === undefined ? null : narrow.length;
+    receipt.selection = selection.fullRun ? 'full-fallback' : narrow?.length ? 'affected-narrow'
+      : selection.suites.length > 0 ? 'affected-floor' : 'full-fallback';
     receipt.reasons = selection.reasons;
-    if (!selection.fullRun && selection.suites.length === 0) receipt.reasons = [...selection.reasons, 'empty affected floor: refusing a zero-test green'];
-    receipt.suites = verifiedSuites(root, receipt.selection === 'full-fallback' ? listTestFiles(root) : selection.suites);
+    if (!selection.fullRun && receipt.selection === 'full-fallback') receipt.reasons = [...selection.reasons, 'empty affected floor: refusing a zero-test green'];
+    receipt.suites = verifiedSuites(root, receipt.selection === 'full-fallback' ? listTestFiles(root)
+      : receipt.selection === 'affected-narrow' ? narrow : selection.suites);
     if (receipt.suites.length === 0) throw new Error('no verified test files in the checkout');
-    console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s); head=${receipt.headSha}, base=${receipt.baseSha}`);
+    console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
-      const census = run(process.execPath, [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
+      const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusOk = census.status === 0 && !census.signal && !census.error;
       report('census-precheck', census, censusOk);
       if (census.status === 2 || census.signal || census.error || census.status === null) {
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
-        const staticResult = run(process.execPath, ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
+        const staticResult = runStep('static-preflight', ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
           '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
         const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
         report('static-preflight', staticResult, staticOk);
@@ -126,9 +184,17 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         // receipt and selected floor, but don't spend another full run on known-doomed tests.
         if (staticOk) {
           // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-          const tests = run(process.execPath, ['--test', '--test-reporter=tap', `--test-concurrency=${Math.min(4, availableParallelism())}`,
-            '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
-          report('affected-tests', tests, completeTestResult(tests));
+          // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
+          const slot = acquireTestSlot('preflight-author:affected-tests');
+          try {
+            receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites], Math.min(4, slot.concurrency)));
+            const tests = runStep('affected-tests', child.args, child.file);
+            report('affected-tests', tests, completeTestResult(tests));
+          } finally {
+            slot.release();
+          }
         } else {
           receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
           console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');
@@ -147,10 +213,19 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   receipt.durationMs = Date.now() - startedAt;
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
-    if (diagnosticsRoot) writeFileSync(join(diagnosticsRoot, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    if (diagnosticsRoot) {
+      writeFileSync(join(diagnosticsRoot, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    }
     writeFileSync(join(root, 'coverage/preflight-author.json'), JSON.stringify(receipt, null, 2) + '\n');
+    if (diagnosticsRoot) progress();
   } catch (error) {
-    console.error(`author receipt could not be written: ${error.message}`);
+    receipt.verdict = 'refused';
+    receipt.error = `author receipt could not be written: ${error.message}`;
+    console.error(receipt.error);
+    if (diagnosticsRoot) {
+      try { progress(); }
+      catch (progressError) { console.error(`refused progress receipt unavailable: ${progressError.message}`); }
+    }
     return 1;
   }
   console.log(`author verdict: ${receipt.verdict}; hosted full-suite/coverage remains REQUIRED, not proven by this run`);

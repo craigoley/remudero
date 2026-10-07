@@ -1,25 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -72,0 +73,7 @@
+@@ -85,0 +86,6 @@
 +
-+## Pass 2026-10-06T10:53:35.712Z
++## Pass 2026-10-07T10:29:54.880Z
 +
-+- retire step-names-come-from-source: Workers offered it have rarely used it, compared with other learnings.
-+- retire webtools-are-injection-surface: Workers offered it have rarely used it, compared with other learnings.
++- retire canonical-checkout-lags-by-design: Workers offered it have rarely used it, compared with other learnings.
 +
-+Learnings used when offered: 18%. Dangling Why pointers: 1.
-diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
---- a/learnings/architecture.yaml
-+++ b/learnings/architecture.yaml
-@@ -175,1 +175,2 @@
--  lifecycle: active
-+  # knowledge gardener: retire step-names-come-from-source
-+  lifecycle: superseded
++Learnings used when offered: 19%. Dangling Why pointers: 1.
 diff --git a/learnings/platform.yaml b/learnings/platform.yaml
 --- a/learnings/platform.yaml
 +++ b/learnings/platform.yaml
-@@ -187,1 +187,2 @@
+@@ -307,1 +307,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire webtools-are-injection-surface
++  # knowledge gardener: retire canonical-checkout-lags-by-design
 +  lifecycle: superseded

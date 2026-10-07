@@ -16,7 +16,7 @@ import type { NowDecision } from "./now-decisions.js";
 import { NAV_BADGE_VIEW_NAME, withNavBadgeDecisions, type NavBadgeData } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowAction, type NowViewData } from "./now-view.js";
 import type { ReadModelBodyEntry, ReadModelWorkerHandle } from "./read-model-worker.js";
-import { oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
+import { newestLedgerRow, oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
 
 export const NEEDS_YOU_VIEW_NAME = "needs-you";
 export const NEEDS_YOU_VIEW_VERSION = 1;
@@ -74,7 +74,7 @@ function projectionSources(projection: HumanGateProjection): HumanGateSource[] {
 }
 
 /** The composite's data and sources from the bodies held now; `known` are the instances the worker reported. */
-export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>, known: Iterable<string>): { data: NeedsYouData; sources: ViewSource[]; generation: number } {
+export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>, known: Iterable<string>): { data: NeedsYouData; sources: ViewSource[]; generation: number; buildStartedMs?: number } {
   const nows = new Map<string, ReadModelBodyEntry>();
   let inbox: ReadModelBodyEntry | undefined;
   for (const entry of bodies.values()) {
@@ -166,7 +166,10 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     humanGates, needsYou: consumeHumanGateCounts(humanGates, { shown }),
     decisions: decisions.sort(newestFirst), ...(page ? { inbox: page } : {}), instances, ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
-  return { data, sources: sources.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)), generation: Math.max(0, ...inputs.map((i) => i.generation)) };
+  // The newest input build: the one whose body this composition is the first to carry.
+  const started = inputs.flatMap((input) => (input.buildStartedMs === undefined ? [] : [input.buildStartedMs]));
+  return { data, sources: sources.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)), generation: Math.max(0, ...inputs.map((i) => i.generation)),
+    ...(started.length > 0 ? { buildStartedMs: Math.max(...started) } : {}) };
 }
 
 /**
@@ -177,12 +180,12 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
 export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = systemClock): ReadModelWorkerHandle {
   let current: ReadModelBodyEntry | undefined;
   const compose = (): ReadModelBodyEntry => {
-    const { data, sources, generation } = composeNeedsYou(inner.bodies, inner.state().instances.keys());
+    const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, inner.state().instances.keys());
     const stale = sources.some((s) => s.state !== "fresh");
     const etag = viewEtag(NEEDS_YOU_VIEW_NAME, NEEDS_YOU_VIEW_VERSION, stale, data);
     if (current?.etag === etag) return current;
     const body: ViewBody = { view: NEEDS_YOU_VIEW_NAME, version: NEEDS_YOU_VIEW_VERSION, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-    current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body };
+    current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
     return current;
   };
   // W1-T5373: a served nav-badge body carries the same composite count; the worker's own body stays the shadow's.
@@ -193,7 +196,12 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
     const memo = badges.get(entry);
     if (memo?.etag === composite.etag) return memo.entry;
     const data = withNavBadgeDecisions(entry.body.data as NavBadgeData, (composite.body.data as NeedsYouData).humanGates);
-    const decorated = { ...entry, etag: viewEtag(entry.view, entry.version, entry.body.stale, data), body: { ...entry.body, data } };
+    // Its latency stamps are the newer of its own build and the now builds whose decisions it carries: the badge's
+    // own entry kept the build and ledger row of its last worker body, so every decoration re-sent those (2026-10-06).
+    const started = [entry.buildStartedMs, composite.buildStartedMs].filter((ms): ms is number => ms !== undefined);
+    const rowTs = newestLedgerRow(composite.body.sources, newestLedgerRow(entry.body.sources));
+    const decorated = { ...entry, etag: viewEtag(entry.view, entry.version, entry.body.stale, data), body: { ...entry.body, data },
+      ...(started.length > 0 ? { buildStartedMs: Math.max(...started) } : {}), ...(rowTs !== undefined ? { rowTs } : {}) };
     badges.set(entry, { etag: composite.etag, entry: decorated });
     return decorated;
   };

@@ -20,6 +20,7 @@ import { emptyRepoStore, pullOf, type FieldTrialsGithubStore, type GithubPage, t
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { TaskCaseFile } from "../src/lib/task-case-file.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { servedTrialCohorts, trialRevisionPins, TRIAL_COHORT_MAX, TRIAL_REVISION_RE } from "../src/lib/field-trials-cohorts.js";
 
 const T = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
 
@@ -47,6 +48,103 @@ function flowReadOf(rows: Record<string, unknown>[]): FieldTrialsLedgerRead {
     newestTs: null, rows: rows.map((value, index) => projectFlowRow(value, `fp-${index}-${JSON.stringify(value).length}`)) };
 }
 
+const CONTROL_FIELDS = ["harness", "prompt", "tool", "scorer", "environment"] as const;
+function controlledRows(id: string, assignmentExtra: Record<string, unknown> = {}, attemptExtra: Record<string, unknown> = {}): Record<string, unknown>[] {
+  return [row("worker.assignment", `task-${id}`, `run-${id}`, T(10), {
+    worker_assignment: { id, selected: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" } },
+    benchmark_run: { work: { taskClass: { state: "observed", value: "implement" }, risk: { state: "observed", value: "medium" },
+      shape: { lane: { state: "observed", value: "build" } } },
+    stack: Object.fromEntries(CONTROL_FIELDS.map((field, i) => [`${field}Revision`, { state: "observed", value: String(i + 1).repeat(40) }])) },
+    ...assignmentExtra }), row("worker.attempt", `task-${id}`, `run-${id}`, T(10, 1), {
+      selection_assignment_id: id, provider: "codex", served_model: "gpt-6.1-sol-snapshot", success: true, ...attemptExtra })];
+}
+const controlledFold = (rows: Record<string, unknown>[], asOf = T(11)) => servedTrialCohorts(flowReadOf(rows).rows, asOf, periodOf);
+
+test("private served trial cohorts partition exact immutable controls and reported fallback identities", () => {
+  const ordinary = controlledRows("ordinary");
+  const fallback = controlledRows("fallback", {}, { served_model: "gpt-6-luna-snapshot", success: false });
+  const changed = controlledRows("changed");
+  (changed[0]!.benchmark_run as { stack: Record<string, unknown> }).stack.promptRevision = { state: "observed", value: "a".repeat(64) };
+  const evidence = controlledFold([...ordinary, ...fallback, ...changed]);
+  assert.equal(evidence.denominator, 3); assert.equal(evidence.qualifiedAssignments, 3);
+  assert.equal(evidence.cohorts.length, 3, "changed controls and served fallbacks cannot share a selected-model bucket");
+  const failed = evidence.cohorts.find((cohort) => cohort.servedModel === "gpt-6-luna-snapshot")!;
+  assert.equal(failed.selectedModel, "gpt-6.1-sol"); assert.equal(failed.workerFailed, 1); assert.equal(failed.workerSucceeded, 0);
+  assert.equal(failed.revisions.prompt, "2".repeat(40)); assert.equal(failed.selectedEffort, "medium");
+  assert.equal(evidence.outcomeBasis, "terminal-worker-attempt"); assert.equal(evidence.causalClaims, "none");
+});
+
+test("private trial revisions retain only observed immutable IDs and reject misleading pin booleans", () => {
+  assert.equal(TRIAL_REVISION_RE.test("a".repeat(40)), true);
+  assert.equal(TRIAL_REVISION_RE.test("main"), false);
+  assert.deepEqual(trialRevisionPins(undefined), Object.fromEntries(CONTROL_FIELDS.map((field) => [field, null])));
+  for (const pin of [null, [], { state: "unavailable", value: "a".repeat(40) }, { state: "observed", value: "main" },
+    { state: "observed", value: "a".repeat(41) }, { state: "observed", value: 1 }])
+    assert.equal(trialRevisionPins({ promptRevision: pin }).prompt, null);
+  assert.equal(trialRevisionPins({ promptRevision: { state: "observed", value: "A".repeat(64) } }).prompt, "a".repeat(64));
+  const rows = CONTROL_FIELDS.flatMap((missing) => {
+    const pair = controlledRows(missing);
+    delete (pair[0]!.benchmark_run as { stack: Record<string, unknown> }).stack[`${missing}Revision`];
+    return pair;
+  });
+  const evidence = controlledFold(rows);
+  assert.equal(evidence.qualifiedAssignments, 0); assert.deepEqual(evidence.excluded, { "immutable-stack-pins-unavailable": 5 });
+  const historical = flowReadOf(controlledRows("old")).rows;
+  delete historical[0]!.stackRevisions;
+  assert.equal(servedTrialCohorts(historical, T(11), periodOf).qualifiedAssignments, 0, "legacy true booleans do not reconstruct IDs");
+});
+
+test("private trial cohorts refuse wrong assignment joins and missing or future terminal evidence", () => {
+  const rows = [
+    ...controlledRows("host", {}, { host: "other-host" }), ...controlledRows("run", {}, { run_id: "other-run" }),
+    ...controlledRows("task", {}, { task_id: "other-task" }), ...controlledRows("provider", {}, { provider: "other-provider" }),
+    ...controlledRows("identity", { run_id: null }), ...controlledRows("provider-gap", { worker_assignment: { id: "provider-gap" } }),
+    ...controlledRows("future", {}, { ts: T(20) }), ...controlledRows("backward", {}, { ts: T(9) }),
+    ...controlledRows("missing-time", {}, { ts: null }), ...controlledRows("served", {}, { served_model: null }),
+    ...controlledRows("outcome", {}, { success: null }), ...controlledRows("context", {
+      worker_assignment: { id: "context", selected: { provider: "codex", model: "gpt-6.1-sol" } } }),
+    controlledRows("nonstarter")[0]!, row("worker.assignment", null, null, T(10)) ];
+  const evidence = controlledFold(rows);
+  assert.equal(evidence.denominator, 14); assert.equal(evidence.excludedAssignments, 14); assert.equal(evidence.qualifiedAssignments, 0);
+  assert.deepEqual(evidence.excluded, { "assignment-id-unavailable": 1, "attempt-identity-mismatch": 6,
+    "attempt-time-unavailable-or-outside-window": 3, "served-model-unavailable": 1, "worker-outcome-unavailable": 1,
+    "assignment-context-unavailable": 1, "terminal-attempt-unavailable": 1 });
+  assert.deepEqual(controlledFold(controlledRows("asof"), "bad-date").excluded, { "attempt-time-unavailable-or-outside-window": 1 });
+  const legacy = flowReadOf(controlledRows("legacy-provider")).rows;
+  delete legacy[0]!.provider; delete legacy[1]!.provider;
+  assert.deepEqual(servedTrialCohorts(legacy, T(11), periodOf).excluded, { "attempt-identity-mismatch": 1 });
+});
+
+test("private trial cohorts deduplicate equivalent receipts and preserve conflicting assignment or attempt identities", () => {
+  const good = controlledRows("same"); const assignmentConflict = controlledRows("assignment"); const terminalConflict = controlledRows("terminal");
+  const evidence = controlledFold([...good, ...good, ...assignmentConflict, { ...assignmentConflict[0]!, host: "changed-host" },
+    ...terminalConflict, { ...terminalConflict[1]!, served_model: "gpt-6-luna-snapshot" }]);
+  assert.equal(evidence.denominator, 3); assert.equal(evidence.duplicateAssignments, 1);
+  assert.equal(evidence.qualifiedAssignments, 1); assert.equal(evidence.cohorts[0]!.assignments, 1);
+  assert.deepEqual(evidence.excluded, { "conflicting-assignment-or-attempt": 2 });
+});
+
+test("private trial cohort output is bounded while an existing partition still accepts later assignments", () => {
+  const rows = Array.from({ length: TRIAL_COHORT_MAX + 1 }, (_, i) => controlledRows(String(i), {}, { served_model: `snapshot-${i}` })).flat();
+  rows.push(...controlledRows("repeat", {}, { served_model: "snapshot-0" }));
+  const evidence = controlledFold(rows);
+  assert.equal(evidence.denominator, TRIAL_COHORT_MAX + 2); assert.equal(evidence.cohorts.length, TRIAL_COHORT_MAX);
+  assert.equal(evidence.qualifiedAssignments, TRIAL_COHORT_MAX + 1); assert.deepEqual(evidence.excluded, { "cohort-output-bound": 1 });
+  assert.equal(evidence.cohorts.find((cohort) => cohort.servedModel === "snapshot-0")!.assignments, 2);
+});
+
+test("the existing private flow retains served trial control cohorts while its release excludes the new evidence", () => {
+  const rows = controlledRows("private-controls");
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11), sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const evidence = snapshot.servedTrialCohorts![0]!.evidence;
+  assert.equal(evidence.qualifiedAssignments, 1); assert.equal(evidence.cohorts[0]!.revisions.environment, "5".repeat(40));
+  const candidate = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-controlled-trial-release-salt");
+  assert.equal(candidate.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(candidate), /servedTrialCohorts|served-trial-cohorts-v1|1111111111111111111111111111111111111111/);
+  assert.equal(snapshot.causalClaims, "none");
+});
+
 test("Field Trials keeps the Sol 6.1 switch separate from Sol 6 and cash separate from subscription", () => {
   const assignment = (id: string, model: string) => ({ step: "worker.assignment", ts: T(30), task_id: `W1-T${id}`,
     host: "azure-core", worker_assignment: { id, requested: { model: "sonnet" }, selected: { model } } });
@@ -67,6 +165,34 @@ test("Field Trials keeps the Sol 6.1 switch separate from Sol 6 and cash separat
   assert.equal(next.assignments, 2);
   assert.equal(next.nonStarterAssignments, 1);
   assert.equal(next.costMissingAssignments, 1);
+  assert.equal(snapshot.causalClaims, "none");
+});
+
+test("the existing private repair family consumes explicit PR costs without exporting their identities", () => {
+  const store = emptyRepoStore();
+  for (const number of [1, 2]) {
+    const pull = pullOf(rawPull(number, { task: "W1-Tshared", merged: T(4) }))!;
+    store.pulls[pull.nodeId] = pull;
+  }
+  const rows = [1, 2].flatMap((number) => {
+    const context = { worker_run_id: `fix-${number}`, worker_rung: "fix", repair_round_id: `round-${number}`,
+      repair_pr_url: `https://github.com/acme/core/pull/${number}` };
+    return [
+      { ...assign("W1-Tshared", "daemon", `a-${number}`, T(2)), ...context },
+      row("worker.attempt", "W1-Tshared", "daemon", T(3), { ...context, selection_assignment_id: `a-${number}`,
+        total_cost_usd: number, billing_mode: "api" }),
+    ];
+  });
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(20),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": store } } });
+  const cost = Object.values(snapshot.families.repair)[0]!.cells.reworkCost;
+  assert.equal(cost.knownApiAttempts, 2); assert.equal(cost.apiCostEstimateUsd, 3);
+  assert.equal(cost.subscriptionNotionalUsd, null);
+  assert.equal(cost.history, "unavailable-retention-uncertified");
+  const candidate = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-repair-release-salt");
+  assert.equal(candidate.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(candidate), /fix-1|round-1|repair_pr_url|repair_round_id|worker_run_id/);
   assert.equal(snapshot.causalClaims, "none");
 });
 
@@ -162,7 +288,8 @@ test("private Field Trials counts assignment class, risk, lane and effective sta
   assert.deepEqual(snapshot.assignmentTelemetry, [{ source: "core", selectedModel: "claude-sonnet-5-5", assignments: 1,
     taskClass: 1, risk: 1, workLane: 1, harnessPinned: 1, promptPinned: 0, toolPinned: 0,
     scorerPinned: 0, environmentPinned: 0, attemptReceipts: 0, nonStarterAssignments: 1,
-    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0 }]);
+    costMissingAssignments: 1, apiCostEstimateUsd: 0, subscriptionNotionalUsd: 0,
+    servedModelKnownAssignments: 0, workerOutcomeKnownAssignments: 0, servedModelUnavailableReasons: {} }]);
 });
 
 test("private Field Trials joins terminal cost by assignment and separates API estimates from subscription notional cost", () => {
@@ -654,4 +781,91 @@ test("field trials learning loop counts proposals to outcomes and never zeroes h
   const cells = released.state === "candidate" ? released.release.cells.filter((cell) => cell.family === "learning") : [];
   assert.deepEqual(cells.map((cell) => cell.stratum.kind).sort(), ["evidence-followup", "gardener-pr", "judgement"]);
   assert.ok(cells.every((cell) => cell.reasons.includes("humanEffort:no-independent-human-effort-estimate")));
+});
+
+test("private field trials distinguish explicit Codex notional from cash and keep identity gaps measurable", () => {
+  const rows = [
+    { step: "worker.assignment", ts: T(10), task_id: "W1-T1", worker_assignment: { id: "codex-a", selected: { model: "gpt-6.1-sol" } } },
+    { step: "worker.assignment", ts: T(10), task_id: "W1-T2", worker_assignment: { id: "codex-b", selected: { model: "gpt-6.1-sol" } } },
+    { step: "worker.attempt", ts: T(10, 1), selection_assignment_id: "codex-a", total_cost_usd: 0,
+      notional_cost_usd: 0.75, billing_mode: "subscription", served_model: null, served_model_reason: "CLI-no-model", success: false },
+    { step: "worker.attempt", ts: T(10, 2), selection_assignment_id: "codex-b", total_cost_usd: 0,
+      notional_cost_usd: -1, billing_mode: "subscription", served_model: "gpt-6.1-sol-snapshot", success: true },
+  ];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const counts = snapshot.assignmentTelemetry[0]!;
+  assert.equal(counts.subscriptionNotionalUsd, 0.75);
+  assert.equal(counts.apiCostEstimateUsd, 0);
+  assert.equal(counts.costMissingAssignments, 1, "an invalid explicit notional cannot fall back to a cash placeholder");
+  assert.equal(counts.servedModelKnownAssignments, 1);
+  assert.equal(counts.workerOutcomeKnownAssignments, 2, "known failure is an outcome, not an accepted task");
+  assert.deepEqual(counts.servedModelUnavailableReasons, { "CLI-no-model": 1 });
+});
+
+test("the existing private flow consumes prevention source import and later work while its release excludes the evidence", () => {
+  const prevention = { id: "ci-friction:check:synthetic-private-gate", taskId: "W1-Tprivate-source", causeKey: "check:synthetic-private-gate",
+    path: "src/run-task.ts", blob: "b".repeat(40), mergeRevision: "a".repeat(40), mergedAt: T(2), workScope: "fix-worker-attempt" };
+  const imported = { state: "observed", source: "module-import-git", path: prevention.path, blob: prevention.blob,
+    revision: "c".repeat(40), capturedAt: T(3) };
+  const repair = { worker_run_id: "private-worker-source", worker_rung: "fix", repair_round_id: "private-source-round",
+    repair_pr_url: "https://github.com/acme/core/pull/9" };
+  const assigned = assign("private-task-source", "daemon", "private-source-assignment", T(4));
+  const rows = [row("ci-friction.scorecard", "DAEMON", "garden", T(2), { prevention_sources: [prevention] }),
+    { ...assigned, ...repair, benchmark_run: { ...((assigned as Record<string, unknown>).benchmark_run as object), loadedModule: imported } },
+    row("worker.attempt", "private-task-source", "daemon", T(5), { ...repair, selection_assignment_id: "private-source-assignment", success: true })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const actual = snapshot.preventionAdoption![0]!.evidence.records[0]!;
+  assert.equal(actual.expectedSource.blob, prevention.blob); assert.deepEqual(actual.loadedSource, imported);
+  assert.equal(actual.laterWork.state, "observed"); assert.equal(actual.efficacyClaim, "none");
+  const release = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-prevention-release-salt");
+  assert.equal(release.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(release), /private-worker-source|private-source-round|private-source-assignment|synthetic-private-gate|preventionAdoption|module-import-git/);
+});
+
+test('private repair cells separate observed current-head green from legacy first-commit success', () => {
+  const saved = repoStore([rawPull(1, { merged: T(2) }), rawPull(2, { merged: T(2) })]);
+  const first = saved.pulls.PR_node_1!; first.headSha = 'a'.repeat(40);
+  first.headGreen = { version: 1, headSha: first.headSha, state: 'observed', readAt: T(4),
+    history: { state: 'partial', nextPage: 2, pagesRead: 1, reason: 'pending-history' }, pending: [], seenCheckIds: [11],
+    firstEver: 'unavailable-retention-uncertified',
+    firstObserved: { checkId: 11, suiteId: 22, runId: 33, jobId: 44, checkCompletedAt: T(2),
+      completedAt: T(2), firstReadAt: T(3), validatedAt: T(4), producer: { workflowId: 55, path: '.github/workflows/ci.yml' } } };
+  const other = saved.pulls.PR_node_2!; other.headSha = 'b'.repeat(40); other.headGreen = first.headGreen;
+  const github: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: { 'acme/core': saved } };
+  const sources = [{ label: 'core', repo: 'acme/core', ledger: flowReadOf([]) }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  const cells = Object.values(snapshot.families.repair).map((partition) => partition.cells.toFirstObservedCurrentHeadGreen);
+  assert.equal(cells.reduce((sum, cell) => sum + cell.observed, 0), 1);
+  assert.equal(cells.reduce((sum, cell) => sum + (cell.excluded['missing-join'] ?? 0), 0), 1);
+  for (const cell of cells) {
+    assert.equal(cell.firstEver, 'unavailable-retention-uncertified');
+    assert.equal(cell.basis, 'pr-created-to-observed-current-head-gate-success');
+  }
+  first.headGreen.firstObserved!.completedAt = T(30);
+  const future = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  assert.equal(Object.values(future.families.repair).reduce((sum, partition) => sum + partition.cells.toFirstObservedCurrentHeadGreen.observed, 0), 0);
+});
+
+
+test("a Codex cash zero never substitutes for a missing trial notional receipt", () => {
+  const assigned = (id: string) => ({ step: "worker.assignment", ts: T(10), task_id: "W1-Tusage",
+    worker_assignment: { id, selected: { provider: "codex", model: "gpt-6.1-sol" } } });
+  const attempt = (id: string, extra: Record<string, unknown>) => ({ step: "worker.attempt", ts: T(10, 1),
+    selection_assignment_id: id, total_cost_usd: 0, billing_mode: "subscription", ...extra });
+  const rows = [assigned("explicit"), assigned("legacy"), assigned("zero"),
+    attempt("explicit", { provider: "codex" }), attempt("legacy", {}),
+    attempt("zero", { provider: "codex", notional_cost_usd: 0 })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const counts = snapshot.assignmentTelemetry[0]!;
+  assert.equal(counts.assignments, 3);
+  assert.equal(counts.costMissingAssignments, 2);
+  assert.equal(counts.subscriptionNotionalUsd, 0);
+  assert.equal(counts.apiCostEstimateUsd, 0);
+  assert.equal(projectFlowRow(rows[0]!, "assignment").provider, "codex");
+  assert.equal(projectFlowRow(rows[3]!, "attempt").provider, "codex");
 });

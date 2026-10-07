@@ -1,0 +1,80 @@
+- id: W1-T6093
+  title: "BACK-TO-BACK SELF-MERGES SHARE ONE DAEMON RESTART — a daemon self-path advance scores the full restart threshold on its own, so decideFreshnessRestart restarts at once even while busy and the next self-path merge a few minutes later costs a second boot and drain; hold a restart in a short coalescing window that each new advance re-arms, bounded by an upper staleness age so it can never starve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — when a decided freshness restart is taken; a pure rule in deploy-judge.ts and its one caller in daemon.ts
+  band_meaning: span
+  origin: "operator ruling 2026-10-06 (P7 of the 2026-10-04 restart research, research/restart/report.md on the Azure host): approve coalescing restarts"
+  plan_refs: [W1-T4945, W1-T5308, W1-T5476, W1-T2965]
+  files: [src/lib/deploy-judge.ts, src/lib/daemon.ts, test/back-to-back-self-merges-share-one-daemon-restart.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-06: approve P7 and file it. Hold a daemon restart briefly so back-to-back
+    self-merges share one restart. The operator rejects hard thresholds, so the hold is a short, self-healing
+    coalescing window: each new merge re-arms it, and an upper age bounds it so a restart is never starved.
+    MEASURED, 10-06 operator session (HANDOFF-2026-10-06.md and WATCH.md on the Azure host): the core daemon
+    booted 25 times on 2026-10-06 and 21 times on 2026-10-05. 8 of the 10-06 boots came within about 10 min of
+    the previous one: 00:41->00:48, 02:40->02:41, 03:52->03:55, 05:43->05:50->05:52, 07:11->07:16,
+    09:46->09:56, 20:04->20:09 (gaps 1-10 min). Each restart drains work for 1-9 min, and the research measured
+    the first review.posted a median 15 min after a boot. RE-READ 2026-10-06T23:18Z at filing: one nice'd grep
+    of `"daemon.boot"` in the LIVE /home/craigoleyagent/rmd-state2/state/ledger.ndjson (20,473 rows, first row
+    2026-09-28) returns 2 rows, 2026-10-06T20:09:27Z and 21:20:28Z. Compaction prunes the live file
+    (memory: live-ledger-gaps-are-not-evidence), so it confirms only the 20:09 boot of the last pair; the
+    full day's count is the session's, read over the ledger union.
+    WHY EVERY SELF-PATH MERGE RESTARTS AT ONCE. src/lib/deploy-judge.ts freshnessAdvanceWorth scores any
+    advance touching DAEMON_SELF_PATH_PREFIXES at 18, and DEPLOY_RESTART_SCORE_THRESHOLD.value is 18. So
+    decideFreshnessRestart returns `restart` on the change weight alone, busy or idle. daemon.ts decideFreshness
+    re-scores on every dispatch tick (W1-T5308), so the next self-path merge minutes after the boot is again a
+    full-weight advance and a second restart.
+    NOT A MINIMUM LIFETIME, NOT A TIMER. The 10-02 rulings rejected a freshness minimum lifetime, and the
+    W1-T2965 comment in daemon.ts rejects a timer or backoff sized against a moving merge rate. This hold is
+    neither. It opens only on an observed advance, not on boot age. The merge rate itself sizes it, because
+    every further advance re-arms the window and a quiet window lets the restart go.
+    STARVATION IS THE KNOWN FAILURE (memory: daemon-freshness-starves-while-busy). On 2026-10-02 a busy daemon ran
+    stale code for 97 min and then about 3 h, because a deferral never accumulated pressure. The upper age bound
+    below exists so that a steady stream of merges can never hold a restart open the same way.
+  design: |
+    (1) src/lib/deploy-judge.ts gains a pure `coalesceFreshnessRestart(input)` beside decideFreshnessRestart.
+    Its input is the FreshnessDecision, `newSha`, `lastAdvanceAtMs` (when the daemon first saw this newSha),
+    `staleSinceMs`, `nowMs`, and a recorded window (`{value, reason}`, the RecordedDeployRestartThreshold
+    shape). It returns `{action: "restart" | "hold", reason, heldMs, windowEndsAtMs}`. A defer decision passes
+    through unchanged.
+    (2) THE WINDOW. A restart decision is held while `nowMs - lastAdvanceAtMs` is under the recorded window.
+    Each new advance (a different newSha) resets lastAdvanceAtMs, so it re-arms the window. Once a window
+    passes with no new advance, the restart goes. The starting value is 10 min, recorded with its reason: all 8
+    measured 10-06 follow-on boots came 1-10 min after the previous one. It is a recorded, re-measurable value, like the score
+    threshold, not a ceiling.
+    (3) THE UPPER AGE. The hold ends, and the restart goes, once age pressure reaches half the score threshold.
+    Age pressure is the existing staleness term in decideFreshnessRestart, measured from staleSinceMs. At
+    today's 60-min DEPLOY_RESTART_RATE_CEILING_MS horizon that is 30 min of staleness. It is derived from the
+    recorded horizon and threshold, so it adds no new constant, and the hold can never outlast staleness the
+    busy path already accepts.
+    (4) NO HOLD WHEN THE LAG IS ALREADY HURTING. A restart driven by withheld reviews (W1-T5476) goes at once,
+    because holding would prolong the review stall it exists to end. An unreadable advance (`changes`
+    undefined) also goes at once, because an unknown advance never waits. Only a restart the change weight
+    decided can be held.
+    (5) src/lib/daemon.ts decideFreshness keeps `lastAdvanceAtMs` and the last newSha beside staleSinceMs,
+    applies the coalesce after decideFreshnessRestart, and returns `defer` while it holds. Every hold and the
+    final release write one `daemon.freshness_coalesced` row naming new_sha, held_ms, advances_coalesced,
+    window_ms, and the reason the hold ended (`window_quiet` or `upper_age`). A held tick must not be silent:
+    defer rows are not ledgered today (W1-T5308), and the hold is a new deferral.
+    (6) SELF-HEALING, NO OPERATOR STEP. The window re-arms and expires on its own, the upper age always
+    releases, and the coalesced rows let the next measurement re-size the recorded window from real
+    advance spacing.
+  acceptance:
+    - claim: "a self-path advance followed by a second self-path advance inside the window yields one restart decision, taken after the window passes with no further advance; each new advance re-arms the window; once age pressure reaches half the threshold the restart goes even while advances keep arriving; a restart driven by withheld reviews or by an unreadable advance is never held; a defer decision passes through unchanged"
+      proof: "unit test: test/back-to-back-self-merges-share-one-daemon-restart.test.ts"
+    - claim: "the coalescing rule lives beside the freshness decision"
+      proof: "grep: coalesceFreshnessRestart in src/lib/deploy-judge.ts"
+    - claim: "the daemon ledgers every hold and its release"
+      proof: "grep: daemon\\.freshness_coalesced in src/lib/daemon.ts"
+  falsifier: |
+    Remove the coalesce call from decideFreshness, and a second self-path advance three minutes after the
+    first produces a second `restart`, so the test fails. Drop the upper-age arm, and a stream of advances
+    every five minutes holds the restart past 30 min of staleness, so the starvation test fails.

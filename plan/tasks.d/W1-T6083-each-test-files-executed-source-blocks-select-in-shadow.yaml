@@ -1,0 +1,57 @@
+- id: W1-T6083
+  title: "EACH TEST FILE'S EXECUTED SOURCE BLOCKS ARE RECORDED ON MAIN AND SELECT IN SHADOW — the affected-suite floor picks 2,374-2,385 of ~2,700 suites (~138 of 147 CPU-min) for an ordinary src PR because src/run-task.ts reaches 447 of 453 src modules; the per-process V8 data that would say which suites EXECUTE a changed function is already written by every coverage shard and discarded after one day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — a third, coverage-derived selection arm recorded beside the floor and narrow arms, in shadow only
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-selection REPORT draft C, TIA prototype)"
+  plan_refs: [W1-T4404, W1-T5705, W1-T5923, W1-T6084, W1-T6089]
+  files: [src/lib/test-impact-map.ts, src/lib/affected-suites.ts, scripts/coverage-merge-ratchet.mjs, scripts/select-affected-suites.mjs, test/each-test-files-executed-source-blocks-select-in-shadow.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (origin/main 189f19cbb, research-selection): over 5 merged src PRs the floor
+    selected 2,374-2,385 suites and the narrow arm 176-2,415. src/run-task.ts reaches 447/453 src modules
+    and 2,341 suites reach it (864 by import, 230 by spawning it by path), so a module-level graph cannot
+    separate them. A test-impact prototype (30 single-file runs, per-file lcov, 5/5 controls) selected
+    0/25, 0/25, 0/25, 1/25 and 13/25 of random floor suites; the 13/25 case (#9701) edited an exported
+    module-scope const, which correctly selects every loader. A function-body edit selects ~1% of the
+    floor (~25 suites, 95% upper bound ~110); with census suites and changed tests, ~140-220 suites
+    (10-25 CPU-min against 138). The raw data already exists: each coverage shard writes per-process V8
+    coverage, and `coverage-merge-ratchet.mjs --compact-output` keeps the process boundaries, but the
+    coverage-shard artifacts are uploaded with retention-days 1 and nothing reads them per test file.
+  design: |
+    (1) src/lib/test-impact-map.ts builds, from one main run's compact per-process coverage, a map from
+    each test file to the source blocks (function ranges, by file and stable range key) it EXECUTED with
+    a non-zero count, plus the modules it only LOADED. It is keyed by the main sha it was built from.
+    scripts/coverage-merge-ratchet.mjs gains a mode that emits that map from the compact output. The
+    daemon side fetches main's coverage-shard artifacts inside their one-day retention, the way the test
+    gardener already fetches the flake aggregate, and keeps the newest map under state; no workflow edit.
+    (2) selectAffectedSuites gains an `impact` arm beside `narrow`, computed by `impactArmSelection` (exported
+    from src/lib/test-impact-map.ts) in SHADOW only and recorded
+    by the existing shadow scorer (scripts/select-affected-suites.mjs); live selection does not change.
+    SOUNDNESS RULES (from the research, each one a test): changed tests always self-select; an edit to a
+    module-scope or exported binding (not inside a function body) selects every suite that LOADED the
+    module; non-code inputs come from W1-T6084's read map, and until it lands a changed non-code path
+    leaves the arm at the narrow selection; census suites are kept by their path rules; child processes
+    write coverage to a per-test NODE_V8_COVERAGE subdirectory so a spawned src/run-task.ts is credited
+    to the test that spawned it; a map older than its staleness bound (or built from a sha the diff's base
+    is not descended from) falls back to the narrow selection and says so; the merge queue and main stay
+    full runs.
+  acceptance:
+    - claim: "the impact map credits a function body only to the tests that executed it, not to tests that only loaded its module; the coverage arm selects a suite that executed a changed function body and skips one that only loaded the module; an edit to an exported module-scope binding selects every suite that loaded the module; an impact map older than its staleness bound falls back to the narrow selection and names the fallback"
+      proof: "unit test: test/each-test-files-executed-source-blocks-select-in-shadow.test.ts"
+    - claim: "the selector computes the impact arm through the impact map module"
+      proof: 'grep: impactArmSelection( in src/lib/affected-suites.ts'
+  falsifier: |
+    Credit every module a test loaded as executed: the fixture suite that only imports the changed module
+    is selected for a function-body edit and the second test fails.
+  note: |
+    SHADOW ONLY. Flipping the impact arm live is a separate operator decision on the shadow record, like
+    W1-T4406's flag. The soundness of non-code inputs depends on W1-T6084; this task does not wait for it,
+    it falls back instead.

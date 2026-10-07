@@ -208,7 +208,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -259,6 +259,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
         ...(cost(row.total_cost_usd) !== undefined ? { cost: cost(row.total_cost_usd) }
           : cost(row.cost_usd) !== undefined ? { cost: cost(row.cost_usd) } : {}),
+        ...(Object.hasOwn(row, "notional_cost_usd") ? { notionalCost: cost(row.notional_cost_usd) ?? null } : {}),
         ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
         ...(str(row.served_model)?.trim() ? { servedModel: str(row.served_model) } : {}),
         ...(typeof row.success === "boolean" ? { success: row.success } : {}),
@@ -275,6 +276,8 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       .map(([id]) => receipts.get(id));
     const armReceipts = armAssignments
       .filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined);
+    const priced = (receipt: NonNullable<typeof armAssignments[number]>) => receipt.billingMode === "subscription"
+      ? receipt.notionalCost === null ? undefined : receipt.notionalCost ?? receipt.cost : receipt.cost;
     return {
       arm,
       provider,
@@ -285,13 +288,13 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       medianWorkerMinutes: median(armReceipts.flatMap((receipt) => (receipt.minutes === undefined ? [] : [receipt.minutes]))),
       meanTokens: mean(armReceipts.flatMap((receipt) => (receipt.tokens === undefined ? [] : [receipt.tokens]))),
       meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "api" ? [] : [receipt.cost]))),
-      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "subscription" ? [] : [receipt.cost]))),
-      costMissingAssignments: armAssignments.filter((receipt) => receipt?.cost === undefined || receipt.billingMode === undefined).length,
+      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || receipt.billingMode !== "subscription" ? [] : [priced(receipt)!]))),
+      costMissingAssignments: armAssignments.filter((receipt) => receipt === undefined || priced(receipt) === undefined || receipt.billingMode === undefined).length,
       nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
       receiptCoverage: {
         assignments: armAssignments.length,
         terminalAssignments: armReceipts.length,
-        costKnownAssignments: armReceipts.filter((receipt) => receipt.cost !== undefined && receipt.billingMode !== undefined).length,
+        costKnownAssignments: armReceipts.filter((receipt) => priced(receipt) !== undefined && receipt.billingMode !== undefined).length,
         servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
         outcomeKnownAssignments: armReceipts.filter((receipt) => receipt.success !== undefined).length,
       },

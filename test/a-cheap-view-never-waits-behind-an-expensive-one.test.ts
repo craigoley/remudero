@@ -263,3 +263,71 @@ setInterval(() => {}, 1000);
   await until(() => logs.some((l) => l.step === "read_model.views_exited" && l.extra.lane === "heavy"), "a heavy lane death is logged by lane");
   await until(() => got().filter((l) => l === "fast:lane:*:false").length >= 2, "the fast lane reclaimed the heavy lane's units at its death and at its respawn");
 });
+
+/**
+ * `now` builds in bounded calls (board+snapshot, then decisions, then a cheap assemble), and an idle
+ * instance's call builds nothing. Placed by its LAST call, it settled on the fast lane on the host
+ * (2026-10-06: 3,209 of 3,892 `materialize_deferred` rows deferred `now@core` behind cheap views).
+ */
+function stagedLanes(t: TestCtx, kind: string) {
+  const stateDir = scratch(t, `${kind}-state`);
+  const ledgerDir = scratch(t, `${kind}-ledger`);
+  writeFileSync(join(ledgerDir, LIVE), row(T0, "r1"));
+  switchOn(stateDir, ["staged"]);
+  const hand = handClock(T0 + 1_000);
+  const projector = projectorStates(stateDir, ledgerDir, hand.clock);
+  t.after(() => void projector.release());
+  const plan = { costs: [2_000, 2_000, 50], due: true, stage: 0 };
+  const view: ReadModelView = {
+    name: "staged", version: 1,
+    prepare: (_ctx, more) => {
+      if (!plan.due) return true;
+      while (plan.stage < plan.costs.length) {
+        if (!more()) return false;
+        hand.advance(plan.costs[plan.stage++]!);
+      }
+      return true;
+    },
+    materialize: () => {
+      if (plan.stage < plan.costs.length) return [];
+      plan.stage = 0;
+      return [{ key: "", data: { at: hand.clock.now() }, sources: [] }];
+    },
+  };
+  const lane = (name: "fast" | "heavy") => {
+    const posted: ReadModelWorkerMessage[] = [];
+    const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views: [view], viewsOnly: true, oracle: "off", lane: name, post: (m) => void posted.push(m) });
+    t.after(() => void ticker.release());
+    ticker.observe(projector.states);
+    const run = (ticks: number): void => {
+      for (let i = 0; i < ticks; i++) {
+        hand.advance(60_000);
+        ticker.tick();
+      }
+    };
+    return { ticker, run, moves: () => posted.flatMap((m) => (m.type === "view_lane" ? [[m.view, m.heavy, m.costMs]] : [])), bodies: () => posted.filter((m) => m.type === "body").length };
+  };
+  return { plan, lane };
+}
+
+test("a view whose bounded build ends in a cheap call is placed by its costliest call, so it never settles on the fast lane", (t) => {
+  const { lane } = stagedLanes(t, "staged-fast");
+  const fast = lane("fast");
+  fast.run(3);
+  assert.equal(fast.bodies(), 1, "three bounded calls finish one build");
+  assert.deepEqual(fast.moves(), [["staged", true, 2_000]], "its 2,000 ms calls, not its 50 ms last one, send it to the heavy lane");
+});
+
+test("a heavy unit stays on the heavy lane through a cheap last call and a poll that builds nothing, and a whole build under soloMs still moves it back", (t) => {
+  const { plan, lane } = stagedLanes(t, "staged-heavy");
+  const heavy = lane("heavy");
+  heavy.ticker.lane({ view: "staged", heavy: true, dueAt: 0, costMs: 2_000 });
+  heavy.run(3);
+  assert.equal(heavy.bodies(), 1, "the heavy lane finished the build");
+  plan.due = false;
+  heavy.run(2);
+  assert.deepEqual(heavy.moves(), [], "neither the 50 ms assemble nor an idle poll is a cheap build");
+  Object.assign(plan, { due: true, costs: [10, 10, 10] });
+  heavy.run(1);
+  assert.deepEqual(heavy.moves(), [["staged", false, 30]], "a build whose costliest call fits soloMs returns to the fast lane");
+});

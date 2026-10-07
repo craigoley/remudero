@@ -265,9 +265,10 @@ test("STRUCTURAL: every one of the four run-task.ts call sites still passes an e
   // The title position must be one of the two authored sources (W1-T327): the worktree's own
   // last-commit subject (implement/retro) or the harness-shaped commit header (triage/plan) —
   // never a bare literal and never omitted, which is what this pattern enforces structurally.
+  // Implement builds through the awaited variant, so its proofs never spawnSync on the loop (W1-T6034).
   const callSites = [
     ...src.matchAll(
-      /ghPrCreateFillCommand\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])(?:,\s*planPrBody)?\)/g,
+      /ghPrCreateFillCommand(?:Async)?\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])(?:,\s*planPrBody)?\)/g,
     ),
   ];
   assert.equal(callSites.length, 4, "exactly implement, retro, triage and plan build a create argv");

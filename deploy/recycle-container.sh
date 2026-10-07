@@ -116,7 +116,7 @@ set -euo pipefail
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
 RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
-RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR)
+RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR RMD_TEST_SLOT_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
   # shellcheck source=./runtime-env-vars.sh
@@ -215,6 +215,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       gh_app_id) gh_app_id="$value" ;;
       gh_app_installation_id) gh_app_installation_id="$value" ;;
       gh_app_private_key_path) gh_app_private_key_path="$value" ;;
+      gh_app_private_key_host_path) RMD_GH_APP_PRIVATE_KEY_HOST_PATH="$value" ;;
       service_user|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log) : ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
       project|github_repo|retired|primary) : ;;
@@ -688,12 +689,12 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
-  # `.Config.Image` (the reference this container was started FROM), never `.Image` (the resolved
-  # digest section 7 below already owns, for a different comparison: proving the STARTED container
-  # matches what THIS run just pulled).
+  # `.Image`, the id this container was created from. `.Config.Image` is a tag that any instance's
+  # pull re-points: after a Node base bump the first instance recycled, and every later one read
+  # the NEW image's NODE_VERSION against its own and refused (2026-10-07).
   IMAGE_ENV_LINES=()
   IMAGE_ENV_KNOWN=0
-  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   if [ -n "${CONTAINER_IMAGE_REF}" ]; then
     if IMAGE_ENV_RAW="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_IMAGE_REF}" 2>/dev/null)"; then
       IMAGE_ENV_KNOWN=1
@@ -911,14 +912,25 @@ app_auth_host_path() {
 
 APP_AUTH_MISSING=""
 APP_KEY_HOST=""
+APP_PRIVATE_KEY_ARGS=()
 app_auth_note() { APP_AUTH_MISSING="${APP_AUTH_MISSING}${APP_AUTH_MISSING:+; }$1"; }
 [ -n "$(CAPTURED_get GH_APP_ID)" ] || app_auth_note "GH_APP_ID is not set"
 [ -n "$(CAPTURED_get GH_APP_INSTALLATION_ID)" ] || app_auth_note "GH_APP_INSTALLATION_ID is not set"
 CAPTURED_APP_KEY_PATH="$(CAPTURED_get GH_APP_PRIVATE_KEY_PATH)"
+if [ -n "${RMD_GH_APP_PRIVATE_KEY_HOST_PATH:-}" ]; then
+  if [ ! -r "${SCRIPT_DIR}/app-private-key-mount.sh" ]; then
+    echo "recycle-container: REFUSING -- explicit App key mount helper is unavailable." >&2
+    exit 1
+  fi
+  . "${SCRIPT_DIR}/app-private-key-mount.sh"
+  app_private_key_mount_args "$RMD_GH_APP_PRIVATE_KEY_HOST_PATH" "$CAPTURED_APP_KEY_PATH" || exit 1
+  APP_KEY_HOST="$RMD_GH_APP_PRIVATE_KEY_HOST_PATH"
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "$APP_KEY_HOST" "$CAPTURED_APP_KEY_PATH" ro)
+fi
 if [ -z "${CAPTURED_APP_KEY_PATH}" ]; then
   app_auth_note "GH_APP_PRIVATE_KEY_PATH is not set"
 else
-  APP_KEY_HOST="$(app_auth_host_path "${CAPTURED_APP_KEY_PATH}")"
+  [ -n "$APP_KEY_HOST" ] || APP_KEY_HOST="$(app_auth_host_path "${CAPTURED_APP_KEY_PATH}")"
   if [ -z "${APP_KEY_HOST}" ]; then
     app_auth_note "GH_APP_PRIVATE_KEY_PATH (${CAPTURED_APP_KEY_PATH}) is under neither bind mount, so this shell cannot verify the key exists"
   elif [ ! -s "${APP_KEY_HOST}" ]; then
@@ -1482,6 +1494,9 @@ fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   SMOKE_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
 fi
+if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
+fi
 SMOKE_ARGS+=(
   -w /app "${PULLED_IMAGE_ID}"
   node --import tsx -e 'import("./src/lib/containment.ts").then((m) => m.workerSmokeMain()).then((c) => process.exit(c))'
@@ -1579,6 +1594,9 @@ if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${SCRATCH_ARGS[@]}")
+fi
+if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
 fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null

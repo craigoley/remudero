@@ -4,6 +4,7 @@ import { execFile as execFileChild, execFileSync, spawn as spawnChild, type Chil
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import {
@@ -12,9 +13,21 @@ import {
   type CapabilityUseRequest,
 } from "./capability-grant.js";
 import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalEffectResult } from "./action-reconciliation.js";
+import {
+  affectedSelectionOrFull,
+  changedSymbols,
+  symbollessSourceFiles,
+  type AffectedSelection,
+  type AffectedSuitesInput,
+} from "./affected-suites.js";
+import { callerReachableSuites } from "./ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -22,7 +35,7 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { withTempDir } from "./tmp.js";
+import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
@@ -75,6 +88,8 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  /** The shell-less surface a caller declares only when its harness owns git (run-task.ts's coherence rule). */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   runId?: string;
@@ -92,8 +107,15 @@ interface CodexSpawnArgs {
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
 }
 
+/** W1-T6027: how a worker's process ended. `exit` carries a code (0 included) and `signal` the signal's name, each as the
+ * runner OBSERVED it. `unobserved` is for a runner that saw no process end: the cash HTTP runner, or a claude envelope with
+ * no SDK throw. It is never read as exit 0. Re-exported by worker.ts beside `WorkerResult.exit`. */
+export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; signal: string } | { kind: "unobserved" };
+
 interface CodexWorkerResult {
   provider: "codex";
+  /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
+  harnessCommit?: CodexHarnessCommit;
   sessionId: string;
   costUsd: number;
   /** W1-T5629: NOTIONAL, never billed — see {@link codexNotionalCostUsd}. Absent when the model is unpriced. */
@@ -105,6 +127,8 @@ interface CodexWorkerResult {
   stderr: string;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
+  exit: WorkerExit;
   apiError: boolean;
   usageRefusal?: UsageLimitRefusal;
   permissionDenials: unknown[];
@@ -113,6 +137,7 @@ interface CodexWorkerResult {
   model: string;
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
   servedModel?: null;
@@ -1903,6 +1928,7 @@ export interface ParsedCodexEvents {
   text: string;
   blocks: string[];
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   numTurns: number;
   isError: boolean;
   subtype: string;
@@ -1999,6 +2025,10 @@ class CodexJsonlAccumulator {
   private input = 0;
   private output = 0;
   private cacheRead = 0;
+  private completedTurns = 0;
+  private usageTurns = 0;
+  private missingUsageTurns = 0;
+  private turnInProgress = false;
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
@@ -2028,6 +2058,8 @@ class CodexJsonlAccumulator {
       text: this.blocks.at(-1) ?? "",
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      tokenUsageState: this.usageTurns === 0 ? "unavailable"
+        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
       isError: this.errors.length > 0,
       subtype: this.errors.length > 0 ? "error_codex" : "success",
@@ -2068,17 +2100,34 @@ class CodexJsonlAccumulator {
       : "other";
     this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
-    if (event.type === "turn.started") this.numTurns += 1;
+    if (event.type === "turn.started") {
+      this.numTurns += 1;
+      this.turnInProgress = true;
+    }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
-    if (event.type === "turn.completed" && event.usage) {
-      this.input += event.usage.input_tokens ?? 0;
-      this.output += event.usage.output_tokens ?? 0;
-      this.cacheRead += event.usage.cached_input_tokens ?? 0;
+    if (event.type === "turn.completed") {
+      this.turnInProgress = false;
+      this.completedTurns += 1;
+      const input = event.usage?.input_tokens;
+      const output = event.usage?.output_tokens;
+      const cached = event.usage?.cached_input_tokens;
+      if (typeof input === "number" && Number.isSafeInteger(input) && input >= 0
+        && typeof output === "number" && Number.isSafeInteger(output) && output >= 0
+        && typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0 && cached <= input
+        && [this.input + input, this.output + output, this.cacheRead + cached].every(Number.isSafeInteger)) {
+        this.input += input;
+        this.output += output;
+        this.cacheRead += cached;
+        this.usageTurns += 1;
+      } else {
+        this.missingUsageTurns += 1;
+      }
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
       this.keptBytes += Buffer.byteLength(message, "utf8");
@@ -2189,28 +2238,6 @@ function isGitWorktree(cwd: string): boolean {
 }
 
 /**
- * Resolve only this checkout's Git administrative directories. Codex workspace-write protects
- * `.git` by default, while Remudero implementation prompts require the worker to commit. Linked
- * worktrees need both the per-worktree git dir and their shared common dir; paths outside the
- * configured Remudero root are refused instead of widening the sandbox from repository metadata.
- */
-export function codexGitWritableRoots(cwd: string, configRoot: string): string[] {
-  try {
-    const root = physicalPath(configRoot);
-    const output = execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    return [...new Set(output.split("\n").map((line) => line.trim()).filter(Boolean).map(physicalPath))]
-      .filter((candidate) => isWithin(root, candidate));
-  } catch (error) {
-    // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
-    return [];
-  }
-}
-
-/**
  * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
  * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
  * (`scripts/claude-md-budget-baseline.json`'s `capBytes`), and this ceiling binds only if that
@@ -2302,6 +2329,59 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
   ];
 }
 
+function codexReadOnly(args: CodexSpawnArgs): boolean {
+  return args.sandboxIntent !== "disposable-review" && Array.isArray(args.tools) &&
+    !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+}
+
+/**
+ * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
+ * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
+ * rule run-task.ts holds), else this module, after the run, through the host git leaf.
+ */
+export function codexHarnessCommits(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tools" | "cashTools">): boolean {
+  if (args.sandboxIntent === "disposable-review" || codexReadOnly(args as CodexSpawnArgs)) return false;
+  const shellLess = Array.isArray(args.tools) && !args.tools.includes("Bash");
+  return args.cashTools === undefined && !shellLess;
+}
+
+/** Told to a codex writer whose edits {@link commitCodexWriterEdits} commits. */
+export const CODEX_HARNESS_COMMITS_PART =
+  "GIT: your sandbox cannot write this repository's git directory, so do not run `git commit`, `git push` or any git " +
+  "command that writes. The harness commits every change you leave in the worktree when you finish. End your final " +
+  "message with one line `COMMIT_MESSAGE: <conventional-commit subject, at most 100 characters>`.\n\n";
+
+const CODEX_FALLBACK_SUBJECT = "chore: commit the Codex worker's edits (harness commit, W1-T6148)";
+
+/** The subject a codex writer asked for: its last anchored `COMMIT_MESSAGE:` line, as worker.ts reads one. */
+export function codexCommitSubject(text: string): string {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  const subject = matches.at(-1)?.[1]?.trim() ?? "";
+  return subject.length > 0 && subject.length <= 100 ? subject : CODEX_FALLBACK_SUBJECT;
+}
+
+export type CodexHarnessCommit =
+  | { outcome: "committed"; sha: string }
+  | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
+  | { outcome: "refused"; reason: string };
+
+/** Commit what a codex writer left in `cwd`, through the leaf (pinned gitdir, vetted config, harness hooks).
+ *  Only in a tree `worktreeAdd` cut and recorded: a checkout the harness did not cut is never committed in. */
+export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
+  if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
+  try {
+    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    hostWorktreeGit(cwd, ["add", "-A"]);
+    hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
+    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(JSON.stringify({ event: "codex.harness_commit_refused", cwd, reason }));
+    return { outcome: "refused", reason };
+  }
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -2309,7 +2389,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
-  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const readOnly = codexReadOnly(args);
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
@@ -2369,13 +2449,14 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
-  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
+  // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
+  // plant config the host's authenticated push honours, so the harness commits for it instead
+  // ({@link commitCodexWriterEdits}).
   return [
     "exec",
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
-    ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
     "-C", args.cwd,
     "-",
   ];
@@ -3235,6 +3316,8 @@ export interface OpenWeightWorkerResult {
   stderr: string;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: always `unobserved` — an HTTP runner has no process whose end it could see. */
+  exit: WorkerExit;
   apiError: boolean;
   permissionDenials: unknown[];
   /** This adapter runs in the daemon, not a child worker process. The Azure key is absent. */
@@ -3282,14 +3365,22 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
-  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags; unit_test runs only the suites the harness selects from your diff, and refuses a selection too broad to run here. No shell; no network.", required: ["check"] },
 };
+
+/** The `--import` chain package.json's `test`/`test:ci` scripts load before any suite: tsx, then
+ *  test/setup/tmp-hygiene.ts, which installs the temp-dir reaper and the no-live-remote guards. A
+ *  `node --test` without it runs every fixture unguarded. The path is relative to the check's cwd,
+ *  the worktree root (`--chdir cwd`). Parity with package.json is enforced by test.
+ *  {@link openWeightCheckArgv} drops the setup import in a tree that has no such file. */
+export const TEST_SETUP_IMPORT = "./test/setup/tmp-hygiene.ts";
+export const TEST_PROCESS_GUARD_IMPORTS: readonly string[] = ["--import", "tsx", "--import", TEST_SETUP_IMPORT];
 
 /** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
  *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
  *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
 export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
-  unit_test: ["node", "--import", "tsx", "--test", "--test-reporter=tap"],
+  unit_test: ["node", ...TEST_PROCESS_GUARD_IMPORTS, "--test", "--test-reporter=tap"],
   typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
   // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
   // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
@@ -3431,10 +3522,13 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
  * reader cannot see either.
  *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
- * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
- * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
-export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
+ * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
+ * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Elsewhere this
+ * argv runs the whole suite under the same setup imports as `test:ci`
+ * ({@link TEST_PROCESS_GUARD_IMPORTS}), and re-admitting caller arguments stays a separate,
+ * deliberate decision rather than a default. */
+export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
   }
@@ -3443,7 +3537,183 @@ export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   if (paths !== undefined) {
     throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
   }
-  return [...OPENWEIGHT_CHECKS[check]];
+  const argv = [...OPENWEIGHT_CHECKS[check]];
+  // A CONSUMER REPO HAS NO SETUP FILE. Loading a missing `--import` fails before any test runs, so
+  // a tree without it runs exactly what main ran: tsx alone. Remudero's own tree always has it.
+  const at = argv.indexOf(TEST_SETUP_IMPORT);
+  if (cwd !== undefined && at > 0 && !existsSync(join(cwd, TEST_SETUP_IMPORT))) argv.splice(at - 1, 2);
+  return argv;
+}
+
+// ── W1-T6091: THE unit_test CHECK RUNS THE DIFF'S AFFECTED SUITES ────────────────────────────
+// MEASURED 2026-10-06: the whole suite is ~21 min against OPENWEIGHT_CHECK_TIMEOUT_MS's 10, so a
+// whole-tree unit_test always timed out, at ~70 core-minutes a call, and left no ledger row.
+
+/** The file whose presence says a tree carries the affected-suites model (the census and
+ *  plan-reading listings the selector reads). A consumer repo has none, and keeps the fixed
+ *  whole-tree argv: it has no model to narrow by, its suite is its own size, and the wall-clock
+ *  bound still ends the call — now ledgered, so its cost is visible rather than assumed. */
+export const OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER = "scripts/diff-class.mjs";
+/** PRIMARY CONTROL: above this many selected suites the check refuses rather than run. At the
+ *  cap below, forty suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
+export const OPENWEIGHT_UNIT_TEST_MAX_SUITES = 40;
+/** `--test-concurrency` for a harness-scoped run: node's default is cores-1, which on the fleet
+ *  host is 7 suites at once per lane, each spawning git and tsx. W1-T6090's testRunConcurrency
+ *  replaces this constant when it lands. */
+export const OPENWEIGHT_UNIT_TEST_CONCURRENCY = 2;
+/** Prefix that runs a scoped check below the daemon's own priority. */
+export const OPENWEIGHT_UNIT_TEST_NICE: readonly string[] = ["nice", "-n", "10"];
+/** BACKSTOP on computing the selection itself (git reads plus the census listings): it fires
+ *  only when a listing hangs, and the overrun is a refusal naming it. */
+export const OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS = 2 * 60_000;
+/** One row per run_check call, any check. Deliberately NOT in DECISION_RELEVANT_LEDGER_STEPS
+ *  (lib/ledger.ts): nothing decides on it; it prices the check, so rotation may archive it. */
+export const OPENWEIGHT_RUN_CHECK_LEDGER_STEP = "cash.run_check";
+/** The prefix every refusal of a too-broad selection carries, so a lane reads one sentence. */
+export const OPENWEIGHT_UNIT_TEST_TOO_BROAD = "selection too broad for an open-weight check — run in CI";
+
+const UNIT_TEST_SUITE = /^test\/[^\0\n]*\.test\.ts$/;
+/** This module's own checkout: the selector's helper scripts run from HERE, never from the
+ *  worktree, whose files the model writes and which therefore run only inside the sandbox. */
+const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function fullSelection(reason: string): AffectedSelection {
+  return { suites: [], fullRun: true, reasons: [`full run: ${reason}`], recentOnly: { floor: [] } };
+}
+
+/**
+ * The suites a worktree's diff against its merge base with origin/main affects, by the same
+ * selector `preflight-author.mjs`'s authorSelection uses: the NARROW arm (changed tests, suites
+ * naming a changed symbol or its src/ caller, path readers and namers) when every changed source
+ * file names a symbol, else the floor. Every input is read from git and from files as DATA;
+ * the census listings come from {@link HARNESS_ROOT}'s diff-class.mjs pointed at the worktree,
+ * since the worktree's own copy is model-writable code this process must not execute.
+ * Anything unreadable is a FULL selection naming why — never a narrower guess.
+ */
+export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpawn = defaultPreflightSpawn): AffectedSelection {
+  const root = realpathSync(cwd);
+  const run = (file: string, args: string[], at = root): string => {
+    const r = spawn(file, args, { cwd: at });
+    if (r.status !== 0) throw new Error(`${file} ${args.slice(0, 3).join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
+    return r.stdout;
+  };
+  const lines = (text: string) => text.split("\n").map((l) => l.trim()).filter(Boolean);
+  let base: string;
+  let changed: string[];
+  try {
+    base = run("git", ["merge-base", "origin/main", "HEAD"]).trim();
+    changed = [...new Set([
+      ...lines(run("git", ["diff", "--name-only", base])),
+      ...lines(run("git", ["ls-files", "--others", "--exclude-standard"])),
+    ])].sort();
+  } catch (err) {
+    // No readable diff means no narrow answer: a FULL selection naming why, which then refuses.
+    return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
+  }
+  return affectedSelectionOrFull(changed, (): AffectedSuitesInput => {
+    const diff = run("git", ["diff", "-U0", base, "--", "src", "scripts", "bin"]);
+    const readFile = (path: string) => readFileSync(join(root, path), "utf8");
+    const symbolless = symbollessSourceFiles(changed, diff, readFile);
+    const symbols = symbolless.length > 0 ? [] : changedSymbols(diff, readFile);
+    const files = new Map<string, string>();
+    for (const path of lines(run("git", ["ls-files", "--", "src", "scripts", "bin", "test"]))) {
+      if (!/\.(?:ts|mts|mjs|js|cjs)$/.test(path) || !existsSync(join(root, path))) continue;
+      files.set(path, readFile(path));
+    }
+    const dir = makeTempDir("ow-unit-test");
+    try {
+      const list = join(dir, "changed.txt");
+      writeFileSync(list, changed.join("\n") + "\n");
+      const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+      const listing = (flag: string) =>
+        lines(run(process.execPath, ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", root], HARNESS_ROOT));
+      const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f));
+      const pathReaders = [...listing("--list-census-suites"), ...(prose ? listing("--list-plan-reading-suites") : [])];
+      return {
+        files,
+        pathReaders,
+        ...(symbolless.length > 0 ? {} : { symbolSuites: symbols.length === 0 ? [] : callerReachableSuites(symbols, root, spawn).suites }),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+/** What one `unit_test` call does with a selection: run an explicit file list, run nothing, or
+ *  refuse with the reason. A whole-tree run is never one of the outcomes. */
+export type OpenWeightUnitTestPlan =
+  | { kind: "run"; argv: string[]; suites: string[] }
+  | { kind: "empty"; reasons: string[] }
+  | { kind: "refused"; reason: string; suites: number };
+
+/** Pure: `baseArgv` is {@link openWeightCheckArgv}'s unit_test argv. Suites are kept only when
+ *  they are `test/…​.test.ts` files present under `cwd`, so no entry can read as a flag. */
+export function openWeightUnitTestPlan(selection: AffectedSelection, baseArgv: readonly string[], cwd: string): OpenWeightUnitTestPlan {
+  if (selection.fullRun) {
+    return { kind: "refused", reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${selection.reasons.join("; ")}`, suites: 0 };
+  }
+  const suites = [...new Set(selection.narrow ?? selection.suites)]
+    .filter((s) => UNIT_TEST_SUITE.test(s) && existsSync(join(cwd, s)))
+    .sort();
+  if (suites.length > OPENWEIGHT_UNIT_TEST_MAX_SUITES) {
+    return {
+      kind: "refused",
+      reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${suites.length} affected suites exceed the ${OPENWEIGHT_UNIT_TEST_MAX_SUITES}-suite bound`,
+      suites: suites.length,
+    };
+  }
+  if (suites.length === 0) return { kind: "empty", reasons: selection.reasons };
+  const argv = [...OPENWEIGHT_UNIT_TEST_NICE, ...baseArgv, `--test-concurrency=${OPENWEIGHT_UNIT_TEST_CONCURRENCY}`, ...suites];
+  return { kind: "run", argv, suites };
+}
+
+/** {@link selectOpenWeightUnitTestSuites} in a child process, so its git reads and listings never
+ *  block the daemon's event loop. It runs THIS checkout's code (cwd {@link HARNESS_ROOT}) with the
+ *  check's credential-free env; a child that fails or overruns is a FULL selection naming why. */
+export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Record<string, string>): Promise<AffectedSelection> {
+  const code = "const m = await import(process.argv[1]);" +
+    "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout) as AffectedSelection;
+  } catch (err) {
+    // A failed or overrun selection is never an empty one: it is FULL, so the check refuses.
+    const e = err as { killed?: boolean; message?: string };
+    return fullSelection(e.killed === true
+      ? `the selection overran ${OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS / 1000}s`
+      : `the selection failed — ${String(e.message ?? err).slice(0, 300)}`);
+  }
+}
+
+/** Where a run_check row goes, and whose run it belongs to. */
+export interface OpenWeightRunCheckLedger {
+  config: Config;
+  runId?: string;
+  taskId?: string;
+  clock: Pick<Clock, "now" | "iso">;
+}
+
+function ledgerRunCheck(
+  ledger: OpenWeightRunCheckLedger,
+  row: { check: unknown; outcome: "ran" | "empty" | "refused"; suites: number | null; startedAt: number; exitCode?: number; timedOut?: boolean; reason?: string },
+): void {
+  appendLedger(ledgerPathFor(ledger.config), {
+    run_id: ledger.runId ?? "unattributed",
+    task_id: ledger.taskId ?? "unattributed",
+    step: OPENWEIGHT_RUN_CHECK_LEDGER_STEP,
+    check: String(row.check),
+    outcome: row.outcome,
+    suites: row.suites,
+    duration_ms: ledger.clock.now() - row.startedAt,
+    exit_code: row.exitCode ?? null,
+    timed_out: row.timedOut ?? false,
+    ...(row.reason !== undefined ? { reason: row.reason.slice(0, 500) } : {}),
+  });
 }
 
 /** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
@@ -3487,6 +3757,20 @@ function openWeightTools(
     }));
 }
 
+/** W1-T6106: the open-weight write tools' path — contained like a read, and never the worktree's `.git`
+ *  entry, which a host git call would otherwise follow. hooks/ stays writable: it is product source here, and
+ *  the host never executes the worktree's copy. */
+export function openWeightWritablePath(cwd: string, candidate: unknown): string {
+  const target = openWeightContainedPath(cwd, candidate);
+  const root = realpathSync(cwd);
+  let existing = target;
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  for (const rel of [relative(root, target), relative(root, realpathSync(existing))]) {
+    if (rel.split(sep)[0]!.toLowerCase() === ".git") throw new Error("tool path names the worktree's .git entry, which only the harness writes");
+  }
+  return target;
+}
+
 function openWeightContainedPath(cwd: string, candidate: unknown): string {
   if (typeof candidate !== "string" || candidate.trim() === "") throw new Error("tool path must be a non-empty string");
   const root = realpathSync(cwd);
@@ -3528,20 +3812,21 @@ async function executeOpenWeightTool(
   checkEnv: Record<string, string>,
   workerHome: string,
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
+  ledger: OpenWeightRunCheckLedger,
 ): Promise<unknown> {
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
     case "write_file": {
       if (typeof args.content !== "string") throw new Error("write_file content must be a string");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, args.content, "utf8");
       return { written: relative(realpathSync(cwd), path) };
     }
     case "edit_file": {
       if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       const before = readFileSync(path, "utf8");
       const at = before.indexOf(args.old_string);
       if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {
@@ -3554,7 +3839,26 @@ async function executeOpenWeightTool(
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
       // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
       // fresh network namespace before it runs.
-      const argv = openWeightCheckArgv(args.check, args.paths);
+      const startedAt = ledger.clock.now();
+      let argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      // W1-T6091: in a tree carrying the selector, unit_test runs the HARNESS-derived affected
+      // suites as explicit files, or nothing, or refuses — never the whole tree.
+      let suites: number | null = null;
+      if (args.check === "unit_test" && existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER))) {
+        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd);
+        if (plan.kind === "refused") {
+          ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason });
+          return { check: args.check, ran: false, suites: plan.suites, refused: plan.reason };
+        }
+        if (plan.kind === "empty") {
+          const output = `no suite is affected by this worktree's diff; nothing ran (${plan.reasons.join("; ") || "no changed file reaches a suite"})`;
+          ledgerRunCheck(ledger, { check: args.check, outcome: "empty", suites: 0, startedAt });
+          return { check: args.check, ran: false, suites: 0, output };
+        }
+        argv = plan.argv;
+        suites = plan.suites.length;
+      }
+      const scoped = suites === null ? {} : { suites };
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -3562,14 +3866,16 @@ async function executeOpenWeightTool(
           workerHome,
           env: checkEnv,
         });
-        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0 });
+        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
       } catch (err) {
         // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
         // still throws, because that is not a result.
-        const e = err as { status?: number; code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer };
+        const e = err as { status?: number; code?: number | string; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
-        return { check: args.check, exitCode, output: out.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true });
+        return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
       }
     }
     case "grep_files": {
@@ -3788,6 +4094,7 @@ function openWeightResult(input: {
     stderr: error ?? "",
     subtype: error ? "openweight_error" : "success",
     isError: error !== undefined,
+    exit: { kind: "unobserved" },
     apiError: error !== undefined,
     permissionDenials: [],
     childEnvKeys: [],
@@ -3980,7 +4287,8 @@ export async function spawnFoundryClaudeWorker(
         }
         let result: unknown;
         try {
-          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
+          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
+            { config, runId: args.runId, taskId: args.taskId, clock });
         } catch (error) {
           // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash ${label} tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -4248,6 +4556,7 @@ export async function spawnOpenWeightWorker(
                 checkEnv,
                 args.workerHome,
                 args.runCheck,
+                { config, runId: args.runId, taskId: args.taskId, clock },
               ));
         } catch (error) {
           if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -4382,6 +4691,14 @@ async function brokerCashWebSearch(input: {
   return { text: result.text, sources: result.citations };
 }
 
+/** W1-T6027: Node's `exit` event hands a child `(code, signal)`, exactly one non-null. The signal is kept by name; an event
+ * carrying neither is `unobserved`, never exit 0. */
+function codexWorkerExit(code: number | null, signal: NodeJS.Signals | null | undefined): WorkerExit {
+  if (signal) return { kind: "signal", signal };
+  if (typeof code === "number") return { kind: "exit", code };
+  return { kind: "unobserved" };
+}
+
 async function spawnCodexWorkerInPrivateTemp(
   args: CodexSpawnArgs,
   config: Config,
@@ -4436,8 +4753,8 @@ async function spawnCodexWorkerInPrivateTemp(
     stdin: NodeJS.WritableStream;
     stdout: NodeJS.ReadableStream;
   };
-  const exitPromise = new Promise<number | null>((resolve, reject) => {
-    process.once("exit", (code: number | null) => resolve(code));
+  const exitPromise = new Promise<WorkerExit>((resolve, reject) => {
+    process.once("exit", (code: number | null, signal?: NodeJS.Signals | null) => resolve(codexWorkerExit(code, signal)));
     process.once("error", reject);
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -4470,18 +4787,23 @@ async function spawnCodexWorkerInPrivateTemp(
     armClockBound();
   });
   armClockBound();
-  const prompt = CODEX_DOCTRINE_PRELUDE + args.prompt;
+  const harnessCommits = codexHarnessCommits(args);
+  const prompt = CODEX_DOCTRINE_PRELUDE + (harnessCommits ? CODEX_HARNESS_COMMITS_PART : "") + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
-    const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
     const parsed = stdout.finish();
+    // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
+    const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
-    const notionalCostUsd = codexNotionalCostUsd(model, parsed.tokens);
+    const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
+    const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     return {
+      ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
       ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),
@@ -4493,6 +4815,7 @@ async function spawnCodexWorkerInPrivateTemp(
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
+      exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
       ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
       permissionDenials: parsed.errors.filter((error) => /permission|sandbox|denied/i.test(error)),
@@ -4502,6 +4825,7 @@ async function spawnCodexWorkerInPrivateTemp(
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
+      tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
       servedModel: null,
       servedModelReason: CODEX_SERVED_MODEL_REASON,

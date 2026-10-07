@@ -1,0 +1,87 @@
+- id: W1-T6148
+  title: "NO WORKER WRITES A GIT CONFIG THE HOST PUSH HONOURS — codexExecArgs grants a codex writer its tree's --git-dir and --git-common-dir as writable --add-dir roots, and W1-T6106's leaf deliberately keeps the pinned gitdir's own config, so credential.helper, include.path, remote.<n>.url/pushurl, core.askPass and url.*.insteadOf written there run or redirect the daemon's authenticated push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which git config a worker can write that a host git call then honours
+  band_meaning: span
+  origin: "operator session 2026-10-07: raised by the filer of #9796 (W1-T6146's SEPARATE note); premise verified read-only on origin/main f43378343 and the open #9784/#9796 heads before filing"
+  plan_refs: [W1-T6106, W1-T6146, W1-T6147, W1-T6134, W1-T6124, W1-T2699, W1-T2754, W1-T5115]
+  files: [src/lib/worker-provider.ts, src/lib/worktree-git.ts, settings/worker.json, test/no-worker-writes-a-git-config-the-host-push-honours.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main f43378343. Static reading only; no config was planted anywhere real.
+    THE GRANT. src/lib/worker-provider.ts `codexExecArgs` computes `gitWritableRoots = codexGitWritableRoots(args.cwd,
+    config.root)` for every writer (not readOnly, not disposable-review) and emits each as `--add-dir <root>`, i.e. a
+    WRITABLE root of codex's workspace-write sandbox. `codexGitWritableRoots` returns `rev-parse --git-dir
+    --git-common-dir` filtered only to lie under config.root. Its own doc says why: "Codex workspace-write protects
+    `.git` by default, while Remudero implementation prompts require the worker to commit." So a codex writer can
+    write the common dir's `config`, the private gitdir's `config.worktree` and the common `hooks/`.
+    THE READER. src/lib/worktree-git.ts header, WHAT IT DELIBERATELY KEEPS: "system and global config, and the pinned
+    gitdir's own config", and "Repo-local config is reachable by a worker only through the pointer" — false for a
+    codex writer, which reaches it through the grant above. `HOST_GIT_CONFIG` overrides only core.fsmonitor,
+    core.hooksPath, core.sshCommand, core.pager, protocol.ext.allow, commit.gpgSign, tag.gpgSign. src/lib/git-push.ts
+    `worktreePushExec` pushes through `hostWorktreeGit` to the remote NAMED `origin`, with the daemon's env.
+    REACHABLE KEY CLASSES, each read by that leaf push or fetch from the codex-writable config, by static reading:
+      - credential.helper (and credential.<url>.helper): a `!cmd` helper runs on push, and git hands every helper the
+        working credential on `store`. YES.
+      - include.path / includeIf.<cond>.path: pulls any file in as config; git has no env switch that disables
+        includes. YES.
+      - remote.<n>.url / remote.<n>.pushurl: redirects the authenticated push of `origin`. YES.
+      - url.<base>.insteadOf / pushInsteadOf: rewrites the push URL the same way. YES.
+      - core.askPass, http.<url>.extraHeader, http.proxy, remote.<n>.receivepack / uploadpack / vcs: run a program
+        or redirect transport. YES (the leaf sets none of them).
+      - filter.<d>.* and merge.<d>.driver: YES, already filed as W1-T6146 (#9796, open).
+      - common `hooks/`: written by the same grant; the leaf pins core.hooksPath so leaf calls do not run it, but the
+        raw `worktree add` does — filed as W1-T6147 (#9796, open).
+    OTHER LANES. Claude worker: settings/worker.json has no `sandbox.filesystem.denyWrite` / `allowWrite` entry and
+    hooks/deny-floor.sh has no gitdir rule, but whether the Claude CLI sandbox's default write set reaches a LINKED
+    worktree's gitdir (it must, for the worker's own `git commit`) could not be settled from the repository: NOT
+    VERIFIED, the builder measures it. Open-weight: `openWeightWritablePath` refuses a `.git` path ("only the harness
+    writes") and `openWeightCheckSandboxArgv` binds only the worktree and HOME, so a linked gitdir is not mounted: NO.
+    Reviewer proof child (W1-T6124, open #9784 head e45a899fc): `proofSandboxArgv` binds the common dir read-only and
+    masks its `config` with /dev/null, but binds the worktree's PRIVATE gitdir WRITABLE, so a proof can write that
+    gitdir's `config.worktree`; on main the proof child is unsandboxed. Narrower, still YES for config.worktree.
+    THE AUTHENTICATION THE FIX MUST KEEP. The fleet credential helper lives in the global config, and
+    worker.ts `wireCredentialHelperSocket` writes the per-worktree helper into `config.worktree` itself (reset with
+    `credential.helper ""`, `credential.useHttpPath true`, then the socket helper). So the private gitdir's config
+    holds one value the harness wrote and the leaf must honour; it cannot simply ignore that file.
+  design: |
+    The builder owns the mechanism; constraints:
+    (1) NO WORKER GETS WRITE ACCESS TO ANY GITDIR. Drop the codex writer's `--add-dir` gitdir grants; if the worker
+    then cannot `git commit` inside its sandbox, the harness commits for it through the leaf (the shell-less lane's
+    anchored COMMIT_MESSAGE path already exists in worker.ts), and the PR says which. Deny the linked gitdir and common
+    dir for the Claude lane in settings/worker.json (`sandbox.filesystem.denyWrite`), after MEASURING whether it is
+    reachable today. Open-weight stays as #9778 left it.
+    (2) DEFENCE IN DEPTH IN THE LEAF, for any config a worker or proof might still reach. At command-line precedence
+    (GIT_CONFIG_COUNT): reset `credential.helper` with an empty value, then re-add ONLY the helpers the harness owns
+    (the fleet helper, and the socket helper `wireCredentialHelperSocket` wired, from harness state, never read back
+    from the file); pin `remote.origin.url` and `pushurl` to the value the harness recorded when it cut the worktree;
+    neutralise core.askPass and the other transport keys above. For keys that cannot be overridden from the command
+    line (include.path/includeIf, url.*.insteadOf, any per-URL key whose name the harness cannot predict), REFUSE
+    before git runs when the pinned config files hold one the harness did not write: a `git config --list
+    --show-origin --no-includes` read of the pinned files, checked against an allowlist, refused with one named
+    ledger row. If a sound env-only mechanism exists for any of them on the host's git, the PR may use it and says why.
+    (3) A legitimate push through the leaf still authenticates exactly as today, and argv, outputs and error shapes
+    are otherwise the leaf's existing ones.
+  acceptance:
+    - claim: "codexExecArgs for a writer emits no --add-dir naming the tree's git dir or common dir, the rendered Claude worker settings deny writes to both, and on a fixture worktree whose pinned config and config.worktree each plant a credential.helper, include.path, remote.origin.url and pushurl, url.insteadOf and core.askPass entry, a leaf push to a fixture bare remote neither runs any planted marker command nor reaches the planted remote, a planted include is refused before git runs, and the same push without the planted keys still authenticates through a fixture helper and lands"
+      proof: "unit test: test/no-worker-writes-a-git-config-the-host-push-honours.test.ts"
+  falsifier: |
+    At origin/main f43378343, `codexExecArgs` for a writer returns `--add-dir <gitdir>` and `--add-dir <common>`, and
+    `worktreePushExec` on the fixture runs the planted credential.helper marker and pushes to the planted pushurl, so
+    the test fails.
+  notes: |
+    FIXTURES ONLY: every planted key, marker command, helper and bare remote lives in a gitRepo() fixture under the
+    test's tmp dir; nothing writes a real gitconfig, a managed checkout's config or the daemon's HOME.
+    RELATIONSHIP. This supersedes W1-T6146's "SEPARATE, NOT THIS TASK" note for credential.helper, include.path,
+    remote.<n>.url and the transport keys; W1-T6146 keeps filter.* and merge.*. W1-T6147 keeps the raw `worktree add`
+    hook route. Removing the grant (1) closes the codex route for all three at once; each task's leaf or call-site
+    change remains as defence in depth, so none depends on another. W1-T6146 also edits src/lib/worktree-git.ts
+    `HOST_GIT_CONFIG` and W1-T6134 (#9796) converts `codexGitWritableRoots` to the leaf: whichever merges second
+    rebases one hunk, and if this task deletes `codexGitWritableRoots` W1-T6134's half for it becomes moot.

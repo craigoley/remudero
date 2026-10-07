@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5523 follow-ups (timed-out judge call abandoned, not cancelled)"
   plan_refs: [W1-T5523, W1-T5403, W1-T1045]
   files: [src/lib/worker.ts, src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/a-handed-off-head-judgment-is-cancelled-at-its-bound.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

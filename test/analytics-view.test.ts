@@ -3,11 +3,18 @@
 // in core. These tests drive the real ticker over real SQLite stores, the real refresh over a real ledger, and
 // the real worker with its slow lane and view threads.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { deriveAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import {
+  createAnalyticsSnapshotCache,
+  deriveAnalyticsSnapshot,
+  deriveAnalyticsSnapshotFromCheckpointedLedger,
+  writeAnalyticsCheckpoint,
+  type AnalyticsSnapshot,
+  type AnalyticsTimer,
+} from "../src/lib/analytics-route.js";
 import {
   ANALYTICS_SOURCE_CONSOLE_V1,
   ANALYTICS_SOURCE_NAMES,
@@ -26,6 +33,7 @@ import { attachReadModel, currentReadModelPath, sourceSnapshotStates, type Sourc
 import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewSource } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 
@@ -269,7 +277,7 @@ test("serve's legacy merge over its own caches matches the read-model body for t
   assert.ok(!("error" in computed));
   assert.deepEqual(computed.data, w.body().data, "the two sides agree on the same inputs");
   assert.deepEqual(computed.sources, w.body().sources);
-  assert.deepEqual(legacy.shadowSources, { overview: "analytics:core", coverage: "analytics:core", "instances[instanceId=core]": "analytics:core", "instances[instanceId=site]": "analytics:site" });
+  assert.deepEqual(legacy.shadowSources, { overview: ["analytics:core", "analytics:site"], coverage: ["analytics:core", "analytics:site"], "instances[instanceId=core]": "analytics:core", "instances[instanceId=site]": "analytics:site" });
 });
 
 test("the legacy merge leaves out a cold cache and merges cache reuse only from carried token terms", () => {
@@ -407,4 +415,93 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   assert.deepEqual(merged()?.coverage, { counted: 1, of: 1, missing: [] }, JSON.stringify(posted.filter((m) => m.type === "log")));
   assert.equal(metric(merged()!, "runs.completed").value, 2);
   onMessage?.({ type: "stop" });
+});
+
+// Host reading 2026-10-06T18:34Z: every analytics sample diffed overview runs.completed 1751 vs 1752, tokens.total
+// and cache.reuse, classified real. The overview merges EVERY instance, but the shadow paired it with the first
+// instance's source only: core's as-of matched, console's differed (legacy 18:30:00.792Z, body 18:30:55.440Z), so
+// console's own entry was timing while the overview it feeds stayed real on every sample.
+const NO_EVIDENCE: ShadowEvidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 };
+
+/** One analytics sample: legacy rendered over `legacy` as serve's sampler renders it, compared against a body merged over `view`. */
+function compareAnalytics(legacy: Array<[string, AnalyticsSnapshot]>, view: Array<[string, AnalyticsSnapshot]>, tamper?: (data: AnalyticsViewData) => void) {
+  const { clock } = handClock(T0);
+  const posted: ShadowRequest[] = [];
+  const definition = analyticsLegacyView({ clock, scopes: () => legacy.map(([instanceId, snapshot]) => ({ instanceId, analytics: () => snapshot })) });
+  legacyViewSampler({ legacy: [definition], clock, defer: (run) => run(), post: (request) => void posted.push(request) })(ANALYTICS_VIEW_NAME, "", new URLSearchParams());
+  assert.ok(posted[0]?.legacy, "legacy rendered the sample");
+  const body = mergeAnalytics(view.map(([instanceId, snapshot]) => ({ instanceId, snapshot: { asOf: snapshot.asOf!, console: analyticsSourceBodies(snapshot)[0]!.body as AnalyticsConsoleSource } })), T0);
+  tamper?.(body.data);
+  const asOf = body.sources.map((s) => s.asOf!).sort()[0]!;
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NO_EVIDENCE });
+  return shadow.compare({ view: ANALYTICS_VIEW_NAME, key: "", requests: 0, legacy: posted[0].legacy, body: { data: body.data, asOf, sources: body.sources } });
+}
+
+test("an analytics overview diff from a later instance's refresh is timing when the body read that instance at another as-of", () => {
+  const core = snapshotOf(CORE_LINES, T0 - 5 * MINUTE);
+  const siteBefore = snapshotOf(SITE_LINES, T0 - 4 * MINUTE);
+  // Site's next refresh counted one more run; the body merged it, legacy still merged the one before.
+  const siteAfter = snapshotOf([...SITE_LINES, ...run("s2", T0 - 30 * MINUTE, 2_000, { input: 50, output: 1 })], T0 - 3 * MINUTE);
+  const compared = compareAnalytics([["core", core], ["site", siteBefore]], [["core", core], ["site", siteAfter]]);
+  const real = compared.diffs.filter((d) => d.classification === "real");
+  assert.deepEqual(real, [], "a diff explained by the second instance's as-of is not real");
+  const overview = compared.diffs.filter((d) => d.path.startsWith("overview"));
+  assert.ok(overview.length > 0, "the overview differs: the comparison is not vacuous");
+  for (const d of overview) assert.match(d.reason, new RegExp(`legacy read analytics:site as of ${iso(T0 - 4 * MINUTE)}, the body as of ${iso(T0 - 3 * MINUTE)}`), d.path);
+});
+
+test("an analytics overview diff over the same snapshots of every instance stays real", () => {
+  const core = snapshotOf(CORE_LINES, T0 - 5 * MINUTE);
+  const site = snapshotOf(SITE_LINES, T0 - 4 * MINUTE);
+  const compared = compareAnalytics([["core", core], ["site", site]], [["core", core], ["site", site]], (data) => {
+    const runs = data.overview.find((m) => m.key === "runs.completed")!;
+    runs.value = Number(runs.value) + 1;
+  });
+  assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [["overview[key=runs.completed].value", "real"]]);
+});
+
+// Host reading 2026-10-06 20:25-21:07Z: all 42 analytics samples diffed overview cache.reuse, legacy
+// `{ value: null, instances: 0, notCollectedReason: "an instance's snapshot carries no cache token terms; ..." }`
+// vs the view's `{ value: 0.8349751415071711, instances: 3 }`. Legacy's core snapshot stayed as of 20:06:30.548Z
+// across three serves (20:21, 20:36, 20:52Z): each booted onto core's checkpoint, and each core refresh timed out
+// at 120 s. The terms are non-enumerable, so JSON left them out of the checkpoint's snapshot.
+const noTimers = (): AnalyticsTimer => ({ unref: () => {}, cancel: () => {} });
+
+/** Core's checkpoint as a refresh writes it, and the snapshot that refresh built. */
+async function checkpointed(t: TestCtx, lines: ReadonlyArray<Record<string, unknown>>): Promise<{ stateDir: string; built: AnalyticsSnapshot }> {
+  const stateDir = scratch(t, "analytics-checkpoint");
+  writeFileSync(join(stateDir, "ledger.ndjson"), lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+  const { snapshot, checkpoint } = await deriveAnalyticsSnapshotFromCheckpointedLedger(stateDir, handClock(T0 - MINUTE).clock);
+  writeAnalyticsCheckpoint(stateDir, checkpoint);
+  return { stateDir, built: snapshot };
+}
+
+test("a serve booted onto its analytics checkpoint merges cache reuse from the checkpoint's own token terms", async (t) => {
+  const { stateDir, built } = await checkpointed(t, CORE_LINES);
+  assert.equal((JSON.parse(readFileSync(join(stateDir, ".analytics-console-v1.checkpoint.json"), "utf8")) as { snapshot: AnalyticsSnapshot }).snapshot.cacheReuseTokens,
+    undefined, "control: the checkpoint's own snapshot carries no terms");
+  // Never started: a boot serves the checkpoint until its first refresh completes.
+  const restored = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers }).current();
+  assert.equal(restored.asOf, built.asOf, "positive control: legacy serves the restored checkpoint, not a cold cache");
+  assert.deepEqual(restored.cacheReuseTokens, built.cacheReuseTokens);
+  const site = snapshotOf(SITE_LINES, T0 - MINUTE);
+  const compared = compareAnalytics([["core", restored], ["site", site]], [["core", built], ["site", site]]);
+  assert.deepEqual(compared.diffs, [], "legacy over the restored snapshot merges what the view merges over the refresh's rows");
+});
+
+test("a checkpoint carrying no token terms restores none, and its cache reuse diff stays real", async (t) => {
+  const { stateDir, built } = await checkpointed(t, CORE_LINES);
+  const path = join(stateDir, ".analytics-console-v1.checkpoint.json");
+  const file = JSON.parse(readFileSync(path, "utf8")) as { state: Record<string, unknown>; snapshotHidden?: unknown };
+  delete file.state.tokensTotal;
+  delete file.snapshotHidden; // a checkpoint written before hidden fields round-tripped
+  writeFileSync(path, JSON.stringify(file));
+  const restored = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers }).current();
+  assert.equal(restored.asOf, built.asOf, "positive control: the checkpoint was restored");
+  assert.equal(restored.cacheReuseTokens, undefined, "no terms are invented");
+  const site = snapshotOf(SITE_LINES, T0 - MINUTE);
+  const compared = compareAnalytics([["core", restored], ["site", site]], [["core", built], ["site", site]]);
+  assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [
+    ["overview[key=cache.reuse].instances", "real"], ["overview[key=cache.reuse].notCollectedReason", "real"], ["overview[key=cache.reuse].value", "real"],
+  ]);
 });

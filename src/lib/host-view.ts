@@ -34,6 +34,14 @@ export const HOST_VIEW_NAME = "host";
 export const HOST_VIEW_VERSION = 1;
 /** The probe cadence (design §1.1: "probe every 60 s"); `host-probe:` is judged stale after three of them. */
 export const HOST_PROBE_INTERVAL_MS = 60_000;
+/** The home instance's probe source: its as-of is the instant the view read the host's files. */
+const HOST_PROBE_SOURCE = "host-probe:core";
+/** Each governor posture in `accountUsage`: its state, the `ts` of the ledger row it came from, and that row's figures. */
+const GOVERNOR_READINGS: ReadonlyArray<readonly [string, string, ...string[]]> = [
+  ["governor", "governorAsOf"],
+  ["costGovernor", "costGovernorAsOf", "costGovernorObservedUsd", "costGovernorCeilingUsd"],
+  ["queueGovernor", "queueGovernorAsOf", "queueGovernorObservedOpenCount", "queueGovernorWipLimit"],
+];
 /** How many `measurement_cadence.ran` rows the self-measurement part carries: GET /v1/self-measurement's default. */
 const SELF_MEASUREMENT_ROWS = 10;
 
@@ -244,6 +252,14 @@ export function hostLegacyView(deps: HostRouteReads, viewData: () => HostViewDat
   return {
     name: HOST_VIEW_NAME,
     version: HOST_VIEW_VERSION,
+    // The routing status is rewritten in place on every worker spawn and its freshness is judged against the
+    // clock: the view reads it at its probe, legacy when serve renders, so the shadow pairs the two by its own times.
+    // Each governor posture is its step's newest ledger row, appended every few minutes: a row landing between
+    // the probe and the render is in legacy's read alone, so the shadow pairs those by the row's own `ts` too.
+    shadowReadings: {
+      providerRouting: { at: "observedAt", verdicts: { freshness: "freshUntil" }, viewReadAt: HOST_PROBE_SOURCE },
+      accountUsage: GOVERNOR_READINGS.map(([state, at, ...rest]) => ({ at, fields: [state, at, ...rest], viewReadAt: HOST_PROBE_SOURCE })),
+    },
     compute: () => {
       const sampled = viewData();
       const data: HostViewData = {
