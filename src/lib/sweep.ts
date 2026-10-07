@@ -14,7 +14,7 @@ import {
 } from "./state-reconciler.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
-import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
+import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
@@ -7677,7 +7677,7 @@ export async function renumberPlanPrIds(
     planRepairGitImpl: run = prHeadTreeGit(wt),
     worktreeAddImpl: add = worktreeAdd,
     worktreeRemoveImpl: remove = worktreeRemove,
-    planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
+    planRepairReserveIdImpl: reserveId = (cwd, branch) => reservePlanRepairTaskId(cwd, branch, undefined, log),
     ghJsonImpl: ghApi = ghJson,
   } = deps;
   const git = (cwd: string, args: readonly string[]): string => run("git", ["-C", cwd, ...args]);
@@ -7729,7 +7729,7 @@ export async function renumberPlanPrIds(
   }
 }
 
-/** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gitRemoteRefReserver} takes.
+/** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gatedRemoteRefReserver} takes.
  *  A refused pointer is not an exit status and propagates: renumberPlanPrIds reports it as its error. */
 export function planRepairGitRun(cwd: string): RemoteReserveDeps["run"] {
   return (args) => {
@@ -7750,9 +7750,10 @@ export function reservePlanRepairTaskId(
   worktreePath: string,
   filingBranch: string,
   run: RemoteReserveDeps["run"] = planRepairGitRun(worktreePath),
+  log?: (step: string, fields: Record<string, unknown>) => void,
 ): string {
   const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
-  return reserveTaskIdRemote(mint.n, gitRemoteRefReserver({ run, filingBranch })).taskId;
+  return reserveTaskIdRemote(mint.n, gatedRemoteRefReserver({ run, filingBranch, lane: "plan-repair", log })).taskId;
 }
 
 export interface StaleBaseReleaseTarget {

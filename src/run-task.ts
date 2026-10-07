@@ -743,6 +743,7 @@ import {
   parsePrefixedTaskId,
   parseReservationHolderLine,
   gitRemoteRefReserver,
+  gatedRemoteRefReserver,
   remoteReservedTaskIds,
   reservationFloorFrom,
   reservationPolicyCurrency,
@@ -24830,7 +24831,8 @@ export function ciLearningCommand(
     try {
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
-        mintTaskId: ciLearningTaskIdMinter(checkoutRoot),
+        mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields })),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -24870,7 +24872,7 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) => string {
+export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void): (filingBranch?: string) => string {
   return (filingBranch) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -24879,7 +24881,7 @@ export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) =>
     // landing branch cannot satisfy.
     const held = reserveTaskIdRemote(
       mint.n,
-      gitRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch }),
+      gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
     );
     return held.taskId;
   };
@@ -26294,6 +26296,7 @@ export interface NextTaskIdReserveDeps {
   filingBranch?: string;
   /** W1-T6026: whether this checkout's reservation module is origin/main's; defaults to the real blob read. */
   policyCurrency?: () => ReservationPolicyCurrency;
+  log?: (step: string, fields: Record<string, unknown>) => void;
 }
 
 /** W1-T4388: a shallow, blob-less, sparse clone of `source`'s main (`owner/name` or a git URL) holding
@@ -26347,9 +26350,17 @@ function prefixedNextTaskIdCommand(rest: string[], deps: NextTaskIdReserveDeps):
       listing(["ls-remote", "--heads", "origin", `run-${prefix}-T*`]),
       listing(["ls-remote", "origin", `refs/rmd-id/${prefix}-T*`]),
     ];
-    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
+    const log = deps.log ?? ((step: string, fields: Record<string, unknown>) => {
+      try {
+        appendLedger(ledgerPathFor(loadConfig()), { run_id: `MINT-${process.pid}`, task_id: "MINT", step, ...fields });
+      } catch (error) {
+        console.error(`rmd next-task-id: takeover ledger unavailable: ${String(error)}`);
+      }
+    });
+    const reserver = deps.reserver ?? gatedRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown", policyCurrency: deps.policyCurrency, lane: "next-task-id-prefix", log });
     const held = reserveTaskIdRemote(nextPrefixedTaskIdStart(texts, prefix), reserver, { idFor: (n) => `${prefix}-T${n}` });
-    console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)`);
+    const takeover = held.takenOver ? ` — ${describeReservationTakeover(held.takenOver)}` : "";
+    console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)${takeover}`);
     return 0;
   } catch (e) {
     console.error(describeReservationRefusal((e as TaskIdReservationError).outcome, `${repo}: ${(e as Error).message}`));
@@ -35596,7 +35607,8 @@ export function buildCiLearningCadenceRunner(deps: {
     let refused = 0;
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
-        const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot);
+        const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
+          appendLedger(join(deps.root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${at.getTime()}`, task_id: "DAEMON", step, ...fields }));
         const filing = deps.fileShards
           ? deps.fileShards(result.drafts, deps.checkoutRoot, {
               mintTaskId,
@@ -36483,14 +36495,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -36503,10 +36515,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
-      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot));
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     case "evidence-coverage":
       return () => {
         try {
@@ -36533,7 +36545,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
@@ -36553,7 +36565,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
-      const mintTaskId = ciLearningTaskIdMinter(repoRoot);
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log);
       const ports = {
         stateDir,
         log,
@@ -47056,7 +47068,7 @@ async function triageCommandLocked(
     // unreachable remote — the conflation `classifyPushFailure` exists to prevent. `worktreePath`,
     // NOT the module-level `repoRoot`: the reservation must be pushed to the SAME `origin` this
     // filing will push its branch to.
-    const triageRemoteRefReserver = gitRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)) });
+    const triageRemoteRefReserver = gatedRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)), lane: "triage", log });
     // W1-T2326: THE REMOTE HALF IS TAKEN HERE, BEFORE THE PROMPT IS BUILT — and that ORDERING is
     // the whole task. It used to be taken 100+ lines below, inside `decision.action === "propose"`,
     // and its result reached nothing but the `triage.id_minted` row: the worker was prompted from
@@ -47575,7 +47587,8 @@ export async function planCommand(
       reserveTaskIdBlockRemote(
         planReserveFrom,
         PLAN_MAX_NEW_TASKS,
-        gitRemoteRefReserver({
+        gatedRemoteRefReserver({
+          lane: "plan", log,
           // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
           // rejected push is NORMAL here (contention), so a throwing runner would make it
           // indistinguishable from an unreachable remote.
@@ -49932,7 +49945,8 @@ export async function approveCommand(
               reserveTaskIdBlockRemote(
                 approveReserveFrom,
                 count,
-                gitRemoteRefReserver({
+                gatedRemoteRefReserver({
+                  lane: "approve", log,
                   run: (args) => {
                     const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -50429,7 +50443,8 @@ async function approveBatchCommand(
                     reserveTaskIdBlockRemote(
                       reserveFrom,
                       count,
-                      gitRemoteRefReserver({
+                      gatedRemoteRefReserver({
+                        lane: "approve-batch", log,
                         run: (args) => {
                           const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
                           return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };

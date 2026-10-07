@@ -805,8 +805,29 @@ export function idReservationFailureFields(e: TaskIdReservationError): Record<st
   return { id: e.taskId ?? null, ref: e.ref ?? null, outcome: e.outcome ?? null, error: e.message };
 }
 
-export function reservationTakeoverFields(h: RemoteReservationHandle, t: ReservationTakeover): Record<string, unknown> {
+export function reservationTakeoverFields(h: Pick<RemoteReservationHandle, "taskId" | "ref">, t: ReservationTakeover): Record<string, unknown> {
   return { task_id: h.taskId, ref: h.ref, taken_over_from: t.from, holder_pid: t.pid ?? null, holder_host: t.host ?? null, holder_started_at: t.startedAt ?? null, age_ms: t.ageMs ?? null };
+}
+
+export function gatedRemoteRefReserver(deps: RemoteReserveDeps & {
+  lane: string;
+  log?: (step: string, fields: Record<string, unknown>) => void;
+}): RemoteRefReserver {
+  const base = gitRemoteRefReserver({ ...deps, policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
+  return {
+    ...base,
+    reclaim(taskId) {
+      const outcome = base.reclaim!(taskId);
+      const takeover = base.takeoverOf!(taskId);
+      if (outcome === "created" && takeover) {
+        deps.log?.("reservation.taken_over", {
+          lane: deps.lane,
+          ...reservationTakeoverFields({ taskId, ref: taskIdReservationRef(taskId) }, takeover),
+        });
+      }
+      return outcome;
+    },
+  };
 }
 
 /**
