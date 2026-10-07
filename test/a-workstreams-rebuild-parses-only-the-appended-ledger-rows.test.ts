@@ -220,5 +220,15 @@ test("the live tail opens the ledger once and never tails a symlinked one, falli
   const f = fixture(t);
   writeFileSync(`${f.path}.real`, '{"elsewhere":true}\n');
   symlinkSync(`${f.path}.real`, f.path);
-  equalOracle(f.path, f.read());
+  const opens = t.mock.method(fs, "openSync");
+  syncBuiltinESMExports();
+  t.after(() => { opens.mock.restore(); syncBuiltinESMExports(); });
+  const rows = f.read();
+  assert.equal(opens.mock.callCount(), 1, "the tail makes one open attempt");
+  assert.ok((Number(opens.mock.calls[0]!.arguments[1]) & fs.constants.O_NOFOLLOW) !== 0,
+    "the tail refuses a symlink before falling back to the whole-file reader");
+  assert.deepEqual(rows, [{ elsewhere: true }], "the symlink fallback returns the target ledger rows");
+  assert.equal(rows.present, true);
+  assert.equal(rows.torn, 0);
+  equalOracle(f.path, rows);
 });
