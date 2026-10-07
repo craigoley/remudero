@@ -2895,7 +2895,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, GitCallBoundExceededError, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -29247,6 +29247,9 @@ export async function retroShippedGithubGatewayAsync(
   const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
   const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
   const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
+  // boundGitCall aborts the signal it hands the runner exactly when the bound fires, so an aborted one names a timeout.
+  let commitSignal: AbortSignal | undefined;
+  const boundedGit: AsyncGitRunner = (args, signal, env) => ((commitSignal = signal), commitGit(args, signal, env));
   const answers = new Map<string, { out: string } | { error: unknown }>();
   const keyOf = (tool: "gh" | "git", args: string[]): string => `${tool}\u0000${args.join("\u0000")}`;
   let missed: { tool: "gh" | "git"; args: string[] } | undefined;
@@ -29282,11 +29285,11 @@ export async function retroShippedGithubGatewayAsync(
         const half = miss.args[1]?.includes("state=open&") ? "open" : "closed";
         await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), undefined, half);
       } else {
-        answers.set(keyOf("git", miss.args), { out: await boundGitCall(commitGit, miss.args, commitTimeoutMs) });
+        answers.set(keyOf("git", miss.args), { out: await boundGitCall(boundedGit, miss.args, commitTimeoutMs) });
       }
     } catch (e) {
       if (e instanceof ShippedReadTimeoutError) throw e;
-      if (e instanceof GitCallBoundExceededError) throw new ShippedReadTimeoutError(`retro shipped-since read: ${e.message}`);
+      if (commitSignal?.aborted) throw new ShippedReadTimeoutError(`retro shipped-since read: ${(e as Error).message}`);
       // Held, not erased: the replay throws it where the sync read threw. A failed gh page is already held.
       if (miss.tool === "git") answers.set(keyOf("git", miss.args), { error: e });
     }

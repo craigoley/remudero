@@ -5,6 +5,7 @@
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
 import { execFileSync } from "node:child_process";
 import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
 // writes: named `node:fs` bindings are non-configurable and mocking one throws (W1-T207).
 import fsMarker from "node:fs";
@@ -897,14 +898,18 @@ export function shippedSince(
 
 /** A gateway read {@link shippedSinceAsync} must await before {@link shippedSince} can answer: thrown by an awaitable
  *  gateway in place of a blocking read. `load` performs it; the walk then re-runs over the loaded answers. */
-export class ShippedReadPending extends Error {
+export class ShippedReadPending extends RmdError {
   constructor(readonly load: () => Promise<void>) {
-    super("a shipped-since gateway read is pending");
+    super("github", GENERIC_EXIT_CODE, "a shipped-since gateway read is pending");
   }
 }
 
 /** An awaited shipped-since read killed at its bound. NAMED, never success-shaped: the trigger declines with it. */
-export class ShippedReadTimeoutError extends Error {}
+export class ShippedReadTimeoutError extends RmdError {
+  constructor(message: string) {
+    super("github", GENERIC_EXIT_CODE, message);
+  }
+}
 
 /** {@link shippedSince}, awaited: the ONE body, re-run after each {@link ShippedReadPending} load until the gateway
  *  answers from memory. A gateway that never throws one (every sync fixture) is walked exactly once. */

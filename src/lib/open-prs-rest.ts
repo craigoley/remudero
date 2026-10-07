@@ -495,7 +495,6 @@ export type BoardFetchHalf = "both" | "open" | "closed";
  *  rows whose rendered fields can still move — and unconditionally so it never depends on GitHub
  *  bumping `updated_at`, which matters most for `auto_merge`. Cold: closed and merged PRs, walked
  *  newest-updated-first, stopped at the first row already held with an identical `updated_at`.
- *
  *  Invariant: sorted `updated_at` descending, so every changed row sorts strictly above every
  *  unchanged one and rows never reached keep their cached values. Throws on a failed page without
  *  mutating the cache — swallowing would report "the repo has zero PRs" (W1-T181). */
@@ -510,8 +509,7 @@ export function fetchBoardPrsRest(
   for (let step = walk.next(); ; step = walk.next(fetch(step.value))) if (step.done) return step.value;
 }
 
-/** {@link fetchBoardPrsRest} with each page awaited: the same walk, the same pages in the same order, the same
- *  stop tests. A rejected page ends the walk with that rejection, as a throwing page ends the sync one. */
+/** {@link fetchBoardPrsRest} with each page awaited: the same walk; a rejected page ends it as a throw does. */
 export async function fetchBoardPrsRestAsync(
   owner: string,
   repo: string,
@@ -523,7 +521,6 @@ export async function fetchBoardPrsRestAsync(
   for (let step = walk.next(); ; step = walk.next(await fetch(step.value))) if (step.done) return step.value;
 }
 
-/** The ONE body of the board walk: yields each page's argv and is resumed with that page's parsed rows. */
 function* boardPrsWalk(
   owner: string,
   repo: string,

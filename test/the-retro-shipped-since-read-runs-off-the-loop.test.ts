@@ -85,7 +85,7 @@ function fakeGh(opts: { sleep?: number; closedFails?: boolean; hang?: string } =
 }
 
 /** A real checkout whose origin is o/r and whose origin/main carries PR #3's commit trailer. */
-function trailerCheckout(withOrigin = true): string {
+function seededTrailers(withOrigin = true): string {
   const repo = gitRepo({ kind: "retro-shipped" });
   if (withOrigin) repo.addRemote("origin", "https://github.com/o/r.git");
   repo.git("commit", "--allow-empty", "-m", "feat: three (#3)", "-m", "Remudero-Task: W1-T3");
@@ -147,7 +147,7 @@ test("a shipped-since page walk past its bound is killed and the retro decline n
     // The commit-trailer git read is bounded the same way: past its bound it rejects naming it, never an empty index.
     const fast = fakeGh();
     try {
-      const gateway = await runTask.retroShippedGithubGatewayAsync({ ownerRepo: OWNER_REPO, execAsync: fast.execAsync, commitCwd: trailerCheckout(), commitTimeoutMs: 0 });
+      const gateway = await runTask.retroShippedGithubGatewayAsync({ ownerRepo: OWNER_REPO, execAsync: fast.execAsync, commitCwd: seededTrailers(), commitTimeoutMs: 0 });
       await assert.rejects(retro.shippedSinceAsync([run(3, "failed")], undefined, gateway), (e: unknown) => {
         assert.ok(e instanceof retro.ShippedReadTimeoutError, String(e));
         assert.match((e as Error).message, /^retro shipped-since read: git config --get remote\.origin\.url exceeded its 0ms bound and was killed/);
@@ -169,7 +169,7 @@ test("the awaited and sync shipped-since gateways answer identically over a reco
     { name: "no origin remote", gh: {}, origin: false, minShipped: 2 },
   ];
   for (const scenario of scenarios) {
-    const cwd = trailerCheckout(scenario.origin);
+    const cwd = seededTrailers(scenario.origin);
     const syncGh = fakeGh(scenario.gh);
     const awaitedGh = fakeGh(scenario.gh);
     try {
@@ -189,7 +189,7 @@ test("the awaited and sync shipped-since gateways answer identically over a reco
   }
 
   // Through the trigger: the production-shaped awaited gateway and the sync one decide the same corpus alike.
-  const cwd = trailerCheckout();
+  const cwd = seededTrailers();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}retro-shipped-same-`));
   mkdirSync(join(root, "state"), { recursive: true });
   writeLedger(
