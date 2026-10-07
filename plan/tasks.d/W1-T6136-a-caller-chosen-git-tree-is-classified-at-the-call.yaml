@@ -1,0 +1,50 @@
+- id: W1-T6136
+  title: "A CALLER-CHOSEN GIT TREE IS CLASSIFIED AT THE CALL — W1-T6123's widened census records 15 git sites in nine files as CALLER, a helper that runs git in whatever tree its caller passes (plan-architect's gitAddAndCommitWithRollback commits there, disk-artifact-reclaim's defaultCountDirtyFiles may be handed a worktree), so whether each addresses a worker tree is decided by no one and none can be lowered"
+  repo: remudero
+  depends_on: [W1-T6123]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which repository a caller-bound host git helper may treat as its own
+  band_meaning: span
+  origin: "operator session 2026-10-07: follow-up from W1-T6123's widened census (PR #9792), whose CALLER class defers the decision to the call; verified read-only on origin/main and the #9792 head before filing"
+  plan_refs: [W1-T6106, W1-T6123, W1-T6135]
+  files: [src/lib/affected-suites.ts, src/lib/containment.ts, src/lib/disk-artifact-reclaim.ts, src/lib/inbox.ts, src/lib/paired-trial.ts, src/lib/plan-architect.ts, src/lib/plan-pr-merge-safety.ts, src/lib/proof-base-stale.ts, src/lib/status.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main f43378343 and the open W1-T6123 head (run-W1-T6123-1791348460000, 0ebe8b64d).
+    Static reading only. Of the 77 files W1-T6123's `WIDENED_SITE_EXCEPTIONS` names (345 sites), these nine carry the
+    CALLER class, 15 sites: affected-suites.ts 1 (readAffectedSuitesInput's injected `run("git", …)`), containment.ts
+    1 (defaultExecutor, the caller's cwd), disk-artifact-reclaim.ts 1 (defaultCountDirtyFiles, `-C checkoutPath`,
+    "which may be a worktree"), inbox.ts 2 (gitGrepAnchorTrue / gitGrepAnchorTrueAsync), paired-trial.ts 1 (gitProbe,
+    `-C dir`), plan-architect.ts 4 (gitAddAndCommitWithRollback, `-C cwd`: an add and a COMMIT, which runs the hooks
+    the addressed tree's config names), plan-pr-merge-safety.ts 2 (planSafetyGitSync / planSafetyGitAsync; their
+    production callers in arm-auto-merge.ts bind them to a clone via planMergeSafetyInClone), proof-base-stale.ts 1
+    (certainStaleProofs, `-C dir`; run-task.ts calls it with repoRoot), status.ts 2 (buildGitLogSupersessionSearch /
+    buildCommitTrailerIndex, `opts.cwd`). The CALLER class is honest about what the census cannot see from the site,
+    but it is a deferral: until each helper's production callers are read, none of the 15 can be converted or
+    lowered, and a new caller passing a worker worktree lands without failing anything.
+    The other WORKTREE-classed files are owned elsewhere: sweep.ts and worker.ts by W1-T6133, worker-provider.ts and
+    report-commands.ts by W1-T6134, run-task.ts by W1-T6135. The rest are CHECKOUT or NOT GIT and stay as recorded.
+  design: |
+    (1) For each of the nine helpers, enumerate its production callers (src/, not tests) and the tree each passes.
+    (2) Where any caller can pass a worker worktree or a PR-head tree, route THAT call through `hostWorktreeGit` /
+    `hostWorktreeGitAsync` — by a leaf-backed seam the caller injects, or a helper variant — and never classify a
+    mixed helper as a whole. (3) Where every caller passes a harness-owned tree, the entry becomes CHECKOUT with the
+    callers named in its reason. (4) A positive control: the new test asserts the caller enumeration finds at least
+    one production caller per helper, so a helper whose callers were never found cannot read as resolved. (5) No
+    entry in the nine keeps the CALLER class; each count is exactly what is left. Argv and outputs are unchanged.
+  acceptance:
+    - claim: "no WIDENED_SITE_EXCEPTIONS entry carries the CALLER class, each of the nine helpers is recorded with at least one named production caller and the tree class it passes, and a helper call that a production caller makes on a fixture worktree whose .git pointer names a planted gitdir with a core.fsmonitor marker never writes the marker"
+      proof: "unit test: test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts"
+  falsifier: |
+    At the W1-T6123 head, nine entries read "CALLER:" and gitAddAndCommitWithRollback commits in the fixture tree with
+    a raw `git -C cwd`: the planted pointer is followed, the marker is written, and the test fails.
+  notes: |
+    FIXTURES ONLY: the planted gitdir and its marker live in a gitRepo() fixture under the test's tmp dir. Split from
+    W1-T6135 (run-task.ts) for Rule 19 sizing and because this half does not wait on W1-T6121. Depends on W1-T6123
+    (#9792, open at filing): the widened table and its CALLER class arrive with it; re-read the entries at its merged
+    head before building.

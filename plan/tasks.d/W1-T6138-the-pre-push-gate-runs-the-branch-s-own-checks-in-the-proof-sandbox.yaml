@@ -1,0 +1,66 @@
+- id: W1-T6138
+  title: "THE PRE-PUSH GATE RUNS THE BRANCH'S OWN CHECKS IN THE PROOF SANDBOX — W1-T6120 makes the host-side gate skip the three checks that execute the pushed tree's code (census-precheck's admitted census suites read NOT MEASURED, ci-control-plane-precheck's capability-snapshot arm, lint-plan-precheck) because they would run as the daemon; run them inside W1-T6124's bwrap proof sandbox instead, so the fleet's pushes get those checks back without the credentials"
+  repo: remudero
+  depends_on: [W1-T6120, W1-T6124]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — where the host pre-push gate may execute the pushed tree's own code
+  band_meaning: span
+  origin: "operator session 2026-10-07: follow-up from W1-T6120 (PR #9788) and W1-T6124 (PR #9784), both open at filing; verified read-only on both heads before filing"
+  plan_refs: [W1-T6120, W1-T6124, W1-T6106, W1-T5617, W1-T4901, W1-T3423, W1-T499]
+  files: [hooks/pre-push, src/lib/git-push.ts, test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on the open heads of W1-T6120 (run-W1-T6120-1791347052780, 71d1df56e) and W1-T6124
+    (run-W1-T6124-1791345180000, 0777ff3f7). Static reading only; no sandbox was started anywhere.
+    WHAT W1-T6120 SKIPS. Its hooks/pre-push computes `gate_root` (the hook's own code root) and `tree_root` (the cwd)
+    and sets `own_tree=1` only when they coincide. On the host path (the push leaf running the harness copy in a
+    worker worktree) `own_tree=0`, and: (a) census-precheck runs from the gate root with
+    `runSuites = () => { throw … "the host gate runs no worktree code (CI runs them)" }`, so every admitted or
+    triggered census suite reads NOT MEASURED (exit 2, "not blocking"); (b) ci-control-plane-precheck exits 4,
+    "skipped, NOT passed (CI runs it)", whenever `affectedCapabilitySnapshot(files)` is true, because that arm spawns
+    the branch's own generator; (c) lint-plan-precheck is skipped outright ("runs the branch's own package.json lint
+    argv"). git-push.ts `prePushGateEnv` gives the gate an allowlisted env (no GH_TOKEN, no GH_APP_*) and
+    `withGateHome` a throwaway HOME. So the skip is safe, but every fleet push now loses the three local checks that
+    were added because their reds were common: W1-T4901's lint-plan precheck (14 of 55 single-shard test reds, per
+    the hook's own comment) and the census suites W1-T5617 admitted.
+    WHAT W1-T6124 BUILDS. src/lib/review.ts at its head adds `PROOF_SANDBOX_BINARY = "bwrap"`, `probeProofSandbox` /
+    `proofSandboxStatus` (bwrap or `unsandboxed` with a reason), `proofSandboxArgv` (the checkout and a throwaway HOME
+    writable, runtime roots and the linked node_modules read-only, nothing else of the host), `proofChildEnv`
+    (W1-T499's allowlist with HOME replaced) and `ProofSandboxUnavailableError`, graded not_executable, never a pass.
+    THE HOST FACT this rests on is the operator's 2026-10-07 host check, not re-verified by this filing (no host
+    access): bwrap is present and starts in the remudero-daemon container, where the push leaf runs; the serve
+    container lacks user namespaces but runs no pre-push gate.
+  design: |
+    The builder owns the shape; constraints: (1) on the host path (gate root not the tree root), the three checks run
+    their tree-owned half INSIDE the proof sandbox built from W1-T6124's exports (`proofSandboxArgv`,
+    `proofChildEnv`, `probeProofSandbox`), never in the daemon's own process tree: the census suites as a sandboxed
+    `node --test` child, the capability generator and the package.json lint argv each as a sandboxed child; the
+    gate-root half (reading the diff, the admission table, interpreting exit codes) stays where W1-T6120 put it.
+    (2) The tree is bound so the checks can read it; nothing they write survives outside the throwaway HOME and tmp;
+    the daemon's HOME, config.root and the App key path are not mounted, and the env is `prePushGateEnv`'s allowlist.
+    (3) When the sandbox cannot start (`probeProofSandbox` reads unsandboxed: darwin, or a host without user
+    namespaces), the check keeps W1-T6120's skip-by-name — never run unsandboxed, never passed. (4) Exit semantics are
+    the own-tree path's: a census violation blocks, an unmeasurable run is exit 2 "not blocking", a lint finding
+    blocks or advises exactly as `lint-plan-precheck.mjs` does today. (5) The sandbox runner is an injectable seam so
+    the test can stand a fixture runner in for bwrap and assert the argv and env it receives on any OS; the real-bwrap
+    arm is skipped with a name where bwrap cannot start, as W1-T6124's test does.
+  acceptance:
+    - claim: "on the host path the pre-push gate runs the census suites, the capability-snapshot check and the lint-plan precheck through the sandbox runner with no GH_TOKEN or GH_APP name in the child env and a throwaway HOME, a census suite that fails in the sandbox blocks the push, and with the sandbox unavailable each of the three reports skipped by name rather than passed or run unsandboxed"
+      proof: "unit test: test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts"
+  falsifier: |
+    At the W1-T6120 head, push a fixture worktree through the push leaf with a census suite that fails: the host path
+    reports census-precheck NOT MEASURED and the push proceeds, and the fixture sandbox runner is never invoked, so the
+    test fails.
+  notes: |
+    FIXTURES ONLY: a gitRepo() fixture worktree and bare remote under the test's tmp dir, the fixture sandbox runner a
+    tmp script that records its argv, `harnessHooksDir` pointed at the fixture through RMD_HARNESS_HOOKS_DIR. Nothing
+    runs against a real worktree, the host or origin. TAKE THE CHEAP HALF FIRST if one check proves costly to
+    sandbox: lint-plan-precheck alone recovers the most-measured red class (W1-T4901), and the census suites wait on a
+    count of host-path pushes whose census reads NOT MEASURED. Depends on W1-T6120 (#9788) and W1-T6124 (#9784), both
+    open at filing: re-read `prePushGateSteps`, the hook's `own_tree` arms and review.ts's sandbox exports at their
+    merged heads before building.

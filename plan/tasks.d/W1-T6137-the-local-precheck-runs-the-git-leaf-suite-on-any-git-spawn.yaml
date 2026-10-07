@@ -1,0 +1,50 @@
+- id: W1-T6137
+  title: "THE LOCAL PRECHECK RUNS THE GIT-LEAF SUITE ON ANY GIT SPAWN — scripts/census-precheck.mjs joins census:host-worktree-git only when a diff adds a `\"-C\", <name>` line whose name is one of the seven worktree spellings, so a positional -C under any other name, a cwd-option spawn or a run(\"git\", …) helper call that W1-T6123's census counts reaches the push unchecked and reds only in CI"
+  repo: remudero
+  depends_on: [W1-T6123]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — when the pre-push precheck runs the git-leaf suite
+  band_meaning: span
+  origin: "operator session 2026-10-07: follow-up from W1-T6123 (PR #9792), whose widened detector the precheck trigger does not share; verified read-only on origin/main and the #9792 head before filing"
+  plan_refs: [W1-T6106, W1-T6123, W1-T5692, W1-T5617]
+  files: [scripts/census-precheck.mjs, scripts/lib/git-spawn-shapes.mjs, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/the-local-precheck-runs-the-git-leaf-suite-on-any-git-spawn.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main f43378343 and the open W1-T6123 head (run-W1-T6123-1791348460000, 0ebe8b64d).
+    scripts/census-precheck.mjs `PRECHECK_TRIGGERED_SUITES` joins
+    test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts (script `census:host-worktree-git`) when
+    `input.changed.includes("src/lib/worktree-git.ts")` or `addsMatch(input, CLOCK_SCOPE_RE, …)` finds an added line
+    matching `/"-C",\s*(?:wt|worktreePath|[\w$]+\.worktreePath|worktreeRoot|batchWorktree|ownerPath)\b/` — W1-T6106's
+    `WORKTREE_TARGET` spellings, copied. W1-T6123's head widens the suite itself (`POSITIONAL_C`, a `-C` argv by
+    position; `CWD_OPTION_GIT_SPAWN`, a callee applied to "git" with a cwd option or through a helper;
+    `widenedGitSites`, `WIDENED_SITE_EXCEPTIONS`) but leaves the precheck trigger untouched (its diff is the census
+    test file and its own new test only). So after W1-T6123 merges, a diff adding `spawnSync("git", args, { cwd })`
+    or `"-C", dir` to any src file trips the widened ratchet in CI while the local precheck joins nothing: the
+    pre-push gate exists to catch exactly that first.
+  design: |
+    (1) The trigger fires on an added src/ line holding any shape the census counts: a `"-C",` argv element by
+    position (any expression after it), or a callee applied to a literal "git" as its first argument, plus a change
+    to src/lib/worktree-git.ts or to the census test file itself. Over-triggering is cheap (it runs one suite), so the
+    line test may be a superset of the census's multi-line detector, never a subset. (2) ONE DEFINITION: the trigger
+    reads its patterns from the census's own exported detector (W1-T6123's `CWD_OPTION_GIT_SPAWN` and positional
+    `-C` source, through the tsx import census-precheck already uses for test-slot.ts) or both move to one shared
+    module (scripts/lib/git-spawn-shapes.mjs); a copied regex is what this task removes. The census file registers node:test cases at top level, so
+    importing it from the precheck would run them: the shared-module route is the likely shape, and the PR says why. (3) A load failure of that detector is `unmeasured` with its
+    reason, never a silent no-trigger. (4) A positive control: the new test asserts the trigger fires for each of the
+    three shapes and NOT for a diff that adds no git spawn.
+  acceptance:
+    - claim: "the census precheck joins census:host-worktree-git for an added positional -C argv under an unlisted name, an added cwd-option git spawn and an added run(\"git\", …) helper call, joins nothing for a src diff that adds no git spawn, and reports unmeasured rather than skipping when the census detector cannot be loaded"
+      proof: "unit test: test/the-local-precheck-runs-the-git-leaf-suite-on-any-git-spawn.test.ts"
+  falsifier: |
+    At the W1-T6123 head, evaluate `PRECHECK_TRIGGERED_SUITES` over a fixture diff adding `spawnSync("git", ["status"],
+    { cwd: dir })` to a src file: the host-worktree-git trigger reads false, so the test fails.
+  notes: |
+    The test slug avoids the word census so the shard is not read as a CI rule suite (as W1-T6123's did). Fixture
+    diffs only, through the trigger's `readHead` / `readBase` seams; no suite is run against the real tree by the
+    trigger test. Depends on W1-T6123 (#9792, open at filing): the widened detector the trigger must share arrives
+    with it.

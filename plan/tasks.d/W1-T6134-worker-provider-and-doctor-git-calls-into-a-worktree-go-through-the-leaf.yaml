@@ -1,0 +1,51 @@
+- id: W1-T6134
+  title: "WORKER-PROVIDER'S AND THE DOCTOR'S GIT CALLS INTO A WORKTREE GO THROUGH THE LEAF — worker-provider.ts isGitWorktree, codexGitWritableRoots and the five run(\"git\", …) calls in selectOpenWeightUnitTestSuites, and report-commands.ts defaultReadWorktreeHead and defaultIsWorktreeBaseAncestor, run git with a worker worktree as cwd, so git discovers the repository through the tree's own `.git` pointer and honours that gitdir's config"
+  repo: remudero
+  depends_on: [W1-T6123]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which repository a host git call in worker-provider.ts or report-commands.ts may treat as its own
+  band_meaning: span
+  origin: "operator session 2026-10-07: follow-up from W1-T6123's widened census (PR #9792), which records these sites as WORKTREE with no owner task; verified read-only on origin/main and the #9792 head before filing"
+  plan_refs: [W1-T6106, W1-T6123, W1-T6091, W1-T2627, W1-T2754]
+  files: [src/lib/worker-provider.ts, src/lib/report-commands.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/worker-provider-and-doctor-git-calls-into-a-worktree-go-through-the-leaf.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main f43378343 and the open W1-T6123 head (run-W1-T6123-1791348460000, 0ebe8b64d).
+    Static reading only. W1-T6123's `WIDENED_SITE_EXCEPTIONS` gives src/lib/worker-provider.ts 8 ("WORKTREE
+    (follow-up conversion, no owner yet)") and src/lib/report-commands.ts 7 ("WORKTREE (follow-up conversion)" for two
+    of them). Counting its `widenedGitSites` per function at origin/main:
+    WORKER-PROVIDER.TS. isGitWorktree 1 (`execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd })`),
+    codexGitWritableRoots 1 (`rev-parse --path-format=absolute --git-dir --git-common-dir` with `{ cwd }`, whose
+    answer becomes extra WRITABLE roots for the codex sandbox, so a rewritten pointer chooses what is granted, bounded
+    only by the `isWithin(configRoot)` filter), and selectOpenWeightUnitTestSuites 5 (`run("git", …)` over the
+    injected `PreflightSpawn`, defaulting to `defaultPreflightSpawn` in the worker worktree: `merge-base`, `diff
+    --name-only`, `ls-files --others`, `diff -U0 … -- src scripts bin`, `ls-files -- src scripts bin test`); the two
+    `diff` calls carry no `--no-ext-diff --no-textconv`, and `ls-files` and `diff` honour core.fsmonitor.
+    codexExecArgs's `-C` is codex's own flag (NOT GIT), not this task.
+    REPORT-COMMANDS.TS. defaultReadWorktreeHead (`rev-parse HEAD`, `{ cwd: worktreePath }`) and
+    defaultIsWorktreeBaseAncestor (`merge-base --is-ancestor`, `{ cwd: worktreePath }`) are doctor's per-worktree
+    reads (W1-T2627). The other five (reportOwnerRepo, readCheckoutDepth 2, statusCommand, learningsExportCommand)
+    read the repo root: CHECKOUT, not this task.
+  design: |
+    (1) The seven WORKTREE sites run through `hostWorktreeGit` / `hostWorktreeGitAsync` (src/lib/worktree-git.ts):
+    for selectOpenWeightUnitTestSuites, the DEFAULT `PreflightSpawn` routes a `git` call through the leaf while the
+    seam's shape stays as is, so its tests keep injecting. (2) The answers keep their fail-closed meanings:
+    isGitWorktree reads false and codexGitWritableRoots reads [] on a refused pointer; doctor's two reads keep
+    W1-T2627's distinction (absent `undefined` vs undecidable), with a refused pointer reported as undecidable, never
+    as `false`. (3) Lower `WIDENED_SITE_EXCEPTIONS` for both files to exactly what is left, each reason CHECKOUT or NOT
+    GIT with its function named. (4) Argv and outputs otherwise unchanged.
+  acceptance:
+    - claim: "on a fixture worker worktree whose .git pointer names a planted gitdir with a core.fsmonitor marker, isGitWorktree, codexGitWritableRoots, selectOpenWeightUnitTestSuites' default spawn and doctor's two worktree reads never write the marker, codexGitWritableRoots grants no root the planted pointer names, and doctor reports the refused worktree as undecidable rather than not-an-ancestor"
+      proof: "unit test: test/worker-provider-and-doctor-git-calls-into-a-worktree-go-through-the-leaf.test.ts"
+  falsifier: |
+    At the W1-T6123 head, codexGitWritableRoots runs `git rev-parse` with `{ cwd }` in the fixture worktree: git
+    follows the planted pointer, the fsmonitor marker is written, and the test fails.
+  notes: |
+    FIXTURES ONLY: the planted gitdir and its marker command live in a gitRepo() fixture under the test's tmp dir.
+    Depends on W1-T6123 (#9792, open at filing): the widened exception table this lowers arrives with it; re-count it
+    at the merged head before building.
