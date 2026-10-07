@@ -112,6 +112,7 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
     "test/host-capability-fixtures.test.ts",
     "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+    "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
   ]);
 });
 

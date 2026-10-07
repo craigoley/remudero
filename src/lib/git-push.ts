@@ -1,7 +1,16 @@
 import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import {
+  harnessHooksDir,
+  hostWorktreeGit,
+  hostWorktreeGitAsync,
+  pinnedConfigValue,
+  pinWorktreeGit,
+} from "./worktree-git.js";
 
 /**
  * THE git-push LEAF — the single place this codebase pushes a branch to origin.
@@ -151,7 +160,10 @@ export interface PushRunBranchOpts {
 
 export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts = {}): void {
   runStepsSync(
-    pushRunBranchSteps(worktreePath, opts, { capture: opts.capture ?? defaultGitCapture, exec: opts.exec ?? defaultPushExec }),
+    pushRunBranchSteps(worktreePath, opts, {
+      capture: opts.capture ?? worktreeGitCapture(worktreePath),
+      exec: opts.exec ?? worktreePushExec(worktreePath),
+    }),
   );
 }
 
@@ -170,8 +182,8 @@ export interface PushRunBranchAsyncOpts extends Omit<PushRunBranchOpts, "capture
 export async function gitPushRunBranchAsync(worktreePath: string, opts: PushRunBranchAsyncOpts = {}): Promise<void> {
   await runStepsAsync(
     pushRunBranchSteps(worktreePath, opts, {
-      capture: opts.capture ?? defaultGitCaptureAsync,
-      exec: opts.exec ?? defaultPushExecAsync,
+      capture: opts.capture ?? worktreeGitCaptureAsync(worktreePath),
+      exec: opts.exec ?? worktreePushExecAsync(worktreePath),
     }),
   );
 }
@@ -393,6 +405,155 @@ function reportForeignHead(
   observed: string | undefined,
 ): void {
   console.error(foreignHeadRefusalMessage(branch, lastPublished, newSha, observed));
+}
+
+/** W1-T6106 — the run-branch push's default git: the steps' `["-C", <worktree>, …]` argv, minus that
+ *  prefix, through {@link hostWorktreeGit}, which pins the repository and runs no worktree hook. */
+function leafArgs(worktreePath: string, args: string[]): string[] {
+  if (args[0] !== "-C" || args[1] !== worktreePath) {
+    throw new Error(`git-push: a worktree push step must address ${worktreePath} with -C; got ${args.slice(0, 2).join(" ")}`);
+  }
+  return args.slice(2);
+}
+
+export function worktreeGitCapture(worktreePath: string): GitCapture {
+  return (_file, args) => hostWorktreeGit(worktreePath, leafArgs(worktreePath, args));
+}
+
+export function worktreeGitCaptureAsync(worktreePath: string): GitCaptureAsync {
+  return (_file, args) => hostWorktreeGitAsync(worktreePath, leafArgs(worktreePath, args));
+}
+
+const ZERO_SHA = "0000000000000000000000000000000000000000";
+
+/** The gate a push runs: the harness's hook, its argv, the stdin line git would have given it, its env. */
+interface PrePushGate {
+  hook: string;
+  args: string[];
+  input: string;
+  env: NodeJS.ProcessEnv;
+}
+
+/**
+ * THE PRE-PUSH GATE, FROM THE HARNESS'S COPY. git runs no hook on a host push now, so the push leaf runs
+ * the gate itself, first: the HARNESS's `hooks/pre-push` ({@link harnessHooksDir}), never the worktree's
+ * tracked copy, fed the stdin line git would have given it. Only for a worktree whose pinned
+ * (daemon-owned) config enables hooks, so a worktree that ran no hook before still runs none.
+ */
+function* prePushGateSteps(
+  worktreePath: string,
+  pushArgs: string[],
+  read: (args: string[]) => string | Promise<string>,
+): Steps<PrePushGate | undefined> {
+  const pin = pinWorktreeGit(worktreePath);
+  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  const hook = join(harnessHooksDir(), "pre-push");
+  if (!existsSync(hook)) return undefined;
+  const tryRead = function* (args: string[]): Steps<string | undefined> {
+    try {
+      const out = String(yield* step(() => read(args))).trim();
+      return out.length > 0 ? out : undefined;
+    } catch {
+      // An absent ref or an unreachable remote; each read below names the placeholder git itself uses.
+      return undefined;
+    }
+  };
+  const positional = pushArgs.slice(1).filter((a) => !a.startsWith("-"));
+  const remote = positional[0] ?? "origin";
+  const refspec = positional[1] ?? "HEAD";
+  const [src, dst] = refspec.includes(":") ? (refspec.split(":", 2) as [string, string]) : [refspec, undefined];
+  const headRef = yield* tryRead(["symbolic-ref", "-q", "HEAD"]);
+  const localRef = src === "HEAD" ? (headRef ?? "HEAD") : src.startsWith("refs/") || /^[0-9a-f]{40,64}$/.test(src) ? src : `refs/heads/${src}`;
+  const localSha = (yield* tryRead(["rev-parse", src])) ?? ZERO_SHA;
+  const remoteRef = dst ?? localRef;
+  // Unreadable reads as a new ref: the hook's only reader (identity-transition) abstains on it, and the
+  // push that follows reports the transport failure itself.
+  const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
+  if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
+  const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
+  // The daemon's env as git gave it to the hook — no pin, no overrides; the hook scrubs GIT_DIR (W1-T3224).
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) {
+    if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(k)) delete env[k];
+  }
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
+}
+
+/** A refused gate, in the shape a refused `git push` had: `runErrorCause` and `censusPushRefusal` read it. */
+function gateRefusal(worktreePath: string, pushArgs: string[], err: unknown): PushFailedError {
+  const text = String((err as { stderr?: unknown } | null)?.stderr ?? "");
+  return new PushFailedError(
+    `Command failed: git -C ${worktreePath} ${pushArgs.join(" ")}\n` +
+      `the harness's pre-push gate (${harnessHooksDir()}/pre-push) refused this push; nothing was pushed\n${text}`.trimEnd(),
+    text,
+    err,
+  );
+}
+
+function writeThrough(err: unknown): void {
+  const failed = err as { stdout?: unknown; stderr?: unknown } | null;
+  if (failed?.stdout) process.stdout.write(String(failed.stdout));
+  if (failed?.stderr) process.stderr.write(String(failed.stderr));
+}
+
+function pushFailure(err: unknown): PushFailedError {
+  const text = String((err as { stderr?: unknown } | null)?.stderr ?? "");
+  return new PushFailedError(`${String((err as Error)?.message ?? err)}\n${text}`.trimEnd(), text, err);
+}
+
+const GATE_MAX_BUFFER = 64 * 1024 * 1024;
+
+/** The default exec for a run-branch push: the harness's gate, then the push through the leaf. */
+export function worktreePushExec(worktreePath: string): PushExec {
+  return (_file, args, opts) => {
+    const pushArgs = leafArgs(worktreePath, args);
+    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
+    if (gate) {
+      try {
+        const out = execFileSync(gate.hook, gate.args, {
+          cwd: worktreePath, input: gate.input, env: gate.env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
+        });
+        if (opts.stdio !== "ignore") process.stdout.write(out);
+      } catch (err) {
+        if (opts.stdio !== "ignore") writeThrough(err);
+        throw gateRefusal(worktreePath, pushArgs, err);
+      }
+    }
+    try {
+      hostWorktreeGit(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
+    } catch (err) {
+      if (opts.stdio !== "ignore") writeThrough({ stderr: (err as { stderr?: unknown } | null)?.stderr });
+      throw pushFailure(err);
+    }
+  };
+}
+
+/** {@link worktreePushExec} off the event loop. */
+export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
+  return async (_file, args, opts) => {
+    const pushArgs = leafArgs(worktreePath, args);
+    const gate = await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a)));
+    if (gate) {
+      try {
+        const out = await new Promise<string>((resolveGate, reject) => {
+          const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env: gate.env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
+            (err, stdout, stderr) => (err ? reject(Object.assign(err, { stdout, stderr })) : resolveGate(stdout)));
+          child.stdin?.end(gate.input);
+        });
+        if (opts.stdio !== "ignore") process.stdout.write(out);
+      } catch (err) {
+        if (opts.stdio !== "ignore") writeThrough(err);
+        throw gateRefusal(worktreePath, pushArgs, err);
+      }
+    }
+    try {
+      await hostWorktreeGitAsync(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
+    } catch (err) {
+      if (opts.stdio !== "ignore") writeThrough(err);
+      throw pushFailure(err);
+    }
+  };
 }
 
 /** Captures stdout from a git plumbing read/write. Injected by tests so the argv and the
