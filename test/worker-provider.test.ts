@@ -1049,7 +1049,7 @@ test("Codex hook profile fails closed when the validated worker policy has no co
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
   const settingsFile = join(root, "worker.json");
   try {
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
     assert.throws(() => codexPreToolUseProfile(settingsFile), /must define at least one PreToolUse hook/);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1059,7 +1059,7 @@ test("Codex hook profile fails closed when the validated worker policy has no co
 /** Base sandbox stanza shared by the malformed-hook fixtures below — the shape
  *  {@link validateWorkerSettingsFile} requires before {@link codexPreToolUseProfile} ever
  *  inspects `hooks`. */
-const CODEX_HOOK_PROFILE_BASE_SANDBOX = { enabled: true, failIfUnavailable: true };
+const CODEX_HOOK_PROFILE_BASE_SANDBOX = { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false };
 
 function writeCodexHookProfileFixture(root: string, preToolUse: unknown): string {
   const settingsFile = join(root, "worker.json");
