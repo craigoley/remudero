@@ -215,38 +215,47 @@ export function readReservationHolder(remote, cwd, ref, runGit = git) {
   return readReservationHolderRecord(remote, cwd, ref, runGit).holder;
 }
 
-// W1-T6025: the head and, for a takeover (`source=reclaimed`), its PARENT -- the holder it took the id
-// from. An unreadable parent stays unset, and adjudication then keeps the head, as before.
+// Read one bounded, head-first chain; an unweighable chain keeps the head.
 export function readReservationHolderRecord(remote, cwd, ref, runGit = git) {
   const fetched = runGit(["fetch", remote, ref], { cwd });
   if (fetched.error || fetched.status !== 0) return { holder: { status: "unreadable", reason: `could not fetch ${ref}` } };
-  const body = runGit(["log", "-1", "--format=%B", "FETCH_HEAD"], { cwd });
+  const body = runGit(["log", "--first-parent", "-n", "16", "--format=%B%x00", "FETCH_HEAD"], { cwd });
   if (body.error || body.status !== 0) return { holder: { status: "unreadable", reason: `could not read ${ref}` } };
-  const record = { holder: parseReservationHolderLine(body.stdout ?? ""), fields: parseReservationHolderFields(body.stdout ?? "") };
-  if (record.fields?.source !== "reclaimed") return record;
-  const parent = runGit(["log", "-1", "--format=%B", "FETCH_HEAD^"], { cwd });
-  if (parent.error || parent.status !== 0) return record;
-  return { ...record, parent: { holder: parseReservationHolderLine(parent.stdout ?? ""), fields: parseReservationHolderFields(parent.stdout ?? "") } };
+  const output = body.stdout ?? "";
+  const messages = output.includes("\0") ? output.split("\0").slice(0, -1) : [output];
+  const chain = messages.map((message) => ({
+    holder: parseReservationHolderLine(message), fields: parseReservationHolderFields(message),
+  }));
+  return { ...(chain[0] ?? { holder: { status: "legacy" } }), chain };
 }
 
 // W1-T6025: mirrors RESERVATION_PUSH_GRACE_MS in src/lib/task-id-reservation.ts; the W1-T6025 test pins parity.
 export const RESERVATION_PUSH_GRACE_MS = 2 * 60 * 60 * 1000;
 
-// W1-T6025: a takeover younger than the grace loses to the ORIGINAL holder (refs/rmd-id/W1-T5997 was taken
-// over 14.75s in by a stale client; only main's gate can bind it). At or past the grace the reclaimer holds.
-// Anything unweighable keeps the head: no parent, an unattributable one (main/unknown: the W1-T3674 repair),
-// a taken_over_from that is not the parent's branch, or an unparsable started_at.
+// Preserve the one-parent entry point for callers supplying a W1-T6025 record.
 export function adjudicateReservationHolder(record, graceMs = RESERVATION_PUSH_GRACE_MS) {
-  const { holder, fields, parent } = record;
-  const kept = { holder, fields };
-  if (holder.status !== "known" || fields?.source !== "reclaimed" || parent === undefined) return kept;
-  const original = parent.holder;
-  if (original.status !== "known" || original.branch === "main" || fields.takenOverFrom !== original.branch) return kept;
-  const ageMs = Date.parse(fields.startedAt) - Date.parse(parent.fields.startedAt);
-  if (!Number.isFinite(ageMs)) return kept;
-  const takeover = { reclaimer: fields, original: parent.fields, ageMs, graceMs };
-  if (Math.abs(ageMs) < graceMs) return { holder: original, fields: parent.fields, takeover: { ...takeover, winner: "original" } };
-  return { ...kept, takeover: { ...takeover, winner: "reclaimer" } };
+  return adjudicateReservationChain(record.chain ?? [record, ...(record.parent ? [record.parent] : [])], graceMs);
+}
+
+// Weigh each takeover against the rightful holder, even after earlier reclaimers lost.
+export function adjudicateReservationChain(links, graceMs = RESERVATION_PUSH_GRACE_MS) {
+  const head = links[0];
+  if (!head) return { holder: { status: "unreadable", reason: "empty reservation chain" }, fields: undefined };
+  const kept = { holder: head.holder, fields: head.fields };
+  if (links.length === 1) return kept;
+  if (links.some((link) => link.holder.status !== "known" || link.holder.branch === "main" || !Number.isFinite(Date.parse(link.fields?.startedAt)))) return kept;
+  let rightful = links.at(-1);
+  let takeover;
+  for (let i = links.length - 2; i >= 0; i--) {
+    const link = links[i];
+    const parent = links[i + 1];
+    if (link.fields.source !== "reclaimed" || link.fields.takenOverFrom !== parent.holder.branch) return kept;
+    const ageMs = Date.parse(link.fields.startedAt) - Date.parse(rightful.fields.startedAt);
+    const winner = ageMs < graceMs ? "original" : "reclaimer";
+    takeover = { reclaimer: link.fields, original: rightful.fields, ageMs, graceMs, winner };
+    if (winner === "reclaimer") rightful = link;
+  }
+  return { holder: rightful.holder, fields: rightful.fields, takeover };
 }
 
 export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBranch) {
