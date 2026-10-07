@@ -53,7 +53,8 @@ async function realWorker(events: unknown[]) {
 }
 
 test("a real Codex worker with no reported usage has no notional price", async () => {
-  for (const events of [[{ type: "turn.failed", error: { message: "synthetic refusal" } }], [completed()], [completed(used), completed()]]) {
+  for (const events of [[{ type: "turn.failed", error: { message: "synthetic refusal" } }], [completed()],
+    [completed(used), completed()], [completed(used), { type: "turn.started" }]]) {
     const result = await realWorker(events);
     assert.equal(result.notionalCostUsd, undefined);
     assert.equal(result.costUsd, 0);

@@ -2010,6 +2010,7 @@ class CodexJsonlAccumulator {
   private completedTurns = 0;
   private usageTurns = 0;
   private missingUsageTurns = 0;
+  private turnInProgress = false;
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
@@ -2040,7 +2041,7 @@ class CodexJsonlAccumulator {
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
       tokenUsageState: this.usageTurns === 0 ? "unavailable"
-        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.numTurns > this.completedTurns ? "partial" : "observed",
+        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
       isError: this.errors.length > 0,
       subtype: this.errors.length > 0 ? "error_codex" : "success",
@@ -2081,12 +2082,16 @@ class CodexJsonlAccumulator {
       : "other";
     this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
-    if (event.type === "turn.started") this.numTurns += 1;
+    if (event.type === "turn.started") {
+      this.numTurns += 1;
+      this.turnInProgress = true;
+    }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
     if (event.type === "turn.completed") {
+      this.turnInProgress = false;
       this.completedTurns += 1;
       const input = event.usage?.input_tokens;
       const output = event.usage?.output_tokens;
@@ -2104,6 +2109,7 @@ class CodexJsonlAccumulator {
       }
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
       this.keptBytes += Buffer.byteLength(message, "utf8");
