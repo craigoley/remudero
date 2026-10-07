@@ -37,3 +37,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The filed record names check:reviewer-unmet as the defect but does not describe the proposed prevention mechanism; the declared file list cannot establish whether review policy is preserved.; on the change's description/files alone, no diff was read — Acceptance supplies only a grep for a test declaration, which verifies text presence rather than the claimed elimination of fix rounds.; on the change's description/files alone, no diff was read — The supplied escalation rule requires HIGH when the finding cannot be verified from what is shown; this filing-time record supplies no behavioral evidence."
+    judged_at: "2026-10-07T10:09:11.893Z"
+    pin: "44967bedd5a5bd6464646b1f80d14d6c888db3f40900d7ffb86a0acebc774341"
