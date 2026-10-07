@@ -2,6 +2,9 @@
  * W1-T6089 — a src module that SPAWNS or READS a src path keeps its graph edge to it; one that only
  * lists the path as DATA does not.
  *
+ * @source-text-subject: source text is the selector's input. These tests pass fixture strings and
+ * real modules to selectAffectedSuites and assert selected suites, rather than matching source prose.
+ *
  * #9720's `namedEdges` dropped every src path string inside a src module, because the tables
  * (authority.ts, config-schema.ts, worktree-sites.ts, baked-runtime-inputs.ts) made 114 false edges.
  * That also dropped four real ones: serve-supervisor, operator-mcp and gate-gardener spawn
