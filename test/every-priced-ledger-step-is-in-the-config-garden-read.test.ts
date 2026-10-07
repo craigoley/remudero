@@ -120,6 +120,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "dep-review.migrate.feedback_captured": A_LANE_RUN_ID,
   "dep-review.migrate.ignore_commented": A_LANE_RUN_ID,
   "dep-review.migrate.incomplete": A_LANE_RUN_ID,
+  "dep-review.node_pin_refused": A_LANE_RUN_ID, // W1-T6258: the .nvmrc sync, under the dep-review-PR run id
+  "dep-review.node_pin_synced": A_LANE_RUN_ID, // W1-T6258: the .nvmrc sync, under the dep-review-PR run id
   "approve.join_body_refreshed": A_LANE_RUN_ID,
   "approve.join_body_stale": A_LANE_RUN_ID,
   "ratify.approved": A_LANE_RUN_ID,
