@@ -20,6 +20,8 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -42,12 +44,46 @@ test("check refuses with no target rather than defaulting to the whole suite", (
 });
 
 test("the refusal is the only zero-target behaviour — no argv shape slips past it", () => {
-  // An empty string and a lone `--` are the shapes an npm invocation can produce by accident.
-  for (const argv of [[], [""], ["--"]]) {
-    const r = spawnSync("node", [SCRIPT, ...argv].filter((a) => a !== ""), { cwd: REPO_ROOT, encoding: "utf8" });
-    if (argv.length === 0 || argv[0] === "") {
-      assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must refuse`);
-    }
+  for (const argv of [[], [""], ["--"], ["--", ""], ["", "--"], ["--", "--"]]) {
+    const r = spawnSync(process.execPath, [SCRIPT, ...argv], {
+      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" },
+    });
+    assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must refuse`);
+    assert.match(r.stderr, /no test target given/);
+    assert.equal(r.stdout.trim(), "", "neither the tests nor typecheck may start");
+  }
+});
+
+test("check refuses missing, directory and option-only targets before either child starts", () => {
+  for (const argv of [["test/ghost-check-target.test.ts"], ["test"], ["--test-name-pattern", "only-this"]]) {
+    const r = spawnSync(process.execPath, [SCRIPT, ...argv], {
+      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" },
+    });
+    assert.equal(r.status, 2, `unverified targets ${JSON.stringify(argv)} must refuse`);
+    assert.match(r.stderr, /every target must name an existing test file/);
+    assert.equal(r.stdout.trim(), "", "no child is attempted before the entire file list is verified");
+  }
+});
+
+test("check with a separator and a real file runs its scoped test and typecheck in an isolated tiny project", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-check-target-"));
+  try {
+    mkdirSync(join(root, "test", "setup"), { recursive: true });
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"), "dir");
+    writeFileSync(join(root, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+    writeFileSync(join(root, "probe.test.mjs"), "import { test } from 'node:test'; test('the real scoped child runs', () => {});\n");
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: {
+      allowJs: true, skipLibCheck: true, types: [],
+    }, files: ["probe.test.mjs"] }));
+    const r = spawnSync(process.execPath, [SCRIPT, "--", "probe.test.mjs"], {
+      cwd: root, encoding: "utf8", timeout: 30_000,
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /the real scoped child runs/);
+    assert.match(r.stdout, /scoped tests\s*: PASS/);
+    assert.match(r.stdout, /typecheck\s*: PASS/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
