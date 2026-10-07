@@ -7006,7 +7006,7 @@ export function missingTaskTrailerRepairDecision(
       reason: "missing trailer repair refused: head branch does not match run-<taskId>-<epoch>, so no task id is derivable",
     };
   }
-  if (pr.taskExistsOnMain !== true) {
+  if (taskId !== "unfiled" && pr.taskExistsOnMain !== true) {
     return {
       action: "stand-down",
       reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
@@ -13593,7 +13593,25 @@ export async function runSweep(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    // W1-T6052: an old pending snapshot is not proof CI is still running. The arm reader
+    // proves every required context on a fresh head; only that exact open head can clear it.
+    if (pr.checksState === "pending" &&
+        (pendingAgeMinutes(pr, now) ?? 0) >= policy.pendingCeilingMinutes && deps.readArmFacts) {
+      try {
+        const fresh = await deps.readArmFacts(pr);
+        if (fresh?.prNumber === pr.prNumber && fresh.headSha === pr.headSha &&
+            fresh.state === "open" && fresh.checksGreen) {
+          pr = { ...pr, checksState: "green", checksPendingSince: undefined,
+            ciFailures: undefined, cancelledRequiredChecks: undefined, redRequiredChecks: undefined };
+          log("sweep.stale_pending_cleared", { pr_number: pr.prNumber, head_sha: pr.headSha,
+            reason: "fresh exact-head required checks concluded green" });
+        }
+      } catch (error) {
+        log("sweep.stale_pending_read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha,
+          reason: String(error) });
+      }
+    }
     let stackParentWithdrawal:
       | { check: StackPrerequisiteCheck; outcome?: DisarmOutcome; error?: string }
       | undefined;
