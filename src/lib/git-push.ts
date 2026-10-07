@@ -1,11 +1,12 @@
-import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFile, execFileSync, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { probeProofSandbox, proofChildEnv, proofSandboxArgv, ProofSandboxUnavailableError } from "./review.js";
 import {
   HOST_GIT_CONFIG,
   harnessHooksDir,
@@ -492,6 +493,39 @@ export function prePushGateEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Pr
     env[`GIT_CONFIG_VALUE_${i}`] = value;
   });
   return env;
+}
+
+/** W1-T6138: branch-owned checks get the proof sandbox with every persistent bind read-only. */
+export function createPrePushSandboxRunner(cwd: string, {
+  probe = probeProofSandbox,
+  run = (file, args, options) => spawnSync(file, args, options),
+}: {
+  probe?: typeof probeProofSandbox;
+  run?: (file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) => SpawnSyncReturns<string>;
+} = {}) {
+  const status = probe();
+  return (file: string, args: string[], options: { timeout?: number; maxBuffer?: number } = {}): SpawnSyncReturns<string> => {
+    if (status.mode !== "bwrap") throw new ProofSandboxUnavailableError(status.reason);
+    const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prepush-sandbox-home-`));
+    try {
+      const env = { ...prePushGateEnv(proofChildEnv(home, prePushGateEnv())), HOME: home, TMPDIR: "/tmp" };
+      const sandbox = proofSandboxArgv({ cwd, home, env: { HOME: home, GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH } });
+      const realHome = realpathSync(home);
+      for (let i = 0; i < sandbox.length; i++) {
+        if (sandbox[i] === "--bind" && sandbox[i + 1] !== realHome) sandbox[i] = "--ro-bind";
+      }
+      const spawnOptions: SpawnSyncOptionsWithStringEncoding = {
+        cwd, env, encoding: "utf8", timeout: options.timeout ?? 60_000, maxBuffer: options.maxBuffer ?? GATE_MAX_BUFFER,
+      };
+      const started = run(status.binary, [...sandbox, process.execPath, "-e", ""], { ...spawnOptions, timeout: 10_000 });
+      if (started.error || started.status !== 0) {
+        throw new ProofSandboxUnavailableError(started.error?.message || started.stderr.trim() || `sandbox probe exited ${started.status}, signal ${started.signal}`);
+      }
+      return run(status.binary, [...sandbox, file, ...args], spawnOptions);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
 }
 
 /** Runs `run` with `gate.env.HOME` a fresh empty directory, removed once `run` (or the promise it returns) settles. */
