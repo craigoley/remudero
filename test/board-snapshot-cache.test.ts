@@ -455,7 +455,7 @@ esac
 test("production daemon and Serve composition roots construct and pass the shared snapshot cache", () => {
   const source = readFileSync(join(process.cwd(), "src", "run-task.ts"), "utf8");
   assert.ok(/createBoardSnapshotCache\(/.test(source), "the module is constructed outside its unit test");
-  assert.ok(/snapshotCache:\s*boardSnapshotFor\(/.test(source), "daemon projection and lane gateways receive the per-repo shared cache");
+  assert.ok(/snapshotCache:\s*boardSnapshotFor\(|snapshotFor:\s*boardSnapshotFor\b/.test(source), "daemon projection and lane gateways receive the per-repo shared cache");
   assert.ok(/buildSweepHook\([\s\S]*?boardSnapshotFor\(target\.owner, target\.repo\)/.test(source), "the full sweep gateway receives the same daemon cache");
   assert.ok(/const serveBoardSnapshot = createBoardSnapshotCache\([\s\S]*?snapshotCache:\s*serveBoardSnapshot/.test(source), "Serve uses the same state namespace");
 });

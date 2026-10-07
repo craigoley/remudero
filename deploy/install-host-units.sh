@@ -1216,7 +1216,95 @@ ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
 "
 fi
 
+host_apt() {
+  if [ -n "${RMD_HOST_APT_CMD:-}" ]; then "${RMD_HOST_APT_CMD}" "$@"
+  else "$@"; fi
+}
+
+converge_host_node() {
+  local pin actual node_path major source source_text desired versions package after
+  source="${RMD_NODESOURCE_PATH:-/etc/apt/sources.list.d/nodesource.sources}"
+  node_path="$(command -v node || true)"
+  actual="$(node --version 2>/dev/null || true)"
+  actual="${actual#v}"
+  actual="${actual:-unavailable}"
+  if ! pin="$(cat "${SCRIPT_DIR%/deploy}/.nvmrc" 2>/dev/null)"; then
+    echo "host-node: cannot read checkout .nvmrc; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  pin="${pin#v}"
+  if ! printf '%s\n' "$pin" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "host-node: invalid .nvmrc pin '${pin}'; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  major="${pin%%.*}"
+  if [ "$MODE" = check ]; then
+    if [ "$actual" != "$pin" ]; then
+      echo "install-host-units: DRIFTED host-node ${actual} != ${pin}"
+      drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      host-node ${actual}"
+    fi
+    return 0
+  fi
+  if [ ! -f "$source" ] || [ "$node_path" != "${RMD_HOST_NODE_PATH:-/usr/bin/node}" ]; then
+    echo "host-node: unmanaged node=${node_path:-missing} version=${actual} source=${source}; unchanged"
+    return 0
+  fi
+  if ! source_text="$(cat "$source")"; then
+    echo "host-node: cannot read ${source}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! printf '%s\n' "$source_text" | grep -Eq '^URIs:.*https?://deb\.nodesource\.com/node_[0-9]+\.x([/[:space:]]|$)'; then
+    echo "host-node: unmanaged source=${source} node=${node_path} version=${actual}; unchanged"
+    return 0
+  fi
+  if ! desired="$(printf '%s\n' "$source_text" | sed "/^URIs:/s|\(https\{0,1\}://deb\.nodesource\.com/node_\)[0-9][0-9]*\.x|\1${major}.x|g")"; then
+    echo "host-node: cannot render ${source}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if [ "$desired" != "$source_text" ]; then
+    if ! printf '%s\n' "$desired" > "$source"; then
+      echo "host-node: cannot write ${source}; staying on ${actual}, retried next converge"
+      return 0
+    fi
+    echo "host-node: source now node_${major}.x"
+  elif [ "$actual" = "$pin" ]; then
+    echo "host-node: in step ${actual}"
+    return 0
+  fi
+  if ! host_apt apt-get update; then
+    echo "host-node: apt-get update failed; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if [ "$actual" = "$pin" ]; then return 0; fi
+  package="${pin}-1nodesource1"
+  if ! versions="$(host_apt apt-cache madison nodejs)"; then
+    echo "host-node: apt-cache madison failed; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! printf '%s\n' "$versions" | awk -F '|' -v want="$package" '
+    { version=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", version); if (version == want) found=1 }
+    END { exit !found }
+  '; then
+    echo "host-node: ${pin} not yet in node_${major}.x; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! host_apt apt-get install -y "nodejs=${package}"; then
+    echo "host-node: apt-get install failed for ${package}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  after="$(node --version 2>/dev/null || true)"
+  after="${after#v}"
+  if [ "$after" = "$pin" ]; then
+    echo "host-node: installed ${pin} (${package})"
+  else
+    echo "host-node: install returned success but node is still ${after:-unavailable} != ${pin}; retried next converge"
+  fi
+}
+
 drift=0
+converge_host_node
 for row in $UNITS; do
   [ -n "$row" ] || continue
   path="${row%%:*}"; rest="${row#*:}"; fn="${rest%%:*}"; mode="${rest##*:}"

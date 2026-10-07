@@ -173,7 +173,7 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
-import { createChangedFilesCache } from "./lib/changed-files-cache.js";
+import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
@@ -1527,6 +1527,7 @@ import {
   preferImplementingPr,
   isBookkeepingOnlyChangeset,
   type PrRef,
+  type BatchedPr,
   type OpenSiblingBuild,
   type StatusProjection,
   planBranchReap,
@@ -16643,7 +16644,7 @@ async function runTask(
   // W1-T2509: `githubFor` lets a multi-lane caller hand every lane ONE memoised gateway per
   // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
   // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
-  const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? buildBatchedGithub(owner, task.repo);
+  const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? createDaemonGatewayFactory(config.root, log)(owner, task.repo);
   const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
@@ -34446,7 +34447,7 @@ async function drainCommand(
   // which is the same guarantee at none of the cost — a fresh instance ALSO starts with an empty
   // `knownBoardPrs`, so every pass re-walked the closed half cold.
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
-  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log, snapshotCache: boardSnapshotFor(o, r) }));
+  const githubFactory = deps.githubFactory ?? createDaemonGatewayFactory(config.root, log, { snapshotFor: boardSnapshotFor });
 
   // W1-T2513 — ONE COALESCER FOR THIS WHOLE `rmd drain` INVOCATION (never per tick, never per
   // lane), handed to every dispatch lane's `runTask` call below (`runOne`) via its
@@ -35455,6 +35456,41 @@ export function memoiseGatewayByRepo(build: (owner: string, repo: string) => Git
     const built = build(owner, repo);
     cache.set(key, built);
     return built;
+  };
+}
+
+/** W1-T6259: every daemon-side gateway reads changed files through the non-blocking per-repo cache. */
+export function createDaemonGatewayFactory(
+  root: string,
+  log: (event: string, extra?: Record<string, unknown>) => void,
+  opts: {
+    snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache;
+    trailerIndexFor?: (owner: string, repo: string) => (() => Map<string, PrRef[]> | null) | undefined;
+    exec?: (args: string[]) => string;
+    fetchAll?: () => BatchedPr[];
+    fetchChangedFiles?: (prNumber: string) => Promise<string[] | undefined>;
+  } = {},
+): (owner: string, repo: string) => GitHub {
+  const files = new Map<string, ChangedFilesCache>();
+  const filesFor = (owner: string, repo: string): ChangedFilesCache => {
+    const key = `${owner}/${repo}`;
+    let cache = files.get(key);
+    if (!cache) {
+      cache = createChangedFilesCache(root, owner, repo, { log, ...(opts.fetchChangedFiles ? { fetch: opts.fetchChangedFiles } : {}) });
+      files.set(key, cache);
+    }
+    return cache;
+  };
+  return (owner, repo) => {
+    const trailerIndex = opts.trailerIndexFor?.(owner, repo);
+    return buildBatchedGithub(owner, repo, {
+      log,
+      changedFilesCache: filesFor(owner, repo),
+      ...(opts.snapshotFor ? { snapshotCache: opts.snapshotFor(owner, repo) } : {}),
+      ...(trailerIndex ? { commitTrailerIndex: trailerIndex } : {}),
+      ...(opts.exec ? { exec: opts.exec } : {}),
+      ...(opts.fetchAll ? { fetchAll: opts.fetchAll } : {}),
+    });
   };
 }
 
@@ -37224,12 +37260,10 @@ export async function daemonCommand(
   const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
-  const gatewayFor = (o: string, r: string) =>
-    buildBatchedGithub(o, r, {
-      log,
-      snapshotCache: boardSnapshotFor(o, r),
-      ...(o === target.owner && r === target.repo ? { commitTrailerIndex: targetCommitTrailerIndex } : {}),
-    });
+  const gatewayFor = createDaemonGatewayFactory(config.root, log, {
+    snapshotFor: boardSnapshotFor,
+    trailerIndexFor: (o, r) => (o === target.owner && r === target.repo ? targetCommitTrailerIndex : undefined),
+  });
   const githubFactory = deps.githubFactory ?? gatewayFor;
 
   // W1-T2509 — ONE GATEWAY PER owner/repo FOR THE WHOLE DAEMON, handed to every dispatch lane.
