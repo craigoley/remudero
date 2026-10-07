@@ -1,0 +1,46 @@
+- id: W1-T6260
+  title: "AN INSTANCE'S IDLE PROBE COUNTS ONLY ITS OWN WORKERS — deploy-run's probeIdle runs a host-wide `pgrep`, so on a multi-instance host one instance's recycle is held by another instance's workers (console's 2026-10-07 deploy.not_idle counted core's workers with zero locks of its own)"
+  repo: remudero
+  depends_on: [W1-T6249]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-07: why console's watchdog reached deploy-run while core's never did"
+  plan_refs: [W1-T6249, W1-T3532]
+  files: [src/lib/deployer.ts, test/an-instances-idle-probe-counts-only-its-own-workers.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 44defb0 and on the host (read-only):
+    - src/lib/deployer.ts:2485 probeIdle counts workers with `exec("pgrep", ["-f", "claude --output-format|codex exec"])`.
+      deploy-run is started ON THE HOST by each instance's launcher, so the host process table includes every
+      container's processes: the probe counts core, console and site workers together. Its lock counts
+      (:2496-2497) are per-instance, and so are the launcher's deploy_code_idle (deploy/install-host-units.sh:357-385,
+      `docker top <container>`) and recycle-container.sh:1187 (`docker exec <container> ps`).
+    - Live 18:39Z: host-wide pgrep matched 2 (core's one codex worker, counted twice: node wrapper and musl binary);
+      docker top showed core 2, console 0, site 0.
+    - Journal, console 12:58-13:14Z: every deploy.not_idle row read `"inflight_locks":0,"worktree_locks":0,
+      "blockers":["workers"]` with workers 2-4, while console's own launcher check passed (no worker in its
+      container) and core logged `active workers; deferring` on the same ticks. Console's 30-min ceiling recycles
+      were therefore driven by core's load. This breaks W1-T3532's "no tick may act on another instance".
+    - The container name is already in deploy-run's reach: `process.env.RMD_RESOURCE_POLICY_CONTAINER ||
+      imageShaContainer` (deployer.ts:2306, :2309); the launcher exports RMD_RESOURCE_POLICY_CONTAINER.
+  design: |
+    probeIdle counts workers inside the instance's own container when one is named: `docker top <container>` (or
+    `docker exec <container> ps -eo args`), matched with the same pattern, counting each worker once (match the
+    worker binary, not its node wrapper). The host-wide pgrep remains only when no container is named (the launchd /
+    single-instance Mac path). An unreadable container read stays `unreadable`, never zero, as today. W1-T6249 is
+    being built on the same file; build after it merges and keep its hand-off to recycle-container intact.
+  acceptance:
+    - claim: "a worker in a different container never makes this instance's idle probe report busy, and its own worker does"
+      proof: 'grep: test("W1-T6260: another container''s worker does not make this instance busy" in test/an-instances-idle-probe-counts-only-its-own-workers.test.ts'
+  falsifier: |
+    Keep the host-wide pgrep: the fixture with one worker in a sibling container and none in this one reports
+    workers 1, and the test fails.
+  note: |
+    Diagnosed by a read-only host investigation; W1-T6249's rationale left this open ("why console's
+    deploy_code_idle passes while its deploy-run probe counts workers was not determined") — this is the answer.

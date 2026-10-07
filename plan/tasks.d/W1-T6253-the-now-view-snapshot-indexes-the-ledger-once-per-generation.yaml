@@ -1,0 +1,42 @@
+- id: W1-T6253
+  title: "THE NOW VIEW'S SNAPSHOT INDEXES THE LEDGER ONCE PER GENERATION — every now build's snapshot stage runs computeBoardSnapshot → buildStatusBoard, which calls buildLedgerIndex over every row twice (deriveCircuitBrokenBlockers and the queue section), and dayCostRows rescans the same rows; measured on serve 2026-10-07 the snapshot stage took a median 2.4 s (max 3.8 s) on all 37 sampled builds, and a 150 s CPU profile of the views worker attributed 10.5 s to buildLedgerIndex and 10.0 s to windowCostRows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a now build reuses the ledger-derived structures of an unchanged row generation
+  band_meaning: span
+  origin: "operator session 2026-10-07: now view 2.5-3.4 s per pass; views-worker CPU profile (serve lanes/claude/serve2-w2-_worker_9_.cpuprofile)"
+  plan_refs: [W1-T3523, W1-T4075]
+  files: [src/lib/status-board.ts, src/lib/now-view.ts, test/the-now-view-snapshot-indexes-the-ledger-once-per-generation.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 on remudero-serve (generation b at b80ffa1e6): read_model.slow_view rows for
+    view "now" over the last 40 builds give the snapshot stage n=37, median 2385 ms, max 3783 ms;
+    board median 283 ms; decisions (5 builds) median 1656 ms. A 150 s Profiler session on the views
+    worker ([worker 9], read-model-worker.ts) found it busy 113.6 s of 153 s; self time:
+    decisionsOf 25 s (with inlined callees), buildLedgerIndex 10.5 s, windowCostRows 10.0 s,
+    computeBoardSnapshot 9.2 s, projectFeedbackGates 5.0 s, deriveNeedsMe 4.6 s. READ on origin/main:
+    status-board.ts builds `const index = buildLedgerIndex(lines)` in deriveCircuitBrokenBlockers and
+    again in the queue section, both reached from buildStatusBoard on every computeBoardSnapshot;
+    now-view.ts's `dayCostRows` calls windowCostRows over all rows per build.
+  design: |
+    Build the ledger index once per row GENERATION and share it: one index per buildStatusBoard call
+    passed to both sections, and across now builds while the board projection's row generation is
+    unchanged (the projection already knows its generation). dayCostRows likewise caches on
+    (generation, UTC day). A changed generation rebuilds; nothing is reused across generations, so
+    no view can show a stale count.
+  acceptance:
+    - claim: "one status-board build indexes the ledger once"
+      proof: 'grep: test("W1-T6253: one status-board build indexes the ledger once" in test/the-now-view-snapshot-indexes-the-ledger-once-per-generation.test.ts'
+    - claim: "two now builds over an unchanged row generation index the ledger and scan day costs once"
+      proof: 'grep: test("W1-T6253: an unchanged row generation is indexed once across now builds" in test/the-now-view-snapshot-indexes-the-ledger-once-per-generation.test.ts'
+    - claim: "a new row generation rebuilds the index"
+      proof: 'grep: test("W1-T6253: a new row generation rebuilds the index" in test/the-now-view-snapshot-indexes-the-ledger-once-per-generation.test.ts'
+  falsifier: |
+    Keep the per-section buildLedgerIndex: a counting index builder records two builds for one
+    status-board call, and the first test fails.

@@ -271,6 +271,7 @@ function* corpusReports(file, manifest, bytes) {
       !Array.isArray(manifest.mapChunks) || !Array.isArray(manifest.reportChunks)) {
     throw new Error(`${file} has an invalid chunked coverage manifest`);
   }
+  addRecordedDrops(manifest, bytes, file);
   const readChunk = verifiedChunkReader(file, manifest, CORPUS_FORMAT, CORPUS_PIECE, stem,
     [['maps', manifest.mapChunks], ['reports', manifest.reportChunks]], bytes);
   const sourceMaps = [];
@@ -310,6 +311,18 @@ export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
   });
 }
 
+function retainDescribedScripts(result, sourceMapCache, counts) {
+  const retained = scriptsTheSourceMapDescribes(result, sourceMapCache);
+  counts.droppedRepeatInstances += result.length - retained.length;
+  return retained;
+}
+
+function addRecordedDrops(record, counts, file) {
+  const dropped = record.droppedRepeatInstances === undefined ? 0 : record.droppedRepeatInstances;
+  if (!Number.isSafeInteger(dropped) || dropped < 0) throw new Error(`${file} has an invalid droppedRepeatInstances count`);
+  counts.droppedRepeatInstances += dropped;
+}
+
 function* coverageReports(directories, bytes) {
   const childSuites = childSuiteCache();
   for (const directory of directories) {
@@ -326,13 +339,14 @@ function* coverageReports(directories, bytes) {
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
         const spawnedBy = Array.isArray(parsed?.result) ? rawReportIdentity(file, parsed.result, childSuites) : {};
-        if (Array.isArray(parsed?.result)) parsed.result = scriptsTheSourceMapDescribes(parsed.result, parsed['source-map-cache']);
+        if (Array.isArray(parsed?.result)) parsed.result = retainDescribedScripts(parsed.result, parsed['source-map-cache'], bytes);
         yield spawnedBy.child ? { ...parsed, ...spawnedBy } : parsed;
         continue;
       }
       if (parsed?.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
         throw new Error(`${file} is not a valid ${COMPACT_FORMAT} report`);
       }
+      addRecordedDrops(parsed, bytes, file);
       for (const report of parsed.reports) {
         bytes.rawFileCount += 1;
         yield restoreReport(report, parsed.sourceMaps, file);
@@ -355,6 +369,7 @@ function collectCompactReports(directories, onMap, onReport) {
   const sourceMapIndexes = new Map();
   let rawFileCount = 0;
   let reportCount = 0;
+  const counts = { droppedRepeatInstances: 0 };
   const childSuites = childSuiteCache();
 
   for (const directory of directories) {
@@ -365,7 +380,7 @@ function collectCompactReports(directories, onMap, onReport) {
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
       const identity = rawReportIdentity(file, raw.result, childSuites);
-      const result = scriptsTheSourceMapDescribes(raw.result, raw['source-map-cache']).filter((script) => !collector.shouldSkipFileCoverage(script.url));
+      const result = retainDescribedScripts(raw.result, raw['source-map-cache'], counts).filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
       for (const script of result) {
@@ -387,14 +402,14 @@ function collectCompactReports(directories, onMap, onReport) {
   }
 
   if (reportCount === 0) throw new Error('raw coverage compaction produced no source records');
-  return { rawFileCount, reportCount, sourceMapCount: sourceMapIndexes.size };
+  return { rawFileCount, reportCount, sourceMapCount: sourceMapIndexes.size, ...counts };
 }
 
 export function compactRawCoverageDirectories(directories) {
   const sourceMaps = [];
   const reports = [];
-  const { rawFileCount } = collectCompactReports(directories, (_source, map) => sourceMaps.push(map), report => reports.push(report));
-  return { rawFileCount, bundle: { format: COMPACT_FORMAT, sourceMaps, reports } };
+  const { rawFileCount, droppedRepeatInstances } = collectCompactReports(directories, (_source, map) => sourceMaps.push(map), report => reports.push(report));
+  return { rawFileCount, bundle: { format: COMPACT_FORMAT, sourceMaps, reports, droppedRepeatInstances } };
 }
 
 function atomicCoverageFile(path, source) {
@@ -497,7 +512,7 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
       return lines;
     };
     const mapped = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'mapped', 'reports', maxChunkBytes);
-    const bytes = { rawFileCount: 0, inputBytes: 0 };
+    const bytes = { rawFileCount: 0, inputBytes: 0, droppedRepeatInstances: 0 };
     let reportCount = 0;
     for (const report of coverageReports(directories, bytes)) {
       // A script the merge would skip (node:, test/**, node_modules) can never reach a summary, so
@@ -509,7 +524,7 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
     }
     if (reportCount === 0) throw new Error('raw coverage premapping produced no source records');
     mapped.flush();
-    const counts = { rawFileCount: bytes.rawFileCount, reportCount };
+    const counts = { rawFileCount: bytes.rawFileCount, reportCount, droppedRepeatInstances: bytes.droppedRepeatInstances };
     const lines = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'lines', 'lines', maxChunkBytes);
     for (const [url, { source, written, ignored }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written], ignored: [...ignored] }));
     lines.flush();
@@ -554,6 +569,7 @@ function* premappedReports(file, collector, bytes) {
       !Array.isArray(manifest.lineChunks) || !Array.isArray(manifest.reportChunks)) {
     throw new Error(`${file} has an invalid premapped coverage manifest`);
   }
+  addRecordedDrops(manifest, bytes, file);
   const readChunk = verifiedChunkReader(file, manifest, PREMAPPED_FORMAT, PREMAPPED_PIECE, PREMAPPED_FILE.exec(basename(file)),
     [['lines', manifest.lineChunks], ['mapped', manifest.reportChunks]], bytes);
   let lineFiles = 0;
@@ -595,7 +611,7 @@ export function mergeRawCoverageDirectories(directories) {
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
   const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
-  const bytes = { rawFileCount: 0, inputBytes: 0 };
+  const bytes = { rawFileCount: 0, inputBytes: 0, droppedRepeatInstances: 0 };
   collector.getCoverageFromDirectory = () => {
     const merged = new Map();
     for (const directory of directories) {
@@ -639,7 +655,7 @@ export async function writeImpactMap(directories, output, { sha, sourceRoot } = 
   if (directories.length === 0) throw new Error('at least one coverage directory is required');
   if (!sha) throw new Error('--impact-map requires --sha <the main sha the coverage ran on>');
   const { buildImpactMap } = await import('../src/lib/test-impact-map.ts');
-  const bytes = { rawFileCount: 0, inputBytes: 0 };
+  const bytes = { rawFileCount: 0, inputBytes: 0, droppedRepeatInstances: 0 };
   const readSource = sourceRoot === undefined ? undefined : (path) => {
     try {
       return readFileSync(join(sourceRoot, path), 'utf8');
@@ -678,29 +694,29 @@ export async function main(argv) {
         `${r.orphanReports} orphan report(s) -> ${values['impact-map']} (${r.spawnCredited} suite(s) credited with a child's report)`,
     );
   } else if (values['premap-output']) {
-    const { rawFileCount, reportCount, lineFileCount, output, premappedBytes } =
+    const { rawFileCount, reportCount, lineFileCount, output, premappedBytes, droppedRepeatInstances } =
       writePremappedCoverageDirectories(positionals, values['premap-output']);
     console.log(
       `coverage-merge-ratchet: premapped ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${reportCount} retained process report(s), ` +
-        `${lineFileCount} source file line record(s), premappedBytes=${premappedBytes} -> ${output}`,
+        `${lineFileCount} source file line record(s), premappedBytes=${premappedBytes} droppedRepeatInstances=${droppedRepeatInstances} -> ${output}`,
     );
   } else if (values['compact-output']) {
     const outputDirectory = values['compact-output'];
     const rawBytes = positionals.flatMap((directory) => coverageFilesUnder(directory)).reduce((sum, file) => sum + fileBytes(file), 0);
-    const { rawFileCount, reportCount, sourceMapCount, output, compactBytes } = writeCompactCoverageDirectories(positionals, outputDirectory);
+    const { rawFileCount, reportCount, sourceMapCount, output, compactBytes, droppedRepeatInstances } = writeCompactCoverageDirectories(positionals, outputDirectory);
     console.log(
       `coverage-merge-ratchet: bundled ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${reportCount} retained process report(s), ${sourceMapCount} unique source map(s), ` +
-        `rawBytes=${rawBytes} compactBytes=${compactBytes} peakBytes=${rawBytes + compactBytes} -> ${output}`,
+        `rawBytes=${rawBytes} compactBytes=${compactBytes} peakBytes=${rawBytes + compactBytes} droppedRepeatInstances=${droppedRepeatInstances} -> ${output}`,
     );
   } else {
-    const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir } = mergeRawCoverageDirectories(positionals);
+    const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir, droppedRepeatInstances } = mergeRawCoverageDirectories(positionals);
     writeFileSync(values.output, renderCoverageSummary(summary));
     console.log(
       `coverage-merge-ratchet: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${summary.files.length} source record(s), inputBytes=${inputBytes} stagingBytes=${stagingBytes} ` +
-        `peakBytes=${peakBytes} stagingDir=${stagingDir} -> ${values.output}`,
+        `peakBytes=${peakBytes} stagingDir=${stagingDir} droppedRepeatInstances=${droppedRepeatInstances} -> ${values.output}`,
     );
   }
 }

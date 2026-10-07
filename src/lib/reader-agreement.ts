@@ -6,6 +6,7 @@ import { TASK_STATUSES, type Plan } from "./plan.js";
 import {
   buildBatchedGithub, buildLedgerIndex, dispatchesWithoutNewOwnedPr, infrastructureRefusal,
   orphanedRunIds, projectPlan, readLedgerUnionBounded, STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS,
+  type GitHub,
 } from "./status.js";
 
 type Row = Record<string, unknown>;
@@ -25,6 +26,8 @@ export interface ReaderAgreementOptions {
   plan?: Plan;
   openPrCount?: number;
   readJson?: (args: string[]) => Promise<unknown>;
+  /** The gateway the independent queue projection reads; omitted, {@link independentQueueGateway}. */
+  queueGithub?: () => GitHub;
   boardReader?: () => ReaderFigures | Promise<ReaderFigures>;
   independentReader?: () => ReaderFigures | Promise<ReaderFigures>;
   appendLine?: (path: string, row: Row & { run_id: string; task_id: string; step: string }) => void;
@@ -104,6 +107,21 @@ function independentStreak(rows: Row[], id: string): number {
   return count;
 }
 
+const independentQueueGateways = new Map<string, GitHub>();
+
+/** W1-T6246 — the independent queue figure's gateway, one per repository for the process's life. It never spawns gh
+ *  on the calling thread: `warm()` walks on a worker and reads serve the facts it last held. A per-pass gateway
+ *  was cold every pass, so projectPlan walked GitHub synchronously on the daemon loop (89.6 s, live profile). */
+export function independentQueueGateway(owner: string, repo: string): GitHub {
+  const key = `${owner}/${repo}`;
+  let gateway = independentQueueGateways.get(key);
+  if (!gateway) {
+    gateway = buildBatchedGithub(owner, repo, { offLoop: true });
+    independentQueueGateways.set(key, gateway);
+  }
+  return gateway;
+}
+
 async function independentFigures(options: ReaderAgreementOptions): Promise<ReaderFigures> {
   const union = readLedgerUnionRawLinesSync(dirname(options.ledgerPath), {
     liveFirst: true, order: "newest-first", rotationWindowMs: STATUS_BOARD_WINDOW_MS,
@@ -133,7 +151,10 @@ async function independentFigures(options: ReaderAgreementOptions): Promise<Read
   }
   let queuedTaskCount: number | undefined;
   if (options.plan && options.owner && options.repo && existsSync(join(dirname(options.ledgerPath), "status.json"))) {
-    const github = buildBatchedGithub(options.owner, options.repo);
+    const github = options.queueGithub?.() ?? independentQueueGateway(options.owner, options.repo);
+    github.warm?.();
+    // W1-T6246: a cross-check never waits on GitHub. Until the off-loop walk has fresh facts the figure is absent.
+    if (github.factsStale?.() !== false) return { dispatchStreaks, healthyDeploys, openPrCount, queuedTaskCount };
     const projections = projectPlan(options.plan, {
       ledgerPath: options.ledgerPath, readLedger: () => rows,
       github, writeCreditStore: () => {},

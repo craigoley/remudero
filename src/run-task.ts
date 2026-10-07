@@ -7751,6 +7751,7 @@ async function runReview(args: {
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
+  let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
   let reviewerFindingText: string | undefined;
   if (planOnlySkip) {
@@ -7836,6 +7837,7 @@ async function runReview(args: {
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
+        reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
           provider: reviewerFields.provider ?? null,
@@ -7905,6 +7907,7 @@ async function runReview(args: {
   const outcome = reviewerOutcome({
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
+    exit: reviewerExit,
     spawnError: reviewerSpawnFailed,
     // Reported from what ACTUALLY happened, never from the classification alone: `planOnlySkip &&
     // !attemptReviewer` is true only when the spawn was really not dispatched. Measured while
@@ -13874,6 +13877,9 @@ export interface WorkerErrorVerdict {
   budgetBreach: boolean;
   /** Spread verbatim onto the `verdict` ledger line — carries turns + cost. */
   ledger: {
+    worker_exit?: NonNullable<WorkerResult["exit"]>["kind"];
+    worker_exit_signal?: string;
+    worker_exit_code?: number;
     verdict: "blocked_budget" | "failed";
     stage: string;
     subtype: string;
@@ -13967,6 +13973,9 @@ export function workerErrorVerdict(
     verdict,
     budgetBreach,
     ledger: {
+      ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+      ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+      ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
       verdict,
       stage,
       subtype: r.subtype,
@@ -13976,7 +13985,9 @@ export function workerErrorVerdict(
       account_label: r.accountLabel,
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
-        : `worker error at ${stage}: ${r.subtype}`,
+        : r.exit?.kind === "signal"
+          ? `worker ended by signal ${r.exit.signal} at ${stage}`
+          : `worker error at ${stage}: ${r.subtype}`,
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
@@ -41173,6 +41184,22 @@ function readQuestionsNdjson(root: string): Array<Record<string, unknown>> {
   return out;
 }
 
+const openPrViewPlans = new WeakMap<(root: string) => Plan, { path: string; identity: string; plan: Plan }>();
+
+function openPrPlanIdentity(path: string): { kind: "readable"; identity: string } | { kind: "unreadable"; reason: string } {
+  const identity = planFilesIdentity(path);
+  if (identity.split("\n").some((line) => line === "-" || line.endsWith("=-"))) {
+    return { kind: "unreadable", reason: "plan file metadata is unavailable" };
+  }
+  try {
+    // W1-T6247: distinguish an unreadable listing from planFilesIdentity's empty-directory fallback.
+    readdirSync(join(dirname(path), "tasks.d"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "unreadable", reason: String(err) };
+  }
+  return { kind: "readable", identity };
+}
+
 /**
  * Build the observed open-PR state the sweep reconciles — the real gateway
  * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
@@ -41217,6 +41244,8 @@ export function buildOpenPrViews(
      *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
      *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
     readMainPlan?: (root: string) => Plan;
+    /** Plan-file location for identity checks and the default loader; omitted uses the checkout. */
+    mainPlanPath?: string;
     /** W1-T3585 — the SAME freshly-derived merged-task set daemon dispatch consults (the daemon's
      *  own `refreshMerged()` projection, never a second GitHub walk this producer invents), threaded
      *  through so {@link currentPlanIneligibilityReason} can resolve an unmet dependency exactly as
@@ -41261,8 +41290,19 @@ export function buildOpenPrViews(
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
   let mainPlan: Plan | undefined;
+  const mainPlanPath = deps.mainPlanPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const planReader = deps.readMainPlan ?? loadPlan;
   try {
-    mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    const observation = openPrPlanIdentity(mainPlanPath);
+    const identity = observation.kind === "readable" ? observation.identity : undefined;
+    const held = openPrViewPlans.get(planReader);
+    if (identity !== undefined && held?.path === mainPlanPath && held.identity === identity) {
+      mainPlan = held.plan;
+    } else {
+      openPrViewPlans.delete(planReader);
+      mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(mainPlanPath);
+      if (identity !== undefined) openPrViewPlans.set(planReader, { path: mainPlanPath, identity, plan: mainPlan });
+    }
   } catch {
     // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;

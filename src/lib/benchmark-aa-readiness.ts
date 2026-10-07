@@ -59,7 +59,8 @@ export interface RuntimePins {
 /**
  * The production derivation. The prompt renderer and the reviewer-executor scorer are source modules, so they ship at
  * the executing harness revision, which `executingHarnessRevision` only attests over a clean `src/`. The worker's tools
- * are `settings/` and `hooks/` under the install root: the same revision only when those are clean too. The
+ * are `settings/` and `hooks/` under the install root: the same revision only when those are clean and the
+ * install HEAD still equals the imported harness on both sides of that read. The
  * environment is the image's build stamp. Anything else is unavailable by name — never inferred from a checkout.
  */
 export function deriveRuntimePins(input: { harnessRevision: BenchmarkStackEvidence["harnessRevision"]; installRoot: string;
@@ -73,7 +74,13 @@ export function deriveRuntimePins(input: { harnessRevision: BenchmarkStackEviden
   let tool: RuntimePins["revisions"]["toolRevision"] = fromHarness;
   if (head !== null) {
     const git = input.git ?? ((cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }));
-    try { tool = git(input.installRoot, ["status", "--porcelain", "--", "settings", "hooks"]).trim() === "" ? fromHarness : unknown("executing-source-not-clean"); }
+    try {
+      const before = git(input.installRoot, ["rev-parse", "HEAD"]).trim().toLowerCase();
+      const clean = git(input.installRoot, ["status", "--porcelain", "--", "settings", "hooks"]).trim() === "";
+      const after = git(input.installRoot, ["rev-parse", "HEAD"]).trim().toLowerCase();
+      tool = before !== head.toLowerCase() || after !== head.toLowerCase() ? unknown("executing-tool-revision-drift")
+        : clean ? fromHarness : unknown("executing-source-not-clean");
+    }
     catch (error) {
       const reason = `executing-module-revision-unavailable:${(error as Error).message.slice(0, 80)}`;
       tool = unknown(reason);
