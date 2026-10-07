@@ -870,8 +870,13 @@ export async function runBenchmarkCohortPass(
       // A zero-byte prefix performs no stream read; verify its source still
       // exists and is a file instead of turning missing evidence into zero.
       if (!statSync(cachedLive.path).isFile()) throw new Error("ledger-live-not-a-file");
-    } catch {
-      return { state: "unavailable", snapshot: emptySnapshot("ledger-live-unreadable-before-scan", checkpoint.lastGood),
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      const reason = code === "ENOENT" ? "ledger-live-missing-before-scan"
+        : code === "EACCES" || code === "EPERM" ? "ledger-live-denied-before-scan"
+        : error instanceof Error && error.message === "ledger-live-not-a-file" ? "ledger-live-invalid-before-scan"
+        : "ledger-live-unreadable-before-scan";
+      return { state: "unavailable", snapshot: emptySnapshot(reason, checkpoint.lastGood),
         scannedSources: 0, pendingSources: 1 };
     }
   }

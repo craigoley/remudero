@@ -487,7 +487,7 @@ test("benchmark cached live verification preserves evidence when its real source
     const saved = readFileSync(checkpoint, "utf8");
     const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => unlinkSync(live) });
     assert.equal(missing.state, "unavailable");
-    assert.equal(missing.snapshot.reason, "ledger-live-unreadable-before-scan");
+    assert.equal(missing.snapshot.reason, "ledger-live-missing-before-scan");
     assert.equal(missing.snapshot.lastGoodAt, initial.snapshot.asOf);
     assert.equal(missing.snapshot.sourceRows.assignments, 1, "last good evidence is retained, never an invented empty ledger");
     assert.equal(missing.scannedSources, 0);
@@ -514,8 +514,40 @@ test("benchmark cached empty live evidence still requires an existing regular so
         if (replacement === "directory") mkdirSync(live);
       } });
       assert.equal(missing.state, "unavailable", `${replacement} source is not verified empty evidence`);
-      assert.equal(missing.snapshot.reason, "ledger-live-unreadable-before-scan");
+      assert.equal(missing.snapshot.reason, replacement === "missing" ? "ledger-live-missing-before-scan" : "ledger-live-invalid-before-scan");
       assert.equal(missing.pendingSources, 1);
+      assert.equal(readFileSync(checkpoint, "utf8"), saved);
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  }
+});
+
+test("benchmark cached live failures retain bounded missing denied invalid and unknown reasons", async () => {
+  const source = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+  // Actual disappearing/non-file source controls above cover ENOENT and invalid.
+  // Inject the remaining error arms without changing filesystem permissions or
+  // assuming root/platform permissions; the source and cached projection are real.
+  const failures = [
+    { error: Object.assign(new Error("private source path and token"), { code: "EACCES" }), reason: "ledger-live-denied-before-scan" },
+    { error: Object.assign(new Error("private source path and token"), { code: "EPERM" }), reason: "ledger-live-denied-before-scan" },
+    { error: Object.assign(new Error("private source path and token"), { code: "EIO" }), reason: "ledger-live-unreadable-before-scan" },
+    { error: null, reason: "ledger-live-unreadable-before-scan" },
+  ];
+  for (const failure of failures) {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-cache-error-class-"));
+    try {
+      writeFileSync(join(stateDir, "ledger.ndjson"), source);
+      const initial = await runBenchmarkCohortPass(stateDir);
+      assert.equal(initial.state, "complete");
+      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const saved = readFileSync(checkpoint, "utf8");
+      const refused = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => { throw failure.error; } });
+      assert.equal(refused.state, "unavailable");
+      assert.equal(refused.snapshot.reason, failure.reason);
+      assert.equal(refused.snapshot.lastGoodAt, initial.snapshot.asOf);
+      assert.equal(refused.snapshot.sourceRows.assignments, 1);
+      assert.equal(refused.pendingSources, 1);
+      assert.equal(JSON.stringify(refused).includes("private source path and token"), false);
       assert.equal(readFileSync(checkpoint, "utf8"), saved);
     } finally { rmSync(stateDir, { recursive: true, force: true }); }
   }
