@@ -1,0 +1,38 @@
+- id: W1-T6248
+  title: "ESCALATION ANSWERS ARE READ OFF THE DAEMON LOOP — ghEscalationAnswerGateway runs every list and comment read through synchronous ghExec, and the daemon calls readEscalationAnswers on every tick before buildOpenPrViews; the 2026-10-07 live CPU profile caught it holding the loop 20.3 s, 14.6 s of it in the transport's blocking cadence wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the per-tick escalation-answer read never blocks the daemon loop
+  band_meaning: span
+  origin: "operator session 2026-10-07: daemon.loop_lag 863 s in ~40 min; live CPU profile (lanes/claude/daemon-cpu.cpuprofile)"
+  plan_refs: [W1-T4471, W1-T4970, W1-T5689]
+  files: [src/lib/escalation-answers.ts, src/run-task.ts, test/escalation-answers-are-read-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 16:26–16:32Z (360 s Profiler session on the live daemon, Node 24.21.0): a
+    20.3 s loop block was escalation-answers.readEscalationAnswers → github-transport.ghExec, with
+    14.6 s in applyGhReadCadence → withGhCadenceLock → defaultBlockingSleepSync. READ on origin/main:
+    `ghEscalationAnswerGateway` (src/lib/escalation-answers.ts) builds `run = (args) => ghExec(args,
+    ...)`, synchronous for every listOpen/listComments call; run-task.ts's tick calls
+    `readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath })` synchronously
+    on every pass (W1-T4471). The async transport W1-T4970 added (ghTextAsync/ghJsonAsync, which
+    await the same cadence gap without blocking) is unused here.
+  design: |
+    Give the gateway async methods over ghTextAsync (same REST argv, same cadence lock and gap) and
+    await readEscalationAnswers in the tick; ordering is preserved because the tick already awaits
+    before buildOpenPrViews reads plan/questions.ndjson. reactPlusOne stays a write and keeps its
+    current path.
+  acceptance:
+    - claim: "the escalation-answer gateway reads GitHub through the async transport"
+      proof: 'grep: test("W1-T6248: the escalation-answer gateway never reads GitHub synchronously" in test/escalation-answers-are-read-off-the-daemon-loop.test.ts'
+    - claim: "the tick still lands owner replies before it builds open-PR views"
+      proof: 'grep: test("W1-T6248: a reply read this tick is landed before open-PR views are built" in test/escalation-answers-are-read-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Keep `run = (args) => ghExec(...)`: a gateway test whose sync exec seam throws when called fails
+    the first test.
