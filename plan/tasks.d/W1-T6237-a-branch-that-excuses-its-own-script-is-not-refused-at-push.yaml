@@ -1,0 +1,42 @@
+- id: W1-T6237
+  title: "A BRANCH THAT EXCUSES ITS OWN NEW SCRIPT IS NOT REFUSED AT PUSH WHERE CI WOULD PASS IT — the pre-push census runs the harness's census-precheck, whose instrument-surface child imports the harness's own src/lib/review.ts, so a branch that adds a script AND its reasoned INSTRUMENT_SURFACE_EXCLUSIONS entry is refused at every push while its in-tree census and CI pass it; #9873 could not push its fix until the identical entry landed on main first (#9887)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — which declarations the push-time instrument census judges a branch by
+  band_meaning: span
+  origin: "operator session 2026-10-07: #9873 (W1-T6064) push refused by the hook census; RMD_PREPUSH_GATES=0 is not an acceptable remedy"
+  plan_refs: [W1-T5101, W1-T6138, W1-T402]
+  files: [scripts/census-precheck.mjs, hooks/pre-push, test/a-branch-that-excuses-its-own-script-is-not-refused-at-push.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: hooks/pre-push runs `$gate_root/scripts/census-precheck.mjs`
+    ("Counts and admission remain harness-owned"), and that script's instrument-surface census spawns
+    scripts/lib/instrument-surface-census.mjs, which does
+    `await import("../../src/lib/review.ts")` relative to ITSELF, so the gate judges the branch by
+    main's INSTRUMENT_SURFACE/INSTRUMENT_SURFACE_EXCLUSIONS. CI and review run the branch's own
+    census and pass a branch whose own review.ts carries a reasoned exclusion. #9873 added
+    scripts/node-pin-follows-the-image.mjs with exactly that entry: `node scripts/census-precheck.mjs`
+    in its tree said OK, the hook refused every push, and the only remedies were a gate bypass or
+    a second PR landing the entry on main first (#9887). Every fleet worker meets the same wall.
+  design: |
+    Keep admission harness-owned, but make the push gate no stricter than CI on the one question it
+    cannot answer from main: when a head gap is an entry the BRANCH's own review.ts excuses with a
+    non-blank reason (read as data from the branch tree, never imported or executed), report it as
+    `instrument-surface: <path> excused by this branch (CI and review judge the reason)` and do not
+    refuse. A gap the branch does not excuse is still refused exactly as today, and a branch that
+    REMOVES an existing exclusion is unaffected. Reading the branch's entry as text keeps the gate
+    from running worktree code (the W1-T6138 boundary).
+  acceptance:
+    - claim: "a branch that adds a script and a reasoned exclusion for it in its own review.ts is not refused by the push-time census"
+      proof: 'grep: test("W1-T6237: a branch that excuses its own new script passes the push census" in test/a-branch-that-excuses-its-own-script-is-not-refused-at-push.test.ts'
+    - claim: "a branch that adds a script with no exclusion, or a blank reason, is still refused"
+      proof: 'grep: test("W1-T6237: an unexcused or blank-reason script is still refused at push" in test/a-branch-that-excuses-its-own-script-is-not-refused-at-push.test.ts'
+  falsifier: |
+    Keep the census importing the harness's review.ts only: a gitRepo() fixture branch adding
+    scripts/x.mjs plus `"scripts/x.mjs": "<reason>"` in its review.ts is refused, and the first test fails.
