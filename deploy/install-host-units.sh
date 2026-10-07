@@ -946,9 +946,15 @@ $(render_app_private_key_mount)
 
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
+# W1-T6110 -- THE CHECKOUT'S PLAN FIRST. The installed copy changes only at --install, so a bind
+# merged since then reached the deploy tick's drift reading (which reads the checkout) but not this
+# relaunch; the copy stays as the fallback for a host whose checkout is missing.
 SCRATCH_ARGS=()
-if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
-  . ${BIN_DIR}/rmd-scratch-mounts
+SCRATCH_LIB="\$CHECKOUT/deploy/scratch-mounts.sh"
+[ -r "\$SCRATCH_LIB" ] || SCRATCH_LIB=${BIN_DIR}/rmd-scratch-mounts
+if [ -r "\$SCRATCH_LIB" ]; then
+  . "\$SCRATCH_LIB"
+  echo "rmd-relaunch: scratch plan from \$SCRATCH_LIB"
   if scratch_plan "\$STATE_DIR" ${CONTAINER_NAME} && scratch_prepare; then scratch_fresh_tmp; fi
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi

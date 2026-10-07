@@ -132,6 +132,7 @@ interface CodexWorkerResult {
   model: string;
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
   servedModel?: null;
@@ -3719,6 +3720,20 @@ function openWeightTools(
     }));
 }
 
+/** W1-T6106: the open-weight write tools' path — contained like a read, and never the worktree's `.git`
+ *  entry, which a host git call would otherwise follow. hooks/ stays writable: it is product source here, and
+ *  the host never executes the worktree's copy. */
+export function openWeightWritablePath(cwd: string, candidate: unknown): string {
+  const target = openWeightContainedPath(cwd, candidate);
+  const root = realpathSync(cwd);
+  let existing = target;
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  for (const rel of [relative(root, target), relative(root, realpathSync(existing))]) {
+    if (rel.split(sep)[0]!.toLowerCase() === ".git") throw new Error("tool path names the worktree's .git entry, which only the harness writes");
+  }
+  return target;
+}
+
 function openWeightContainedPath(cwd: string, candidate: unknown): string {
   if (typeof candidate !== "string" || candidate.trim() === "") throw new Error("tool path must be a non-empty string");
   const root = realpathSync(cwd);
@@ -3767,14 +3782,14 @@ async function executeOpenWeightTool(
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
     case "write_file": {
       if (typeof args.content !== "string") throw new Error("write_file content must be a string");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, args.content, "utf8");
       return { written: relative(realpathSync(cwd), path) };
     }
     case "edit_file": {
       if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       const before = readFileSync(path, "utf8");
       const at = before.indexOf(args.old_string);
       if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {
@@ -4770,6 +4785,7 @@ async function spawnCodexWorkerInPrivateTemp(
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
+      tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
       servedModel: null,
       servedModelReason: CODEX_SERVED_MODEL_REASON,

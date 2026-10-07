@@ -80,3 +80,20 @@ test("repair receipt context is explicit and a pre-push or malformed identity ca
   assert.equal(malformed.number, null);
   assert.equal(repairCostsByPull([row("worker.assignment", "a", { repair_pr_url: undefined })], "acme/core").size, 0);
 });
+
+test("known Codex repair providers require an explicit notional price and cannot conflict across one identity", () => {
+  const assigned = (id: string) => row("worker.assignment", id, { provider: "codex" });
+  const attempt = (id: string, extra: Record<string, unknown>) => row("worker.attempt", id,
+    { total_cost_usd: 0, billing_mode: "subscription", ...extra });
+  const rows = [assigned("explicit"), attempt("explicit", { provider: "codex" }),
+    assigned("legacy"), attempt("legacy", {}), assigned("zero"), attempt("zero", { notional_cost_usd: 0 }),
+    assigned("positive"), attempt("positive", { notional_cost_usd: 0.5 }),
+    assigned("conflict"), attempt("conflict", { provider: "claude", notional_cost_usd: 0.2 })];
+  const report = repairCostsByPull(rows, "acme/core").get(1)!;
+  assert.equal(report.identifiedAssignments, 5);
+  assert.equal(report.knownSubscriptionAttempts, 2);
+  assert.equal(report.subscriptionNotionalUsd, 0.5);
+  assert.equal(report.missingCost, 2);
+  assert.equal(report.conflictingIdentities, 1);
+  assert.equal(report.apiCostEstimateUsd, null);
+});
