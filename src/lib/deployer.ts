@@ -35,6 +35,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import { escalate, type IssueGateway } from "./escalate.js";
+import { createHash } from "node:crypto";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -1254,6 +1256,20 @@ export interface DeployDeps {
    *  days older than their newest `deploy.ok` (measured 2026-09-29). Optional for fake-dep callers. */
   clearFailure?: () => void;
 
+  // ── PERSISTING REFUSAL (W1-T6062) ── a backend that refuses every recycle used to leave only
+  // state/DEPLOY_FAILED and an hourly `deploy.restart_refused` row (site and console, 2026-10-04 to
+  // 10-06). All OPTIONAL: an omitting caller keeps today's single marker and row, nothing more.
+  /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
+  refusalStreak?: () => RefusalStreak | undefined;
+  /** Store the streak, or clear it with `undefined`. */
+  setRefusalStreak?: (streak: RefusalStreak | undefined) => void;
+  /** Open (or update) the one needs-human issue for this instance and reason; returns its url. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** Close that issue once a recycle is VERIFIED healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
+  /** The daemon instance this deployer serves, for naming the escalation. */
+  refusalInstance?: () => string | undefined;
+
   // ── DEFERRAL CEILING (W1-T341) ── each cycle is a fresh launchd one-shot with no in-memory
   // continuity, so the idle-gate wait needs its own persisted clock. All three OPTIONAL: an
   // omitting caller degrades to `waitedMs` always 0 (see {@link evaluateIdleGate}) — today's
@@ -1310,6 +1326,173 @@ export interface DeployResult {
    *  (the ledger row, `rmd deploy-run`'s own stdout) can render the standing state without
    *  re-parsing `reason`'s prose. */
   blocker?: StaleRunningDaemonBlocker;
+}
+
+// ── A RECYCLE THAT KEEPS REFUSING IS ESCALATED (W1-T6062) ──────────────────────────────────────
+// Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
+// row; a refusal recurring across consecutive backoff windows (same instance, same reason) logs
+// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
+// needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
+// closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
+
+/** Consecutive refused windows at which the refusal is logged as persisting. */
+export const REFUSAL_PERSISTING_AT = 2;
+/** Consecutive refused windows at which the one needs-human issue is opened. */
+export const REFUSAL_ESCALATE_AT = 3;
+
+/** The run of consecutive same-reason refusals for one instance. */
+export interface RefusalStreak {
+  /** Digest of the normalised refusal reason — the "same reason" key. */
+  key: string;
+  count: number;
+  firstAtMs: number;
+  lastAtMs: number;
+  /** The issue opened for this streak, once it has been. */
+  issueUrl?: string;
+}
+
+/** What the escalation path is told about a persisting refusal. */
+export interface PersistingRefusal {
+  instance: string;
+  key: string;
+  count: number;
+  firstAtMs: number;
+  lastAtMs: number;
+  /** Baked-path commits the running image predates; `undefined` = could not tell. */
+  lagCommits: number | undefined;
+  /** The refusal's own message, verbatim. */
+  message: string;
+  /** The refusal's own remedy line. */
+  remedy: string;
+  toHead: string;
+  backend: string;
+}
+
+/** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
+ *  count or timestamp inside the message does not read as a different reason. */
+export function refusalReasonKey(message: string): string {
+  const norm = message.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+  return createHash("sha256").update(norm).digest("hex").slice(0, 10);
+}
+
+/** The refusal's own remedy: a line it labels as one, else its last non-empty line. */
+export function refusalRemedyLine(message: string): string {
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const labelled = lines.find((l) => /^(remedy|fix|to fix|next|hint|run|re-?run|declared)\b/i.test(l));
+  return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
+}
+
+/** Build the one escalation for a persisting refusal and open it, or comment on the open one
+ *  (escalate's own dedup on task id and class). Exported so the real wiring and the tests share it. */
+export function escalatePersistingRefusal(
+  r: PersistingRefusal,
+  ctx: { issues: IssueGateway; ledgerPath: string; runId: string },
+): string {
+  const lag = r.lagCommits === undefined ? "an unknown number of baked-path commits" : `${r.lagCommits} baked-path commit(s)`;
+  return escalate(
+    {
+      class: "BLOCKED",
+      taskId: `DEPLOY-REFUSAL-${r.instance}-${r.key}`,
+      runId: ctx.runId,
+      // STABLE across windows (no count, no lag): escalate dedups on the title, so a changing one would open a new issue each hour.
+      summary: `image recycle for ${r.instance} keeps being refused (${r.key})`,
+      detail:
+        `The ${r.backend} backend refused to recycle instance ${r.instance} on ${r.count} consecutive ` +
+        `backoff windows (first refused ${new Date(r.firstAtMs).toISOString()}, latest ` +
+        `${new Date(r.lastAtMs).toISOString()}) for the same reason. The running image is ${lag} behind ` +
+        `origin/main, so merged baked-path changes are not live. Target head ${r.toHead}.\n\n` +
+        `Refusal's remedy line: ${r.remedy}\n\nFull refusal:\n${r.message.slice(0, 1500)}`,
+      options: [
+        { label: "apply the remedy and let the next window retry", detail: r.remedy },
+        {
+          label: "recycle by hand",
+          detail: `run \`bash deploy/recycle-container.sh --instance ${r.instance}\` on the host once the refusal's cause is fixed.`,
+        },
+      ],
+      recommendation: "apply the remedy and let the next window retry",
+      consequence: "the instance keeps running a stale image; every hourly retry will refuse again",
+    },
+    ctx,
+  );
+}
+
+/** Record ONE refused recycle: count it, log it as persisting once it recurs, and escalate once it
+ *  has persisted long enough. Never throws — an escalation fault must not break the cycle. */
+function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: string; message: string }): void {
+  if (!deps.setRefusalStreak) return;
+  const nowMs = deps.now();
+  const key = refusalReasonKey(refusal.message);
+  const prior = deps.refusalStreak?.();
+  const streak: RefusalStreak =
+    prior && prior.key === key
+      ? { ...prior, count: prior.count + 1, lastAtMs: nowMs }
+      : { key, count: 1, firstAtMs: nowMs, lastAtMs: nowMs };
+  const instance = deps.refusalInstance?.() ?? "default";
+  const lagCommits = deps.imageBakedCommitsBehind?.();
+  if (streak.count >= REFUSAL_PERSISTING_AT) {
+    deps.log("deploy.refusal_persisting", {
+      instance,
+      count: streak.count,
+      reason_key: key,
+      baked_commits_behind: lagCommits ?? null,
+      first_refused_at: new Date(streak.firstAtMs).toISOString(),
+      to: short(refusal.toHead),
+    });
+  }
+  if (streak.count >= REFUSAL_ESCALATE_AT && deps.escalateRefusal) {
+    try {
+      const url = deps.escalateRefusal({
+        instance,
+        key,
+        count: streak.count,
+        firstAtMs: streak.firstAtMs,
+        lastAtMs: streak.lastAtMs,
+        lagCommits,
+        message: refusal.message,
+        remedy: refusalRemedyLine(refusal.message),
+        toHead: refusal.toHead,
+        backend: refusal.backend,
+      });
+      if (url) streak.issueUrl = url;
+      deps.log("deploy.refusal_escalated", { instance, count: streak.count, issue: url ?? null });
+    } catch (err) {
+      deps.log("deploy.refusal_escalation_failed", {
+        instance,
+        count: streak.count,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  try {
+    deps.setRefusalStreak(streak);
+  } catch (err) {
+    deps.log("deploy.refusal_streak_unwritable", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** A verified recycle ends the streak: close the issue it opened and forget the count. */
+function retractRefusal(deps: DeployDeps, toHead: string): void {
+  const prior = deps.refusalStreak?.();
+  if (!prior) return;
+  const instance = deps.refusalInstance?.() ?? "default";
+  let closed = false;
+  if (prior.issueUrl && deps.closeRefusalIssue) {
+    try {
+      deps.closeRefusalIssue(
+        prior.issueUrl,
+        `A recycle of ${instance} to ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`,
+      );
+      closed = true;
+    } catch (err) {
+      deps.log("deploy.refusal_close_failed", {
+        instance,
+        issue: prior.issueUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  deps.setRefusalStreak?.(undefined);
+  deps.log("deploy.refusal_cleared", { instance, count: prior.count, issue: prior.issueUrl ?? null, issue_closed: closed });
 }
 
 /**
@@ -1630,6 +1813,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     const message = err instanceof Error ? err.message : String(err);
     deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
     deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
+    recordRefusal(deps, { toHead, backend: selection.backend.name, message });
     return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
   }
   deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
@@ -1641,6 +1825,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (health.healthy) {
     deps.clearMarker();
     deps.clearFailure?.();
+    retractRefusal(deps, toHead);
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
@@ -1723,6 +1908,11 @@ export function deployRestartPressurePath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_RESTART_PRESSURE");
 }
 
+/** W1-T6062: the persisted run of consecutive same-reason refused recycles. */
+export function deployRefusalStreakPath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_REFUSAL_STREAK");
+}
+
 /** `rmd deploy` — request a deploy at the next idle gap. */
 export function requestDeploy(stateRoot: string, reason: string | undefined): void {
   const p = deployMarkerPath(stateRoot);
@@ -1760,6 +1950,9 @@ export interface RealDeployOpts {
    *  against each declared `state_dir` ({@link instanceForStateRoot}); still undefined ⇒ the script
    *  is invoked exactly as before this field existed, and refuses exactly as it does today. */
   instance?: string;
+  /** W1-T6062 — where a persisting refusal's needs-human issue is opened. OMITTED ⇒ the streak is
+   *  still counted and logged, but no issue is opened (no gateway to open it on). */
+  refusalIssues?: IssueGateway;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -2348,6 +2541,37 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         /* already gone */
       }
     },
+    refusalInstance: () => recycleInstance,
+    refusalStreak: () => {
+      try {
+        const parsed = JSON.parse(readFileSync(deployRefusalStreakPath(o.stateRoot), "utf8")) as Partial<RefusalStreak>;
+        if (typeof parsed.key !== "string" || typeof parsed.count !== "number") return undefined;
+        return parsed as RefusalStreak;
+      } catch {
+        return undefined; // absent or unreadable reads as no streak — the count restarts, never invents one
+      }
+    },
+    setRefusalStreak: (streak) => {
+      if (streak === undefined) {
+        try {
+          unlinkSync(deployRefusalStreakPath(o.stateRoot));
+        } catch {
+          /* already gone */
+        }
+        return;
+      }
+      writeAtomic(deployRefusalStreakPath(o.stateRoot), JSON.stringify(streak, null, 2));
+    },
+    ...(o.refusalIssues
+      ? {
+          escalateRefusal: (r: PersistingRefusal) =>
+            escalatePersistingRefusal(r, { issues: o.refusalIssues!, ledgerPath, runId: `DEPLOY-${clock()}` }),
+          closeRefusalIssue: (url: string, comment: string) => {
+            if (!o.refusalIssues!.closeWithComment) throw new Error("issue gateway cannot close issues");
+            o.refusalIssues!.closeWithComment(url, comment);
+          },
+        }
+      : {}),
     clearFailure: () => {
       for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
         try {

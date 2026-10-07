@@ -38198,6 +38198,17 @@ async function deployCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/** W1-T6062: the gateway a persistently refused recycle opens its one needs-human issue on, or
+ *  `undefined` when this checkout cannot name its own owner/repo (the streak is still counted). */
+function deployRefusalIssueGateway(): IssueGateway | undefined {
+  try {
+    const self = resolveOwnerRepo();
+    return ghIssueGateway(self.owner, self.repo);
+  } catch {
+    return undefined; // no resolvable owner/repo: count and log the refusal, open no issue
+  }
+}
+
 /**
  * `rmd deploy-run [--dry-run]` — ONE supervisor cycle (the launchd unit runs this on
  * its interval). No-op unless a deploy is triggered AND the daemon is idle. `--dry-run`
@@ -38262,6 +38273,8 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      // W1-T6062: a recycle refused window after window opens ONE needs-human issue here.
+      refusalIssues: deployRefusalIssueGateway(),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
