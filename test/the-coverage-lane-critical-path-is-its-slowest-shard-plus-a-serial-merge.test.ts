@@ -140,6 +140,13 @@ test("W1-T5923: a premapped shard refuses a tampered chunk, a mixed directory, a
     writeFileSync(join(premapped, chunk), original.replace(/"count":(\d)/, (_m, digit) => `"count":${(Number(digit) + 1) % 10}`));
     assert.throws(() => merger("--output", output, premapped), /checksum mismatch/);
     writeFileSync(join(premapped, chunk), original);
+    const manifestName = readdirSync(premapped).find((name) => /^coverage-premapped-/.test(name))!;
+    const manifest = readFileSync(join(premapped, manifestName), "utf8");
+    writeFileSync(join(premapped, manifestName), JSON.stringify({ ...JSON.parse(manifest), reportCount: 0 }));
+    assert.throws(() => merger("--output", output, premapped), /invalid premapped coverage manifest/);
+    writeFileSync(join(premapped, manifestName), manifest);
+    editPremapped(premapped, "lines", (lines) => (lines as Array<Record<string, unknown>>).map((line) => ({ ...line, url: 7 })));
+    assert.throws(() => merger("--output", output, premapped), /invalid premapped line record/);
     writeFileSync(join(premapped, "coverage-1-0000000000000-0.json"), "{}");
     assert.throws(() => merger("--output", output, premapped), /incomplete or mixed premapped coverage/);
     const empty = join(root, "empty");
