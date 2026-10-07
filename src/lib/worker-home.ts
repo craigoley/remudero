@@ -86,22 +86,25 @@ type ClaudeFleetSeedFsOps = typeof claudeFleetSeedFsOps;
 
 /** Seed the real home's credential-only grant once, before a worker home is planned. The exclusive
  * directory create protects a refreshed token from concurrent spawns; an existing sibling is owned
- * by the worker's token refresh and must never be copied over. */
+ * by the worker's token refresh and is never copied over WHILE IT HOLDS A CREDENTIAL. A fork the CLI
+ * has emptied (another holder of the same login rotated its refresh token away) heals from a usable
+ * owner credential instead of refusing every spawn until the container is recreated. */
 export function seedClaudeFleetCredentials(opts: {
   realHome: string;
   fsImpl?: Partial<ClaudeFleetSeedFsOps>;
-}): void {
+}): "seeded" | "healed" | "kept" | "skipped" {
   const f = { ...claudeFleetSeedFsOps, ...opts.fsImpl };
   const targetDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
   // An explicitly provisioned shared child is the authority. Preserve existing private forks
   // for recovery, but never create a new fork when this common store is available.
-  if (f.existsSync(sharedClaudeCredentialDir(opts.realHome)) || f.existsSync(targetDir)) return;
+  if (f.existsSync(sharedClaudeCredentialDir(opts.realHome))) return "skipped";
+  if (f.existsSync(targetDir)) return healClaudeFleetFork(opts.realHome, targetDir, f);
 
   let credential: Buffer;
   try {
     credential = f.readFileSync(join(opts.realHome, ".claude", ".credentials.json"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "skipped";
     throw error;
   }
 
@@ -117,7 +120,7 @@ export function seedClaudeFleetCredentials(opts: {
       f.mkdirSync(targetDir, { mode: 0o700 });
       createdDir = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return "kept";
       throw error;
     }
     f.chmodSync(targetDir, 0o700);
@@ -129,6 +132,31 @@ export function seedClaudeFleetCredentials(opts: {
       if (createdDir) f.rmSync(targetDir, { recursive: true, force: true });
     }
   }
+  return "seeded";
+}
+
+/** Replace an existing fork's credential only when the fork is unusable and the owner's is usable.
+ *  The replacement is staged inside the fork and renamed over it, so a reader sees one file or the other. */
+function healClaudeFleetFork(realHome: string, targetDir: string, f: ClaudeFleetSeedFsOps): "healed" | "kept" {
+  const forkFile = join(targetDir, ".credentials.json");
+  if (classifyWorkerCredentialFile(() => f.readFileSync(forkFile, "utf8") as string).kind === "usable") return "kept";
+  let owner: Buffer;
+  try {
+    owner = f.readFileSync(join(realHome, ".claude", ".credentials.json")) as Buffer;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "kept";
+    throw error;
+  }
+  if (classifyWorkerCredentialFile(() => owner.toString("utf8")).kind !== "usable") return "kept";
+  const stagedFile = join(targetDir, `.credentials.json.heal-${randomUUID()}`);
+  try {
+    f.writeFileSync(stagedFile, owner, { mode: 0o600, flag: "wx" });
+    f.chmodSync(stagedFile, 0o600);
+    f.renameSync(stagedFile, forkFile);
+  } finally {
+    f.rmSync(stagedFile, { force: true });
+  }
+  return "healed";
 }
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
