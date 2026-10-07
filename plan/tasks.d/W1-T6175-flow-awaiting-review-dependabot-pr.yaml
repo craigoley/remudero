@@ -26,3 +26,11 @@
     - PR #9762: 0.30 PR-hours — dependabot PR — dep-review lane (checks green, review none) — mergeability unread this pass; inherited last known "clean" observed 2026-10-07T02:06:01.877Z for this exact head 81df50e (W1-T4470)
     - PR #9767: 0.26 PR-hours — dependabot PR — dep-review lane (checks pending, review none) — mergeability unread this pass; inherited last known "clean" observed 2026-10-07T02:41:54.430Z for this exact head 4fc17e0 (W1-T4470)
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "high-risk verdict at confidence 0.90 — on the change's description/files alone, no diff was read — The acceptance requires clearing an awaiting-review Dependabot PR without manual intervention, but does not specify the owner's action or how required review is preserved.; on the change's description/files alone, no diff was read — The supplied proof checks for test text; no behavioral evidence or gate results establish safe clearance. Whether the remedy changes review or merge policy cannot be verified from what is shown."
+    judged_at: "2026-10-07T13:32:34.042Z"
+    pin: "b44e226f1b0710468fb1a32b3924aa1a723b96c976ed97ca50abdb6b9b4a3b60"
