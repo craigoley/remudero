@@ -13,7 +13,7 @@ raw: "Triage feedback#fb-1789349833277-20ca42 committed its proposal and
   drop remote claim ownership while the PR is genuinely awaiting CI."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/9765
 summary:
