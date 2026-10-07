@@ -101,6 +101,7 @@ import {
   type DeriveDeps,
   type GhFailureReason,
   type GitHub,
+  type LedgerIndex,
   type LedgerReader,
   type StatusProjection,
   readLedgerUnionBounded,
@@ -564,6 +565,11 @@ export interface StatusBoardDeps {
   resolveSupervisorIntervalS?: () => number | undefined;
   /** Ledger reader; defaults to status.ts's real `readLedgerLines`. */
   readLedger?: LedgerReader;
+  /** W1-T6253: an index a caller already built; used only when it indexes the very rows `readLedger` returned. */
+  ledgerIndex?: LedgerIndex;
+  /** W1-T6253: how this build indexes its rows when no `ledgerIndex` fits; defaults to status.ts's `buildLedgerIndex`.
+   *  Injectable so a test can count the builds. */
+  buildLedgerIndex?: (rows: ReadonlyArray<Record<string, unknown>>) => LedgerIndex;
   /** LOCAL (no-fetch) resolution of `origin/main`'s sha — offline-safe by construction. Defaults to `git rev-parse
    *  origin/main` in `repoDir`; returns `undefined`, never throws, when it cannot be resolved. */
   resolveOriginMainSha?: (repoDir: string) => string | undefined;
@@ -1509,11 +1515,13 @@ export function deriveCircuitBrokenBlockers(
   lines: Array<Record<string, unknown>>,
   plan: Plan | undefined,
   projections: Map<string, StatusProjection> | undefined,
+  // W1-T6253: the board's ONE index for `lines`. Omitted, this section indexes for itself, as it always did.
+  ledgerIndexOf: () => LedgerIndex = () => buildLedgerIndex(lines),
 ): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
-  // W1-T3523's orphan predicate needs the ledger's newest timestamp. Build the shared index once
-  // for this whole board section rather than re-scanning the complete ledger for each task.
-  const index = buildLedgerIndex(lines);
+  // W1-T3523's orphan predicate needs the ledger's newest timestamp. Share one index across this whole
+  // board section rather than re-scanning the complete ledger for each task.
+  const index = ledgerIndexOf();
   for (const taskId of distinctDispatchedTaskIds(lines)) {
     if (!isDispatchBreakerTripped(lines, taskId, DEFAULT_MAX_TASK_DISPATCHES, index)) continue;
     const planTask = plan?.tasks.find((t) => t.id === taskId);
@@ -1632,8 +1640,9 @@ function deriveBlockers(
   projections: Map<string, StatusProjection> | undefined,
   github: GitHub | undefined,
   limit: number,
+  ledgerIndexOf: () => LedgerIndex,
 ): BlockersSection {
-  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections);
+  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, ledgerIndexOf);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const retired = deriveRetiredBlockers(plan);
   let blockedPrs: BlockedPrBlocker[] = [];
@@ -1705,6 +1714,8 @@ export function deriveQueueHead(
   // W1-T1205: OPTIONAL and TRAILING, so every existing caller — doctorCommand's deliberately network-free call among
   // them — keeps its byte-identical no-exclusion behaviour. `buildStatusBoard` supplies the one real reader.
   hasPushedRunBranch?: (taskId: string) => boolean,
+  // W1-T6253: the board's ONE index for `lines`, trailing and optional for the same reason; omitted, indexed here.
+  ledgerIndexOf: () => LedgerIndex = () => buildLedgerIndex(lines),
 ): QueueHeadSection {
   if (!plan || !projections || ghUnknownReason) {
     const section: QueueHeadSection = {
@@ -1719,7 +1730,7 @@ export function deriveQueueHead(
   // Keep the per-task breaker callbacks below O(task rows), including W1-T3523's
   // ledger-derived orphan clock. Rebuilding this index inside each callback made /v1/status
   // cross its production-corpus wall-clock bound.
-  const index = buildLedgerIndex(lines);
+  const index = ledgerIndexOf();
   const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
   const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id, DEFAULT_MAX_TASK_DISPATCHES, index);
@@ -2206,6 +2217,12 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const readDispatchClaims = deps.readDispatchClaims ?? defaultReadDispatchClaims;
 
   const lines = readLedger(ledgerPath);
+  // W1-T6253: ONE ledger index per build, made on first use and handed to every section that needs it (BLOCKERS' circuit
+  // breaker and QUEUE HEAD each built their own over the same rows). A caller's index is taken only when it indexes THESE
+  // rows, so a stale one can never answer for a different read.
+  let sharedIndex: LedgerIndex | undefined;
+  const ledgerIndexOf = (): LedgerIndex =>
+    (sharedIndex ??= deps.ledgerIndex && deps.ledgerIndex.rows === lines ? deps.ledgerIndex : (deps.buildLedgerIndex ?? buildLedgerIndex)(lines));
   const boots = deriveDaemonBoots(lines);
   const lastCycleRaw = deriveLastCycle(lines);
   const supervisorTick = deriveSupervisorTick(lines);
@@ -2308,13 +2325,13 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit);
+  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit, ledgerIndexOf);
   // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds, read here rather than shared with it —
   // this is its own, unbatched call site. ONE sweep per render, never one per candidate.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs, (id) =>
-    pushedRunBranchIds.has(id),
+    pushedRunBranchIds.has(id), ledgerIndexOf,
   );
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =

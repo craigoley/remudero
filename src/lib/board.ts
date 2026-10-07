@@ -211,6 +211,8 @@ function deriveBoardStatusSections(
     queryService: () => ({ running: false, pid: null }),
     repoDir: BLOCKED_PR_ROOT_SENTINEL,
     readLedger: () => lines,
+    // W1-T6253: a caller's index over these very rows is reused (status-board.ts checks it indexes `lines`).
+    ...(deps.ledgerIndex ? { ledgerIndex: deps.ledgerIndex } : {}),
     resolveOriginMainSha: () => undefined,
     github: deps.github,
     now: deps.now,

@@ -83,7 +83,7 @@ import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, buildLedgerIndex, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub, type LedgerIndex } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
@@ -632,6 +632,10 @@ export interface NowViewOptions {
   readPinPolicy?: (instance: NowInstance) => PolicyValues;
   /** Fact rows one `board` step ingests at most (W1-T6014); the projection's default when omitted. */
   boardIngestChunkRows?: number;
+  /** W1-T6253: how a row generation is indexed (status.ts's `buildLedgerIndex`); injectable so a test counts the builds. */
+  indexLedger?: (rows: ReadonlyArray<Record<string, unknown>>) => LedgerIndex;
+  /** W1-T6253: how a day's cost rows are scanned ({@link dayCostRows}); injectable so a test counts the scans. */
+  scanDayCosts?: (rows: ReadonlyArray<Record<string, unknown>>, nowMs: number) => Array<[string, number]>;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
@@ -860,6 +864,18 @@ export function createNowView(opts: NowViewOptions): {
   /** Per instance, the rotations legacy's windows read, each parsed once: a sample reads only the live file and any new cut. */
   const legacyMemos = new Map<string, { rows: LedgerRotationMemo; costs: LedgerRotationMemo }>();
   const retentionReported = new Map<string, string>();
+  /** W1-T6253: per instance, what one row generation derived from its rows. A new store, generation or row count
+   *  recomputes both; nothing carries across a generation, so no build can show a count from a stale one. */
+  const generationDerived = new Map<string, { db: ReadModelDb; generation: number; length: number; index?: LedgerIndex; day?: { start: number; costs: Array<[string, number]> } }>();
+  const derivedFor = (name: string, b: NowBuild): NonNullable<ReturnType<typeof generationDerived.get>> => {
+    const kept = generationDerived.get(name);
+    if (kept && kept.db === b.db && kept.generation === b.state.generation && kept.length === b.rows!.length) return kept;
+    const fresh = { db: b.db, generation: b.state.generation, length: b.rows!.length };
+    generationDerived.set(name, fresh);
+    return fresh;
+  };
+  const indexLedger = opts.indexLedger ?? buildLedgerIndex;
+  const scanDayCosts = opts.scanDayCosts ?? dayCostRows;
   const planCache = new Map<string, { key: string; plan: Plan }>();
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
@@ -1083,6 +1099,13 @@ export function createNowView(opts: NowViewOptions): {
   const depsOf = (instance: NowInstance, b: NowBuild) => ({
     plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
   });
+  /** The day's cost rows for `rows`, scanned once per (row generation, UTC day). */
+  const dayCosts = (name: string, b: NowBuild, rows: ReadonlyArray<Row>, nowMs: number): Array<[string, number]> => {
+    const derived = derivedFor(name, b);
+    const start = utcDayWindowMs(nowMs)[0];
+    if (derived.day?.start !== start) derived.day = { start, costs: scanDayCosts(rows, nowMs) };
+    return derived.day.costs;
+  };
   /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. A stage
    *  returning false is not done: the next step resumes it (a cold `board` ingests one chunk per step). */
   const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void | false]> = [
@@ -1119,7 +1142,11 @@ export function createNowView(opts: NowViewOptions): {
     }],
     ["snapshot", (instance, b) => {
       const projections = b.h!.board.projections();
-      b.snapshot = computeBoardSnapshot(depsOf(instance, b), { reuseProjection: (task) => projections.get(task.id) });
+      // The ledger is indexed once per row generation, not once per build: the index covers `b.rows` itself, which the
+      // status board checks before it takes the index in place of building its own.
+      const derived = derivedFor(instance.name, b);
+      const ledgerIndex = (derived.index ??= indexLedger(b.rows as Array<Record<string, unknown>>));
+      b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex }, { reuseProjection: (task) => projections.get(task.id) });
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {
@@ -1138,7 +1165,7 @@ export function createNowView(opts: NowViewOptions): {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
-      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCosts(instance.name, b, rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])), credit: h.board.creditRead() });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
