@@ -239,11 +239,14 @@ export function hostWorktreeGitPlan(worktreePath: string, args: readonly string[
   env.GIT_CONFIG_GLOBAL = daemonGlobalConfig(process.env);
   env.GIT_PAGER = "cat";
   env.GIT_EDITOR = "true";
-  // A pinned worktree always gets the harness gate. One nothing recorded gets it only when it asked for hooks at all (the
-  // `core.hooksPath` worktreeAdd sets), which is exactly when the raw call would have run some.
-  const wantsHooks =
-    pin !== null || readConfigList(["-C", worktreePath, "-c", "core.fsmonitor=false"], "core.hooksPath", env).length > 0;
-  const hooks = wantsHooks && sub !== undefined && HOOKED_SUBCOMMANDS.has(sub) ? (opts.hooksDir ?? harnessHooksDir(env)) : "/dev/null";
+  // THE GATE RUNS WHERE THE RAW CALL WOULD HAVE RUN HOOKS: the worktree asked for hooks (`core.hooksPath`, which worktreeAdd
+  // sets to its tracked `hooks/`) and that directory exists. What runs is then ALWAYS the harness copy — never the worktree's.
+  // RESIDUAL, named: a worker that deletes its own hooks/ skips the gate, exactly as before; CI still runs every check.
+  const scope = pin !== null ? ["--git-dir", pin.gitDir] : ["-C", worktreePath];
+  const hooked = sub !== undefined && HOOKED_SUBCOMMANDS.has(sub); // only a commit or push can run a hook; every other call skips the read
+  const configured = hooked ? readConfigList([...scope, "-c", "core.fsmonitor=false"], "core.hooksPath", env).at(-1) : undefined;
+  const wantsHooks = configured !== undefined && configured !== "" && existsSync(resolve(worktreePath, configured));
+  const hooks = wantsHooks ? (opts.hooksDir ?? harnessHooksDir(env)) : "/dev/null";
   if (hooks !== "/dev/null" && !existsSync(hooks)) {
     throw new HarnessHooksMissingError(worktreePath, sub ?? "", hooks);
   }

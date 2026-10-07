@@ -51,6 +51,10 @@ function fixture() {
   const hook = join(repo.dir, ".git/hooks/pre-push");
   writeFileSync(hook, `#!/bin/sh\nwhile read -r _lref sha _rref _rsha; do\n  printf '%s\\n' "$sha" >> '${hookLog}'\ndone\n`);
   chmodSync(hook, 0o755);
+  // W1-T6106: a host push runs hooks only from the HARNESS copy, and only where the worktree asked for hooks — so this
+  // fixture's gate is configured as its hooks path and stood in for the install's hooks/ through the daemon-environment seam.
+  repo.git("config", "core.hooksPath", ".git/hooks");
+  process.env.RMD_HARNESS_HOOKS_DIR = join(repo.dir, ".git/hooks");
   put("src/feature.ts", "export function normalize(n: number): number {\n  if (n < 0) {\n    return -n;\n  }\n  return n;\n}\n");
   const uncoveredHead = commit("add an initially untested negative path");
   const ports: CoveragePrecheckPorts = {
@@ -60,7 +64,7 @@ function fixture() {
   return {
     repo, branch, uncoveredHead, ports, hookLog,
     repair: () => { put(suite, testSource(true)); return commit("cover the negative path"); },
-    cleanup: () => { repo.cleanup(); origin.cleanup(); },
+    cleanup: () => { delete process.env.RMD_HARNESS_HOOKS_DIR; repo.cleanup(); origin.cleanup(); },
   };
 }
 

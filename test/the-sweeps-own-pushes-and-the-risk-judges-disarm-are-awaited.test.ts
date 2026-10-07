@@ -291,8 +291,13 @@ test(`${PROOF}: the plan round's default git port awaits the explicit remote bra
     const { result, ticks } = await observeChild(shim, "push origin HEAD:", () => effects.dispatchPlanGateRound!(f.pr));
     assert.deepEqual(result, { outcome: "pushed" });
     assert.ok(ticks > 0, "the plan round's git port allows timer ticks while pushing");
-    assert.deepEqual(shim.calls(), ["-C /fixture rev-parse HEAD",
-      "-C /fixture push origin HEAD:refs/heads/ci-friction-garden-1791283542371"]);
+    // W1-T6106: every call runs through the hardened leaf, so the shim records the pinned/overridden argv — strip that
+    // preamble (and the leaf's own hooks-path config read) to compare the CALLS the plan round made.
+    const hardened = (call: string): boolean => /^-C \/fixture --no-pager -c core\.fsmonitor=false /.test(call);
+    const made = shim.calls().filter((call) => !/ config --get-all /.test(call));
+    assert.ok(made.every(hardened), `every git call into the plan-round worktree is hardened: ${made.join(" | ")}`);
+    assert.deepEqual(made.map((call) => call.replace(/^-C \/fixture --no-pager(?: -c \S*)+ /, "-C /fixture ")),
+      ["-C /fixture rev-parse HEAD", "-C /fixture push origin HEAD:refs/heads/ci-friction-garden-1791283542371"]);
     assert.equal(f.removed.length, 1);
   } finally {
     f.cleanup();
