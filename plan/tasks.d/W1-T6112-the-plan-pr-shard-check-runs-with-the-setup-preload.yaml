@@ -1,0 +1,38 @@
+- id: W1-T6112
+  title: "THE PLAN-PR SHARD CENSUS RUNS WITH THE TEST SETUP PRELOAD, AT LOW PRIORITY — plan-pr-emitter.ts spawns its shard census `node --test` without `--import ./test/setup/tmp-hygiene.ts`, because the inTreeEnv it shares with the rmd calls sets RMD_SELF_SYNC_DONE=1, which the setup's refuseSelfSyncEscape refuses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the shard census child gets its own environment, the setup preload and low priority
+  band_meaning: span
+  origin: "operator session 2026-10-06: found by PR #9703's builder (open-weight unit_test under the suite's setup guards), surfaced again during the de-nest work"
+  plan_refs: [W1-T6090, W1-T6091]
+  files: [src/lib/plan-pr-emitter.ts, test/the-plan-pr-shard-check-runs-with-the-setup-preload.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main 23c0e7dfe. src/lib/plan-pr-emitter.ts `SHARD_CENSUS_ARGV` is
+    `["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST]`, run by `runInTree` /
+    `runInTreeAsync` with `inTreeEnv()`, which sets `RMD_SELF_SYNC_DONE: "1"` (needed by the rmd
+    subcommands the same helpers run: lint-plan, task-id, check-proof) and deletes NODE_TEST_CONTEXT.
+    test/setup/tmp-hygiene.ts `refuseSelfSyncEscape` refuses to load when RMD_SELF_SYNC_DONE is set, so
+    the census cannot take the preload; it runs without the tmp hygiene, the git gc guard and the
+    gh read-gap opt-in every other test process gets, at default priority.
+  design: |
+    Give the census spawn its own environment: `inTreeEnv()` minus RMD_SELF_SYNC_DONE (the census runs
+    no rmd self-sync path; the rmd subcommands keep it). Add `--import ./test/setup/tmp-hygiene.ts` to
+    SHARD_CENSUS_ARGV when that file exists in the tree (the `openWeightCheckArgv` rule for a tree
+    without it), and start the child through src/lib/test-slot.ts `lowPriorityCommand` with an explicit
+    `--test-concurrency=1` via `testRunArgv`. It is a single-file run: niced and bounded, no slot wait.
+  acceptance:
+    - claim: "the shard census child is spawned with the test setup preload, without RMD_SELF_SYNC_DONE in its environment, under nice with an explicit test concurrency, while the rmd subcommand spawns keep RMD_SELF_SYNC_DONE"
+      proof: "unit test: test/the-plan-pr-shard-check-runs-with-the-setup-preload.test.ts"
+  falsifier: |
+    Keep inTreeEnv for the census spawn: the fixture sees RMD_SELF_SYNC_DONE in the census child's
+    environment and the environment test fails.
+  note: |
+    Single-file spawners elsewhere are W1-T6090's (#9761); plan-pr-emitter.ts is not in its files:.
