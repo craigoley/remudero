@@ -19,14 +19,11 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  impactArmSelection,
-  spawningSuites,
-  uncreditableSpawners,
-  type ImpactArmContext,
-  type ImpactMap,
-} from "../src/lib/test-impact-map.js";
-import { CHILD_COVERAGE_DIR_PREFIX, CHILD_COVERAGE_RECORD_FORMAT, flattenChildCoverage, redirectChildCoverage } from "./setup/tmp-hygiene.js";
+// Namespace imports, so the file LOADS where these exports do not exist yet and each test fails on
+// its own assertion there, rather than the whole file failing to link.
+import * as impactMap from "../src/lib/test-impact-map.js";
+import type { ImpactArmContext, ImpactMap } from "../src/lib/test-impact-map.js";
+import * as hygiene from "./setup/tmp-hygiene.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import * as ratchet from "../scripts/coverage-merge-ratchet.mjs";
 
@@ -107,12 +104,12 @@ function readMap(name: string): ImpactMap {
 
 test("W1-T6108: the child writes under its suite's directory, and its report lands beside a record naming that suite", () => {
   const observed = readFileSync(join(fixture.dir, "observed.txt"), "utf8");
-  assert.match(observed, new RegExp(`${CHILD_COVERAGE_DIR_PREFIX}[^/]+/test/spawner\\.test\\.ts$`), `the child inherited ${observed}`);
+  assert.match(observed, new RegExp(`${hygiene.CHILD_COVERAGE_DIR_PREFIX}[^/]+/test/spawner\\.test\\.ts$`), `the child inherited ${observed}`);
   const names = readdirSync(fixture.raw);
   const records = names.filter((n) => n.startsWith("rmd-v8-children-"));
   assert.equal(records.length, 1, `exactly the spawner moved child reports: ${names.join(", ")}`);
   const record = JSON.parse(readFileSync(join(fixture.raw, records[0]!), "utf8")) as { format: string; suite: string; reports: string[] };
-  assert.equal(record.format, CHILD_COVERAGE_RECORD_FORMAT);
+  assert.equal(record.format, hygiene.CHILD_COVERAGE_RECORD_FORMAT);
   assert.equal(record.suite, SPAWNER);
   assert.ok(record.reports.length >= 1);
   for (const report of record.reports) {
@@ -164,11 +161,11 @@ test("W1-T6108: the merged lcov still counts the child's coverage, as the runner
 
 test("W1-T6108: a suite that only spawns git is not a spawner, and a credited spawner is selected by what its child executed", () => {
   const files = new Map([...SUITES, ["src/child.mjs", CHILD_MJS], ["src/never.mjs", "export const n = 1;\n"]]);
-  assert.deepEqual([...spawningSuites(files)].sort(), [BLANKS, SPAWNER], "git-only spawns no repo code");
-  assert.deepEqual([...uncreditableSpawners(files)], [BLANKS]);
+  assert.deepEqual([...impactMap.spawningSuites(files)].sort(), [BLANKS, SPAWNER], "git-only spawns no repo code");
+  assert.deepEqual([...impactMap.uncreditableSpawners(files)], [BLANKS]);
   const map = readMap("map.json");
   const diffOf = (path: string, hunk: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n${hunk}\n`;
-  const arm = (diffText: string, over: Partial<ImpactMap> = {}, ctx: Partial<ImpactArmContext> = {}) => impactArmSelection(
+  const arm = (diffText: string, over: Partial<ImpactMap> = {}, ctx: Partial<ImpactArmContext> = {}) => impactMap.impactArmSelection(
     { map: { ...map, ...over }, diffText, drift: { distance: 0, changedSinceMap: [] }, baseText: (p) => files.get(p) },
     { changed: ["src/child.mjs"], files, floor: [...SUITES.keys()], pathReaders: [], pathNamers: [], recent: [], fallback: [], ...ctx },
   );
@@ -183,7 +180,7 @@ test("W1-T6108: a suite that only spawns git is not a spawner, and a credited sp
   assert.deepEqual(unexecuted.suites, [BLANKS], "neither the credited spawner nor the git-only suite is force-selected");
   // A map from before attribution, or one that credits the spawner nothing, still selects it.
   const { spawnCredited: _drop, ...old } = map;
-  const legacy = impactArmSelection(
+  const legacy = impactMap.impactArmSelection(
     { map: old as ImpactMap, diffText: diffOf("src/child.mjs", "@@ -6 +6 @@\n-a\n+b"), drift: { distance: 0, changedSinceMap: [] }, baseText: (p) => files.get(p) },
     { changed: ["src/child.mjs"], files, floor: [...SUITES.keys()], pathReaders: [], pathNamers: [], recent: [], fallback: [] },
   );
@@ -199,31 +196,31 @@ test("W1-T6108: a suite that only spawns git is not a spawner, and a credited sp
 test("W1-T6108: the redirect applies only to a suite's main thread under coverage, and a bad record is refused by name", () => {
   const cwd = REPO_ROOT;
   const script = join(REPO_ROOT, "test", "x.test.ts");
-  assert.equal(redirectChildCoverage({}, { script, cwd }), undefined, "no coverage, no redirect");
-  assert.equal(redirectChildCoverage({ NODE_V8_COVERAGE: "/c" }, { script, cwd, mainThread: false }), undefined, "a worker keeps its parent's");
-  assert.equal(redirectChildCoverage({ NODE_V8_COVERAGE: `/t/${CHILD_COVERAGE_DIR_PREFIX}1-0-a/test/y.test.ts` }, { script, cwd }), undefined, "a suite's child keeps its suite's");
-  assert.equal(redirectChildCoverage({ NODE_V8_COVERAGE: "/c" }, { script: join(REPO_ROOT, "src", "cli.ts"), cwd }), undefined, "not a suite");
+  assert.equal(hygiene.redirectChildCoverage({}, { script, cwd }), undefined, "no coverage, no redirect");
+  assert.equal(hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: "/c" }, { script, cwd, mainThread: false }), undefined, "a worker keeps its parent's");
+  assert.equal(hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: `/t/${hygiene.CHILD_COVERAGE_DIR_PREFIX}1-0-a/test/y.test.ts` }, { script, cwd }), undefined, "a suite's child keeps its suite's");
+  assert.equal(hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: "/c" }, { script: join(REPO_ROOT, "src", "cli.ts"), cwd }), undefined, "not a suite");
   const out = mkdtempSync(join(tmpdir(), "rmd-t6108-flat-"));
   try {
     const env: NodeJS.ProcessEnv = { NODE_V8_COVERAGE: out };
-    const redirect = redirectChildCoverage(env, { script, cwd });
+    const redirect = hygiene.redirectChildCoverage(env, { script, cwd });
     assert.ok(redirect);
     assert.equal(env.NODE_V8_COVERAGE, redirect.childDir);
     assert.ok(redirect.childDir.endsWith(join("test", "x.test.ts")));
     writeFileSync(join(redirect.childDir, "coverage-1-0000000000000-0.json"), "{}");
     writeFileSync(join(redirect.childDir, "unrelated.txt"), "");
-    assert.deepEqual(flattenChildCoverage(redirect, () => 1234567890123), ["coverage-1-0000000000000-0.json"]);
+    assert.deepEqual(hygiene.flattenChildCoverage(redirect, () => 1234567890123), ["coverage-1-0000000000000-0.json"]);
     assert.deepEqual(readdirSync(out).sort(), ["coverage-1-0000000000000-0.json", `rmd-v8-children-${process.pid}-1234567890123.json`]);
     // A late writer (a thread holding the redirected value) lands flat, through the link.
     assert.equal(lstatSync(redirect.childDir).isSymbolicLink(), true);
     writeFileSync(join(redirect.childDir, "coverage-2-0000000000000-1.json"), "{}");
     assert.ok(readdirSync(out).includes("coverage-2-0000000000000-1.json"));
-    const empty = redirectChildCoverage({ NODE_V8_COVERAGE: out }, { script, cwd });
+    const empty = hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: out }, { script, cwd });
     assert.ok(empty);
-    assert.deepEqual(flattenChildCoverage(empty), [], "no child, no record");
+    assert.deepEqual(hygiene.flattenChildCoverage(empty), [], "no child, no record");
     assert.equal(readdirSync(out).filter((n) => n.startsWith("rmd-v8-children-")).length, 1);
     assert.equal(ratchet.childSuitesIn(out).get(join(out, "coverage-1-0000000000000-0.json")), "test/x.test.ts");
-    writeFileSync(join(out, `rmd-v8-children-${process.pid}-1234567890124.json`), JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: "src/x.ts", reports: [] }));
+    writeFileSync(join(out, `rmd-v8-children-${process.pid}-1234567890124.json`), JSON.stringify({ format: hygiene.CHILD_COVERAGE_RECORD_FORMAT, suite: "src/x.ts", reports: [] }));
     assert.throws(() => ratchet.childSuitesIn(out), /is not a valid rmd-v8-child-suites-v1 record/);
     assert.throws(() => ratchet.childSuitesIn(join(out, "missing")), /cannot read raw coverage directory/);
   } finally {
