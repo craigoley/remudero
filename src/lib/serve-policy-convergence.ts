@@ -22,6 +22,7 @@ import {
   daemonInstanceRegistryPath,
   deployLedgerPath,
   githubSlugOf,
+  imageShaContainerFor,
   isPrimaryDeployment,
   readMountPlanDrift,
   readResourcePolicyDrift,
@@ -49,9 +50,18 @@ const HANDOFF_CLOSED_STEPS = [
   "serve.supervisor_ready",
 ];
 
+export type ServeImageDrift = { expected: string; actual: string } | { kind: "unknown"; reason: string };
+
+export type ServePolicyDeps = DeployDeps & {
+  escalate?: (e: Escalation) => void;
+  serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
+  serveImageDrift?: () => ServeImageDrift | undefined;
+};
+
 export interface ServePolicyInputs {
   drift: ResourcePolicyDrift[] | undefined;
   mountDrift?: MountPlanDrift[] | undefined;
+  imageDrift?: ServeImageDrift;
   stopPresent: boolean | undefined;
   pausePresent: boolean | undefined;
   handoffInProgress: boolean | undefined;
@@ -66,6 +76,7 @@ export interface ServePolicyOutcome {
   reason: string;
   drift?: ResourcePolicyDrift[];
   mountDrift?: MountPlanDrift[];
+  imageDrift?: ServeImageDrift;
 }
 
 export function describeDrift(drift: ResourcePolicyDrift[]): string {
@@ -77,10 +88,11 @@ export function describeMountDrift(drift: MountPlanDrift[]): string {
 }
 
 /** Each KNOWN drift, named; an unknown or empty reading contributes nothing. */
-function driftDetails(drift: ResourcePolicyDrift[] | undefined, mountDrift: MountPlanDrift[] | undefined): string[] {
+function driftDetails(drift: ResourcePolicyDrift[] | undefined, mountDrift: MountPlanDrift[] | undefined, imageDrift?: ServeImageDrift): string[] {
   return [
     ...(drift?.length ? [`serve resource policy drift (${describeDrift(drift)})`] : []),
     ...(mountDrift?.length ? [`serve mount plan drift (${describeMountDrift(mountDrift)})`] : []),
+    ...(imageDrift && "expected" in imageDrift ? [`serve image drift (expected=${imageDrift.expected} actual=${imageDrift.actual})`] : []),
   ];
 }
 
@@ -97,7 +109,8 @@ export function serveHandoffOpen(ledgerText: string): boolean {
 }
 
 export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: boolean; reason: string } {
-  const known = driftDetails(i.drift, i.mountDrift);
+  const known = driftDetails(i.drift, i.mountDrift, i.imageDrift);
+  if (known.length === 0 && i.imageDrift && "kind" in i.imageDrift) return { replace: false, reason: `serve image unreadable — unknown is never drift (${i.imageDrift.reason})` };
   if (known.length === 0 && i.drift === undefined) return { replace: false, reason: "serve resource policy unreadable — unknown is never drift" };
   if (known.length === 0) return { replace: false, reason: "serve is on its resource policy and mount plan, or the plan is unknown" };
   const details = known.join("; ");
@@ -114,17 +127,18 @@ export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: b
   return { replace: true, reason: `automatic serve replace: ${details}` };
 }
 
-export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: string, mountDrift: MountPlanDrift[] = []): Escalation {
+export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: string, mountDrift: MountPlanDrift[] = [], imageDrift?: ServeImageDrift): Escalation {
   return {
     class: "BLOCKED",
     taskId: "SERVE-POLICY",
-    summary: "remudero-serve could not be replaced onto its resource policy",
+    summary: "remudero-serve could not be replaced onto its resource policy, mounts or daemon image",
     detail: [
-      `The watchdog tick found remudero-serve's live limits off deploy/resource-policy.sh and its automatic`,
+      `The watchdog tick found remudero-serve drift and its automatic`,
       `\`deploy/serve-container.sh --replace\` failed: ${error}`,
       ``,
       `- drift: ${describeDrift(drift)}`,
       ...(mountDrift.length ? [`- mount drift: ${describeMountDrift(mountDrift)}`] : []),
+      ...(imageDrift && "expected" in imageDrift ? [`- image drift: expected=${imageDrift.expected} actual=${imageDrift.actual}`] : []),
       `- the tick retries after an hour (state/${SERVE_POLICY_FAILED_FILE} records the failure)`,
     ].join("\n"),
     options: [
@@ -133,24 +147,26 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
     ],
     recommendation: "Replace serve by hand",
     headDedup: "independent",
-    consequence: "Serve keeps running on its old limits; the tick retries hourly.",
+    consequence: "Serve keeps running with the observed drift; the tick retries hourly.",
   };
 }
 
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
 export function runServePolicyCycle(
-  deps: DeployDeps & { escalate?: (e: Escalation) => void; serveMountPlanDrift?: () => MountPlanDrift[] | undefined },
+  deps: ServePolicyDeps,
   opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
     return { replaced: false, reason: "serve policy is converged only by the primary instance's watchdog tick" };
   }
   const drift = deps.servePolicyDrift();
   const mountDrift = deps.serveMountPlanDrift?.();
+  const imageDrift = deps.serveImageDrift?.();
   const nowMs = deps.now();
   const decision = decideServePolicyConvergence({
     drift,
     mountDrift,
+    imageDrift,
     stopPresent: deps.stopPresent?.(),
     pausePresent: deps.pausePresent?.(),
     handoffInProgress: deps.serveHandoffInProgress?.(),
@@ -159,11 +175,11 @@ export function runServePolicyCycle(
     nowMs,
     dryRun: opts.dryRun,
   });
-  const rows = { drift: drift ?? [], ...(mountDrift ? { mountDrift } : {}) };
-  if (driftDetails(drift, mountDrift).length === 0) return { replaced: false, reason: decision.reason, drift, mountDrift };
+  const rows = { drift: drift ?? [], ...(mountDrift ? { mountDrift } : {}), ...(imageDrift ? { imageDrift } : {}) };
+  if (driftDetails(drift, mountDrift, imageDrift).length === 0) return { replaced: false, reason: decision.reason, drift, mountDrift, imageDrift };
   if (!decision.replace) {
     deps.log("deploy.serve_policy_held", { reason: decision.reason, ...rows });
-    return { replaced: false, reason: decision.reason, drift, mountDrift };
+    return { replaced: false, reason: decision.reason, drift, mountDrift, imageDrift };
   }
   deps.log("deploy.serve_policy_replace", { reason: decision.reason, ...rows });
   let error: string | undefined;
@@ -172,10 +188,14 @@ export function runServePolicyCycle(
     // Only a reading known BEFORE the replace is re-checked: an unknown one never caused it.
     const after = drift === undefined ? [] : deps.servePolicyDrift();
     const mountsAfter = mountDrift === undefined ? [] : deps.serveMountPlanDrift?.();
+    const imageAfter = imageDrift && "expected" in imageDrift ? deps.serveImageDrift?.() : undefined;
     if (deps.serveHealthy?.() !== true) error = "serve is not running after the replace";
     else if (after === undefined || after.length > 0) error = `limits still off the policy after the replace (${after ? describeDrift(after) : "unreadable"})`;
     else if (mountsAfter === undefined || mountsAfter.length > 0) {
       error = `binds still off the scratch mount plan after the replace (${mountsAfter ? describeMountDrift(mountsAfter) : "unreadable"})`;
+    }
+    else if (imageAfter) {
+      error = `image still off the daemon after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
   } catch (err) {
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
@@ -184,12 +204,12 @@ export function runServePolicyCycle(
   if (error === undefined) {
     deps.clearServePolicyFailure?.();
     deps.log("deploy.serve_policy_replaced", rows);
-    return { replaced: true, reason: decision.reason, drift, mountDrift };
+    return { replaced: true, reason: decision.reason, drift, mountDrift, imageDrift };
   }
   deps.recordServePolicyFailure?.(error, nowMs);
   deps.log("deploy.serve_policy_failed", { ...rows, error });
-  deps.escalate?.(servePolicyEscalation(drift ?? [], error, mountDrift));
-  return { replaced: false, reason: `serve replace failed: ${error}`, drift, mountDrift };
+  deps.escalate?.(servePolicyEscalation(drift ?? [], error, mountDrift, imageDrift));
+  return { replaced: false, reason: `serve replace failed: ${error}`, drift, mountDrift, imageDrift };
 }
 
 /** The real serve seams, or none when this state root is not the registry's primary instance. */
@@ -197,7 +217,7 @@ export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
-): Partial<DeployDeps> & { escalate?: (e: Escalation) => void; serveMountPlanDrift?: () => MountPlanDrift[] | undefined } {
+): Partial<ServePolicyDeps> {
   let registryText: string;
   try {
     registryText = readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
@@ -211,6 +231,18 @@ export function realServePolicyDeps(
     servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
     serveMountPlanDrift: () => readMountPlanDrift(exec, o.installPath, o.stateRoot, SERVE_POLICY_CONTAINER),
+    serveImageDrift: () => {
+      try {
+        const actual = exec("docker", ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{.Image}}"]).trim();
+        const expected = exec("docker", ["inspect", imageShaContainerFor(registryText, o.stateRoot), "--format", "{{.Image}}"]).trim();
+        if (![actual, expected].every(id => /^sha256:[0-9a-f]{64}$/.test(id))) {
+          return { kind: "unknown", reason: "serve or daemon image id unreadable" };
+        }
+        return actual === expected ? undefined : { actual, expected };
+      } catch (err) {
+        return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
     pausePresent: () => isPaused(o.stateRoot),
     serveHandoffInProgress: () => {
       try {
