@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -10,6 +9,7 @@ import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type Kno
 import { resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { buildSkillEffectivenessReport, loadInjectableSkills, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
@@ -207,7 +207,7 @@ const testPinCache = new Map<string, Record<string, string>>();
 /** The git tree id of `test/` at HEAD, or why it could not be read; an unreadable id forces a full scan. */
 export function testTreeId(root: string): { id: string } | { unreadable: string } {
   try {
-    const id = execFileSync("git", ["rev-parse", "HEAD:test"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const id = hostWorktreeGit(root, ["rev-parse", "HEAD:test"]).trim();
     return id ? { id } : { unreadable: "git printed no tree id for test/" };
   } catch (error) {
     const reason = String((error as Error)?.message ?? error);
