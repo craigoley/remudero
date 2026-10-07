@@ -6,6 +6,7 @@ import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
+import type { WorkerExit } from "./worker-provider.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
@@ -9106,6 +9107,13 @@ export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory
 }
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
+
+export function reviewerRerunDecision(
+  first: { exit?: WorkerExit },
+  priorSignal?: string,
+): "rerun" | "accept" {
+  return first.exit?.kind === "signal" && priorSignal === undefined ? "rerun" : "accept";
+}
 
 /** The observable OUTCOME of the fresh advisory reviewer spawn, surfaced on the `review.posted` ledger line and the
  *  console summary. `judgeReview`'s binding verdict is unaffected either way (Standing rules 2/4/12); this is purely a
