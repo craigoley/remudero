@@ -328,12 +328,13 @@ export function isManifestPath(path: string, readRootManifest?: () => string): b
 
 /** Dependency declarations outside the npm-workspace manifest predicate. The deploy image is a
  * separately packaged surface: Dependabot edits its package manifests directly, and a Node image
- * bump edits the Dockerfile's `FROM` declaration. Keep these three paths explicit rather than
- * widening workspace matching (which would admit fixtures). */
+ * bump edits the Dockerfile's `FROM` declaration, which W1-T6064 syncs into `.nvmrc`. Keep these
+ * paths explicit rather than widening workspace matching (which would admit fixtures). */
 const DEPLOY_DEPENDENCY_DECLARATIONS = new Set([
   "deploy/package.json",
   "deploy/package-lock.json",
   "deploy/Dockerfile",
+  ".nvmrc",
 ]);
 
 /** Is `path` safe for a dependency-only PR, using the repository's real root workspace declaration? */

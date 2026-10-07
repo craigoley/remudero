@@ -197,7 +197,8 @@ jobs:
         "clock-sweep (+400d, artifacts excluded by name)",
         "heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)",
         "probe-path-filter",
-        "recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)"
+        "recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)",
+        "node-pin-follows-the-image"
         ]
       # W1-T261 re-aggregate grace window — the mechanism is in the step below. Env, not literals,
       # so tests shrink both to seconds.
