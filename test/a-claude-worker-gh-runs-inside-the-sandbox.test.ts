@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -94,6 +94,35 @@ test("a link to the operator's gh config left by an earlier materialization is r
     workerHome.materializeWorkerHome({ workerHome: home, realHome });
     assert.equal(existsSync(join(home, GH_CONFIG_REL)), false, "a reused home must stop reaching the operator's config");
     assert.equal(existsSync(join(realHome, GH_CONFIG_REL)), true, "and the operator's own directory is untouched");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a revoked gh config slot that cannot be inspected fails the materialization loudly", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-gh-revoke-locked-"));
+  const realHome = join(root, "real");
+  const home = join(root, "wh");
+  mkdirSync(realHome, { recursive: true });
+  mkdirSync(join(home, ".config"), { recursive: true });
+  chmodSync(join(home, ".config"), 0o000); // a real EACCES on the slot, never a stubbed error
+  try {
+    assert.throws(() => workerHome.materializeWorkerHome({ workerHome: home, realHome }), /EACCES/);
+  } finally {
+    chmodSync(join(home, ".config"), 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a file where the .config directory belongs leaves nothing to revoke, and does not fail", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-gh-revoke-file-"));
+  const realHome = join(root, "real");
+  const home = join(root, "wh");
+  try {
+    mkdirSync(realHome, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, ".config"), "not a directory\n");
+    assert.doesNotThrow(() => workerHome.materializeWorkerHome({ workerHome: home, realHome }));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -522,14 +522,19 @@ export function materializeWorkerHome(opts: {
   }
 
   // A link in a REVOKED slot is cleared even when an earlier materialization made it, so a reused home
-  // stops reaching the operator's gh config the moment this module stops granting it.
+  // stops reaching the operator's gh config the moment this module stops granting it. A slot that
+  // cannot even be inspected throws: a revocation nobody could confirm is not one.
   for (const rel of REVOKED_WORKER_HOME_GRANTS) {
     const slot = join(plan.workerHome, rel);
+    let st: ReturnType<typeof lstatSync>;
     try {
-      if (lstatSync(slot).isSymbolicLink()) unlinkSync(slot);
+      st = lstatSync(slot);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue; // nothing can sit in the slot
+      throw e;
     }
+    if (st.isSymbolicLink()) unlinkSync(slot);
   }
 
   // W1-T981: bound the CLI's own `.claude.json` backups at the SAME resolved grant target this call
