@@ -1459,6 +1459,9 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   decideDepReview,
+  isDependabotAuthor,
+  syncNodePinForImageBump,
+  type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
 } from "./lib/dep-review.js";
@@ -21903,6 +21906,44 @@ export interface DepReviewDeps {
     submissionKey: string;
   }) => FeedbackEntry;
   prMutations?: DepReviewPrMutations;
+  /** W1-T6258 — the node-pin sync's git reads and push; defaults to {@link defaultNodePinSyncIo}. */
+  nodePin?: NodePinSyncIo;
+}
+
+/** W1-T6258 — read the PR head with `git show` and push the `.nvmrc` commit from a scratch worktree. */
+export function defaultNodePinSyncIo(root: string): NodePinSyncIo {
+  const git = (args: string[], cwd = root): string =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 24 });
+  return {
+    readAtHead(headSha, path) {
+      try {
+        return git(["show", `${headSha}:${path}`]);
+      } catch (error) {
+        void error; // an unreadable file is reported by the caller as `unreadable`, with nothing more to carry
+        return undefined;
+      }
+    },
+    commitAndPush({ headRef, headSha, nvmrc, subject }) {
+      const scratch = mkdtempSync(join(tmpdir(), "rmd-node-pin-"));
+      const tree = join(scratch, "wt");
+      try {
+        git(["worktree", "add", "--quiet", "-B", headRef, tree, headSha]);
+        writeFileSync(join(tree, ".nvmrc"), nvmrc);
+        git(["add", ".nvmrc"], tree);
+        git(["-c", "user.name=remudero", "-c", "user.email=remudero@users.noreply.github.com", "commit", "--quiet", "-m", subject], tree);
+        const pushedSha = git(["rev-parse", "HEAD"], tree).trim();
+        gitPushRunBranch(tree, { expectedHeadSha: pushedSha });
+        return pushedSha;
+      } finally {
+        try {
+          git(["worktree", "remove", "--force", tree]);
+        } catch (error) {
+          void error; // the scratch directory is removed below either way
+        }
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  };
 }
 
 export interface DepReviewPrMutations {
@@ -21942,13 +21983,14 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,author,statusCheckRollup",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup",
   ]) as {
     number: number;
     url: string;
     title: string;
     body: string;
     headRefOid: string;
+    headRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
@@ -21962,6 +22004,22 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
+
+  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+    const sync = syncNodePinForImageBump(
+      diff,
+      { sha: view.headRefOid, ref: view.headRefName },
+      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+    );
+    if (sync.kind === "synced") {
+      log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
+      console.log(`### rmd dep-review PR #${view.number} — .nvmrc ${sync.from} -> ${sync.to} pushed; CI re-runs on the new head`);
+      return 1;
+    }
+    if (sync.kind === "refused") {
+      log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+  }
 
   const result = decideDepReview({
     author: { login: view.author?.login ?? "" },
