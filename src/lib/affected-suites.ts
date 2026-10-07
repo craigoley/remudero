@@ -511,6 +511,11 @@ export function affectedListingEnv(home: string, parent: NodeJS.ProcessEnv = pro
   return env;
 }
 
+function listingLines(r: SpawnSyncReturns<string>, what: string): string[] {
+  if (r.status !== 0) throw new Error(`${what} exited ${r.status}: ${(r.error?.message ?? r.stderr ?? "").trim().slice(0, 200)}`);
+  return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
 /** Reads the selector's input from `repoRoot`: git's tracked code files and their contents, and
  *  diff-class's own census and plan-reading listings (spawned from {@link HARNESS_ROOT} with
  *  `--plan-reading-root <repoRoot>`, as src/ always reaches scripts/). A tracked file missing from
@@ -521,12 +526,8 @@ export function readAffectedSuitesInput(
   changed: readonly string[],
   extra: { recentFailures?: readonly string[]; symbolSuites?: readonly string[] } = {},
 ): AffectedSuitesInput {
-  const lines = (r: SpawnSyncReturns<string>, what: string): string[] => {
-    if (r.status !== 0) throw new Error(`${what} exited ${r.status}: ${(r.error?.message ?? r.stderr ?? "").trim().slice(0, 200)}`);
-    return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  };
   const run = (cmd: string, args: string[]) =>
-    lines(spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" }), `${cmd} ${args.join(" ")}`);
+    listingLines(spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" }), `${cmd} ${args.join(" ")}`);
   const files = new Map<string, string>();
   for (const path of run("git", ["ls-files", "--", "src", "scripts", "bin", "test"])) {
     if (!CODE_FILE.test(path)) continue;
@@ -537,20 +538,26 @@ export function readAffectedSuitesInput(
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
+  return { files, pathReaders: readAffectedListings(repoRoot, changed), ...extra };
+}
+
+/** diff-class's census and plan-reading listings for `repoRoot`, from {@link HARNESS_ROOT}'s copy
+ *  with the tree passed as data. Reads no git; a listing that fails or overruns THROWS. */
+export function readAffectedListings(repoRoot: string, changed: readonly string[]): string[] {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`));
   try {
     const list = join(dir, "changed.txt");
     writeFileSync(list, changed.join("\n") + "\n");
     const env = affectedListingEnv(join(dir, "home"));
     const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
-    const listing = (flag: string) => lines(spawnSync(
+    const listing = (flag: string) => listingLines(spawnSync(
       process.execPath,
       ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: AFFECTED_LISTING_TIMEOUT_MS },
     ), `diff-class ${flag}`);
     const census = listing("--list-census-suites");
     const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f)) ? listing("--list-plan-reading-suites") : [];
-    return { files, pathReaders: [...census, ...prose], ...extra };
+    return [...census, ...prose];
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

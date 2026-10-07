@@ -82,7 +82,7 @@ test("a worker worktree's own diff-class.mjs never runs while its affected-suite
   try {
     await withSecrets({ NODE_OPTIONS: `--import=${pathToFileURL(probe).href}` }, () => {
       // POSITIVE CONTROL: a node child given the parent env runs the probe and sees the token.
-      spawnSync(process.execPath, ["-e", ""], { env: process.env });
+      spawnSync(process.execPath, ["-e", ""], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", NODE_OPTIONS: process.env.NODE_OPTIONS!, GH_TOKEN: SECRETS.GH_TOKEN } });
       assert.match(readFileSync(probeLog, "utf8"), /ghs_fixture_gh_token/);
       writeFileSync(probeLog, "");
 
@@ -98,15 +98,16 @@ test("a worker worktree's own diff-class.mjs never runs while its affected-suite
     assert.deepEqual(Object.keys(env).sort(), ["HOME", "PATH", "TMPDIR"]);
     assert.equal(env.HOME, join(scratch, "listing-home"));
 
-    // A harness-root caller reads exactly what diff-class printed under the old, cwd-rooted argv.
+    // A harness-root caller's listings are exactly what diff-class printed under the old, cwd-rooted
+    // argv. Compared without git, so the review sandbox's masked checkout config cannot reach it.
     const changed = ["src/lib/tmp.ts", "docs/x.md"];
     const list = join(scratch, "changed.txt");
     writeFileSync(list, changed.join("\n") + "\n");
-    const old = (flag: string) => spawnSync(process.execPath, ["--import", "tsx", join(HARNESS, "scripts", "diff-class.mjs"), flag, "--changed-files", list], { cwd: HARNESS, encoding: "utf8" })
+    const old = (flag: string) => spawnSync(process.execPath, ["--import", "tsx", join(HARNESS, "scripts", "diff-class.mjs"), flag, "--changed-files", list], { cwd: HARNESS, encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(scratch, "old-home") } })
       .stdout.split("\n").map((l) => l.trim()).filter(Boolean);
     const expected = [...old("--list-census-suites"), ...old("--list-plan-reading-suites")];
     assert.ok(expected.length > 10, `the harness listings are non-trivial: ${expected.length}`);
-    assert.deepEqual(affected.readAffectedSuitesInput(HARNESS, changed).pathReaders, expected);
+    assert.deepEqual(affected.readAffectedListings(HARNESS, changed), expected);
   } finally {
     fx.tree.cleanup();
   }
