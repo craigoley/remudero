@@ -90,7 +90,7 @@ test("unit test: an analytics checkpoint refuses to resume when a vanished archi
     writeFileSync(join(dir, "ledger.2026-10-06T20-50-00-000Z.ndjson.gz"), gzipSync(`${invoked("hotel", "2026-10-06T20:45:00.000Z")}\n`));
   }, () => {}, archiveOnly), "live-missing", "with no live file, any change to the rotations is a full scan");
   assert.equal(await refusal("version", () => {}, (checkpoint) => { delete checkpoint.state.goalAccountingVersion; }), "checkpoint-version");
-  assert.equal(await refusal("incomplete", () => {}, (checkpoint) => { delete checkpoint.state.workIntegrityRows; }), "checkpoint-incomplete");
+  assert.equal(await refusal("incomplete", () => {}, (checkpoint) => { delete checkpoint.state.workIntegrityFold; }), "checkpoint-incomplete");
   assert.equal(await refusal("corrupt", () => {}, (checkpoint) => { (checkpoint.state as { startsByRun: unknown }).startsByRun = 7; }), "checkpoint-corrupt");
   assert.equal(await refusal("live-malformed", (dir) => {
     writeFileSync(join(dir, "ledger.2026-10-06T20-40-00-000Z.ndjson.gz"), gzipSync(`${invoked("golf", "2026-10-06T20:35:00.000Z")}\n`));

@@ -123,27 +123,6 @@ function automaticEvent(row: OperatorDecisionLedgerRow): AutomaticMergeEvent {
   };
 }
 
-function classSummary(taskClass: string, events: readonly OperatorDecisionEvent[]): OperatorDecisionClassSummary {
-  const forClass = events.filter((event) => event.taskClass === taskClass);
-  const count = (decision: OperatorDecisionKind): number => forClass.filter((event) => event.decision === decision).length;
-  const approvedCount = count("approved");
-  const acceptedCount = count("accepted");
-  const rejectedCount = count("rejected");
-  const approvalDenominator = approvedCount + acceptedCount + rejectedCount;
-  return {
-    taskClass,
-    approvedCount,
-    acceptedCount,
-    rejectedCount,
-    heldCount: count("held"),
-    releasedCount: count("released"),
-    approvalDenominator,
-    approvalRate: approvalDenominator === 0 ? null : (approvedCount + acceptedCount) / approvalDenominator,
-    taskIds: [...new Set(forClass.map((event) => event.taskId))].slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
-    actorIds: [...new Set(forClass.map((event) => event.actor))].slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
-  };
-}
-
 function unmeasurable(row: OperatorDecisionLedgerRow, cause: OperatorDecisionUnmeasurableCause, taskId?: string, taskClass?: string): OperatorDecisionUnmeasurable {
   const labels: Record<OperatorDecisionUnmeasurableCause, string> = {
     "missing-task-id": "task identity is missing",
@@ -160,51 +139,103 @@ function unmeasurable(row: OperatorDecisionLedgerRow, cause: OperatorDecisionUnm
   };
 }
 
-/** Adapt supplied ledger rows without writing, classifying automatic merges as human decisions, or guessing missing joins. */
-export function adaptOperatorDecisionRows(rows: readonly OperatorDecisionLedgerRow[]): OperatorAgentDecisionSignal {
-  const explicitDecisions: OperatorDecisionEvent[] = [];
-  const automaticMergeEvents: AutomaticMergeEvent[] = [];
-  const unmeasurableRows: OperatorDecisionUnmeasurable[] = [];
+/** One task class's counts and its first distinct task and actor ids, as {@link finishOperatorDecisions} reads them. */
+interface OperatorDecisionClassFold {
+  taskClass: string;
+  counts: Record<OperatorDecisionKind, number>;
+  taskIds: string[];
+  actorIds: string[];
+}
 
-  for (const row of rows) {
-    if (AUTOMATIC_MERGE_STEPS.has(row.step)) {
-      automaticMergeEvents.push(automaticEvent(row));
-      continue;
-    }
-    const decision = EXPLICIT_DECISION_STEPS.get(row.step);
-    if (!decision) continue;
+/** What {@link finishOperatorDecisions} reads: counts and the first details, never the rows. */
+export interface OperatorDecisionFold {
+  explicitDecisionCount: number;
+  automaticMergeEventCount: number;
+  unmeasurableCount: number;
+  explicitDecisions: OperatorDecisionEvent[];
+  automaticMergeEvents: AutomaticMergeEvent[];
+  unmeasurable: OperatorDecisionUnmeasurable[];
+  classes: OperatorDecisionClassFold[];
+}
 
-    const taskId = stringField(row, ["task_id"]);
-    const taskClass = stringField(row, ["task_class", "task_type", "class"]);
-    const actor = stringField(row, ["origin", "actor", "by"]);
-    if (!taskId) {
-      unmeasurableRows.push(unmeasurable(row, "missing-task-id", undefined, taskClass));
-      continue;
-    }
-    if (!taskClass) {
-      unmeasurableRows.push(unmeasurable(row, "missing-task-class", taskId));
-      continue;
-    }
-    if (!actor) {
-      unmeasurableRows.push(unmeasurable(row, "missing-actor", taskId, taskClass));
-      continue;
-    }
-    explicitDecisions.push({ source: "explicit-operator", step: row.step, decision, taskId, taskClass, actor });
+export function emptyOperatorDecisionFold(): OperatorDecisionFold {
+  return { explicitDecisionCount: 0, automaticMergeEventCount: 0, unmeasurableCount: 0, explicitDecisions: [], automaticMergeEvents: [], unmeasurable: [], classes: [] };
+}
+
+function firstDistinct(values: string[], value: string): void {
+  if (values.length < MAX_OPERATOR_AGENT_DETAIL_ITEMS && !values.includes(value)) values.push(value);
+}
+
+function firstItems<T>(values: T[], value: T): void {
+  if (values.length < MAX_OPERATOR_AGENT_DETAIL_ITEMS) values.push(value);
+}
+
+export function foldOperatorDecisionRow(fold: OperatorDecisionFold, row: OperatorDecisionLedgerRow): void {
+  if (AUTOMATIC_MERGE_STEPS.has(row.step)) {
+    fold.automaticMergeEventCount += 1;
+    firstItems(fold.automaticMergeEvents, automaticEvent(row));
+    return;
   }
+  const decision = EXPLICIT_DECISION_STEPS.get(row.step);
+  if (!decision) return;
+  const taskId = stringField(row, ["task_id"]);
+  const taskClass = stringField(row, ["task_class", "task_type", "class"]);
+  const actor = stringField(row, ["origin", "actor", "by"]);
+  const missing = !taskId ? unmeasurable(row, "missing-task-id", undefined, taskClass)
+    : !taskClass ? unmeasurable(row, "missing-task-class", taskId)
+    : !actor ? unmeasurable(row, "missing-actor", taskId, taskClass)
+    : undefined;
+  if (missing !== undefined) {
+    fold.unmeasurableCount += 1;
+    firstItems(fold.unmeasurable, missing);
+    return;
+  }
+  fold.explicitDecisionCount += 1;
+  firstItems(fold.explicitDecisions, { source: "explicit-operator", step: row.step, decision, taskId: taskId!, taskClass: taskClass!, actor: actor! });
+  let summary = fold.classes.find((entry) => entry.taskClass === taskClass);
+  if (summary === undefined) {
+    summary = { taskClass: taskClass!, counts: { approved: 0, accepted: 0, rejected: 0, held: 0, released: 0 }, taskIds: [], actorIds: [] };
+    fold.classes.push(summary);
+  }
+  summary.counts[decision] += 1;
+  firstDistinct(summary.taskIds, taskId!);
+  firstDistinct(summary.actorIds, actor!);
+}
 
-  const classes = [...new Set(explicitDecisions.map((event) => event.taskClass))]
-    .sort()
-    .map((taskClass) => classSummary(taskClass, explicitDecisions));
+function classSummary(entry: OperatorDecisionClassFold): OperatorDecisionClassSummary {
+  const { approved: approvedCount, accepted: acceptedCount, rejected: rejectedCount } = entry.counts;
+  const approvalDenominator = approvedCount + acceptedCount + rejectedCount;
+  return {
+    taskClass: entry.taskClass,
+    approvedCount,
+    acceptedCount,
+    rejectedCount,
+    heldCount: entry.counts.held,
+    releasedCount: entry.counts.released,
+    approvalDenominator,
+    approvalRate: approvalDenominator === 0 ? null : (approvedCount + acceptedCount) / approvalDenominator,
+    taskIds: [...entry.taskIds],
+    actorIds: [...entry.actorIds],
+  };
+}
 
+export function finishOperatorDecisions(fold: OperatorDecisionFold): OperatorAgentDecisionSignal {
   return {
     signal: OPERATOR_AGENT_DECISION_SIGNAL,
-    status: explicitDecisions.length > 0 ? "measured" : "not-collected",
-    explicitDecisionCount: explicitDecisions.length,
-    automaticMergeEventCount: automaticMergeEvents.length,
-    unmeasurableCount: unmeasurableRows.length,
-    explicitDecisions: explicitDecisions.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
-    automaticMergeEvents: automaticMergeEvents.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
-    classes,
-    unmeasurable: unmeasurableRows.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    status: fold.explicitDecisionCount > 0 ? "measured" : "not-collected",
+    explicitDecisionCount: fold.explicitDecisionCount,
+    automaticMergeEventCount: fold.automaticMergeEventCount,
+    unmeasurableCount: fold.unmeasurableCount,
+    explicitDecisions: [...fold.explicitDecisions],
+    automaticMergeEvents: [...fold.automaticMergeEvents],
+    classes: [...fold.classes].sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0)).map(classSummary),
+    unmeasurable: [...fold.unmeasurable],
   };
+}
+
+/** Adapt supplied ledger rows without writing, classifying automatic merges as human decisions, or guessing missing joins. */
+export function adaptOperatorDecisionRows(rows: readonly OperatorDecisionLedgerRow[]): OperatorAgentDecisionSignal {
+  const fold = emptyOperatorDecisionFold();
+  for (const row of rows) foldOperatorDecisionRow(fold, row);
+  return finishOperatorDecisions(fold);
 }

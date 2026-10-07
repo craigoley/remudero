@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { describe, it, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { logCloneReapSurvey, logDiskReclaimRung } from "../src/run-task.js";
+import { logCloneReapSurveyAsync, logDiskReclaimRung } from "../src/run-task.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { sweepStaleTempDirs } from "../src/lib/tmp.js";
 import { sweepStaleWorkerHomes } from "../src/lib/worker-home.js";
@@ -269,7 +269,7 @@ describe("ledger safety — real sweeps, real fixtures, none reach state/ledger.
         sweepTempDirs: () => tempSummary(),
         sweepWorkerHomes: () => homeSummary(),
         reapClonesSurvey: (config, log, deps) =>
-          logCloneReapSurvey(config, log, {
+          logCloneReapSurveyAsync(config, log, {
             ...deps,
             roots: () => [cloneRoot],
             policy: () => ({ enabled: true, maxAgeHours: 0 }),
@@ -326,7 +326,7 @@ describe("one ledger line, summarising the whole rung, and it is not decision-re
     await logDiskReclaimRung(CONFIG, (s, f) => lines.push([s, f]), {
       sweepTempDirs: () => tempSummary(),
       sweepWorkerHomes: () => homeSummary(),
-      // Default reapClonesSurvey = the real logCloneReapSurvey; drive it against a fake root
+      // Default reapClonesSurvey = the real logCloneReapSurveyAsync; drive it against a fake root
       // via cloneReapDeps so it genuinely reports a reap without touching the real filesystem.
       cloneReapDeps: {
         policy: () => ({ enabled: true, maxAgeHours: 24 }),
