@@ -93,6 +93,7 @@ export interface FlowRow {
   assignmentId: string | null;
   requestedModel: string | null;
   selectedModel: string | null;
+  provider?: string | null;
   servedModel: string | null;
   servedModelReason?: string | null;
   notionalCostUsd?: number | null;
@@ -147,6 +148,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
+    provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
@@ -747,7 +749,10 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
           const hits = Object.hasOwn(counts.servedModelUnavailableReasons, bucket) ? counts.servedModelUnavailableReasons[bucket] : 0;
           Object.defineProperty(counts.servedModelUnavailableReasons, bucket, { value: hits + 1, enumerable: true, configurable: true });
         }
-        const cost = attempt?.billingMode === "subscription" ? attempt.notionalCostReported ? attempt.notionalCostUsd : attempt.costUsd : attempt?.costUsd;
+        const cost = attempt?.billingMode === "subscription"
+          ? attempt.notionalCostReported ? attempt.notionalCostUsd
+            : (attempt.provider ?? row.provider) === "codex" ? null : attempt.costUsd
+          : attempt?.costUsd;
         if (cost === null || cost === undefined || attempt?.billingMode == null)
           counts.costMissingAssignments += 1;
         else if (attempt.billingMode === "api") counts.apiCostEstimateUsd += cost;

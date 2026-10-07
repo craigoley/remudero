@@ -452,6 +452,7 @@ import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -2777,9 +2778,12 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./lib/worktree-git.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
+  worktreeGitCaptureAsync,
+  worktreePushExecAsync,
   gitPushRunBranch,
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
@@ -4791,10 +4795,8 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   // function's own best-effort contract; only a base that is present AND zero commits behind
   // suppresses the amend.
   try {
-    execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" });
-    const ahead = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"], {
-      encoding: "utf8",
-    });
+    hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "--quiet", "origin/main"]);
+    const ahead = hostWorktreeGit(worktreePath, ["rev-list", "--count", "origin/main..HEAD"]);
     if ((parseInt(ahead.trim(), 10) || 0) === 0) return false;
   } catch {
     /* no readable origin/main => no base to be identical to; fall through and trailer */
@@ -4802,12 +4804,10 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const trailerRe = new RegExp(`^Remudero-Task:\\s*${escaped}\\s*$`, "m");
   try {
-    const message = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], {
-      encoding: "utf8",
-    });
+    const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"]);
     if (trailerRe.test(message)) return false; // already carries THIS task's trailer — left alone
     const newMessage = `${message.replace(/\n+$/, "")}\n\nRemudero-Task: ${taskId}\n`;
-    execFileSync("git", ["-C", worktreePath, "commit", "--amend", "-m", newMessage], { stdio: "pipe" });
+    hostWorktreeGit(worktreePath, ["commit", "--amend", "-m", newMessage]);
     return true;
   } catch {
     return false;
@@ -4877,10 +4877,7 @@ export function diffIsClassifiedIrreversible(diffText: string): boolean {
  */
 function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
-    const patch = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
     return diffIsClassifiedIrreversible(patch);
   } catch {
     return false;
@@ -15398,6 +15395,12 @@ export function probeVerdictKey(inputs: ProbeKeyInputs): string {
   return hash.digest("hex");
 }
 
+function hookFilesUnder(dir: string, rel = ""): string[] {
+  return readdirSync(join(dir, rel), { withFileTypes: true })
+    .flatMap((entry) => (entry.isDirectory() ? hookFilesUnder(dir, join(rel, entry.name)) : [join(rel, entry.name)]))
+    .sort();
+}
+
 /** Read the probe key's inputs from disk. The worker settings and every file in the hooks dir are
  *  read by CONTENT; the run's own id is normalised out of the settings so a per-run path is not a
  *  policy change. An absent image stamp (off-container) is the literal `absent`; any other read
@@ -15418,7 +15421,7 @@ export function readProbeKeyInputs(src: {
     imageBuildSha: existsSync(src.imageBuildShaPath) ? readFileSync(src.imageBuildShaPath, "utf8").trim() : "absent",
     harnessRevision: src.harnessRevision,
     workerSettings: digest(readFileSync(src.settingsFile, "utf8").split(src.runId).join("<run>")),
-    hooks: readdirSync(src.hooksDir).sort().map((name) => `${name}:${digest(readFileSync(join(src.hooksDir, name)))}`).join(","),
+    hooks: hookFilesUnder(src.hooksDir).map((rel) => `${rel}:${digest(readFileSync(join(src.hooksDir, rel)))}`).join(","),
     cliVersion: src.cliVersion ?? "unobserved",
     provider: src.provider,
     claudeBin: src.claudeBin,
@@ -17094,8 +17097,8 @@ export async function pushFixRound(
       `which is the tree CI builds — merge origin/main into the branch and fix the errors:\n${merged.text}`;
     throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
   }
-  const capture = deps.capture ?? defaultGitCaptureAsync;
-  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
+  const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
+  const push = deps.exec ?? worktreePushExecAsync(wt);
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
@@ -17110,8 +17113,8 @@ export async function pushFixRound(
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
-    const remote = await execFilePromise("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
-      .then(({ stdout }) => stdout.split(/\s/)[0], () => undefined);
+    const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
+      .then((stdout) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
@@ -38452,6 +38455,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig)),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
@@ -43145,11 +43149,10 @@ export function commitWorkerEdits(
   acceptance: readonly AcceptanceCriterion[] = [],
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
 ): WorkerEditCommit {
-  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
-    "git",
-    ["-C", repoDir, ...args],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      ...(options.priorHeadSha === undefined ? {} : { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }) },
+  const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
+    repoDir,
+    args,
+    options.priorHeadSha === undefined ? {} : { env: { GIT_OPTIONAL_LOCKS: "0" } },
   ));
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
@@ -43228,7 +43231,7 @@ export function commitWorkerEdits(
   } else {
     const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
+      hostWorktreeGit(repoDir, ["add", "-A", "--", ...declared], { env });
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };

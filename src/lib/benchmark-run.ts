@@ -391,14 +391,20 @@ function callEvidence(row: Record<string, unknown>) {
     ? row.tokens as Record<string, unknown> : undefined;
   const input = observedNonnegative(rawTokens?.input, "worker-tokens-not-reported");
   const output = observedNonnegative(rawTokens?.output, "worker-tokens-not-reported");
-  const tokens: Evidence<{ input: number; output: number }> = input.state === "observed" && output.state === "observed"
+  const usageState = row.token_usage_state;
+  const completeUsage = usageState === undefined || usageState === "observed";
+  const tokenReason = usageState === "partial" ? "worker-token-usage-partial"
+    : usageState === "unavailable" ? "worker-token-usage-unavailable"
+      : !completeUsage ? "worker-token-usage-invalid" : "worker-tokens-not-reported";
+  const tokens: Evidence<{ input: number; output: number }> = completeUsage && input.state === "observed" && output.state === "observed"
     ? { state: "observed", value: { input: input.value, output: output.value } }
-    : unavailable("worker-tokens-not-reported");
+    : unavailable(tokenReason);
   const workerCall: Outcome = row.success === true ? { state: "observed", value: true }
     : row.success === false ? { state: "failed", value: false }
       : unavailable("worker-outcome-not-reported");
   const cost = observedNonnegative(row.total_cost_usd, "worker-cost-not-reported");
-  const notional = observedNonnegative(Object.hasOwn(row, "notional_cost_usd") ? row.notional_cost_usd : row.total_cost_usd, "worker-cost-not-reported");
+  const notional = observedNonnegative(Object.hasOwn(row, "notional_cost_usd") ? row.notional_cost_usd
+    : row.provider === "codex" ? undefined : row.total_cost_usd, "worker-cost-not-reported");
   const billingMode = row.billing_mode === "api" || row.billing_mode === "subscription"
     ? row.billing_mode : undefined;
   const otherMode = unavailable("different-billing-mode");
@@ -424,8 +430,10 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
   const observedEnvelope = typeof result.subtype === "string" && result.subtype.length > 0;
   const codexPlaceholder = result.provider === "codex";
   const costObserved = observedEnvelope && !(codexPlaceholder && result.costUsd === 0);
-  const tokensObserved = observedEnvelope && !(codexPlaceholder && result.tokens.input === 0
-    && result.tokens.output === 0 && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0);
+  const tokensObserved = observedEnvelope && (fields.token_usage_state === undefined
+    ? !(codexPlaceholder && result.tokens.input === 0 && result.tokens.output === 0
+      && result.tokens.cacheRead === 0 && result.tokens.cacheCreation === 0)
+    : fields.token_usage_state === "observed");
   return {
     served_model: fields.served_model,
     // W1-T4650: the reason rides beside the null it explains; dropping it left every row generic.
@@ -433,6 +441,7 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     worker_duration_ms: fields.worker_duration_ms,
     ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
     ...(tokensObserved ? { tokens: fields.tokens } : {}),
+    ...(fields.token_usage_state === undefined ? {} : { token_usage_state: fields.token_usage_state }),
     ...(costObserved ? { total_cost_usd: fields.total_cost_usd } : {}),
     ...(observedEnvelope && fields.notional_cost_usd !== undefined ? { notional_cost_usd: fields.notional_cost_usd } : {}),
   };
