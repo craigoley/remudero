@@ -37834,7 +37834,6 @@ export async function daemonCommand(
   });
   const loopTelemetry = startReadPlaneTelemetry();
   try {
-    // Publish only after boot guards admit a real daemon; dry-run must not replace its inventory.
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
       plan,
