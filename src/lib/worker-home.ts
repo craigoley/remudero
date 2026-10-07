@@ -84,9 +84,7 @@ export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
 type ClaudeFleetSeedFsOps = typeof claudeFleetSeedFsOps;
 
-/** What {@link seedClaudeFleetCredentials} changed, for a caller that records it (W1-T6252). `store` is the
- *  shared store's path; `priorVerdict` is `absent` for a provisioning and the replaced credential's
- *  reason class for a heal. Carries no credential bytes. */
+/** What {@link seedClaudeFleetCredentials} changed (W1-T6252); `priorVerdict` is `absent` or the replaced reason class. */
 export interface ClaudeCredentialSeedEvent {
   kind: "provisioned" | "healed";
   store: string;

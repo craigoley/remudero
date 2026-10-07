@@ -32884,13 +32884,7 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
   }
 }
 
-/**
- * W1-T6252: the usage probe's sink for a provisioned or healed shared Claude credential store. One row per
- * event — `usage.credential_provisioned` when the store was created, `usage.credential_healed` when an
- * unusable credential in it was replaced — naming the store and the prior verdict, so how often the OAuth
- * lineage splits is a ledger query rather than a guess. Diagnostics only, like
- * {@link ledgerUsageProbeFailure}: a ledger that cannot be written never fails the probe.
- */
+/** W1-T6252: ledgers the probe's shared-credential provisioning and heals, so lineage splits are countable. */
 export function usageCredentialSink(config: Config): (event: ClaudeCredentialSeedEvent) => void {
   return (event) => {
     try {
@@ -32902,7 +32896,6 @@ export function usageCredentialSink(config: Config): (event: ClaudeCredentialSee
         prior_verdict: event.priorVerdict,
       });
     } catch (error) {
-      // Diagnostics are never worth a throw on this path; say so on stderr rather than erase it.
       console.error(JSON.stringify({ event: "usage.credential_ledger_failed", reason: String((error as Error)?.message ?? error) }));
     }
   };
