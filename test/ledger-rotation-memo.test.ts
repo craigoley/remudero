@@ -10,6 +10,77 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const identity = (rows: Array<Record<string, unknown>>) => rows;
 
+test("compressed rotation memo preserves all rows and malformed evidence across passes", () => {
+  const memo = createLedgerRotationMemo(identity, { statKey: () => "fixed", storage: "compressed" });
+  const entry = { path: "synthetic", form: "gzip" as const };
+  const original = { rows: Array.from({ length: 3000 }, (_, i) => ({ ts: "2000-01-01T00:00:00Z", id: i, body: { text: "Unicode \u2028 \u2029 🚀".repeat(30), nullable: null } })), torn: 2, tornLines: ["bad-a", "bad-b"] };
+  let parses = 0;
+  const cold = memo.pass({ parseMissing: true });
+  const a = cold.rotationRecords(entry, () => { parses++; return original; });
+  assert.deepEqual(a, original);
+  assert.equal(cold.complete(), true);
+  assert.ok(memo.retention().compressedBytes! > 0);
+  assert.ok(memo.retention().compressedBytes! < Buffer.byteLength(JSON.stringify(original)) / 4);
+  const warm = memo.pass();
+  const b = warm.rotationRecords(entry, () => { parses++; throw new Error("must not reparse"); });
+  assert.deepEqual(b, original);
+  assert.equal(warm.rotationRecords(entry, () => { throw new Error("must not reparse"); }), b);
+  assert.equal(warm.complete(), true);
+  assert.equal(parses, 1);
+  assert.equal(memo.retention().rows, 3000);
+});
+
+test("compressed rotation memo invalidates changed archives and preserves empty malformed archives", () => {
+  let stamp = "one";
+  const memo = createLedgerRotationMemo(identity, { statKey: () => stamp, storage: "compressed" });
+  const entry = { path: "fixture", form: "plain" as const };
+  let pass = memo.pass({ parseMissing: true });
+  pass.rotationRecords(entry, () => ({ rows: [{ id: "old" }], torn: 0, tornLines: [] }));
+  pass.complete();
+  stamp = "two";
+  pass = memo.pass();
+  assert.deepEqual(pass.rotationRecords(entry, () => { throw new Error("must report missing"); }).rows, []);
+  assert.equal(pass.complete(), false);
+  assert.equal(pass.missing().length, 1);
+  pass = memo.pass({ parseMissing: true });
+  const expected = { rows: [], torn: 1, tornLines: ["malformed-source-marker"] };
+  assert.deepEqual(pass.rotationRecords(entry, () => expected), expected);
+  pass.complete();
+  pass = memo.pass();
+  assert.deepEqual(pass.rotationRecords(entry, () => { throw new Error("must use packed empty read"); }), expected);
+  pass.complete();
+});
+
+test("compressed rotation memo falls back losslessly for an unserializable injected value", () => {
+  const fn = () => "fixture";
+  const read = { rows: [{ injected: fn }], torn: 0, tornLines: [] };
+  const memo = createLedgerRotationMemo(identity, { statKey: () => "fixed", storage: "compressed" });
+  const entry = { path: "fixture", form: "plain" as const };
+  let pass = memo.pass({ parseMissing: true });
+  assert.equal(pass.rotationRecords(entry, () => read).rows[0]?.injected, fn);
+  pass.complete();
+  pass = memo.pass();
+  assert.equal(pass.rotationRecords(entry, () => { throw new Error("must keep ordinary read"); }).rows[0]?.injected, fn);
+  assert.equal(memo.retention().compressedBytes, undefined);
+});
+
+test("compressed async rotation load reads the real archive once and reports unreadable input", async () => {
+  const fx = writeLedger(rows("live", 2), { rotations: [{ at: "2026-09-20T01:00:00.000Z", rows: rows("old", 4), gz: true }] });
+  try {
+    const counter = countingReads();
+    const memo = createLedgerRotationMemo(identity, { readFile: counter.readFile, storage: "compressed" });
+    const expected = readLedgerUnionBounded(fx.path);
+    assert.deepEqual([...(await readLedgerUnionMemoized(fx.path, memo))], [...expected]);
+    assert.ok(memo.retention().compressedBytes! > 0);
+    assert.deepEqual([...(await readLedgerUnionMemoized(fx.path, memo))], [...expected]);
+    assert.equal(counter.reads.length, 1);
+    const failed = createLedgerRotationMemo(identity, { statKey: () => "fixed", readFile: async () => { throw new Error("unreadable"); }, storage: "compressed" });
+    await failed.load([{ path: "missing", form: "plain" }]);
+    assert.equal(failed.retention().failedArchives, 1);
+    assert.throws(() => failed.pass().rotationRecords({ path: "missing", form: "plain" }, () => { throw new Error("still unreadable"); }), /still unreadable/);
+  } finally { rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
 test("rotation memo retention counts reduced rows and pruning without rereading or exposing bodies", () => {
   const memo = createLedgerRotationMemo((r) => r.filter((row) => row.keep), { statKey: () => "fixed" });
   const a = { path: "synthetic-a", form: "plain" as const };
