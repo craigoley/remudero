@@ -452,6 +452,7 @@ import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { refusalEscalationFor } from "./lib/deploy-refusal-escalation.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -38198,14 +38199,15 @@ async function deployCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** W1-T6062: the gateway a persistently refused recycle opens its one needs-human issue on, or
- *  `undefined` when this checkout cannot name its own owner/repo (the streak is still counted). */
-function deployRefusalIssueGateway(): IssueGateway | undefined {
+/** W1-T6062: the injectable escalation halves a persistently refused recycle opens its ONE
+ *  needs-human issue through, or `{}` when this checkout cannot name its own owner/repo (the streak
+ *  is still counted and logged). */
+function deployRefusalEscalation(ledgerPath: string): Partial<ReturnType<typeof refusalEscalationFor>> {
   try {
     const self = resolveOwnerRepo();
-    return ghIssueGateway(self.owner, self.repo);
+    return refusalEscalationFor(ghIssueGateway(self.owner, self.repo), ledgerPath);
   } catch {
-    return undefined; // no resolvable owner/repo: count and log the refusal, open no issue
+    return {}; // no resolvable owner/repo: count and log the refusal, open no issue
   }
 }
 
@@ -38274,7 +38276,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
       // W1-T6062: a recycle refused window after window opens ONE needs-human issue here.
-      refusalIssues: deployRefusalIssueGateway(),
+      ...deployRefusalEscalation(ledgerPathFor(effectiveConfig)),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no

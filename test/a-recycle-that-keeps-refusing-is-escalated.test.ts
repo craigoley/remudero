@@ -6,13 +6,13 @@ import { test } from "node:test";
 import {
   REFUSAL_ESCALATE_AT,
   deployRefusalStreakPath,
-  escalatePersistingRefusal,
   realDeployDeps,
   refusalReasonKey,
   runDeployCycle,
   type DeployDeps,
   type RefusalStreak,
 } from "../src/lib/deployer.js";
+import { escalatePersistingRefusal } from "../src/lib/deploy-refusal-escalation.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -205,8 +205,8 @@ test("W1-T6062: a different instance opens its own issue for the same reason", (
   const base = {
     key,
     count: 3,
-    firstAtMs: 0,
-    lastAtMs: 1,
+    firstAtIso: "2026-10-04T00:00:00.000Z",
+    lastAtIso: "2026-10-04T03:00:00.000Z",
     lagCommits: 46,
     message: REFUSAL,
     remedy: "Remedy: x",

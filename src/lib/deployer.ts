@@ -35,8 +35,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
-import { escalate, type IssueGateway } from "./escalate.js";
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -1356,8 +1356,8 @@ export interface PersistingRefusal {
   instance: string;
   key: string;
   count: number;
-  firstAtMs: number;
-  lastAtMs: number;
+  firstAtIso: string;
+  lastAtIso: string;
   /** Baked-path commits the running image predates; `undefined` = could not tell. */
   lagCommits: number | undefined;
   /** The refusal's own message, verbatim. */
@@ -1382,40 +1382,6 @@ export function refusalRemedyLine(message: string): string {
   return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
 }
 
-/** Build the one escalation for a persisting refusal and open it, or comment on the open one
- *  (escalate's own dedup on task id and class). Exported so the real wiring and the tests share it. */
-export function escalatePersistingRefusal(
-  r: PersistingRefusal,
-  ctx: { issues: IssueGateway; ledgerPath: string; runId: string },
-): string {
-  const lag = r.lagCommits === undefined ? "an unknown number of baked-path commits" : `${r.lagCommits} baked-path commit(s)`;
-  return escalate(
-    {
-      class: "BLOCKED",
-      taskId: `DEPLOY-REFUSAL-${r.instance}-${r.key}`,
-      runId: ctx.runId,
-      // STABLE across windows (no count, no lag): escalate dedups on the title, so a changing one would open a new issue each hour.
-      summary: `image recycle for ${r.instance} keeps being refused (${r.key})`,
-      detail:
-        `The ${r.backend} backend refused to recycle instance ${r.instance} on ${r.count} consecutive ` +
-        `backoff windows (first refused ${new Date(r.firstAtMs).toISOString()}, latest ` +
-        `${new Date(r.lastAtMs).toISOString()}) for the same reason. The running image is ${lag} behind ` +
-        `origin/main, so merged baked-path changes are not live. Target head ${r.toHead}.\n\n` +
-        `Refusal's remedy line: ${r.remedy}\n\nFull refusal:\n${r.message.slice(0, 1500)}`,
-      options: [
-        { label: "apply the remedy and let the next window retry", detail: r.remedy },
-        {
-          label: "recycle by hand",
-          detail: `run \`bash deploy/recycle-container.sh --instance ${r.instance}\` on the host once the refusal's cause is fixed.`,
-        },
-      ],
-      recommendation: "apply the remedy and let the next window retry",
-      consequence: "the instance keeps running a stale image; every hourly retry will refuse again",
-    },
-    ctx,
-  );
-}
-
 /** Record ONE refused recycle: count it, log it as persisting once it recurs, and escalate once it
  *  has persisted long enough. Never throws — an escalation fault must not break the cycle. */
 function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: string; message: string }): void {
@@ -1435,7 +1401,7 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
       count: streak.count,
       reason_key: key,
       baked_commits_behind: lagCommits ?? null,
-      first_refused_at: new Date(streak.firstAtMs).toISOString(),
+      first_refused_at: fixedClock(streak.firstAtMs).iso(),
       to: short(refusal.toHead),
     });
   }
@@ -1445,8 +1411,8 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
         instance,
         key,
         count: streak.count,
-        firstAtMs: streak.firstAtMs,
-        lastAtMs: streak.lastAtMs,
+        firstAtIso: fixedClock(streak.firstAtMs).iso(),
+        lastAtIso: fixedClock(streak.lastAtMs).iso(),
         lagCommits,
         message: refusal.message,
         remedy: refusalRemedyLine(refusal.message),
@@ -1950,9 +1916,12 @@ export interface RealDeployOpts {
    *  against each declared `state_dir` ({@link instanceForStateRoot}); still undefined ⇒ the script
    *  is invoked exactly as before this field existed, and refuses exactly as it does today. */
   instance?: string;
-  /** W1-T6062 — where a persisting refusal's needs-human issue is opened. OMITTED ⇒ the streak is
-   *  still counted and logged, but no issue is opened (no gateway to open it on). */
-  refusalIssues?: IssueGateway;
+  /** W1-T6062 — open or update the one needs-human issue for a persisting refusal; returns its url.
+   *  INJECTED, because importing escalate.ts here closes ten import cycles. OMITTED ⇒ the streak is
+   *  still counted and logged, but no issue is opened. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** W1-T6062 — close that issue with a citation once a recycle is verified healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -2562,16 +2531,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
       writeAtomic(deployRefusalStreakPath(o.stateRoot), JSON.stringify(streak, null, 2));
     },
-    ...(o.refusalIssues
-      ? {
-          escalateRefusal: (r: PersistingRefusal) =>
-            escalatePersistingRefusal(r, { issues: o.refusalIssues!, ledgerPath, runId: `DEPLOY-${clock()}` }),
-          closeRefusalIssue: (url: string, comment: string) => {
-            if (!o.refusalIssues!.closeWithComment) throw new Error("issue gateway cannot close issues");
-            o.refusalIssues!.closeWithComment(url, comment);
-          },
-        }
-      : {}),
+    ...(o.escalateRefusal ? { escalateRefusal: o.escalateRefusal } : {}),
+    ...(o.closeRefusalIssue ? { closeRefusalIssue: o.closeRefusalIssue } : {}),
     clearFailure: () => {
       for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
         try {
