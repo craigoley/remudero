@@ -1099,21 +1099,28 @@ test(
       // ANY elapsed time fires via "days" -- the absent-marker case is Infinity days.
       const policy = { mergesThreshold: 999999, daysThreshold: 1 };
 
+      const triggerDecisions: RetroTriggerDecision[] = [];
+
       const checkRetroTrigger = (): RetroTriggerDecision => {
         const resolution = resolveMarkerForGather(markerPath);
         const marker = resolution.kind === "ok" ? resolution.marker : undefined;
-        return evaluateRetroTrigger(0, marker?.ts, new Date(), policy);
+        const decision = evaluateRetroTrigger(0, marker?.ts, new Date(), policy);
+        triggerDecisions.push(decision);
+        return decision;
       };
 
       let retroRuns = 0;
-      const runRetroTrigger = async (decision: Extract<RetroTriggerDecision, { fire: true }>) => {
+      let retroCompletion: Promise<void> | undefined;
+      const runRetroTrigger = (decision: Extract<RetroTriggerDecision, { fire: true }>) => {
         retroRuns++;
         // THE REAL retroCommand -- W1-T136's mergeable-PR path (Architect spawn -> push
         // -> gh pr create -> ownership assert -> pr.opened -> marker save), gated by
         // opts.automated exactly as the real daemon wiring (run-task.ts's daemonCommand
         // / retroTriggerCheck) invokes it in production. Never a stand-in.
-        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision,
-          startTokenRefresh: () => ({ armed: false }), github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+        retroCompletion = withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision,
+          startTokenRefresh: () => ({ armed: false }), github: offlineGh, prepublishPreflight: fx.prepublishPreflight }))
+          .then(() => undefined);
+        return retroCompletion;
       };
 
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
@@ -1127,14 +1134,21 @@ test(
           stopChecks++;
           return stopChecks > 2 ? "test bound reached" : undefined;
         },
-        sleep: async () => {},
+        // The NEXT evaluated poll must be after the real marker advance, not a
+        // second rapid tick while the detached retro is still in flight. Keep
+        // HOME/PATH owned by this fixture until its own completion, not a drain
+        // timeout that silently resumes assertions and restores them too early.
+        sleep: async () => { if (retroCompletion) await retroCompletion; },
         checkRetroTrigger,
         runRetroTrigger,
         log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
       });
 
-      await drainDetachedSweepActions({ boundMs: 20000 });
-  assert.equal(summary.stopReason, "stopped");
+      assert.deepEqual(await drainDetachedSweepActions({ boundMs: 20000 }), [], "the owned retro has really settled");
+      assert.equal(summary.stopReason, "stopped");
+      assert.equal(triggerDecisions.length, 2);
+      assert.equal(triggerDecisions[0].fire, true);
+      assert.equal(triggerDecisions[1].fire, false, "the real marker suppresses the poll after completion");
       assert.equal(retroRuns, 1, "the REAL retroCommand ran exactly once across the two evaluated ticks");
 
       const fired = lines.filter((l) => l.step === "retro_triggered");
