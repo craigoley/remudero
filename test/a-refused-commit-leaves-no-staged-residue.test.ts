@@ -158,6 +158,11 @@ function captureStderr(fn: () => void): { thrown: unknown; stderrText: string } 
 
 // ── applyPlanProposalCommit (src/lib/plan-architect.ts) ─────────────────────────────────────
 
+/** W1-T6136: the production default is the hardened leaf, which never runs a worktree's tracked hooks — so the
+ *  refusal arms drive the rollback through this raw runner, the only way their synthetic hook fires. */
+const hookRunningPlanGit = (cwd: string, args: string[], stdio: "inherit" | "pipe"): string =>
+  String(execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio }) ?? "");
+
 test("W1-T3243: applyPlanProposalCommit — a refused commit leaves no plan path staged, restores the index exactly, and content the caller had already staged survives", () => {
   const repo = seedRepo(REFUSING_HOOK);
 
@@ -171,7 +176,7 @@ test("W1-T3243: applyPlanProposalCommit — a refused commit leaves no plan path
 
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   assert.throws(() =>
-    applyPlanProposalCommit(repo.dir, "chore(plan): test", (step, extra) => logs.push({ step, extra })),
+    applyPlanProposalCommit(repo.dir, "chore(plan): test", (step, extra) => logs.push({ step, extra }), hookRunningPlanGit),
   );
 
   // (1) No plan path remains staged, and the index is EXACTLY what it held on entry: only the
@@ -190,7 +195,7 @@ test("W1-T3243: applyPlanProposalCommit — the commit's own refusal reaches the
 
   let thrown: unknown;
   try {
-    applyPlanProposalCommit(repo.dir, "chore(plan): test");
+    applyPlanProposalCommit(repo.dir, "chore(plan): test", undefined, hookRunningPlanGit);
   } catch (e) {
     thrown = e;
   }
@@ -256,7 +261,7 @@ test("W1-T3243: applyPlanProposalCommit — a rollback that itself fails is reco
   let thrown: unknown;
   try {
     try {
-      applyPlanProposalCommit(repo.dir, "chore(plan): test", (step, extra) => logs.push({ step, extra }));
+      applyPlanProposalCommit(repo.dir, "chore(plan): test", (step, extra) => logs.push({ step, extra }), hookRunningPlanGit);
     } catch (e) {
       thrown = e;
     }

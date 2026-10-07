@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { readDiskFreeBytes } from "./daemon-health.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /** The only names this sweep will ever consider. Both regenerate from a committed manifest —
  *  `coverage/` from a test run, `node_modules/` from `npm ci` — so removing either costs time and
@@ -222,13 +223,12 @@ function defaultModifiedAtMs(path: string): number | undefined {
 }
 
 /** `git status --porcelain` line count. Any failure is `undefined` — an unreadable tree is never
- *  reported as clean, because "clean" is what authorises deletion. */
+ *  reported as clean, because "clean" is what authorises deletion. W1-T6136: the candidates are any
+ *  `.git`-holding directory beside the managed root, worktrees included, so the read goes through the
+ *  leaf; a refused pointer is one more unreadable tree, and kept. */
 function defaultCountDirtyFiles(checkoutPath: string): number | undefined {
   try {
-    const out = execFileSync("git", ["-C", checkoutPath, "status", "--porcelain"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const out = hostWorktreeGit(checkoutPath, ["status", "--porcelain"]);
     return out.split("\n").filter((l) => l.trim() !== "").length;
   } catch (e) {
     console.error(
