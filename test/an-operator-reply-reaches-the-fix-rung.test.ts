@@ -91,14 +91,14 @@ function fakeGateway(issue: OpenIssue, comments: EscalationIssueComment[]): Esca
 
 // ── 1: the repository owner's reply on an escalation lands in the question store ─────────────
 
-test("W1-T4471: the repository owner's reply on an escalation lands in the question store", () => {
+test("W1-T4471: the repository owner's reply on an escalation lands in the question store", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
   const issue: OpenIssue = { number: 501, url: "https://github.com/craigoley/remudero/issues/501", body: renderIssueBody(e) };
   const gateway = fakeGateway(issue, [ownerComment(9001, "retry")]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 0 });
 
   const stored = readQuestionsStore(root);
@@ -117,14 +117,14 @@ test("W1-T4471: the repository owner's reply on an escalation lands in the quest
   assert.equal(evidence!.constraint, "retry");
 
   // Idempotent per comment id — a re-poll of the same comment creates nothing new.
-  const second = readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
+  const second = await readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
   assert.equal(second.accepted, 0);
   assert.equal(readQuestionsStore(root).length, 1);
 });
 
 // ── 2: a reply from anyone but the repository owner is ignored ───────────────────────────────
 
-test("W1-T4471: a reply from anyone but the repository owner is ignored", () => {
+test("W1-T4471: a reply from anyone but the repository owner is ignored", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
@@ -139,7 +139,7 @@ test("W1-T4471: a reply from anyone but the repository owner is ignored", () => 
   };
   const gateway = fakeGateway(issue, [nonOwner]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.equal(result.accepted, 0);
   assert.equal(result.ignored, 1);
 
@@ -168,7 +168,7 @@ test("W1-T4471: a reply from anyone but the repository owner is ignored", () => 
     authorType: "Bot",
   };
   const botGateway = fakeGateway(issue, [bot]);
-  const botResult = readEscalationAnswers(root, "RUN-2", botGateway, { ledgerPath });
+  const botResult = await readEscalationAnswers(root, "RUN-2", botGateway, { ledgerPath });
   assert.equal(botResult.accepted, 0);
   assert.equal(botResult.ignored, 1);
   assert.deepEqual(readQuestionsStore(root), []);
@@ -247,7 +247,7 @@ test("W1-T4471: a console escalation reply steers the fix rung", async () => {
 
 // ── the reader's degraded arms ─────────────────────────────────────────────────────────────────
 
-test("W1-T4471: an unreadable issue list is counted as unreadable, never as nothing new", () => {
+test("W1-T4471: an unreadable issue list is counted as unreadable, never as nothing new", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const gateway: EscalationAnswerGateway = {
@@ -257,11 +257,11 @@ test("W1-T4471: an unreadable issue list is counted as unreadable, never as noth
     listComments: () => assert.fail("no comments are read when the list itself failed"),
     reactPlusOne: () => assert.fail("nothing is acknowledged when the list itself failed"),
   };
-  assert.deepEqual(readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }), { accepted: 0, ignored: 0, unreadable: 1 });
+  assert.deepEqual(await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }), { accepted: 0, ignored: 0, unreadable: 1 });
   assert.deepEqual(readQuestionsStore(root), []);
 });
 
-test("W1-T4471: one unreadable issue is counted and skipped while the next issue's reply still lands", () => {
+test("W1-T4471: one unreadable issue is counted and skipped while the next issue's reply still lands", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const broken: OpenIssue = { number: 601, url: "u601", body: renderIssueBody(escalation({ taskId: "W1-T9601" })) };
@@ -274,12 +274,12 @@ test("W1-T4471: one unreadable issue is counted and skipped while the next issue
     },
     reactPlusOne: () => {},
   };
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 1 });
   assert.deepEqual(readQuestionsStore(root).map((r) => [r.task, r.answer]), [["W1-T9602", "abandon"]]);
 });
 
-test("W1-T4471: a failed acknowledgement reaction never un-lands the answer", () => {
+test("W1-T4471: a failed acknowledgement reaction never un-lands the answer", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const issue: OpenIssue = { number: 701, url: "u701", body: renderIssueBody(escalation()) };
@@ -290,12 +290,12 @@ test("W1-T4471: a failed acknowledgement reaction never un-lands the answer", ()
       throw new Error("gh api: HTTP 403");
     },
   };
-  assert.deepEqual(readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }), { accepted: 1, ignored: 0, unreadable: 0 });
+  assert.deepEqual(await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }), { accepted: 1, ignored: 0, unreadable: 0 });
   assert.equal(readQuestionsStore(root).length, 1);
   assert.ok(readLedgerLines(ledgerPath).some((l) => l.step === "panel.question_answered" && l.origin === "issue#701:comment:9701"));
 });
 
-test("W1-T4471: a reply naming no option is recorded verbatim, a blank reply and a task-less issue record nothing", () => {
+test("W1-T4471: a reply naming no option is recorded verbatim, a blank reply and a task-less issue record nothing", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const writes: Array<Record<string, unknown>> = [];
@@ -310,7 +310,7 @@ test("W1-T4471: a reply naming no option is recorded verbatim, a blank reply and
     },
     reactPlusOne: () => {},
   };
-  const result = readEscalationAnswers(root, "RUN-1", gateway, {
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, {
     ledgerPath,
     writeLedger: (_path, line) => {
       writes.push(line as Record<string, unknown>);
@@ -323,7 +323,7 @@ test("W1-T4471: a reply naming no option is recorded verbatim, a blank reply and
   assert.equal(existsSync(ledgerPath), false, "an injected writer replaces the default append");
 });
 
-test("W1-T4471: a torn line in the question store is skipped and its good origins still dedupe", () => {
+test("W1-T4471: a torn line in the question store is skipped and its good origins still dedupe", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   mkdirSync(join(root, "plan"), { recursive: true });
@@ -332,7 +332,7 @@ test("W1-T4471: a torn line in the question store is skipped and its good origin
     '{"ts":"t","task":"W1-T9401","answer":"retry","origin":"issue#901:comment:9901"}\n{"torn\n',
   );
   const issue: OpenIssue = { number: 901, url: "u901", body: renderIssueBody(escalation()) };
-  const result = readEscalationAnswers(root, "RUN-1", fakeGateway(issue, [ownerComment(9901, "retry")]), { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", fakeGateway(issue, [ownerComment(9901, "retry")]), { ledgerPath });
   assert.deepEqual(result, { accepted: 0, ignored: 0, unreadable: 0 });
 });
 
@@ -362,13 +362,13 @@ test("W1-T4471: ghEscalationAnswerGateway reads issues and comments over REST an
       { when: "issues/11/comments", stdout: comments },
       { when: "issues?labels=needs-question", stdout: issues },
     ],
-    (calls) => {
+    async (calls) => {
       const gateway = ghEscalationAnswerGateway("o", "r");
       assert.deepEqual(
-        gateway.listOpen("needs-question").map((i) => [i.number, i.body]),
+        (await gateway.listOpen("needs-question")).map((i) => [i.number, i.body]),
         [[11, "**Task:** W1-T9011"]],
       );
-      assert.deepEqual(gateway.listComments(11), [
+      assert.deepEqual(await gateway.listComments(11), [
         { id: 5, body: "retry", authorLogin: "craigoley", authorAssociation: "OWNER", authorType: "User" },
         { id: 6, body: "", authorLogin: "", authorAssociation: "NONE", authorType: "User" },
       ]);
@@ -380,8 +380,8 @@ test("W1-T4471: ghEscalationAnswerGateway reads issues and comments over REST an
 });
 
 test("W1-T4471: ghEscalationAnswerGateway refuses a comments page that is not a JSON array", async () => {
-  await withShim([{ when: "issues/12/comments", stdout: JSON.stringify({ message: "Not Found" }) }], () => {
-    assert.throws(() => ghEscalationAnswerGateway("o", "r").listComments(12), /expected a JSON array page/);
+  await withShim([{ when: "issues/12/comments", stdout: JSON.stringify({ message: "Not Found" }) }], async () => {
+    await assert.rejects(async () => ghEscalationAnswerGateway("o", "r").listComments(12), /expected a JSON array page/);
   });
 });
 
