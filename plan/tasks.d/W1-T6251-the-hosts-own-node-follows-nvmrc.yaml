@@ -1,0 +1,58 @@
+- id: W1-T6251
+  title: "THE HOST'S OWN NODE FOLLOWS .nvmrc — the Azure host's /usr/bin/node (NodeSource apt package) ran 22.23.2 against a 24.21.0 pin until the operator switched the apt source and package by hand on 2026-10-07, so every watchdog tick printed `rmd: node 22.23.2 differs from the pinned 24.21.0`; with W1-T6064 now moving .nvmrc on each same-major Dependabot bump, the host drifts again on every patch release unless convergence installs the pinned package"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-07: Node 24 rollout (host node switched by hand)"
+  plan_refs: [W1-T5883, W1-T6064, W1-T2770, W1-T3583]
+  files: [deploy/install-host-units.sh, test/the-hosts-own-node-follows-nvmrc.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main d7f1f6d5 and on the host (read-only):
+    - The host runs repo Node: each watchdog tick calls "$STATE_DIR/remudero/bin/rmd" (progress-watchdog and
+      deploy-run, deploy/install-host-units.sh:466-470 and :894), and bin/rmd:27-35 warns (never refuses, per
+      R-49) when `node --version` differs from .nvmrc. That warning is the only signal; nothing acts on it.
+    - Nothing in the repo provisions the host's Node. W1-T5883's note lists "the Azure host's nodesource node_22.x
+      apt source" as an operator follow-up outside the diff (plan/tasks.d/W1-T5883-the-fleet-runs-node-24.yaml).
+      deploy/host-update.sh is deliberately sudo-free and node-free (its header, :43-48), so it is the wrong home.
+    - The one root-capable path that already runs on a cadence is host-unit convergence: the watchdog (as the
+      service user) runs install-host-units.sh in check mode and, on MISSING/DRIFTED, re-runs it with
+      `sudo -n ... --install` (:813-824). The service user has NOPASSWD sudo on the host.
+    - Host state now: nodejs 24.21.0-1nodesource1 installed from https://deb.nodesource.com/node_24.x
+      (/etc/apt/sources.list.d/nodesource.sources) with an apt pin preferring origin deb.nodesource.com
+      (/etc/apt/preferences.d/nodejs, priority 600). W1-T6064 (#9873, merged) moves .nvmrc within a major on
+      each Dependabot image bump, so the next patch release reopens the gap.
+  design: |
+    install-host-units.sh gains a host-node rung read from the checkout's .nvmrc. Check mode compares
+    `node --version` with the pin and prints one line: in step, or `install-host-units: DRIFTED host-node
+    <actual> != <pin>` (so the existing watchdog converge picks it up with no new trigger). --install, when the
+    host's Node comes from NodeSource apt (nodesource.sources present), converges in tiers and REPORTS rather
+    than refuses at every tier:
+      1. the source's `node_<major>.x` URI matches the pin's major, else it is rewritten to the pin's major;
+      2. `apt-get install -y nodejs=<pin>-1nodesource1` when apt-cache lists that exact version;
+      3. the exact version not yet published by NodeSource (they lag upstream): leave the installed Node, print
+         `host-node: <pin> not yet in node_<major>.x; staying on <actual>, retried next converge`;
+      4. a host whose Node is not from NodeSource (no source file, or a different `command -v node`): print what
+         was found and change nothing.
+    Unit and host-node convergence are independent: a host-node failure never blocks a unit install, and is
+    named in the converge output. The apt calls go through an injectable command seam so the test drives every
+    tier with a fake apt.
+  acceptance:
+    - claim: "a pinned version the host lacks is installed from the matching NodeSource major"
+      proof: 'grep: test("W1-T6251: install converges the host node to the pinned NodeSource package" in test/the-hosts-own-node-follows-nvmrc.test.ts'
+    - claim: "check mode reports host-node drift so the watchdog converge fires"
+      proof: 'grep: test("W1-T6251: check mode names host-node drift as DRIFTED" in test/the-hosts-own-node-follows-nvmrc.test.ts'
+    - claim: "a pin NodeSource has not published yet is reported and the unit install still succeeds"
+      proof: 'grep: test("W1-T6251: an unpublished pin is reported, never refused" in test/the-hosts-own-node-follows-nvmrc.test.ts'
+  falsifier: |
+    Omit the rung: a fixture host on 22.23.2 with .nvmrc 24.21.0 reads in-step in check mode and --install
+    never calls apt, so the first two tests fail.
+  note: |
+    Host-side: the first converge after merge runs apt as root on the Azure host. Verify with `node --version`
+    and `apt-cache policy nodejs` after the next .nvmrc bump lands. The Mac's Homebrew node is out of scope.

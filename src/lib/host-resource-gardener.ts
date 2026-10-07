@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { promisify } from "node:util";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
@@ -420,7 +421,7 @@ export interface HostResourcePorts {
   clock?: Clock;
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** The latest payload of every `heartbeat-*` branch. */
-  readHeartbeats: () => HeartbeatRead[];
+  readHeartbeats: () => HeartbeatRead[] | Promise<HeartbeatRead[]>;
   /** Hand an incident to the SRE lane's existing feedback path; absent, the tier only records. */
   handoff?: (h: IncidentHandoff) => void;
   /** The `incident#…` origins with open feedback, so an incident is never handed over twice. */
@@ -581,7 +582,7 @@ export function runHostResourcePass(ports: HostResourcePorts): PassResult {
   return runStepsSyncOnly(hostResourcePassSteps(ports));
 }
 
-/** {@link runHostResourcePass} with its filing awaited, for the daemon's async workspace port (W1-T5740). */
+/** {@link runHostResourcePass} with heartbeat reads and filing awaited, for the daemon's async ports. */
 export function runHostResourcePassAsync(ports: HostResourcePorts): Promise<PassResult> {
   return runStepsAsync(hostResourcePassSteps(ports));
 }
@@ -592,7 +593,8 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
   const nowMs = clock.now();
   const incoming: HostSample[] = [];
   const state = readState(ports.stateDir);
-  for (const beat of ports.readHeartbeats()) {
+  const beats = yield* step(() => ports.readHeartbeats());
+  for (const beat of beats) {
     const payload = parseHeartbeatPayload(beat.payload);
     const result = payload["acr_login_result"];
     const ts = payload["acr_login_ts"];
@@ -744,17 +746,21 @@ export function startHostResourceGardener(ports: HostResourcePorts, intervalMs: 
   const clock = ports.clock ?? systemClock;
   let running = false;
   let lastRunMs = -Infinity;
-  const tick = (): void => {
-    if (running || clock.now() - lastRunMs < HOST_RESOURCE_MIN_INTERVAL_MS) return;
-    running = true;
-    lastRunMs = clock.now();
+  function* guardedPass(): Steps<void> {
     try {
-      runHostResourcePass(ports);
+      yield* hostResourcePassSteps(ports);
     } catch (error) {
       ports.log(`${HOST_RESOURCE}.failed`, { error: String((error as Error)?.message ?? error), reason: "a pass that throws is logged and the next tick tries again" });
     } finally {
       running = false;
     }
+  }
+  const tick = (): void => {
+    if (running || clock.now() - lastRunMs < HOST_RESOURCE_MIN_INTERVAL_MS) return;
+    running = true;
+    lastRunMs = clock.now();
+    // Sync fixture ports still finish eagerly; async reads/filings hold the same guard to closure.
+    void runStepsEager(guardedPass());
   };
   tick();
   const timer = setInterval(tick, Math.max(1_000, Math.min(intervalMs, HOST_RESOURCE_MIN_INTERVAL_MS)));
@@ -763,16 +769,34 @@ export function startHostResourceGardener(ports: HostResourcePorts, intervalMs: 
 }
 
 /** Production heartbeat source: one `git fetch` of every `heartbeat-*` head, then each payload off its ref. */
-export function gitHeartbeatSource(repoRoot: string): () => HeartbeatRead[] {
-  const git = (args: string[]) => spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
-  return () => {
-    const fetched = git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
-    if (fetched.status !== 0) throw new Error(`fetching heartbeat branches failed: ${(fetched.stderr || String(fetched.error ?? "no output")).trim().slice(0, 200)}`);
-    const refs = git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/heartbeat-*"]).stdout.split("\n").filter(Boolean);
+export function gitHeartbeatSource(repoRoot: string): () => Promise<HeartbeatRead[]> {
+  const execute = promisify(execFile);
+  const git = (args: string[]) => execute("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
+  return async () => {
+    try {
+      await git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
+    } catch (error) {
+      const stderr = (error as { stderr?: string }).stderr;
+      throw new Error(`fetching heartbeat branches failed: ${(stderr || String(error)).trim().slice(0, 200)}`, { cause: error });
+    }
+    const refs = (await git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/heartbeat-*"])).stdout.split("\n").filter(Boolean);
     const out: HeartbeatRead[] = [];
     for (const ref of refs) {
-      const shown = git(["show", `${ref}:heartbeat.txt`]);
-      if (shown.status === 0) out.push({ host: ref.slice("refs/remotes/origin/heartbeat-".length), payload: shown.stdout });
+      try {
+        const shown = await git(["show", `${ref}:heartbeat.txt`]);
+        out.push({ host: ref.slice("refs/remotes/origin/heartbeat-".length), payload: shown.stdout });
+      } catch (error) {
+        const native = error as { code?: number | string; stderr?: string };
+        // A branch without a published payload is absent. Corrupt refs, transport/spawn failures
+        // and unreadable objects are NOT an empty heartbeat population: retain their native error.
+        if (native.code === 128 && /^fatal: path 'heartbeat\.txt' does not exist in '/m.test(native.stderr ?? "")) {
+          // Git can emit the SAME missing-path text for a dangling ref. Prove its tree is valid
+          // before accepting an absent payload; cat-file's native refusal reaches the caller.
+          await git(["cat-file", "-e", `${ref}^{tree}`]);
+          continue;
+        }
+        throw error;
+      }
     }
     return out;
   };

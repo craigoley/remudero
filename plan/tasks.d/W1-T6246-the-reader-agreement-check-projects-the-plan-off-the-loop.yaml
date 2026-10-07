@@ -1,0 +1,39 @@
+- id: W1-T6246
+  title: "THE READER-AGREEMENT CHECK PROJECTS THE PLAN OFF THE DAEMON LOOP — independentFigures is async but runs buildBatchedGithub + projectPlan synchronously, which reaches listMergedHeadBranches → fetchBoardPrsRest → paced synchronous gh; a live CPU profile of remudero-daemon (2026-10-07 16:26Z, 360 s) caught it holding the loop for one unbroken 89.6 s run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the sweep's independent queue figure never blocks the daemon loop
+  band_meaning: span
+  origin: "operator session 2026-10-07: daemon.loop_lag 863 s in ~40 min; live CPU profile (lanes/claude/daemon-cpu.cpuprofile)"
+  plan_refs: [W1-T5689, W1-T4970, W1-T4773, W1-T4075]
+  files: [src/lib/reader-agreement.ts, test/the-reader-agreement-check-projects-the-plan-off-the-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 16:26–16:32Z with a Profiler sampling session on the live daemon (pid 110,
+    Node 24.21.0): the main thread was busy 335.6 s of 363 s; self time 172 s in synchronous spawn,
+    55 s in github-transport's defaultBlockingSleepSync, 52 s in readFileUtf8. The longest unbroken
+    busy run (89.6 s) was status.projectPlan ← reader-agreement.independentFigures, with 87 s under
+    ghExecFile, 62.9 s in paceGhEntry and 61.8 s in open-prs-rest.fetchBoardPrsRest via
+    status.listMergedHeadBranches. READ on origin/main: `independentFigures` in
+    src/lib/reader-agreement.ts awaits only `options.readJson`; the queue figure calls
+    `buildBatchedGithub(owner, repo)` and `projectPlan(...)` synchronously.
+  design: |
+    The independent queue figure is a CROSS-CHECK, not a dispatch input: compute it from data read
+    off the loop. Either run the projection in the existing generation-bound read worker (W1-T4075's
+    pattern) or feed projectPlan an async-prefetched GitHub snapshot so no synchronous gh call or
+    blocking cadence wait runs on the daemon thread. A figure that cannot be computed in time is
+    `undefined` (the check already treats an absent figure as "not compared"), never a stale number.
+  acceptance:
+    - claim: "the reader-agreement check computes its queue figure without a synchronous gh call on the calling thread"
+      proof: 'grep: test("W1-T6246: the independent queue figure reaches no synchronous gh call on the loop" in test/the-reader-agreement-check-projects-the-plan-off-the-loop.test.ts'
+    - claim: "a queue figure that is not ready is reported absent, not stale"
+      proof: 'grep: test("W1-T6246: an unready independent queue figure is absent, never stale" in test/the-reader-agreement-check-projects-the-plan-off-the-loop.test.ts'
+  falsifier: |
+    Keep the synchronous buildBatchedGithub/projectPlan call: a test that injects a gh seam which
+    throws when called synchronously from the checking thread fails the first test.

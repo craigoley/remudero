@@ -1,0 +1,66 @@
+- id: W1-T6249
+  title: "A BUSY PRIMARY HANDS ITS IMAGE RECYCLE TO THE RECYCLER'S OWN DRAIN — on 2026-10-07 core stayed on the old image for hours after the Node 24 image published, because the watchdog's deploy-code refresh ends every tick with a worker in flight before deploy-run is asked, and deploy-run's 30-minute ceiling clock is cleared on every skip; a hand recycle-container.sh run paused, drained in 100 s and swapped in ~3 min"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-07: Node 24 image rollout (core recycle starved while busy)"
+  plan_refs: [W1-T3245, W1-T341, W1-T4917, W1-T4844, W1-T5688, W1-T5140]
+  files: [deploy/install-host-units.sh, src/lib/deployer.ts, test/a-busy-primary-hands-its-image-recycle-to-the-drain.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main d7f1f6d5, against core's watchdog journal (rmd-fleet-watchdog.service, read-only):
+    - deploy/install-host-units.sh:887 `refresh_deploy_code '${CONTAINER_NAME}' || exit 0` runs before the
+      deploy-run line (:894). refresh_deploy_code calls deploy_code_idle (:357-385), which returns 1 with
+      "deploy code -- active workers; deferring." (:364) or "active locks at $dir; deferring." (:381) whenever a
+      claude/codex worker or a state/inflight lock exists. On core that ended 32 of the 40 ticks from 12:33Z to
+      15:49Z before deploy-run was asked at all.
+    - src/lib/deployer.ts: the ceiling (DEPLOY_IDLE_DEFER_CEILING_MS = 30 min, :962) is a clock persisted only when
+      deploy-run is reached on a busy probe (:1762, :1794), and ANY skip decision clears it (:1700
+      `deps.clearDeferredSince?.()`). On core the few ticks that reached deploy-run were skips ("not published yet",
+      13:28Z; "a deploy failed under an hour ago — the automatic image recycle backs off", 14:49Z, 14:58Z), so the
+      next busy probe started again at waited_ms 0 (15:13:58Z `deploy.not_idle ... "waited_ms":0,"workers":2`).
+      The ceiling never got 30 minutes of consecutive reached ticks.
+    - deploy/recycle-container.sh already pauses dispatch BEFORE a bounded wait for in-flight workers (section 5,
+      :1097; WAIT_SECONDS default 3000 s, :372) and removes only its own PAUSE on refusal. At 15:38Z a hand
+      `deploy/recycle-container.sh --instance core` waited 100 s and swapped. The deployer's idle gate duplicates
+      a drain the backend performs itself, more safely (it stops admission; the gate only hopes for a gap).
+    - Console reached deploy-run on busy ticks (its watchdog logged not_idle with workers 2-4 and waited_ms
+      climbing 0 -> 921815 from 12:58Z to 13:14Z), so its ceiling did run. Why console's deploy_code_idle passes
+      while its deploy-run probe counts workers was not determined.
+    NOT THIS TASK: the 13:59Z core refusal was a separate defect (recycle-container refused the undeclared
+    runtime variable NODE_VERSION) and the build was not yet published at 13:28Z; those account for part of the
+    delay. The starvation is the time after the image was publishable and recycle-container would have accepted.
+  design: |
+    Two tiers; neither adds a threshold.
+    (1) deployer.ts: when the decision is an automatic IMAGE recycle or a create-drift recycle (the tick's
+    `imageDriftOnly` reading) and the selected restart backend drains itself (recycle-container: it pauses
+    dispatch and waits for in-flight work), a busy idle probe hands off instead of deferring: log
+    `deploy.drain_handoff` with the blockers and call the backend, whose own pause, bounded wait and refusal
+    stay authoritative. Mount-side restarts and the launchd kickstart backend keep today's idle gate and ceiling.
+    A RestartBackend declares `drainsItself: true`; nothing reads a platform string.
+    (2) install-host-units.sh: a tick whose refresh_deploy_code deferred ONLY on deploy_code_idle (workers or
+    locks), not on a dirty, diverged or unreadable checkout, still asks deploy-run --image-drift-only when the
+    daemon tree's HEAD already contains the install checkout's HEAD (W1-T4844's invariant: deploy logic never
+    older than what it deploys). When the daemon tree is behind, the tick defers as today and says so in one
+    line naming both shas; the daemon's own freshness restart moves that tree within the hour.
+  acceptance:
+    - claim: "an automatic image recycle over a busy probe hands off to a self-draining backend instead of deferring"
+      proof: 'grep: test("W1-T6249: a busy image recycle is handed to the self-draining backend" in test/a-busy-primary-hands-its-image-recycle-to-the-drain.test.ts'
+    - claim: "a mount-side restart over a busy probe still defers on the idle gate"
+      proof: 'grep: test("W1-T6249: a busy mount-side restart still waits on the idle gate" in test/a-busy-primary-hands-its-image-recycle-to-the-drain.test.ts'
+    - claim: "the rendered launcher asks deploy-run when only active work deferred the code refresh and the daemon tree contains the install head"
+      proof: 'grep: test("W1-T6249: a tick deferred only on active work still asks deploy-run" in test/a-busy-primary-hands-its-image-recycle-to-the-drain.test.ts'
+  falsifier: |
+    Keep `refresh_deploy_code || exit 0` and the idle gate for image recycles: the fixture tick with one active
+    worker ends before deploy-run and the busy image-recycle cycle returns not-idle, so the first and third tests fail.
+  note: |
+    Host-side behaviour: after merge the launcher re-renders through host-unit convergence on each instance.
+    Verify on the next image publish that core's journal shows deploy.drain_handoff followed by a recycle
+    within one drain, not a run of "active workers; deferring." lines.

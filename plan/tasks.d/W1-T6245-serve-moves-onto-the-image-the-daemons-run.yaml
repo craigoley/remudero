@@ -1,0 +1,39 @@
+- id: W1-T6245
+  title: "SERVE MOVES ONTO THE IMAGE THE DAEMONS RUN — runServePolicyCycle replaces remudero-serve only on resource-policy or mount-plan drift, never on image drift, so after the Node 24 rollout (#9852) all three daemons ran image eeb7864f… on Node 24.21.0 while remudero-serve stayed on b37d2a59… (started 05:07Z) on Node 22.22.3, against an .nvmrc that pins 24.21.0, and the deploy supervisor reported 'up-to-date'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the serve convergence pass treats a stale running image as drift
+  band_meaning: span
+  origin: "operator session 2026-10-07 16:27Z: docker inspect after the Node 24 rollout"
+  plan_refs: [W1-T4809, W1-T3245, W1-T6061]
+  files: [src/lib/serve-policy-convergence.ts, test/serve-moves-onto-the-image-the-daemons-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: `runServePolicyCycle` (src/lib/serve-policy-convergence.ts)
+    computes `drift = deps.servePolicyDrift()` and `mountDrift = deps.serveMountPlanDrift?.()` and
+    returns without replacing when both are empty; nothing compares remudero-serve's running image
+    with the published one. The daemons converge through the deployer's own image-drift path
+    (W1-T4809 / W1-T3245). Measured 16:27Z: remudero-daemon, -console-daemon and -site-daemon on
+    image sha256:eeb7864f… (node v24.21.0); remudero-serve on sha256:b37d2a59… (node v22.22.3,
+    started 05:07Z); the latest deploy row was deploy.skip "up-to-date".
+  design: |
+    Add image drift as a third serve drift kind beside policy and mount-plan drift: the running
+    container's image id against the image the deployer last recycled the primary daemon onto (or
+    the published :latest digest, whichever the deployer already reads), read through an injected
+    seam. It goes through the SAME decideServePolicyConvergence gates (stop/pause marker, handoff in
+    progress, health, failure backoff) and logs under the same rows with `imageDrift` beside
+    `drift`/`mountDrift`; an unreadable image id is unknown, never drift, and never a replace.
+  acceptance:
+    - claim: "a serve container running an older image than the daemons is replaced by the convergence pass"
+      proof: 'grep: test("W1-T6245: serve on an older image than the daemons is replaced" in test/serve-moves-onto-the-image-the-daemons-run.test.ts'
+    - claim: "an unreadable serve image id is unknown and replaces nothing"
+      proof: 'grep: test("W1-T6245: an unreadable serve image id replaces nothing" in test/serve-moves-onto-the-image-the-daemons-run.test.ts'
+  falsifier: |
+    Keep the policy/mount-only comparison: a fake whose policy and mounts match but whose serve
+    image id differs from the daemon's returns replaced:false, and the first test fails.
