@@ -18,6 +18,9 @@
  * stage per step, so a cold plan parse or a projection holds the shared views thread for that stage only:
  * 2026-10-06 builds took 2.5 to 33 s in one go while the `host` view went 3 min without its 60 s re-probe.
  * Each stage's ms rides the worker's `read_model.slow_view` row.
+ *
+ * The projection stage re-derives only the tasks whose inputs moved ({@link createWorkstreamsProjectionReuse}): a ring
+ * insert alone re-derived all ~3,400 tasks, ~85% of a warm rebuild. `workstreams.built` counts what it reused.
  * Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
  */
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
@@ -29,11 +32,12 @@ import { gitPlanBehind, nowPlanPath, planSource, planStamp, snapshotGeneration, 
 import { buildOperatorActivityProjection, OPERATOR_ACTIVITY_CONTRACT_VERSION, operatorActivityCandidates, type OperatorActivityEnvelope } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
-import { projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerFsDeps, type LedgerLines, type StatusProjection } from "./status.js";
+import { defaultCreditOverridePath, defaultCreditStorePath, projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerFsDeps, type LedgerLines, type StatusProjection } from "./status.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { judgeSource } from "./view-freshness.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
+import { createWorkstreamsProjectionReuse, WORKSTREAMS_REUSE_AUDIT_MS } from "./workstreams-projection-reuse.js";
 
 export const WORKSTREAMS_VIEW_NAME = "workstreams";
 export const WORKSTREAMS_VIEW_VERSION = 1;
@@ -159,6 +163,9 @@ interface Pending {
   slot: number;
   stage: number;
   work: Work;
+  /** Plan tasks the projection stages reused and re-derived, summed over instances. */
+  reused: number;
+  derived: number;
 }
 
 /** Whether the store holds the ring this view reads: a version-1 ring, with no `seq`, is one the projector has not rebuilt yet. */
@@ -240,6 +247,9 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   /** Keyed by the very `data` object a body published, as now-view's `shown`. */
   const shown = new WeakMap<WorkstreamsData, { builtMs: number; entries: Map<string, Built> }>();
   const legacyMemos = new Map<string, LedgerRotationMemo>();
+  const projectionReuse = createWorkstreamsProjectionReuse();
+  /** When each instance's reuse was last audited (or first held), on the build clock. */
+  const reuseAuditedAt = new Map<string, number>();
   let body: WorkstreamsData | undefined;
   let builtFingerprint: string | undefined;
   let dirtySince: number | undefined;
@@ -270,13 +280,25 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     }],
     // ledger-read-intent: live — the frontier and projection read what /v1/plan/view and the route read.
     ["ledger", (instance, w) => void (w.live = readLedgerLines(join(instance.ledgerDir, LEDGER_FILENAME)))],
-    ["projection", (instance, w) => {
+    ["projection", (instance, w, b) => {
       const github = w.gateway!.github;
+      const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
+      const auditedAt = reuseAuditedAt.get(instance.name);
+      const reuse = projectionReuse.pass(instance.name, {
+        plan: w.plan!, github, live: w.live!,
+        creditStorePath: defaultCreditStorePath(ledgerPath), creditOverridePath: defaultCreditOverridePath(ledgerPath),
+      }, { audit: auditedAt !== undefined && b.now - auditedAt >= WORKSTREAMS_REUSE_AUDIT_MS });
       // No reader of this body reads `uncreditedBuild`, so the pass skips the warning and its walk of every merged PR.
       w.projection = projectPlan(w.plan!, {
-        ledgerPath: join(instance.ledgerDir, LEDGER_FILENAME), github, readLedger: () => w.live!,
+        ledgerPath, github, readLedger: () => w.live!,
         writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, skipUncreditedBuildWarning: true,
+        reuseProjection: reuse.reuseProjection,
       });
+      const held = reuse.capture(w.projection);
+      b.reused += held.reused;
+      b.derived += held.derived;
+      if (auditedAt === undefined || held.audit) reuseAuditedAt.set(instance.name, b.now);
+      if (held.audit) log("workstreams.reuse_audit", { instance: instance.name, ...held.audit });
       w.githubReadFailed = github.readFailed?.() === true;
       w.githubFailureReason = github.readFailureReason?.();
     }],
@@ -329,7 +351,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       else dirtySince ??= now;
     }
     if (!pending && (body === undefined || (dirtySince !== undefined && now - dirtySince >= debounceMs))) {
-      pending = { fingerprint, now, instances: slots.map((s) => s.instance), entries: new Map(), activities: [], slot: 0, stage: 0, work: {} };
+      pending = { fingerprint, now, instances: slots.map((s) => s.instance), entries: new Map(), activities: [], slot: 0, stage: 0, work: {}, reused: 0, derived: 0 };
       dirtySince = undefined;
     }
     while (pending && pending.slot < pending.instances.length && more()) step(pending, slots);
@@ -358,7 +380,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         builtFingerprint = b.fingerprint;
         dirtySince = b.dirtySince;
         pending = undefined;
-        log("workstreams.built", { instances: b.instances.length });
+        log("workstreams.built", { instances: b.instances.length, reused: b.reused, derived: b.derived });
       }
       const sources = slots.flatMap(({ state, instance }) => {
         const gateway = gatewaySources.get(instance.name);
