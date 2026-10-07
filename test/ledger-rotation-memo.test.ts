@@ -35,6 +35,15 @@ test("streamed real rotation loads match buffered rows and torn evidence for gzi
     assert.equal(failed.retention().failedArchives, 1);
     const fallback = { rows: [{ recovered: true }], torn: 0, tornLines: [] };
     assert.deepEqual(failed.pass().rotationRecords({ path: missing, form: "gzip" }, () => fallback), fallback);
+    const corrupt = join(fx.dir, "corrupt.gz");
+    writeFileSync(corrupt, "not gzip");
+    const damaged = createLedgerRotationMemo(identity);
+    await damaged.load([{ path: corrupt, form: "gzip" }]);
+    assert.equal(damaged.retention().failedArchives, 1, "decompressor failure must not install a partial memo");
+    const rejected = createLedgerRotationMemo(identity, { yieldTurn: async () => { throw new Error("fixture yield failure"); } });
+    const plain = join(fx.dir, "ledger.2026-09-20T01-00-00-000Z.ndjson");
+    await rejected.load([{ path: plain, form: "plain" }]);
+    assert.equal(rejected.retention().failedArchives, 1, "consumer failure must not install a partial memo");
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
   }
