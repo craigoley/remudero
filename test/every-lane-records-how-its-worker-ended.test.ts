@@ -133,16 +133,30 @@ test("test/every-lane-records-how-its-worker-ended.test.ts", async (t) => {
           report, settingsFile: join(repo.dir, "settings.json"),
           config: { root: repo.dir, claudeBin: "/unused" } as Parameters<typeof runReview>[0]["config"],
           log: (step, fields = {}) => { rows.push({ step, fields }); }, say: (message) => { messages.push(message); }, account: (r) => r,
-          reviewerSpawnWorker: async () => { calls += 1; return result({ exit, subtype }); },
+          reviewerSpawnWorker: async () => {
+            calls += 1;
+            return result({ exit, subtype, sessionId: `worker-ended-${calls}` });
+          },
           reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
           headCheckoutDir: repo.dir, ledgerPath: join(repo.dir, "ledger.ndjson"), runId: `review-${outcome}`,
           readReviewReuseFacts: () => undefined, disarm: () => "not-armed", arm: () => "ledger-refused",
         });
-        assert.equal(calls, 1);
+        assert.equal(calls, exit.kind === "signal" ? 2 : 1);
         assert.equal(verdict.state, "success");
         assert.equal(verdict.reviewerOutcome, outcome);
+        const reruns = rows.filter((row) => row.step === "review.reviewer.rerun");
+        const twiceSignaled = rows.filter((row) => row.step === "review.reviewer.signal_ended_twice");
+        assert.equal(reruns.length, exit.kind === "signal" ? 1 : 0);
+        assert.equal(twiceSignaled.length, exit.kind === "signal" ? 1 : 0);
+        if (exit.kind === "signal") {
+          assert.equal(reruns[0]!.fields.first_signal, exit.signal);
+          assert.equal(reruns[0]!.fields.session_id, "worker-ended-1");
+          assert.equal(twiceSignaled[0]!.fields.first_signal, exit.signal);
+          assert.equal(twiceSignaled[0]!.fields.second_signal, exit.signal);
+        }
         const reviewerRow = rows.find((row) => row.step === "review.reviewer");
         assert.ok(reviewerRow);
+        assert.equal(reviewerRow.fields.session_id, `worker-ended-${calls}`);
         assert.deepEqual(exitFields(reviewerRow.fields), exit.kind === "signal"
           ? { worker_exit: "signal", worker_exit_signal: "SIGTERM" }
           : { worker_exit: "exit", worker_exit_code: 1 });

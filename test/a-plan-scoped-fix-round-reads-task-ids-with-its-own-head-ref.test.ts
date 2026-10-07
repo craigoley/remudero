@@ -93,7 +93,12 @@ test("W1-T5824: a plan-scoped fix round passes the PR's head ref to every prefli
 function headAddingAnId() {
   const origin = gitRepo({ bare: true, kind: "w1-t5824-origin" });
   const repo = gitRepo({ seedCommit: false, kind: "w1-t5824-repo" });
-  for (const rel of ["scripts/task-id-existence-check.mjs", "scripts/lib/git.mjs", "scripts/lib/argv.mjs"]) {
+  for (const rel of [
+    "scripts/task-id-existence-check.mjs",
+    "scripts/lib/git.mjs",
+    "scripts/lib/argv.mjs",
+    "src/lib/reservation-chain.mjs",
+  ]) {
     mkdirSync(dirname(join(repo.dir, rel)), { recursive: true });
     copyFileSync(join(REPO_ROOT, rel), join(repo.dir, rel));
   }
