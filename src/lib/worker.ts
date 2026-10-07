@@ -182,8 +182,10 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   GITDIR_RECORD_PREFIX,
   hostWorktreeGit,
+  originUrlAtCut,
   pinnedConfigValue,
   pinWorktreeGit,
+  REMOTE_RECORD_PREFIX,
   WorktreePointerRefusedError,
   worktreeRecordPath,
   type PinnedWorktreeGit,
@@ -5053,7 +5055,10 @@ export function worktreeBasePath(worktreePath: string): string {
 export function recordWorktreeBase(worktreePath: string, base: string, gitDir?: string): void {
   // W1-T6106: the gitdir this worktree was cut with rides on the same record, the anchor the host git leaf
   // pins every call to; the base sha stays the first line, which is all readWorktreeBase reads.
-  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}`);
+  // W1-T6148: so does its origin URL, which the leaf then requires the pinned config to still name.
+  const remote = gitDir === undefined ? undefined : originUrlAtCut(gitDir);
+  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}` +
+    `${remote === undefined ? "" : `${REMOTE_RECORD_PREFIX}${remote}\n`}`);
 }
 
 /** Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or unreadable, never a throw, so a

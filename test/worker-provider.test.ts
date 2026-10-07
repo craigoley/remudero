@@ -18,7 +18,6 @@ import {
   clearCodexCapacityCache,
   clearProviderWindowMeasurements,
   codexCapacityFromRateLimits,
-  codexGitWritableRoots,
   codexPreToolUseProfile,
   parseCodexJsonl,
   readCodexCapacity,
@@ -355,30 +354,6 @@ test("abandoning a window measurement removes it from future overlap accounting"
     }).percentConsumed,
     1,
   );
-});
-
-test("Codex write workers grant only an in-root linked worktree's Git administrative directories", () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-codex-git-roots-"));
-  const repo = join(root, "repos", "fixture");
-  const worktree = join(root, "worktrees", "run-fixture");
-  mkdirSync(repo, { recursive: true });
-  execFileSync("git", ["init", "-q"], { cwd: repo });
-  writeFileSync(join(repo, "seed"), "seed\n");
-  execFileSync("git", ["add", "seed"], { cwd: repo });
-  execFileSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "seed"], { cwd: repo });
-  mkdirSync(join(root, "worktrees"), { recursive: true });
-  execFileSync("git", ["worktree", "add", "-q", "--detach", worktree, "HEAD"], { cwd: repo });
-
-  const roots = codexGitWritableRoots(worktree, root);
-  assert.equal(roots.length, 2);
-  assert.ok(roots.every((candidate) => candidate.startsWith(realpathSync(root))));
-  assert.ok(roots.some((candidate) => candidate.endsWith(join(".git", "worktrees", "run-fixture"))));
-  assert.ok(roots.some((candidate) => candidate.endsWith(join("repos", "fixture", ".git"))));
-  assert.deepEqual(codexGitWritableRoots(worktree, join(root, "unrelated")), []);
-
-  const nonRepo = join(root, "not-a-repo");
-  mkdirSync(nonRepo);
-  assert.deepEqual(codexGitWritableRoots(nonRepo, root), []);
 });
 
 test("Claude usage maps every reported subscription window", () => {

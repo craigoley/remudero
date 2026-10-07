@@ -187,9 +187,9 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/test-impact-map.ts": { count: 2, reason: "CHECKOUT: impactDrift/readImpactArmInput read the repo root (cwd: root)" },
   "src/lib/wipe-test.ts": { count: 2, reason: "CHECKOUT: runWipeTestPair reads its own scratch checkout (-C repoDir)" },
   "src/lib/worker-provider.ts": {
-    count: 8,
+    count: 7,
     reason:
-      "WORKTREE (follow-up conversion, no owner yet): isGitWorktree and codexGitWritableRoots (cwd), " +
+      "WORKTREE (follow-up conversion, no owner yet): isGitWorktree (cwd), " +
       "selectOpenWeightUnitTestSuites's 5 run(\"git\", …) into the worker worktree; NOT GIT: codexExecArgs's -C " +
       "is codex's",
   },
