@@ -55,10 +55,12 @@ export function parseGardenerRuntime(raw: unknown): GardenerRuntimeSnapshot {
     throw new Error("gardener runtime identity or inventory is malformed");
   }
   const names = new Set<string>();
+  const gardens: GardenerRuntimeEntry[] = [];
   for (const entry of raw.gardens) {
     if (!object(entry) || typeof entry.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(entry.name) || names.has(entry.name) ||
         typeof entry.enabled !== "boolean" || !count(entry.cadenceMs) || entry.cadenceMs < 1 ||
-        !["repository", "host", "fleet"].includes(String(entry.scope)) || !phases.includes(entry.phase) || !time(entry.observedAt) ||
+        typeof entry.scope !== "string" || !["repository", "host", "fleet"].includes(entry.scope) ||
+        typeof entry.phase !== "string" || !phases.includes(entry.phase) || !time(entry.observedAt) ||
         !(entry.passId === null || (typeof entry.passId === "string" && entry.passId.length > 0 && entry.passId.length <= 128)) ||
         !(entry.nextDueAt === null || time(entry.nextDueAt)) || !duration(entry.queueMs) || !duration(entry.executionMs) ||
         !(entry.exit === null || (typeof entry.exit === "number" && Number.isInteger(entry.exit))) || !reasons.includes(entry.reason) ||
@@ -66,8 +68,16 @@ export function parseGardenerRuntime(raw: unknown): GardenerRuntimeSnapshot {
         entry.failures > entry.completions || [entry.lastCompletedAt, entry.lastSuccessAt, entry.lastFailureAt]
           .some((stamp) => stamp !== null && !time(stamp))) throw new Error("gardener runtime entry is malformed");
     names.add(entry.name);
+    // Validation does not authorize forwarding future or private producer fields.
+    const g = entry as unknown as GardenerRuntimeEntry;
+    gardens.push({ name: g.name, enabled: g.enabled, cadenceMs: g.cadenceMs, scope: g.scope,
+      phase: g.phase, observedAt: g.observedAt, passId: g.passId, nextDueAt: g.nextDueAt,
+      queueMs: g.queueMs, executionMs: g.executionMs, exit: g.exit, reason: g.reason,
+      attempts: g.attempts, completions: g.completions, failures: g.failures,
+      lastCompletedAt: g.lastCompletedAt, lastSuccessAt: g.lastSuccessAt, lastFailureAt: g.lastFailureAt });
   }
-  return raw as unknown as GardenerRuntimeSnapshot;
+  return { version: 1, repository: raw.repository, daemonRunId: raw.daemonRunId,
+    codeSha: raw.codeSha, configuredAt: raw.configuredAt, observedAt: raw.observedAt, gardens };
 }
 
 /** Read one descriptor, with a hard byte bound; no ledger, model call or GitHub read. */
@@ -98,12 +108,11 @@ export function createGardenerRuntimeWriter(input: {
 }) {
   const clock = input.clock ?? systemClock;
   const configuredAt = clock.iso();
-  const snapshot: GardenerRuntimeSnapshot = { version: 1, repository: input.repository, daemonRunId: input.daemonRunId,
+  const snapshot = parseGardenerRuntime({ version: 1, repository: input.repository, daemonRunId: input.daemonRunId,
     codeSha: input.codeSha ?? null, configuredAt, observedAt: configuredAt,
     gardens: input.gardens.map((entry) => ({ ...entry, phase: "scheduled", observedAt: configuredAt,
       passId: null, nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null,
-      attempts: 0, completions: 0, failures: 0, lastCompletedAt: null, lastSuccessAt: null, lastFailureAt: null })) };
-  parseGardenerRuntime(snapshot);
+      attempts: 0, completions: 0, failures: 0, lastCompletedAt: null, lastSuccessAt: null, lastFailureAt: null })) });
   let revision = 1, written = 0, running: Promise<void> | undefined;
   const write = input.write ?? writeAtomicAsync;
   const flush = (): Promise<void> => {
@@ -111,7 +120,7 @@ export function createGardenerRuntimeWriter(input: {
     running = (async () => {
       while (written < revision) {
         const target = revision;
-        await write(join(input.stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(snapshot) + "\n");
+        await write(join(input.stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(parseGardenerRuntime(snapshot)) + "\n");
         written = target;
       }
     })().finally(() => { running = undefined; });

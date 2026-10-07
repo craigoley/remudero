@@ -29,6 +29,61 @@ import { fakeGitHub } from "./helpers/fake-github.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function invokeGardenerRoute(route: import("../src/lib/service.js").Route) {
+  let status = 0, body = "";
+  const res = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } };
+  await route.handler({} as never, res as never, { params: {} });
+  return { status, body: JSON.parse(body) };
+}
+
+test("gardener runtime projects only known fields at persistence and the read boundary", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime, GARDENER_RUNTIME_FILE } =
+    await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-projection-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stamp = "2026-10-07T12:00:00.000Z", clock = clockFromMillisFn(() => Date.parse(stamp));
+  const inventory = [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" as const }];
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: inventory, log: () => {} });
+  await writer.flush();
+  const expected = await readGardenerRuntime(stateDir);
+  const raw = { ...expected, internalNotes: "private-root",
+    gardens: expected.gardens.map((garden) => ({ ...garden, internalNotes: "private-entry" })) };
+  assert.deepEqual(parseGardenerRuntime(raw), expected);
+  writeFileSync(join(stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(raw));
+  assert.deepEqual(await readGardenerRuntime(stateDir), expected);
+  // A port is not permission to forward its untrusted fields, either.
+  const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { ...expected, generatedAt: stamp, coverage: "registered-off-loop",
+    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
+  const extraInventory = inventory.map((garden) => ({ ...garden, internalNotes: "not-persisted" }));
+  const projectedWriter = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: extraInventory, log: () => {} });
+  await projectedWriter.flush();
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, GARDENER_RUNTIME_FILE), "utf8")), expected);
+});
+
+test("gardener runtime refuses array enum coercion at the parse and route boundaries", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-enum-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00.000Z"));
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  await writer.flush();
+  const expected = await readGardenerRuntime(stateDir);
+  for (const field of ["scope", "phase", "reason"] as const) {
+    const raw = structuredClone(expected);
+    Object.assign(raw.gardens[0]!, { [field]: [raw.gardens[0]![field]] });
+    assert.throws(() => parseGardenerRuntime(raw), /malformed/);
+    assert.deepEqual(await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw })),
+      { status: 503, body: { error: "gardeners_unavailable", reason: "unreadable" } });
+  }
+});
+
 test("gardener lifecycle measures admission separately from execution and preserves interruption", async (t) => {
   const start = Date.parse("2026-10-07T12:00:00Z");
   let now = start;

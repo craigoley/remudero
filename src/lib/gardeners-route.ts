@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from "./clock.js";
-import { readGardenerRuntime, type GardenerRuntimeSnapshot } from "./gardener-runtime.js";
+import { parseGardenerRuntime, readGardenerRuntime, type GardenerRuntimeSnapshot } from "./gardener-runtime.js";
 import { sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 
@@ -14,7 +14,7 @@ export function buildGardenersRoute(input: {
   const clock = input.clock ?? systemClock;
   return { method: "GET", path: "/v1/gardeners", scope: "read", handler: async (_req, res) => {
     let snapshot: GardenerRuntimeSnapshot;
-    try { snapshot = await (input.read ?? readGardenerRuntime)(input.stateDir); }
+    try { snapshot = parseGardenerRuntime(await (input.read ?? readGardenerRuntime)(input.stateDir)); }
     catch (error) {
       const reason = (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "not_collected" : "unreadable";
       sendJson(res, 503, { error: "gardeners_unavailable", reason });
