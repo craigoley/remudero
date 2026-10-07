@@ -13,6 +13,7 @@ import type { GitLogCommit, RunSummary } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
+import * as ownerRepo from "../src/lib/owner-repo.js";
 import * as retro from "../src/lib/retro.js";
 import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -222,5 +223,29 @@ test("the awaited and sync shipped-since gateways answer identically over a reco
   } finally {
     rmSync(syncGh.dir, { recursive: true, force: true });
     rmSync(awaitedGh.dir, { recursive: true, force: true });
+  }
+});
+
+test("the awaited owner/repo read answers as the sync one, its typed failures included", async () => {
+  const withOrigin = seededTrailers(true);
+  assert.deepEqual(await ownerRepo.resolveOwnerRepoAtAsync(withOrigin), ownerRepo.resolveOwnerRepoAt(withOrigin));
+  assert.deepEqual(await ownerRepo.resolveOwnerRepoAtAsync(withOrigin), OWNER_REPO);
+  const failures = [seededTrailers(false), mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}retro-shipped-nogit-`))];
+  const odd = gitRepo({ kind: "retro-shipped-odd" });
+  odd.addRemote("origin", "not-a-slug");
+  failures.push(odd.dir);
+  for (const root of failures) {
+    let syncError: unknown;
+    try {
+      ownerRepo.resolveOwnerRepoAt(root);
+    } catch (e) {
+      syncError = e;
+    }
+    assert.ok(syncError instanceof ownerRepo.OwnerRepoUnresolvableError, `the sync read fails at ${root}`);
+    await assert.rejects(ownerRepo.resolveOwnerRepoAtAsync(root), (e: unknown) => {
+      assert.ok(e instanceof ownerRepo.OwnerRepoUnresolvableError, String(e));
+      assert.equal((e as Error).message, (syncError as Error).message);
+      return true;
+    });
   }
 });
