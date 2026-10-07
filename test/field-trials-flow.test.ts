@@ -49,7 +49,7 @@ function flowReadOf(rows: Record<string, unknown>[]): FieldTrialsLedgerRead {
 }
 
 const CONTROL_FIELDS = ["harness", "prompt", "tool", "scorer", "environment"] as const;
-function controlledRows(id: string, assignmentExtra: Record<string, unknown> = {}, attemptExtra: Record<string, unknown> = {}) {
+function controlledRows(id: string, assignmentExtra: Record<string, unknown> = {}, attemptExtra: Record<string, unknown> = {}): Record<string, unknown>[] {
   return [row("worker.assignment", `task-${id}`, `run-${id}`, T(10), {
     worker_assignment: { id, selected: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" } },
     benchmark_run: { work: { taskClass: { state: "observed", value: "implement" }, risk: { state: "observed", value: "medium" },
