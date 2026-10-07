@@ -728,7 +728,6 @@ export const MOUNT_SWEEP_LEDGER_STEPS = new Set([
   ASSIGNMENT_EVENT_STEP, ...ARM_DONE_STEPS, ...Object.values(ARCHITECT_LANE_STEPS),
 ]);
 
-/** Retain reducer inputs and arbitrary first-pr_url fallbacks; raw counts and freshness still see every row. */
 export function isMountSweepEvidence(row) {
   return MOUNT_SWEEP_LEDGER_STEPS.has(row.step) || Boolean(row.run_id && row.pr_url);
 }
