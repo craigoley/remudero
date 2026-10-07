@@ -84,7 +84,7 @@ is real code: run-task/drain/daemon/review/sweep/fix/serve and the rest of the
 
 ## Requirements
 
-- **Node 22.22.3, exactly** — `.nvmrc` and `package.json#engines` pin it, `deploy/Dockerfile`
+- **Node 24.21.0, exactly** — `.nvmrc` and `package.json#engines` pin it, `deploy/Dockerfile`
   builds from it, and the coverage tooling (`assertPinnedNodeVersion`,
   `scripts/coverage-merge-ratchet.mjs`) refuses any other version. `npm ci` only *warns* on a
   mismatch, so check `node --version` first.

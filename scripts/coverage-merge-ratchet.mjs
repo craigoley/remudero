@@ -288,6 +288,28 @@ function* corpusReports(file, manifest, bytes) {
   if (count !== manifest.reportCount) throw new Error(`${file} has a process-report count mismatch`);
 }
 
+/**
+ * A process that loads one `.ts` file through BOTH tsx loaders (an ESM import and a CJS require)
+ * reports two scripts under one URL, but `source-map-cache` is keyed by URL and holds ONE map. Node
+ * maps both instances with it, so the other instance's offsets land on unrelated lines and its
+ * zero-count ranges erase real hits from every other process at the range merge (#9835: a pre-push
+ * fixture's children zeroed src/lib/worker-home.ts across all eight shards). A repeated URL keeps
+ * only the instances whose generated length the cached map describes; a URL that is not repeated,
+ * or has no cached map, is untouched.
+ */
+export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
+  const seen = new Map();
+  for (const script of result) seen.set(script?.url, (seen.get(script?.url) ?? 0) + 1);
+  if (![...seen.values()].some((n) => n > 1)) return result;
+  return result.filter((script) => {
+    const lineLengths = sourceMapCache?.[script.url]?.lineLengths;
+    if (seen.get(script.url) === 1 || !Array.isArray(lineLengths)) return true;
+    const generated = lineLengths.reduce((sum, n) => sum + n, 0) + lineLengths.length - 1;
+    const extent = Math.max(...script.functions.flatMap((fn) => fn.ranges.filter((r) => r.startOffset === 0).map((r) => r.endOffset)));
+    return extent === generated;
+  });
+}
+
 function* coverageReports(directories, bytes) {
   const childSuites = childSuiteCache();
   for (const directory of directories) {
@@ -304,6 +326,7 @@ function* coverageReports(directories, bytes) {
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
         const spawnedBy = Array.isArray(parsed?.result) ? rawReportIdentity(file, parsed.result, childSuites) : {};
+        if (Array.isArray(parsed?.result)) parsed.result = scriptsTheSourceMapDescribes(parsed.result, parsed['source-map-cache']);
         yield spawnedBy.child ? { ...parsed, ...spawnedBy } : parsed;
         continue;
       }
@@ -342,7 +365,7 @@ function collectCompactReports(directories, onMap, onReport) {
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
       const identity = rawReportIdentity(file, raw.result, childSuites);
-      const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
+      const result = scriptsTheSourceMapDescribes(raw.result, raw['source-map-cache']).filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
       for (const script of result) {
@@ -432,6 +455,7 @@ export function writeCompactCoverageDirectories(directories, outputDirectory, { 
  * Translation has exactly two effects beyond its return value, and both are recorded so the
  * aggregator reproduces them in shard order: it populates Node's per-file line cache (the FIRST
  * content seen for a URL wins), and it assigns `count` on cached lines (the LAST assignment wins).
+ * Node 24 also sets `ignore` on TypeScript type-only lines, so that write is recorded too.
  * The range merge (`mergeCoverage`) is NOT pre-applied: it is order-sensitive and not associative,
  * so folding a shard locally could reorder or drop ranges. The aggregator merges the translated
  * reports in exactly the order it would have produced them itself.
@@ -453,13 +477,20 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
       const lines = getLines(url, source);
       if (lines && !lineState.has(url)) {
         const written = new Map();
-        lineState.set(url, { source: lines.map(line => line.src).join(''), written });
+        const ignored = new Set();
+        lineState.set(url, { source: lines.map(line => line.src).join(''), written, ignored });
         lines.forEach((line, index) => {
           let count = line.count;
+          let ignore = line.ignore;
           Object.defineProperty(line, 'count', {
             configurable: true, enumerable: true,
             get: () => count,
             set: (value) => { count = value; written.set(index, value); },
+          });
+          Object.defineProperty(line, 'ignore', {
+            configurable: true, enumerable: true,
+            get: () => ignore,
+            set: (value) => { ignore = value; if (value === true) ignored.add(index); },
           });
         });
       }
@@ -480,7 +511,7 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
     mapped.flush();
     const counts = { rawFileCount: bytes.rawFileCount, reportCount };
     const lines = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'lines', 'lines', maxChunkBytes);
-    for (const [url, { source, written }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written] }));
+    for (const [url, { source, written, ignored }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written], ignored: [...ignored] }));
     lines.flush();
     const manifest = { format: PREMAPPED_FORMAT, maxChunkBytes, ...counts, lineFileCount: lineState.size, lineChunks: lines.chunks, reportChunks: mapped.chunks };
     const source = JSON.stringify(manifest);
@@ -527,10 +558,14 @@ function* premappedReports(file, collector, bytes) {
     [['lines', manifest.lineChunks], ['mapped', manifest.reportChunks]], bytes);
   let lineFiles = 0;
   for (const chunk of manifest.lineChunks) for (const entry of readChunk(chunk, 'lines')) {
-    if (typeof entry?.url !== 'string' || typeof entry.source !== 'string' || !Array.isArray(entry.written)) {
+    if (typeof entry?.url !== 'string' || typeof entry.source !== 'string' || !Array.isArray(entry.written) || !Array.isArray(entry.ignored)) {
       throw new Error(`${file} contains an invalid premapped line record`);
     }
     const lines = collector.getLines(entry.url, entry.source);
+    for (const index of entry.ignored) {
+      if (!Number.isSafeInteger(index) || !lines?.[index]) throw new Error(`${file} ignores a line outside ${entry.url}`);
+      lines[index].ignore = true;
+    }
     for (const write of entry.written) {
       if (!Array.isArray(write) || !Number.isSafeInteger(write[0]) || !lines?.[write[0]] || !Number.isFinite(write[1])) {
         throw new Error(`${file} writes a line outside ${entry.url}`);

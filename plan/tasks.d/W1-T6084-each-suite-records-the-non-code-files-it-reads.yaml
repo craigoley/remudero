@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: test-cost research (research-selection REPORT, ranked item 4)"
   plan_refs: [W1-T5895, W1-T4787, W1-T6092, W1-T6083, W1-T4404]
   files: [test/setup/read-map.ts, test/setup/tmp-hygiene.ts, src/lib/affected-suites.ts, scripts/diff-class.mjs, test/each-suite-records-the-non-code-files-it-reads.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

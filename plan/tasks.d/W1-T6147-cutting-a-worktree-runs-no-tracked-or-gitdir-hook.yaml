@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: raised by W1-T6121's builder (PR #9794); premise verified read-only on origin/main 0fffd033d before filing"
   plan_refs: [W1-T6106, W1-T6122, W1-T6146, W1-T1129, W1-T137]
   files: [src/lib/worker.ts, test/cutting-a-worktree-runs-no-tracked-or-gitdir-hook.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
