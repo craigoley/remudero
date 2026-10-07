@@ -15,6 +15,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as affected from "../src/lib/affected-suites.js";
 import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+
+// W1-T6156 runs the coverage runner in the proof sandbox; a pass-through stands in for bwrap off Linux.
+usePassThroughProofSandbox();
 
 const HARNESS = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SECRETS = {
