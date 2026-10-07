@@ -325,8 +325,9 @@ export function redirectChildCoverage(
   const suite = relative(opts.cwd ?? process.cwd(), resolve(script)).split(sep).join("/");
   if (!SUITE_PATH.test(suite)) return undefined;
   reapDeadOwnerDirs(CHILD_COVERAGE_DIR_PREFIX);
-  // The wrapped mkdtempSync: the exit sweep removes the dir after the move below has emptied it.
-  const root = fs.mkdtempSync(join(tmpdir(), `rmd-test-v8-children-${setupDirOwnerTag()}`));
+  // NOT the wrapped mkdtempSync: the exit sweep must leave the dir, whose suite path becomes a link
+  // for late writers (see flattenChildCoverage); a later test process reaps it (reapDeadOwnerDirs).
+  const root = originalMkdtempSync(join(tmpdir(), `rmd-test-v8-children-${setupDirOwnerTag()}`)) as string;
   const childDir = join(root, ...suite.split("/"));
   fs.mkdirSync(childDir, { recursive: true });
   env.NODE_V8_COVERAGE = childDir;
@@ -334,7 +335,10 @@ export function redirectChildCoverage(
 }
 
 /** Move the children's reports into `coverageDir` under their own names and record which suite
- *  spawned them. Returns the moved names; a report that cannot be moved throws, naming it. */
+ *  spawned them, then leave the suite's directory a LINK to `coverageDir`: a thread that copied the
+ *  redirected value (tsx's module-hooks thread) writes its report after every exit handler, and it
+ *  must land flat, as it did before (MEASURED: without the link, one report per suite was lost).
+ *  Returns the moved names; a report that cannot be moved throws, naming it. */
 export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () => number = Date.now): string[] {
   const moved: string[] = [];
   for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
@@ -350,6 +354,8 @@ export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () =>
     }
     moved.push(name);
   }
+  fs.rmSync(redirect.childDir, { recursive: true, force: true });
+  fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
   if (moved.length > 0) {
     const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);
     fs.writeFileSync(`${record}.part`, JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: redirect.suite, reports: moved }));
@@ -360,8 +366,9 @@ export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () =>
 
 const childCoverage = redirectChildCoverage();
 if (childCoverage !== undefined) {
-  // Registered before the sweep below, so the children's reports move out before their dir goes.
+  // A thread sharing this env writes its own report after every exit handler: back to the flat dir.
   process.on("exit", () => {
+    process.env.NODE_V8_COVERAGE = childCoverage.coverageDir;
     try {
       flattenChildCoverage(childCoverage);
     } catch (error) {

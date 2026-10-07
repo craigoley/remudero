@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -210,11 +210,18 @@ test("W1-T6108: the redirect applies only to a suite's main thread under coverag
     assert.ok(redirect);
     assert.equal(env.NODE_V8_COVERAGE, redirect.childDir);
     assert.ok(redirect.childDir.endsWith(join("test", "x.test.ts")));
-    assert.deepEqual(flattenChildCoverage(redirect), [], "no child, no record");
     writeFileSync(join(redirect.childDir, "coverage-1-0000000000000-0.json"), "{}");
     writeFileSync(join(redirect.childDir, "unrelated.txt"), "");
     assert.deepEqual(flattenChildCoverage(redirect, () => 1234567890123), ["coverage-1-0000000000000-0.json"]);
     assert.deepEqual(readdirSync(out).sort(), ["coverage-1-0000000000000-0.json", `rmd-v8-children-${process.pid}-1234567890123.json`]);
+    // A late writer (a thread holding the redirected value) lands flat, through the link.
+    assert.equal(lstatSync(redirect.childDir).isSymbolicLink(), true);
+    writeFileSync(join(redirect.childDir, "coverage-2-0000000000000-1.json"), "{}");
+    assert.ok(readdirSync(out).includes("coverage-2-0000000000000-1.json"));
+    const empty = redirectChildCoverage({ NODE_V8_COVERAGE: out }, { script, cwd });
+    assert.ok(empty);
+    assert.deepEqual(flattenChildCoverage(empty), [], "no child, no record");
+    assert.equal(readdirSync(out).filter((n) => n.startsWith("rmd-v8-children-")).length, 1);
     assert.equal(ratchet.childSuitesIn(out).get(join(out, "coverage-1-0000000000000-0.json")), "test/x.test.ts");
     writeFileSync(join(out, `rmd-v8-children-${process.pid}-1234567890124.json`), JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: "src/x.ts", reports: [] }));
     assert.throws(() => ratchet.childSuitesIn(out), /is not a valid rmd-v8-child-suites-v1 record/);
