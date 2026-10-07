@@ -22,6 +22,7 @@ export function projectRepairCostContext(row: Record<string, unknown>): RepairCo
 
 export interface RepairCostRow {
   step: string; assignmentId: string | null; costUsd: number | null; billingMode: "api" | "subscription" | null;
+  provider?: string | null;
   notionalCostReported?: boolean; notionalCostUsd?: number | null; repair?: RepairCostContext;
 }
 export interface RepairCostReport {
@@ -79,12 +80,17 @@ function accountGroup(group: RepairCostRow[], result: RepairCostReport): void {
       result.conflictingIdentities += 1; return;
     }
     if (attempts.length === 0) { result.missingTerminal += 1; return; }
+    const providers = new Set(group.flatMap((row) => typeof row.provider === "string" ? [row.provider] : []));
+    if (providers.size > 1) { result.conflictingIdentities += 1; return; }
+    const provider = providers.values().next().value;
     const costs = new Set(attempts.map((row) => JSON.stringify([row.billingMode, row.costUsd,
       row.notionalCostReported ?? false, row.notionalCostUsd ?? null])));
     if (costs.size !== 1) { result.conflictingIdentities += 1; return; }
     const terminal = attempts[0]!;
     const cost = terminal.billingMode === "subscription"
-      ? terminal.notionalCostReported ? terminal.notionalCostUsd ?? null : terminal.costUsd : terminal.costUsd;
+      ? terminal.notionalCostReported ? terminal.notionalCostUsd ?? null
+        : provider === "codex" ? null : terminal.costUsd
+      : terminal.costUsd;
     if (cost === null || !Number.isFinite(cost) || cost < 0 || terminal.billingMode === null) {
       result.missingCost += 1; return;
     }
