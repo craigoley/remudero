@@ -29,7 +29,9 @@ function fixture(t: TestContext, opts: { ghostRow: boolean } = { ghostRow: true 
 }
 
 function runHook(root: string, source = HOOK) {
-  const hook = join(root, "pre-push");
+  // W1-T6120: the hook runs its checks from its OWN code root, so it sits where the tree's own hook does.
+  mkdirSync(join(root, "hooks"), { recursive: true });
+  const hook = join(root, "hooks", "pre-push");
   writeFileSync(hook, source);
   return spawnSync("/bin/sh", [hook], {
     cwd: root,
