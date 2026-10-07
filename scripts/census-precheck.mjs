@@ -33,6 +33,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import {
@@ -243,6 +244,60 @@ function isSide(side) {
   return Boolean(side) && Array.isArray(side.candidates) && Array.isArray(side.gaps);
 }
 
+// W1-T6237: read only literal entries and string concatenations; never import the branch reviewer.
+function branchInstrumentExclusions(text) {
+  const scanner = createScanner(true, undefined, text ?? "");
+  const empty = () => new Map();
+  const scan = () => {
+    const start = scanner.getTokenEnd();
+    const next = scanner.scan();
+    if (next !== SyntaxKind.EndOfFile && scanner.getTokenEnd() <= start) scanner.resetTokenState(start + 1);
+    return next === SyntaxKind.SlashToken || next === SyntaxKind.SlashEqualsToken ? scanner.reScanSlashToken() : next;
+  };
+  function skipTemplate() {
+    let depth = 0;
+    for (let next = scan(); next !== SyntaxKind.EndOfFile; next = scan()) {
+      if (next === SyntaxKind.TemplateHead) skipTemplate();
+      else if (next === SyntaxKind.OpenBraceToken) depth++;
+      else if (next === SyntaxKind.CloseBraceToken) {
+        if (depth > 0) depth--;
+        else if (scanner.reScanTemplateToken(false) === SyntaxKind.TemplateTail) return;
+      }
+    }
+  }
+  let token;
+  while ((token = scan()) !== SyntaxKind.EndOfFile) {
+    if (token === SyntaxKind.TemplateHead) {
+      skipTemplate();
+      continue;
+    }
+    if (token !== SyntaxKind.ExportKeyword || scanner.scan() !== SyntaxKind.ConstKeyword ||
+        scanner.scan() !== SyntaxKind.Identifier || scanner.getTokenValue() !== "INSTRUMENT_SURFACE_EXCLUSIONS") continue;
+    while ((token = scanner.scan()) !== SyntaxKind.EqualsToken) {
+      if (token === SyntaxKind.EndOfFile || token === SyntaxKind.SemicolonToken) return empty();
+    }
+    if (scanner.scan() !== SyntaxKind.OpenBraceToken) return empty();
+    const exclusions = new Map();
+    token = scanner.scan();
+    while (token !== SyntaxKind.CloseBraceToken) {
+      if (token !== SyntaxKind.StringLiteral || scanner.isUnterminated()) return empty();
+      const path = scanner.getTokenValue();
+      if (scanner.scan() !== SyntaxKind.ColonToken) return empty();
+      let reason = "";
+      do {
+        if (scanner.scan() !== SyntaxKind.StringLiteral || scanner.isUnterminated()) return empty();
+        reason += scanner.getTokenValue();
+        token = scanner.scan();
+      } while (token === SyntaxKind.PlusToken);
+      exclusions.set(path, reason);
+      if (token === SyntaxKind.CommaToken) token = scanner.scan();
+      else if (token !== SyntaxKind.CloseBraceToken) return empty();
+    }
+    return [SyntaxKind.SemicolonToken, SyntaxKind.EndOfFile].includes(scanner.scan()) ? exclusions : empty();
+  }
+  return empty();
+}
+
 /**
  * Runs the shared derivation as a child under tsx over `root` and its merge base. THROWS, naming why, on
  * every way the measurement can fail (spawn error, time bound, signal, non-zero exit, output that is not
@@ -278,7 +333,8 @@ export function measureViaChild({ root, mergeBase, run = spawnSync }) {
  * Every failure to measure is `unmeasured` with its reason, never an empty violation list.
  *
  * @param {{ changed: string[], measureInstrumentSurface?: () => { head: { candidates: string[], gaps: string[] },
- *   base: { candidates: string[], gaps: string[] } } }} input
+ *   base: { candidates: string[], gaps: string[] } }, readHead?: (p: string) => string | null,
+ *   reportExcused?: (line: string) => void }} input
  * @returns {{ violations: string[], unmeasured: string | null }}
  */
 export function evaluateInstrumentSurface(input) {
@@ -297,9 +353,15 @@ export function evaluateInstrumentSurface(input) {
     return { violations: [], unmeasured: "the derivation found no candidates at all, which is a failed read, not a clean tree" };
   }
   const carried = new Set(measured.base.gaps);
+  const exclusions = branchInstrumentExclusions(input.readHead?.("src/lib/review.ts"));
   const violations = measured.head.gaps
     .filter((path) => !carried.has(path))
     .sort()
+    .filter((path) => {
+      if (!exclusions.get(path)?.trim()) return true;
+      input.reportExcused?.(`instrument-surface: ${path} excused by this branch (CI and review judge the reason)`);
+      return false;
+    })
     .map(
       (path) =>
         `instrument-surface: ${path} is neither on INSTRUMENT_SURFACE nor excused in INSTRUMENT_SURFACE_EXCLUSIONS - ` +
@@ -726,6 +788,8 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     });
     const instrument = evaluateInstrumentSurface({
       changed,
+      readHead: readers.readHead,
+      reportExcused: (line) => console.log(line),
       measureInstrumentSurface: () => measure({ root, mergeBase }),
     });
     violations.push(...instrument.violations);
