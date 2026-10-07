@@ -2779,7 +2779,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./lib/worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
@@ -5529,11 +5529,11 @@ export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: 
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
   try {
-    execFileSync("git", ["-C", cwd, "cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
+    hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
   } catch {
     // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
     try {
-      execFileSync("git", ["-C", cwd, "fetch", "--quiet", "origin", headSha], { stdio: "pipe", timeout: 60_000 });
+      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
     } catch {
       // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
       return [];
@@ -7291,7 +7291,7 @@ class ReviewerSnapshotError extends Error {
  * borrows immutable objects from the source for speed; no GitHub read and no source checkout
  * mutation is needed. The caller's withTempDir boundary owns removal on every exit path.
  */
-function materializeReviewerSnapshot(
+export function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
@@ -7331,9 +7331,7 @@ function materializeReviewerSnapshot(
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
-    execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    hostWorktreeGit(cwd, ["checkout", "--quiet", "--detach", "--force", expectedHeadSha]);
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -7344,10 +7342,7 @@ function materializeReviewerSnapshot(
 
   let materializedHead: string;
   try {
-    materializedHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    materializedHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
   } catch {
     throw new ReviewerSnapshotError("materialization", "unreadable", "semantic reviewer checkout HEAD is unreadable");
   }
@@ -26105,13 +26100,13 @@ export function gitRunAdapter(
   };
 }
 
-export function hostWorktreeGitAtTopLevel(dir: string, args: string[]): string {
+export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
   const log = (step: string, extra: Record<string, unknown>) => {
     if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
   };
   for (let at = resolve(dir); ; at = dirname(at)) {
     try {
-      return hostWorktreeGit(at, args, { log });
+      return hostWorktreeGit(at, args, { ...opts, log });
     } catch (error) {
       if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }

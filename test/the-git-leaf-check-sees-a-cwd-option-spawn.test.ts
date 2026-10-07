@@ -63,7 +63,6 @@ test("W1-T6123: comments, strings, primitives in the daemon's cwd and W1-T6106's
  *  PR-head trees and the worker's `config --worktree` and lane-reaper reads (W1-T6122's builder). */
 const KNOWN_WIDENED_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/worker-provider.ts", "isGitWorktree"],
-  ["src/lib/worker-provider.ts", "codexGitWritableRoots"],
   ["src/lib/worker-provider.ts", "selectOpenWeightUnitTestSuites"],
   ["src/lib/sweep.ts", "rebaseDirtyFleetBranchViaGit"],
   ["src/lib/sweep.ts", "renumberPlanPrIds"],
