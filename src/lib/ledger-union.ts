@@ -917,6 +917,7 @@ export interface LedgerRotationMemo {
   pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
+  retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number };
 }
 
 /** Lines one turn of the event loop parses while {@link createLedgerRotationMemo} loads a rotation. */
@@ -978,6 +979,15 @@ export function createLedgerRotationMemo(
 
   return {
     size: () => memo.size,
+    retention: () => {
+      let rows = 0, tornRows = 0, failedArchives = 0;
+      for (const entry of memo.values()) {
+        if (!entry.read) { failedArchives++; continue; }
+        rows += entry.read.rows.length;
+        tornRows += entry.read.torn;
+      }
+      return { archives: memo.size, rows, tornRows, failedArchives };
+    },
     load: async (entries) => {
       for (const entry of entries) {
         const pending = loading.get(entry.path) ?? loadOne(entry).finally(() => loading.delete(entry.path));

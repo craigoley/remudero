@@ -1094,6 +1094,30 @@ test("legacy reads a task's newer row past an older one compaction kept live and
   assert.ok(wrong.some((d) => d.classification === "real"), JSON.stringify(wrong));
 });
 
+test("now legacy retention is named without dropping old rows from a recent archive or repeating unchanged samples", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const logged: Array<{ step: string; [key: string]: unknown }> = [];
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [], log: (step, extra) => logged.push({ step, ...extra }) });
+  clock.set(T0 - 3 * 3_600_000);
+  core.append({ step: "implement.done", task_id: "W1-T1", run_id: "old", cost_usd: 0.5 });
+  archive(core, T0 - 1_000, "gzip", liveLines(core));
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), "");
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  const first = view.legacy("instance=core", T0 + 30_000, body.data);
+  assert.ok(first?.rows["W1-T1"]?.length, "old timestamp was live until the recent archive cut");
+  view.legacy("instance=core", T0 + 30_000, body.data);
+  const reports = logged.filter((row) => row.step === "read_model.now_legacy_retention");
+  assert.equal(reports.length, 1);
+  assert.deepEqual(reports[0]?.rows, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
+  assert.deepEqual(reports[0]?.costs, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
+  assert.deepEqual(Object.keys(reports[0]!).sort(), ["costs", "instance", "rows", "step"]);
+});
+
 test("legacy counts a row held in both rotation forms once and reads the day's spend from either", (t) => {
   // (c) The same costed row sits in a gzip and a plain rotation, both cut today but before legacy's board window, and a
   // second costed row sits in the plain one only: the day's spend reads both forms and each row once.

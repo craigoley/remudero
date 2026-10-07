@@ -10,6 +10,21 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const identity = (rows: Array<Record<string, unknown>>) => rows;
 
+test("rotation memo retention counts reduced rows and pruning without rereading or exposing bodies", () => {
+  const memo = createLedgerRotationMemo((r) => r.filter((row) => row.keep), { statKey: () => "fixed" });
+  const a = { path: "synthetic-a", form: "plain" as const };
+  const b = { path: "synthetic-b", form: "gzip" as const };
+  let pass = memo.pass({ parseMissing: true });
+  pass.rotationRecords(a, () => ({ rows: [{ keep: true, payload: "private" }, { keep: false }], torn: 1, tornLines: ["private broken row"] }));
+  pass.rotationRecords(b, () => ({ rows: [{ keep: true }, { keep: true }], torn: 0, tornLines: [] }));
+  assert.equal(pass.complete(), true);
+  assert.deepEqual(memo.retention(), { archives: 2, rows: 3, tornRows: 1, failedArchives: 0 });
+  pass = memo.pass();
+  pass.rotationRecords(b, () => { throw new Error("must not reparse"); });
+  assert.equal(pass.complete(), true);
+  assert.deepEqual(memo.retention(), { archives: 1, rows: 2, tornRows: 0, failedArchives: 0 });
+});
+
 function rows(prefix: string, count: number): Array<Record<string, unknown>> {
   return Array.from({ length: count }, (_, i) => ({ step: "run.start", task_id: `${prefix}-${i}`, ts: new Date(Date.UTC(2026, 8, 20, 0, 0, i)).toISOString() }));
 }
