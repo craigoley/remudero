@@ -58,6 +58,7 @@ function validSettings(): Record<string, unknown> {
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
       network: { allowedDomains: ["github.com", "api.github.com"] },
     },

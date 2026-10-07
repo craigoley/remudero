@@ -113,6 +113,9 @@ test("W1-T5923 falsifier: a premapped shard that drops a range, reorders functio
         report.map((script) => ({ ...script, functions: [...script.functions].reverse() })))),
       "lost line state": (directory) => editPremapped(directory, "lines", (lines) =>
         (lines as Array<{ written: unknown[] }>).map((line) => ({ ...line, written: [] }))),
+      // Node 24's translation ignores TypeScript type-only lines; replaying counts alone reports them.
+      "lost ignored lines": (directory) => editPremapped(directory, "lines", (lines) =>
+        (lines as Array<{ ignored: unknown[] }>).map((line) => ({ ...line, ignored: [] }))),
     };
     for (const [name, mutate] of Object.entries(variants)) {
       const premapped = raws.map((raw, index) => {

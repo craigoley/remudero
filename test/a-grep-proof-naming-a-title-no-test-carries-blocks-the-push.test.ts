@@ -182,6 +182,9 @@ test("W1-T5026: the pre-push proof-resolve block fails on exit 1 and not on exit
   const hook = readFileSync(join(REPO_ROOT, "hooks/pre-push"), "utf8");
   const block = /# BEGIN proof-resolve precheck[^\n]*\n([\s\S]*?)# END proof-resolve precheck/.exec(hook)?.[1];
   assert.ok(block, "the hook must still carry the proof-resolve block");
+  // W1-T6120: the block resolves its script under the hook's code root through the hook's own `has`.
+  const has = /^has\(\) .*$/m.exec(hook)?.[0];
+  assert.ok(has, "the hook must still define has()");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}title-grep-hook-`));
   try {
     mkdirSync(join(dir, "scripts"), { recursive: true });
@@ -190,7 +193,7 @@ test("W1-T5026: the pre-push proof-resolve block fails on exit 1 and not on exit
     writeFileSync(join(dir, "bin/node"), '#!/bin/sh\nexit "$FAKE_RC"\n');
     chmodSync(join(dir, "bin/node"), 0o755);
     const outcome = (rc: number) => {
-      const run = spawnSync("bash", ["-c", `fail=0; head_ref=run-W1-T9-1; ${block}\necho "fail=$fail"`], {
+      const run = spawnSync("bash", ["-c", `gate_root='${dir}'; tsx_loader=/dev/null; ${has}\nfail=0; head_ref=run-W1-T9-1; ${block}\necho "fail=$fail"`], {
         cwd: dir,
         encoding: "utf8",
         env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, FAKE_RC: String(rc) },

@@ -22,7 +22,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=22.22.3"
+    "node": ">=24.21.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -91,6 +91,7 @@
     "census:wall-clock-bound": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-wall-clock-bound-declares-itself.test.ts",
     "census:authority": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/authority-ratchet.test.ts",
     "census:no-draft-pr": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-draft-pull-request-ever-sits-on-the-board.test.ts",
+    "census:no-nested-preflight": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
     "census:ledger-rotation": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-rotation.test.ts",
     "census:unretained-step": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-union-read-of-an-unretained-step-is-refused.test.ts",
     "census:spend": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/spend-is-counted-once-at-its-producer.test.ts",
@@ -102,12 +103,13 @@
     "census:citation-anchor": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/citation-anchor-census.test.ts",
     "census:every-priced-ledger-step": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
     "census:host-capability-fixtures": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/host-capability-fixtures.test.ts",
+    "census:host-worktree-git": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.284",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.289",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "playwright": "^1.63.0",
     "tsx": "^4.23.15",
@@ -120,12 +122,12 @@
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.2.0",
     "@stryker-mutator/core": "^9.6.1",
-    "@swc/core": "^1.16.2",
-    "@types/node": "^22.20.1",
+    "@swc/core": "^1.16.13",
+    "@types/node": "^24.19.1",
     "commit-and-tag-version": "^13.2.1",
-    "dependency-cruiser": "^18.4.0",
+    "dependency-cruiser": "^18.5.0",
     "fast-check": "^4.10.2",
-    "jscpd": "^5.3.2"
+    "jscpd": "^5.4.0"
   },
   "_dependencyRationale": {
     "@swc/core": "Required by .dependency-cruiser.cjs parser: \"swc\"; src never imports it, but depcruise loads it for TypeScript 7 extraction.",

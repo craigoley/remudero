@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { checkCommitMessage, shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import type { Escalation, EscalationOption } from "./escalate.js";
@@ -366,6 +365,7 @@ export function parsePlanVerdict(text: string): PlanVerdict | null {
 // `review.ts` cycle's edge. Re-exported here unchanged for every consumer that isn't `review.ts`.
 export { ORIENTATION_DOC, isInPlanScope, outOfPlanScopeFiles } from "./plan-scope.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-scope.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /** Out-of-scope paths touched by a unified diff (mirrors {@link "./triage.js".nonPlanFilesInDiff}). */
 export function outOfPlanScopeFilesInDiff(diff: string): string[] {
@@ -573,15 +573,26 @@ export function applyPlanProposalCommit(
   cwd: string,
   commitMessage: string,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  git?: PlanCommitGit,
 ): void {
   gitAddAndCommitWithRollback(cwd, ["-A", "--", "plan/", "MASTER-PLAN.md"], commitMessage, {
     stdio: "inherit",
     log,
     stepPrefix: "plan_commit",
+    ...(git ? { git } : {}),
   });
 }
 
 // ── Add-then-commit with index rollback (W1-T3243) ───────────────────────────
+
+/** One git call in the commit's tree; returns stdout (empty when streamed). */
+export type PlanCommitGit = (cwd: string, args: string[], stdio: "inherit" | "pipe") => string;
+
+/** W1-T6136: both production callers (run-task.ts's triage and `rmd plan` propose branches) commit in
+ *  the worktree a planner worker just ran in, so every call goes through the hardened leaf: the tree's
+ *  `.git` pointer is checked, never followed, and none of its tracked hooks run. */
+export const leafPlanCommitGit: PlanCommitGit = (cwd, args, stdio) =>
+  hostWorktreeGit(cwd, args, { stdio: stdio === "inherit" ? "inherit-stdout" : "pipe" });
 
 /**
  * W1-T3243: `git add <addArgs>` then `git commit -m <commitMessage>`, restoring the index to
@@ -613,24 +624,27 @@ export function gitAddAndCommitWithRollback(
     stdio: "inherit" | "pipe";
     log: (step: string, extra?: Record<string, unknown>) => void;
     stepPrefix: string;
+    /** Test seam; production is {@link leafPlanCommitGit}. */
+    git?: PlanCommitGit;
   },
 ): void {
   const { stdio, log, stepPrefix } = opts;
+  const git = opts.git ?? leafPlanCommitGit;
   let preTree: string | null = null;
   try {
-    preTree = execFileSync("git", ["-C", cwd, "write-tree"], { encoding: "utf8" }).trim();
+    preTree = git(cwd, ["write-tree"], "pipe").trim();
   } catch (e) {
     // No pre-add snapshot to roll back to (e.g. an unmerged index) — record it; the add/commit
     // below still runs, but a refused commit can only log-and-skip its rollback, not restore.
     log(`${stepPrefix}.snapshot.error`, { error: String((e as Error)?.message ?? e) });
   }
-  execFileSync("git", ["-C", cwd, "add", ...addArgs], { stdio });
+  git(cwd, ["add", ...addArgs], stdio);
   try {
-    execFileSync("git", ["-C", cwd, "commit", "-m", commitMessage], { stdio });
+    git(cwd, ["commit", "-m", commitMessage], stdio);
   } catch (commitError) {
     if (preTree !== null) {
       try {
-        execFileSync("git", ["-C", cwd, "read-tree", preTree], { stdio });
+        git(cwd, ["read-tree", preTree], stdio);
       } catch (rollbackError) {
         // (v): the rollback itself failed — this is the exact condition the task exists to
         // surface, so it is recorded rather than left silent. The ORIGINAL commit error is

@@ -27,6 +27,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -87,6 +88,8 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  /** The shell-less surface a caller declares only when its harness owns git (run-task.ts's coherence rule). */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   runId?: string;
@@ -111,6 +114,8 @@ export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; sign
 
 interface CodexWorkerResult {
   provider: "codex";
+  /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
+  harnessCommit?: CodexHarnessCommit;
   sessionId: string;
   costUsd: number;
   /** W1-T5629: NOTIONAL, never billed — see {@link codexNotionalCostUsd}. Absent when the model is unpriced. */
@@ -132,6 +137,7 @@ interface CodexWorkerResult {
   model: string;
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
   servedModel?: null;
@@ -1922,6 +1928,7 @@ export interface ParsedCodexEvents {
   text: string;
   blocks: string[];
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   numTurns: number;
   isError: boolean;
   subtype: string;
@@ -2018,6 +2025,10 @@ class CodexJsonlAccumulator {
   private input = 0;
   private output = 0;
   private cacheRead = 0;
+  private completedTurns = 0;
+  private usageTurns = 0;
+  private missingUsageTurns = 0;
+  private turnInProgress = false;
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
@@ -2047,6 +2058,8 @@ class CodexJsonlAccumulator {
       text: this.blocks.at(-1) ?? "",
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      tokenUsageState: this.usageTurns === 0 ? "unavailable"
+        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
       isError: this.errors.length > 0,
       subtype: this.errors.length > 0 ? "error_codex" : "success",
@@ -2087,17 +2100,34 @@ class CodexJsonlAccumulator {
       : "other";
     this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
-    if (event.type === "turn.started") this.numTurns += 1;
+    if (event.type === "turn.started") {
+      this.numTurns += 1;
+      this.turnInProgress = true;
+    }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
-    if (event.type === "turn.completed" && event.usage) {
-      this.input += event.usage.input_tokens ?? 0;
-      this.output += event.usage.output_tokens ?? 0;
-      this.cacheRead += event.usage.cached_input_tokens ?? 0;
+    if (event.type === "turn.completed") {
+      this.turnInProgress = false;
+      this.completedTurns += 1;
+      const input = event.usage?.input_tokens;
+      const output = event.usage?.output_tokens;
+      const cached = event.usage?.cached_input_tokens;
+      if (typeof input === "number" && Number.isSafeInteger(input) && input >= 0
+        && typeof output === "number" && Number.isSafeInteger(output) && output >= 0
+        && typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0 && cached <= input
+        && [this.input + input, this.output + output, this.cacheRead + cached].every(Number.isSafeInteger)) {
+        this.input += input;
+        this.output += output;
+        this.cacheRead += cached;
+        this.usageTurns += 1;
+      } else {
+        this.missingUsageTurns += 1;
+      }
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
       this.keptBytes += Buffer.byteLength(message, "utf8");
@@ -2208,28 +2238,6 @@ function isGitWorktree(cwd: string): boolean {
 }
 
 /**
- * Resolve only this checkout's Git administrative directories. Codex workspace-write protects
- * `.git` by default, while Remudero implementation prompts require the worker to commit. Linked
- * worktrees need both the per-worktree git dir and their shared common dir; paths outside the
- * configured Remudero root are refused instead of widening the sandbox from repository metadata.
- */
-export function codexGitWritableRoots(cwd: string, configRoot: string): string[] {
-  try {
-    const root = physicalPath(configRoot);
-    const output = execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    return [...new Set(output.split("\n").map((line) => line.trim()).filter(Boolean).map(physicalPath))]
-      .filter((candidate) => isWithin(root, candidate));
-  } catch (error) {
-    // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
-    return [];
-  }
-}
-
-/**
  * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
  * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
  * (`scripts/claude-md-budget-baseline.json`'s `capBytes`), and this ceiling binds only if that
@@ -2321,6 +2329,59 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
   ];
 }
 
+function codexReadOnly(args: CodexSpawnArgs): boolean {
+  return args.sandboxIntent !== "disposable-review" && Array.isArray(args.tools) &&
+    !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+}
+
+/**
+ * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
+ * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
+ * rule run-task.ts holds), else this module, after the run, through the host git leaf.
+ */
+export function codexHarnessCommits(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tools" | "cashTools">): boolean {
+  if (args.sandboxIntent === "disposable-review" || codexReadOnly(args as CodexSpawnArgs)) return false;
+  const shellLess = Array.isArray(args.tools) && !args.tools.includes("Bash");
+  return args.cashTools === undefined && !shellLess;
+}
+
+/** Told to a codex writer whose edits {@link commitCodexWriterEdits} commits. */
+export const CODEX_HARNESS_COMMITS_PART =
+  "GIT: your sandbox cannot write this repository's git directory, so do not run `git commit`, `git push` or any git " +
+  "command that writes. The harness commits every change you leave in the worktree when you finish. End your final " +
+  "message with one line `COMMIT_MESSAGE: <conventional-commit subject, at most 100 characters>`.\n\n";
+
+const CODEX_FALLBACK_SUBJECT = "chore: commit the Codex worker's edits (harness commit, W1-T6148)";
+
+/** The subject a codex writer asked for: its last anchored `COMMIT_MESSAGE:` line, as worker.ts reads one. */
+export function codexCommitSubject(text: string): string {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  const subject = matches.at(-1)?.[1]?.trim() ?? "";
+  return subject.length > 0 && subject.length <= 100 ? subject : CODEX_FALLBACK_SUBJECT;
+}
+
+export type CodexHarnessCommit =
+  | { outcome: "committed"; sha: string }
+  | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
+  | { outcome: "refused"; reason: string };
+
+/** Commit what a codex writer left in `cwd`, through the leaf (pinned gitdir, vetted config, harness hooks).
+ *  Only in a tree `worktreeAdd` cut and recorded: a checkout the harness did not cut is never committed in. */
+export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
+  if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
+  try {
+    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    hostWorktreeGit(cwd, ["add", "-A"]);
+    hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
+    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(JSON.stringify({ event: "codex.harness_commit_refused", cwd, reason }));
+    return { outcome: "refused", reason };
+  }
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -2328,7 +2389,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
-  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const readOnly = codexReadOnly(args);
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
@@ -2388,13 +2449,14 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
-  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
+  // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
+  // plant config the host's authenticated push honours, so the harness commits for it instead
+  // ({@link commitCodexWriterEdits}).
   return [
     "exec",
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
-    ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
     "-C", args.cwd,
     "-",
   ];
@@ -3695,6 +3757,20 @@ function openWeightTools(
     }));
 }
 
+/** W1-T6106: the open-weight write tools' path — contained like a read, and never the worktree's `.git`
+ *  entry, which a host git call would otherwise follow. hooks/ stays writable: it is product source here, and
+ *  the host never executes the worktree's copy. */
+export function openWeightWritablePath(cwd: string, candidate: unknown): string {
+  const target = openWeightContainedPath(cwd, candidate);
+  const root = realpathSync(cwd);
+  let existing = target;
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  for (const rel of [relative(root, target), relative(root, realpathSync(existing))]) {
+    if (rel.split(sep)[0]!.toLowerCase() === ".git") throw new Error("tool path names the worktree's .git entry, which only the harness writes");
+  }
+  return target;
+}
+
 function openWeightContainedPath(cwd: string, candidate: unknown): string {
   if (typeof candidate !== "string" || candidate.trim() === "") throw new Error("tool path must be a non-empty string");
   const root = realpathSync(cwd);
@@ -3743,14 +3819,14 @@ async function executeOpenWeightTool(
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
     case "write_file": {
       if (typeof args.content !== "string") throw new Error("write_file content must be a string");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, args.content, "utf8");
       return { written: relative(realpathSync(cwd), path) };
     }
     case "edit_file": {
       if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       const before = readFileSync(path, "utf8");
       const at = before.indexOf(args.old_string);
       if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {
@@ -4711,7 +4787,8 @@ async function spawnCodexWorkerInPrivateTemp(
     armClockBound();
   });
   armClockBound();
-  const prompt = CODEX_DOCTRINE_PRELUDE + args.prompt;
+  const harnessCommits = codexHarnessCommits(args);
+  const prompt = CODEX_DOCTRINE_PRELUDE + (harnessCommits ? CODEX_HARNESS_COMMITS_PART : "") + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
@@ -4723,8 +4800,10 @@ async function spawnCodexWorkerInPrivateTemp(
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
-    const notionalCostUsd = codexNotionalCostUsd(model, parsed.tokens);
+    const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
+    const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     return {
+      ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
       ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),
@@ -4746,6 +4825,7 @@ async function spawnCodexWorkerInPrivateTemp(
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
+      tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
       servedModel: null,
       servedModelReason: CODEX_SERVED_MODEL_REASON,

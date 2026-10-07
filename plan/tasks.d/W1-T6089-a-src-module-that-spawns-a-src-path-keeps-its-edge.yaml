@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: test-cost research follow-up to the narrow-selection PR #9720"
   plan_refs: [W1-T5701, W1-T4404, W1-T5702, W1-T6083]
   files: [src/lib/affected-suites.ts, test/a-src-module-that-spawns-a-src-path-keeps-its-edge.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

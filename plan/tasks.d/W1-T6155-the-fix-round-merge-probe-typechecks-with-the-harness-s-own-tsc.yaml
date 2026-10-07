@@ -1,0 +1,58 @@
+- id: W1-T6155
+  title: "THE FIX-ROUND MERGE PROBE TYPECHECKS WITH THE HARNESS'S OWN TSC, NEVER THE WORKER'S — merge-probe.ts defaultTypecheck spawns `node <realpath(wt/node_modules)>/typescript/bin/tsc` with the daemon's whole inherited env on every fix-round push, so a worker that repoints its node_modules link or writes a tsc shim into it runs code on the host as the daemon, with its credentials"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which program the fix-round typecheck spawns, and with what env
+  band_meaning: span
+  origin: "operator session 2026-10-07: security follow-up batch 3; premise verified read-only on origin/main 44513355a before filing"
+  plan_refs: [W1-T5658, W1-T6124, W1-T6120, W1-T6138, W1-T6106]
+  files: [src/lib/merge-probe.ts, test/the-fix-round-merge-probe-typechecks-with-the-harness-s-own-tsc.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 44513355a. Static reading only; no shim or link was planted anywhere real.
+    THE CALL. src/run-task.ts `pushFixRound` awaits `mergedHeadTypechecks(wt, deps.mergedTypecheck)` before every
+    fix-round push (W1-T5658). src/lib/merge-probe.ts `mergedHeadTypechecks` materialises the merge tree in a tmp
+    dir, then `symlinkSync(realpathSync(join(wt, "node_modules")), join(tree, "node_modules"))` and calls
+    `defaultTypecheck(tree, join(tree, "node_modules"))`; when the merged tree fails it calls
+    `defaultTypecheck(wt, join(wt, "node_modules"))` a second time on the worktree itself.
+    THE SPAWN. `defaultTypecheck` runs `spawn(process.execPath, [join(nodeModules, "typescript", "bin", "tsc"),
+    "--noEmit", "-p", "tsconfig.json"], { cwd: dir, stdio })` with NO `env` option, so the child inherits the daemon's
+    whole environment (GH_TOKEN / GH_APP_* and HOME included), and is not sandboxed. `nodeModules` is whatever the
+    worktree's `node_modules` entry resolves to. The worker owns that entry: it can repoint the link to any directory
+    it can write (its own tree, its HOME, TMPDIR) or, where the link is a real directory, write
+    `node_modules/typescript/bin/tsc` itself. Either way the daemon executes a JS file the worker chose, as the daemon,
+    on the next fix-round push. The 10-minute `MERGED_TYPECHECK_TIMEOUT_MS` bounds it in time only.
+    WHAT IS NOT A ROUTE. `tsc --noEmit` on a hostile tree executes nothing from the tree itself (tsconfig
+    `plugins` load only in tsserver), so the tree may stay DATA; only the program and its env are the defect.
+    SIBLINGS. W1-T6120/W1-T6138 closed the same class for the pre-push gate (`createPrePushSandboxRunner`,
+    src/lib/git-push.ts); W1-T6124 for review proofs (`proofSandboxArgv`, `proofChildEnv`, src/lib/review.ts). The
+    merge probe was outside both.
+  design: |
+    The builder owns the mechanism; constraints:
+    (1) THE PROGRAM IS THE HARNESS'S. Resolve tsc from the harness's own module location (`createRequire(import.meta.url)
+    .resolve("typescript/bin/tsc")` or equivalent), never from the worktree or its node_modules link; both typecheck
+    calls (merged tree and head alone) use it. Type DECLARATIONS may still come from the worktree's node_modules as data,
+    but only when its realpath lies inside the worktree or the managed checkout's node_modules; anything else is
+    `skipped` with a named reason.
+    (2) THE ENV IS CREDENTIAL-FREE: `proofChildEnv` with a throwaway HOME (W1-T6124), or an allowlist no wider than it;
+    no GH_TOKEN, GH_APP_*, or the daemon's HOME reaches the child. The existing timeout bound stays.
+    (3) If (1) cannot hold for a reason the builder measures, run the typecheck inside the W1-T6124 proof sandbox
+    instead, with a named `skipped` when the sandbox cannot start — never an unsandboxed fallback. The PR says which.
+    (4) The result type `MergedTypecheckResult` and its arms are unchanged; async, off the daemon loop, as today.
+  acceptance:
+    - claim: "on a fixture worktree behind main whose node_modules link points at a directory holding a fake typescript/bin/tsc that writes a marker and dumps its env, mergedHeadTypechecks never writes the marker, the typecheck child it spawns runs the harness's own tsc with no GH_TOKEN or GH_APP name and a HOME that is not the daemon's, and a node_modules link resolving outside the worktree and the managed checkout reports skipped by name"
+      proof: "unit test: test/the-fix-round-merge-probe-typechecks-with-the-harness-s-own-tsc.test.ts"
+  falsifier: |
+    At origin/main 44513355a, `mergedHeadTypechecks` on the fixture links the planted node_modules, `defaultTypecheck`
+    spawns the planted tsc with the inherited env, the marker is written with GH_TOKEN in its dump, and the test fails.
+  notes: |
+    FIXTURES ONLY: the fake tsc, its marker and the node_modules link live in a gitRepo() fixture under the test's tmp
+    dir; nothing writes a real worktree, a managed checkout's node_modules or the daemon's HOME. Tests that inject
+    `ports.typecheck` keep working; the default is what changes, so at least one test runs the real default
+    (doctrine coverage-traps: when every test injects a fake, the seam's default is unreachable).

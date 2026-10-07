@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-06: Node 24 rollout readiness check (host, read-only)"
   plan_refs: [W1-T4863, W1-T4198, W1-T5883, W1-T6095]
   files: [.remudero/daemon-instances.yaml, test/site-and-console-recycle-again.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

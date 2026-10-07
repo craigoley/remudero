@@ -26,13 +26,13 @@ import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeRea
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -452,6 +452,7 @@ import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -547,6 +548,7 @@ import {
   type PlanFilingFileObservation,
   type RestPullRow,
   type RestRollupEntry,
+  fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
 import { buildMainHealthRung } from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
@@ -895,12 +897,16 @@ import {
   runlessMergesSince,
   saveMarker,
   shippedSince,
+  shippedSinceAsync,
+  ShippedReadPending,
+  ShippedReadTimeoutError,
   stampCitationsAndCommit,
   type GitLogCommit,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
   type ShippedGithub,
+  type ShippedRecord,
   defaultRetroBackoffPolicy,
   evaluateRetroBackoff,
   loadRetroAttemptRecord,
@@ -951,6 +957,8 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  ratifyPrCreateRestArgs,
+  ratifyPrProbeRestArgs,
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
@@ -1439,7 +1447,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -2094,7 +2102,7 @@ export function buildBaseReproductionProbe(
           await git(["-C", repoDir, "worktree", "prune", "--expire", "now"], timeoutMs);
         }
         await buildBaseProofDir([], repoDir, {
-          detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(args, timeoutMs!) },
+          detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(["-C", repoDir, ...args], timeoutMs!) },
         }).pendingCheckout;
         created = true;
         const linked = (deps.link ?? linkWorktreeNodeModules)(repoDir, worktreePath);
@@ -2713,6 +2721,7 @@ import {
   worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
+  worktreeRemoveAsync,
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
@@ -2772,9 +2781,12 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./lib/worktree-git.js";
 import {
   defaultGitCapture,
   defaultGitCaptureAsync,
+  worktreeGitCaptureAsync,
+  worktreePushExecAsync,
   gitPushRunBranch,
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
@@ -2894,7 +2906,7 @@ import {
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
-import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
+import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
@@ -3854,9 +3866,7 @@ export function stripRepoRootFlag(argv: string[]): string[] {
 function readWorktreeHeadReflog(worktreePath: string): HeadReflogEntry[] | undefined {
   try {
     return parseHeadReflog(
-      execFileSync("git", ["-C", worktreePath, "reflog", "show", "--format=%H%x09%gs", "HEAD"], {
-        encoding: "utf8",
-      }),
+      hostWorktreeGit(worktreePath, ["reflog", "show", "--format=%H%x09%gs", "HEAD"]),
     );
   } catch {
     // Provenance is optional evidence: an unreadable worktree reflog must suppress attribution,
@@ -3871,7 +3881,7 @@ function workerCreatedCurrentHead(
 ): boolean {
   if (!before) return false;
   try {
-    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
     const after = readWorktreeHeadReflog(worktreePath);
     return after ? headWasCreatedAfterReflogSnapshot(before, after, headSha) : false;
   } catch {
@@ -4067,7 +4077,7 @@ export type GitRunner = (args: string[], stdin?: string) => string;
 
 /** The real default: one `git -C <repoDir> …`, with `stdin` piped when the verb wants it. */
 const defaultShardGitRunner = (repoDir: string): GitRunner => (args, stdin) =>
-  execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin });
+  hostWorktreeGit(repoDir, args, { maxBuffer: 1 << 26, ...(stdin === undefined ? {} : { input: stdin }) });
 
 /**
  * List `<planRelDir>/tasks.d/*.yaml` AT `ref` and read every shard blob in ONE
@@ -4414,16 +4424,14 @@ export function fillDerivedBody(worktreePath: string): string {
   try {
     const range = "origin/main..HEAD";
     const count = parseInt(
-      execFileSync("git", ["-C", worktreePath, "rev-list", "--count", range], { encoding: "utf8" }).trim(),
+      hostWorktreeGit(worktreePath, ["rev-list", "--count", range]).trim(),
       10,
     );
     if (!count || count <= 0) return "";
     if (count === 1) {
-      return execFileSync("git", ["-C", worktreePath, "log", "-1", range, "--format=%b"], { encoding: "utf8" }).trim();
+      return hostWorktreeGit(worktreePath, ["log", "-1", range, "--format=%b"]).trim();
     }
-    const subjects = execFileSync("git", ["-C", worktreePath, "log", "--reverse", range, "--format=%s"], {
-      encoding: "utf8",
-    })
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--reverse", range, "--format=%s"])
       .trim()
       .split("\n")
       .filter((s) => s.length > 0);
@@ -4716,9 +4724,7 @@ export function runGhPrCreate(
  */
 export function lastCommitSubject(worktreePath: string): string | undefined {
   try {
-    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s"], {
-      encoding: "utf8",
-    }).trim();
+    const subject = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%s"]).trim();
     return subject.length > 0 ? subject : undefined;
   } catch (e) {
     // Corrupt marker JSON fails open to a new retained-history window; cadence parsing is separate.
@@ -4786,10 +4792,8 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   // function's own best-effort contract; only a base that is present AND zero commits behind
   // suppresses the amend.
   try {
-    execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" });
-    const ahead = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"], {
-      encoding: "utf8",
-    });
+    hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "--quiet", "origin/main"]);
+    const ahead = hostWorktreeGit(worktreePath, ["rev-list", "--count", "origin/main..HEAD"]);
     if ((parseInt(ahead.trim(), 10) || 0) === 0) return false;
   } catch {
     /* no readable origin/main => no base to be identical to; fall through and trailer */
@@ -4797,12 +4801,10 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const trailerRe = new RegExp(`^Remudero-Task:\\s*${escaped}\\s*$`, "m");
   try {
-    const message = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], {
-      encoding: "utf8",
-    });
+    const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"]);
     if (trailerRe.test(message)) return false; // already carries THIS task's trailer — left alone
     const newMessage = `${message.replace(/\n+$/, "")}\n\nRemudero-Task: ${taskId}\n`;
-    execFileSync("git", ["-C", worktreePath, "commit", "--amend", "-m", newMessage], { stdio: "pipe" });
+    hostWorktreeGit(worktreePath, ["commit", "--amend", "-m", newMessage]);
     return true;
   } catch {
     return false;
@@ -4872,10 +4874,7 @@ export function diffIsClassifiedIrreversible(diffText: string): boolean {
  */
 function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
-    const patch = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
     return diffIsClassifiedIrreversible(patch);
   } catch {
     return false;
@@ -5532,11 +5531,11 @@ export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: 
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
   try {
-    execFileSync("git", ["-C", cwd, "cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
+    hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
   } catch {
     // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
     try {
-      execFileSync("git", ["-C", cwd, "fetch", "--quiet", "origin", headSha], { stdio: "pipe", timeout: 60_000 });
+      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
     } catch {
       // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
       return [];
@@ -5916,7 +5915,7 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
 
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
-  const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
+  const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
   const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
@@ -7294,7 +7293,7 @@ class ReviewerSnapshotError extends Error {
  * borrows immutable objects from the source for speed; no GitHub read and no source checkout
  * mutation is needed. The caller's withTempDir boundary owns removal on every exit path.
  */
-function materializeReviewerSnapshot(
+export function materializeReviewerSnapshot(
   reviewRoot: string,
   sourceDir: string | undefined,
   expectedHeadSha: string,
@@ -7313,10 +7312,7 @@ function materializeReviewerSnapshot(
   let sourceHead: string;
   let sourceRepo: string;
   try {
-    [sourceRepo, sourceHead] = execFileSync("git", ["-C", sourceDir, "rev-parse", "--show-toplevel", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim().split("\n");
+    [sourceRepo, sourceHead] = hostWorktreeGitAtTopLevel(sourceDir, ["rev-parse", "--show-toplevel", "HEAD"]).trim().split("\n");
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -7337,9 +7333,7 @@ function materializeReviewerSnapshot(
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
-    execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    hostWorktreeGit(cwd, ["checkout", "--quiet", "--detach", "--force", expectedHeadSha]);
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -7350,10 +7344,7 @@ function materializeReviewerSnapshot(
 
   let materializedHead: string;
   try {
-    materializedHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    materializedHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
   } catch {
     throw new ReviewerSnapshotError("materialization", "unreadable", "semantic reviewer checkout HEAD is unreadable");
   }
@@ -7383,14 +7374,8 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
   let actualHead: string;
   let status: string;
   try {
-    actualHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    actualHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]);
   } catch {
     throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
   }
@@ -9247,18 +9232,9 @@ export function resolveClearedEscalation(
  */
 export function captureWorktreeSnapshotViaGit(worktreePath: string): WorktreeSnapshot | undefined {
   try {
-    const status = execFileSync("git", ["-C", worktreePath, "status", "--porcelain=v1", "-z", "--no-renames"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 26,
-    });
-    const diff = execFileSync("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary", "HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 26,
-    });
-    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 26,
-    })
+    const status = hostWorktreeGit(worktreePath, ["status", "--porcelain=v1", "-z", "--no-renames"], { maxBuffer: 1 << 26 });
+    const diff = hostWorktreeGit(worktreePath, ["diff", "--no-ext-diff", "--binary", "HEAD"], { maxBuffer: 1 << 26 });
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], { maxBuffer: 1 << 26 })
       .split("\0")
       .filter(Boolean)
       .sort();
@@ -10462,15 +10438,13 @@ export type ReadFixRoundCommits = (worktreePath: string, sinceSha: string) => Fi
  * invoke this with a real, previously-observed head sha.
  */
 export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string): FixRoundCommit[] {
-  const shas = execFileSync("git", ["-C", worktreePath, "rev-list", "--reverse", `${sinceSha}..HEAD`], { encoding: "utf8" })
+  const shas = hostWorktreeGit(worktreePath, ["rev-list", "--reverse", `${sinceSha}..HEAD`])
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
   return shas.map((sha) => {
-    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s", sha], { encoding: "utf8" }).trim();
-    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff-tree", "--no-commit-id", "--name-only", "-r", sha], {
-      encoding: "utf8",
-    })
+    const subject = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%s", sha]).trim();
+    const changedFiles = hostWorktreeGit(worktreePath, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha])
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean).length;
@@ -10509,10 +10483,11 @@ export function runNpmScriptViaSpawn(script: string, cwd: string): { status: num
  * --hard` / `git checkout -- .`, which would also destroy working-tree content this function
  * never staged). The commit's own refusal is always rethrown unchanged.
  */
-export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string; git?: (cwd: string, args: string[]) => string }): { sha: string; changed: boolean } {
+  const git = opts.git ?? hostWorktreeGit;
   let preTree: string | null = null;
   try {
-    preTree = execFileSync("git", ["-C", opts.cwd, "write-tree"], { encoding: "utf8" }).trim();
+    preTree = git(opts.cwd, ["write-tree"]).trim();
   } catch (e) {
     // No pre-add index snapshot to roll back to (e.g. an unmerged index) — record it; a refused
     // commit below can then only log-and-skip its rollback, not restore. See (v) below.
@@ -10520,15 +10495,15 @@ export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string
       `commitGeneratorOutputViaGit: snapshot.error ${String((e as Error)?.message ?? e)}\n`,
     );
   }
-  execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
-  const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
+  git(opts.cwd, ["add", "-A"]);
+  const staged = git(opts.cwd, ["status", "--porcelain=v1"]);
   if (staged.trim().length === 0) return { sha: "", changed: false };
   try {
-    execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+    git(opts.cwd, ["commit", "-m", opts.message]);
   } catch (commitError) {
     if (preTree !== null) {
       try {
-        execFileSync("git", ["-C", opts.cwd, "read-tree", preTree], { stdio: "pipe" });
+        git(opts.cwd, ["read-tree", preTree]);
       } catch (rollbackError) {
         // (v): a rollback that itself fails must say so, not fail silently — but the ORIGINAL
         // commit error is still what gets rethrown below, never this one.
@@ -10540,7 +10515,7 @@ export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string
     // (iii): the commit's own refusal text must still reach the caller, unmodified.
     throw commitError;
   }
-  const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const sha = git(opts.cwd, ["rev-parse", "HEAD"]).trim();
   return { sha, changed: true };
 }
 
@@ -11115,7 +11090,7 @@ export async function runFixRung(opts: {
         taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
         owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
         ledgerLinesNow: (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), log: deps.log,
-        gitOps: buildProofAmendmentGitOps(execFileSync), amendmentKind: "scope_amendment",
+        gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
       }, deps.scopeAmendmentPortsIo);
       outcome = requestScopeAmendment({ taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
         headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined }, ports);
@@ -12267,13 +12242,6 @@ export async function runFixRung(opts: {
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
         : []),
-      // W1-T3079: POINT, DO NOT INJECT (design note iii) — spliced onto the rendered prompt here
-      // rather than inside `renderFixPrompt` itself (see the "Worker transcript archive" section
-      // above `runTask` for why). Names this task's predecessor transcript path(s), newest
-      // first, EXCLUDING this rung's own run; empty on a task's first fix rung.
-      ...predecessorTranscriptPromptLines(
-        predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
-      ),
       // W1-T4207: the previous strike's refused commit, named from its own `fix.commit_refused` row.
       ...lastCommitRefusalPromptLines(
         (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
@@ -12347,7 +12315,7 @@ export async function runFixRung(opts: {
     // W1-T4458 (ii): this round's own starting head; whatever lands ahead of it is this round's work.
     let roundStartSha: string | undefined;
     try {
-      roundStartSha = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      roundStartSha = hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
     } catch {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
@@ -12361,11 +12329,13 @@ export async function runFixRung(opts: {
     let spawnElapsedMs: number | undefined;
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
-      const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: fixReceipt.spawn }, fixArgs, {
+      const spawnOutcome = await withPredecessorTranscriptCopies(fixArgs, {
+        root: opts.config.root, taskId: opts.taskId, excludeRunId: opts.runId,
+      }, (args) => spawnFixWorkerBounded({ ...deps, spawn: fixReceipt.spawn }, args, {
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
-      });
+      }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
@@ -12572,9 +12542,7 @@ export async function runFixRung(opts: {
     // fail-open discipline every other optional read in this rung already takes.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
-      expectedHeadShaForPush ??= execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
-        encoding: "utf8",
-      }).trim();
+      expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
     } catch {
       // best-effort — see comment above.
     }
@@ -12742,8 +12710,8 @@ export async function runFixRung(opts: {
       let verified = false;
       try {
         const mainSha = await (deps.readMainTip ?? (() => {
-          execFileSync("git", ["-C", opts.worktreePath, "fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
-          return execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+          hostWorktreeGit(opts.worktreePath, ["fetch", "--no-tags", "origin", "main"]);
+          return hostWorktreeGit(opts.worktreePath, ["rev-parse", "origin/main"]).trim();
         }))();
         const probes: BaseProbeResult = files.length > BASE_REPRODUCTION_MAX_FILES ? Object.assign([], { reason: "too many test files" }) : files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
           buildBaseReproductionProbe(opts.config, opts.worktreePath, deps.ledgerPath, deps.log))(
@@ -12815,8 +12783,8 @@ export async function runFixRung(opts: {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
       try {
-        const changed = workerChangedPaths(execFileSync("git", ["-C", opts.worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL], { encoding: "utf8" }));
-        if (roundStartSha) changed.push(...execFileSync("git", ["-C", opts.worktreePath, "diff", "--name-only", "-z", roundStartSha, "HEAD"], { encoding: "utf8" }).split("\0").filter(Boolean));
+        const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
+        if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
@@ -12900,8 +12868,7 @@ export async function runFixRung(opts: {
         priorHeadSha,
       },
       {
-        readProducedHeadSha: () =>
-          execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readProducedHeadSha: () => hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim(),
         readHeadSha: deps.readHeadShaForProvenance ?? readHeadShaRest,
         log: deps.log,
       },
@@ -13497,23 +13464,23 @@ export async function runFixRung(opts: {
  * W1-T3434 (coverage-ratchet): the two LOCAL git operations `requestProofAmendment`'s write ports
  * need inside its own throwaway worktree — never a GitHub write (those stay guarded by
  * `assertLiveWriteAllowed` at their own call sites: `createPr`/`updateBranch`, above, in
- * `runFixRung`). Extracted to its own top-level function, with `execFileSyncFn` APPENDED LAST and
- * defaulted to the real `execFileSync` — the same injection shape this file's own
- * `buildWipeTestCadenceDaemonHooks`/`resolveAutoMergeState` already use — so a test can inject a
- * fake and assert the exact recorded `git add`/`git commit` invocation, rather than reaching for a
+ * `runFixRung`). Extracted to its own top-level function, with its `git` runner APPENDED LAST and
+ * defaulted to the hardened `hostWorktreeGit` leaf (W1-T6121: no worktree hook or pointer runs) —
+ * the injection shape `buildWipeTestCadenceDaemonHooks`/`resolveAutoMergeState` already use — so a
+ * test can inject a fake and assert the exact recorded `git add`/`git commit` call, rather than a
  * `diff-cov:` directive a process-boundary spawn cannot use.
  */
-export function buildProofAmendmentGitOps(execFileSyncFn: typeof execFileSync = execFileSync): {
+export function buildProofAmendmentGitOps(git: (worktreePath: string, args: string[]) => string = hostWorktreeGit): {
   gitAdd: (worktreePath: string, relPath: string) => void;
   gitCommit: (worktreePath: string, message: string) => string;
 } {
   return {
     gitAdd: (worktreePath, relPath) => {
-      execFileSyncFn("git", ["-C", worktreePath, "add", relPath]);
+      git(worktreePath, ["add", relPath]);
     },
     gitCommit: (worktreePath, message) => {
-      execFileSyncFn("git", ["-C", worktreePath, "commit", "-m", message]);
-      return execFileSyncFn("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      git(worktreePath, ["commit", "-m", message]);
+      return git(worktreePath, ["rev-parse", "HEAD"]).trim();
     },
   };
 }
@@ -13711,7 +13678,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
   proofs: readonly string[];
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
-    execFileSync("git", ["-C", input.worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    hostWorktreeGit(input.worktreePath, args).trim();
   let changedFiles: string[];
   let mergeBase: string;
   try {
@@ -13814,7 +13781,7 @@ export function dispatchProofAmendmentWrite(
     getLedgerLinesNow: () => readonly Record<string, unknown>[];
   },
   io: {
-    execFileSyncFn?: typeof execFileSync;
+    gitFn?: (worktreePath: string, args: string[]) => string;
     findShardFn?: typeof findTaskShard;
     worktreeAddFn?: typeof worktreeAdd;
     worktreeRemoveFn?: typeof worktreeRemove;
@@ -13831,7 +13798,7 @@ export function dispatchProofAmendmentWrite(
   } = {},
 ): void {
   const {
-    execFileSyncFn,
+    gitFn,
     parseProofAmendmentProposalFn = parseProofAmendmentProposal,
     buildBaseProofDirFn = buildBaseProofDir,
     ...portsIo
@@ -13850,7 +13817,7 @@ export function dispatchProofAmendmentWrite(
       proposal.map((p) => ({ proof: p.newProof })),
       headCheckoutDir,
     );
-    const gitOps = buildProofAmendmentGitOps(execFileSyncFn);
+    const gitOps = buildProofAmendmentGitOps(gitFn);
     const writePorts = buildProofAmendmentWritePorts(
       {
         taskId: params.taskId,
@@ -14532,9 +14499,7 @@ export function harvestFollowupsFromReport(
 /** Commits on the worktree's HEAD ahead of `base` (0 ⇒ the worker committed nothing). */
 function commitsAhead(worktreePath: string, base: string): number {
   try {
-    const out = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", `${base}..HEAD`], {
-      encoding: "utf8",
-    });
+    const out = hostWorktreeGit(worktreePath, ["rev-list", "--count", `${base}..HEAD`]);
     return parseInt(out.trim(), 10) || 0;
   } catch {
     return 0; // no base ref / detached / unreadable ⇒ treat as "nothing to PR"
@@ -15398,6 +15363,12 @@ export function probeVerdictKey(inputs: ProbeKeyInputs): string {
   return hash.digest("hex");
 }
 
+function hookFilesUnder(dir: string, rel = ""): string[] {
+  return readdirSync(join(dir, rel), { withFileTypes: true })
+    .flatMap((entry) => (entry.isDirectory() ? hookFilesUnder(dir, join(rel, entry.name)) : [join(rel, entry.name)]))
+    .sort();
+}
+
 /** Read the probe key's inputs from disk. The worker settings and every file in the hooks dir are
  *  read by CONTENT; the run's own id is normalised out of the settings so a per-run path is not a
  *  policy change. An absent image stamp (off-container) is the literal `absent`; any other read
@@ -15418,7 +15389,7 @@ export function readProbeKeyInputs(src: {
     imageBuildSha: existsSync(src.imageBuildShaPath) ? readFileSync(src.imageBuildShaPath, "utf8").trim() : "absent",
     harnessRevision: src.harnessRevision,
     workerSettings: digest(readFileSync(src.settingsFile, "utf8").split(src.runId).join("<run>")),
-    hooks: readdirSync(src.hooksDir).sort().map((name) => `${name}:${digest(readFileSync(join(src.hooksDir, name)))}`).join(","),
+    hooks: hookFilesUnder(src.hooksDir).map((rel) => `${rel}:${digest(readFileSync(join(src.hooksDir, rel)))}`).join(","),
     cliVersion: src.cliVersion ?? "unobserved",
     provider: src.provider,
     claudeBin: src.claudeBin,
@@ -16057,6 +16028,61 @@ export function predecessorTranscriptPaths(
     .filter((t) => t.runId !== opts.excludeRunId)
     .slice(0, limit)
     .map((t) => t.path);
+}
+
+// W1-T5682: worktree-local TMPDIR copies stay readable even when Codex substitutes its private TMPDIR.
+export async function withPredecessorTranscriptCopies<T>(
+  args: SpawnWorkerArgs,
+  opts: { root: string; taskId: string; excludeRunId?: string; limit?: number },
+  spawn: (args: SpawnWorkerArgs) => Promise<T>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<T> {
+  const originals = predecessorTranscriptPaths(opts.root, opts.taskId, opts);
+  if (originals.length === 0) return spawn(args);
+  let scratch: string | undefined;
+  const copies: string[] = [];
+  try {
+    const parent = join(args.cwd, "state");
+    mkdirSync(parent, { recursive: true });
+    const physicalParent = realpathSync(parent);
+    if (!physicalParent.startsWith(`${realpathSync(args.cwd)}${sep}`)) {
+      throw new Error("predecessor scratch resolves outside the assigned worktree");
+    }
+    scratch = mkdtempSync(join(physicalParent, "rmd-predecessor-transcripts-"));
+    for (const original of originals) {
+      try {
+        const fd = openSync(original, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        try {
+          if (!fstatSync(fd).isFile()) throw new Error("predecessor transcript is not a regular file");
+          const buffer = Buffer.alloc(TRANSCRIPT_EXCERPT_CAP);
+          let bytes = 0;
+          while (bytes < buffer.length) {
+            const read = readSync(fd, buffer, bytes, buffer.length - bytes, bytes);
+            if (read === 0) break;
+            bytes += read;
+          }
+          const copy = join(scratch, basename(original));
+          writeFileSync(copy, buffer.subarray(0, bytes), { flag: "wx", mode: 0o600 });
+          copies.push(copy);
+        } finally {
+          closeSync(fd);
+        }
+      } catch (error) {
+        log("transcript.copy_error", { task_id: opts.taskId, path: original, reason: String(error) });
+      }
+    }
+  } catch (error) {
+    log("transcript.copy_error", { task_id: opts.taskId, reason: String(error) });
+  }
+  try {
+    return await spawn(copies.length === 0 ? args : {
+      ...args,
+      env: { ...args.env, TMPDIR: scratch! },
+      prompt: [args.prompt, ...predecessorTranscriptPromptLines(copies)].join("\n"),
+    });
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -16916,7 +16942,7 @@ async function deferOpenToSiblingPr(
     return undefined;
   }
   if (sibling.state === "none") return undefined;
-  const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   log("pr.open_deferred_to_existing", {
     existing_pr_number: sibling.number,
     existing_pr_url: sibling.url,
@@ -17039,8 +17065,8 @@ export async function pushFixRound(
       `which is the tree CI builds — merge origin/main into the branch and fix the errors:\n${merged.text}`;
     throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
   }
-  const capture = deps.capture ?? defaultGitCaptureAsync;
-  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
+  const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
+  const push = deps.exec ?? worktreePushExecAsync(wt);
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
@@ -17055,8 +17081,8 @@ export async function pushFixRound(
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
-    const remote = await execFilePromise("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
-      .then(({ stdout }) => stdout.split(/\s/)[0], () => undefined);
+    const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
+      .then((stdout) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
@@ -17094,7 +17120,7 @@ const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
 
 const realCoverageChangedFiles = (wt: string): string[] =>
-  execFileSync("git", ["-C", wt, ...MERGE_BASE_DIFF_ARGS], { encoding: "utf8" }).split("\n").map((f) => f.trim()).filter(Boolean);
+  hostWorktreeGit(wt, MERGE_BASE_DIFF_ARGS).split("\n").map((f) => f.trim()).filter(Boolean);
 
 /**
  * W1-T5074: ASYNC on purpose. `runTask` runs inside the daemon process, so a `spawnSync` here froze every
@@ -17103,7 +17129,34 @@ const realCoverageChangedFiles = (wt: string): string[] =>
  * timeout/spawn-error mapping are the ones `spawnSync` gave.
  */
 const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
-const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
+const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
+const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
+      resolve(error ? String(stderr).trim().split("\n")[0] || error.message : undefined));
+  });
+const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
+  const home = makeTempDir("proof-home");
+  try {
+    const env: NodeJS.ProcessEnv = { ...proofChildEnv(home), TMPDIR: "/tmp", NODE_V8_COVERAGE: "" };
+    let sandbox: string[];
+    try {
+      sandbox = proofSandboxArgv({ cwd: wt, home });
+    } catch (error) {
+      return { status: null, output: "", timedOut: false, spawnError: coverageSandboxText(error) };
+    }
+    const startFailure = await coverageSandboxStart(status.binary, sandbox, wt, env);
+    if (startFailure !== undefined) return coverageSandboxRefusal(startFailure);
+    const argv = [...sandbox, process.execPath, join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites];
+    return await spawnCoverageChild(status.binary, argv, wt, env, timeoutMs, maxOutputBytes);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+};
+const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -17120,8 +17173,9 @@ const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOut
     // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
     // the environment synchronously, so clearing it around the call is enough.
     const child = withoutNodeTestContextEnv(() =>
-      spawn(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
+      spawn(file, args, {
         cwd: wt,
+        env,
         stdio: ["ignore", "pipe", "pipe"],
       }),
     );
@@ -17283,7 +17337,7 @@ export async function repairCensusRefusedPush(input: {
   recheck?: () => Promise<CensusPushRefusal | undefined>;
 }): Promise<CensusPushRungOutcome> {
   const { task, worktreePath: cwd, log } = input;
-  const head = () => execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const head = () => hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
   const startHead = head();
   const offered = new Set(input.refusal.offeredBaselines);
   const { harnessCommits, cashTools } = fixRoundGitOwnership(input.config);
@@ -17343,7 +17397,7 @@ export async function repairCensusRefusedPush(input: {
       log,
       say: input.say,
     });
-    const baselineFiles = execFileSync("git", ["-C", cwd, "diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES], { encoding: "utf8" })
+    const baselineFiles = hostWorktreeGit(cwd, ["diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES])
       .split("\n")
       .filter(Boolean);
     log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
@@ -18575,7 +18629,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const dispatchDiagnose = async (): Promise<{ text: string }> => {
       say("diagnose worker (two strikes — evidence-only, before any third patch)");
       const d = account(
-        await spawn({
+        await withPredecessorTranscriptCopies({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
@@ -18590,17 +18644,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          // W1-T3079: POINT, DO NOT INJECT (design note iii) — names this task's predecessor
-          // transcript path(s) from an EARLIER run (never this run's own just-archived
-          // `implement` transcript, excluded by `runId`), newest first. Empty on a task's first
-          // run: the diagnose prompt is byte-identical to before this task in that case.
-          prompt: [
-            renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
-            ...predecessorTranscriptPromptLines(
-              predecessorTranscriptPaths(config.root, taskId, { excludeRunId: runId }),
-            ),
-          ].join("\n"),
-        }),
+          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+        }, { root: config.root, taskId, excludeRunId: runId }, spawn, log),
       );
       log("diagnose.worker_done", {
         session_id: d.sessionId,
@@ -18685,10 +18730,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // verdict branch that may remove the worktree. The source-size pilot is advisory: it can defer
     // or file a bounded decomposition follow-up, but never blocks the feature verdict.
     try {
-      const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+      const expectedHead = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
       const gatePostureDeps = buildSourceSizeGatePostureRuntime(repoRoot, worktreePath, settingsFile, spawn, log, say);
       // Keep the wrapper call in the worker-return window so the worktree and summary are still
       // present; its injected consumer above remains the existing source-size writer.
@@ -19025,12 +19067,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let branchOnOrigin = false;
     let probeFailure: RemotePresenceProbeFailure | undefined;
     try {
-      execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
-        // W1-T2267: was `stdio: "ignore"`, which discarded the probe's own stderr — the exact
-        // evidence `fallbackPushCause` needs to tell an unreadable remote from a genuinely
-        // absent ref. stdout/stdin stay ignored; only stderr is captured.
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      // W1-T2267: was `stdio: "ignore"`, which discarded the probe's own stderr — the exact
+      // evidence `fallbackPushCause` needs to tell an unreadable remote from a genuinely
+      // absent ref. The leaf pipes it, so a failed probe's error carries it.
+      hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch]);
       branchOnOrigin = true;
     } catch (e) {
       branchOnOrigin = false;
@@ -19101,9 +19141,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[] | undefined;
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, ...MERGE_BASE_DIFF_ARGS], {
-          encoding: "utf8",
-        })
+        diffFiles = hostWorktreeGit(worktreePath, MERGE_BASE_DIFF_ARGS)
           .split("\n")
           .map((f) => f.trim())
           .filter(Boolean);
@@ -19219,7 +19257,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
-        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
         const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
@@ -19278,8 +19316,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     recordHeadProviderAfterPush(
       { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
       {
-        readProducedHeadSha: () =>
-          execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        readProducedHeadSha: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
         readHeadSha: opts.readHeadShaForProvenance ?? readHeadShaRest,
         log,
       },
@@ -20229,22 +20266,15 @@ export function buildBaseProofDir(
     copyFile?: (src: string, dest: string) => void;
   } = {},
 ): BaseProofDir {
-  const detachedArgs = (repoDir: string, path: string, revision: string) =>
-    ["-C", repoDir, "worktree", "add", "--detach", path, revision];
+  const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
   if (deps.detachedAsync) {
     const { path, revision, run } = deps.detachedAsync;
     return {
       baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
-      pendingCheckout: run(detachedArgs(headCheckoutDir, path, revision)),
+      pendingCheckout: run(detachedArgs(path, revision)),
     };
   }
-  const mergeBase =
-    deps.mergeBase ??
-    ((cwd: string) =>
-      execFileSync("git", ["-C", cwd, "merge-base", "origin/main", "HEAD"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim());
+  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"]).trim());
   const showBlob =
     deps.showBlob ??
     ((cwd: string, rev: string, rel: string) =>
@@ -20255,20 +20285,14 @@ export function buildBaseProofDir(
       // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
       // Node `code`) was MEASURED with stderr already piped, and is locked by
       // test/base-blob-read-failure.test.ts Group 0.
-      execFileSync("git", ["-C", cwd, "show", `${rev}:${rel}`], {
-        encoding: "utf8",
-        maxBuffer: 1 << 26,
-        stdio: ["ignore", "pipe", "pipe"],
-      }));
+      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26 }));
   const addWorktree =
     deps.addWorktree ??
     ((repoDir: string, worktreePath: string, revision: string) =>
       // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
       // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
       // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      execFileSync("git", detachedArgs(repoDir, worktreePath, revision), {
-        stdio: ["ignore", "pipe", "pipe"],
-      }));
+      hostWorktreeGit(repoDir, detachedArgs(worktreePath, revision)));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
   // (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
   // seam's correctness, and the two halves are asymmetric:
@@ -20294,11 +20318,7 @@ export function buildBaseProofDir(
   const changedTestFiles =
     deps.changedTestFiles ??
     ((headDir: string, base: string) =>
-      execFileSync(
-        "git",
-        ["-C", headDir, "diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      )
+      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"])
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean));
@@ -26108,6 +26128,29 @@ export function gitRunAdapter(
   };
 }
 
+export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
+  const log = (step: string, extra: Record<string, unknown>) => {
+    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
+  };
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    try {
+      return hostWorktreeGit(at, args, { ...opts, log });
+    } catch (error) {
+      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
+    }
+  }
+}
+
+export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
+  try {
+    return { status: 0, stdout: hostWorktreeGit(worktreePath, args), stderr: "" };
+  } catch (error) {
+    if (error instanceof WorktreePointerRefusedError) throw error;
+    const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown };
+    return { status: typeof failed.status === "number" ? failed.status : null, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? "") };
+  }
+}
+
 /**
  * The real cross-host triage claim reserver, bound to ONE worktree (W1-T1132).
  *
@@ -27752,7 +27795,7 @@ export function creditedMergedIdsFrom(statusByTaskId: Map<string, StatusProjecti
 export function lintScopeMergeBase(
   checkoutRoot: string,
   baseRef: string,
-  runGit: (args: string[]) => string = (args) => execFileSync("git", ["-C", checkoutRoot, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  runGit: (args: string[]) => string = (args) => hostWorktreeGit(checkoutRoot, args),
 ): string {
   try {
     return runGit(["merge-base", baseRef, "HEAD"]).trim();
@@ -27774,8 +27817,7 @@ export function lintScopeMergeBase(
  */
 export async function lintPlanForReview(
   headCheckoutDir: string | undefined,
-  git: (cwd: string, args: string[]) => string = (cwd, args) =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 }),
+  git: (cwd: string, args: string[]) => string = (cwd, args) => hostWorktreeGit(cwd, args, { timeout: 120_000 }),
   lint: typeof lintPlanCommand = lintPlanCommand,
 ): Promise<PlanLintOutcome> {
   if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
@@ -27903,7 +27945,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        execFileSync("git", ["-C", checkoutRoot, "cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
+        hostWorktreeGit(checkoutRoot, ["cat-file", "-e", `${scopeBase}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -27922,9 +27964,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // matches exactly what `loadPlan` would see from a real checkout at `baseRef`.
     const tmpDir = makeTempDir("lint-plan-base");
     try {
-      const oldRaw = execFileSync("git", ["show", `${scopeBase}:${relPath}`], {
-        cwd: checkoutRoot,
-        encoding: "utf8",
+      const oldRaw = hostWorktreeGit(checkoutRoot, ["show", `${scopeBase}:${relPath}`], {
         // maxBuffer: the SAME blob syncPlanFromOrigin reads at :576, so it overflows Node's 1 MiB
         // default at the same moment — fixing one site alone would just move the failure to CI.
         maxBuffer: 1 << 26,
@@ -28006,8 +28046,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
       statusFlipCarvedIds = [...statusFlipCarve].sort();
-      const diffText = execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
-        encoding: "utf8",
+      const diffText = hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", "--unified=0", `${scopeBase}...HEAD`, "--", "src"], {
         maxBuffer: 64 * 1024 * 1024,
       });
       addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
@@ -28204,10 +28243,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       if (planOnlyFilingDiff === undefined) {
         try {
           planOnlyFilingDiff = planOnlyDiff(
-            execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", `${scopeBase}...HEAD`], {
-              encoding: "utf8",
-              maxBuffer: 1 << 26,
-            }),
+            hostWorktreeGit(checkoutRoot, ["diff", "--no-ext-diff", `${scopeBase}...HEAD`], { maxBuffer: 1 << 26 }),
           );
         } catch (error) {
           // NOT A BARE CATCH, and not only to satisfy the census: an unreadable diff here silently
@@ -28956,6 +28992,23 @@ export type PreflightCommandDeps = PreflightDeps & {
   coverageLockDiscriminator?: string;
 };
 
+/**
+ * Where `preflightCommand` writes its summary, or `undefined` for "write none" — the W1-T455
+ * containment rule as a pure function: an explicit `--summary-file` always wins; otherwise an
+ * injected `deps.spawn` (a test) writes nothing, and only a non-injected run falls back to
+ * `preflightSummaryPath(root)`. Pure so the default-path arm is provable without running the
+ * real gates that a non-injected `preflightCommand` would run.
+ */
+export function preflightSummaryTarget(
+  rest: string[],
+  deps: Pick<PreflightCommandDeps, "spawn">,
+  root: string = repoRoot,
+): string | undefined {
+  const explicitSummaryFile = flagValue(rest, "--summary-file");
+  if (explicitSummaryFile !== undefined) return explicitSummaryFile;
+  return deps.spawn !== undefined ? undefined : preflightSummaryPath(root);
+}
+
 export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, [...PREFLIGHT_VALUE_FLAGS], [...PREFLIGHT_BOOL_FLAGS]);
   if (badArg) {
@@ -29108,9 +29161,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   // named path, never the default the orchestrator trusts. Only a real, non-injected spawn may
   // fall back to the default: that is the one call shape the orchestrator's own verdict comes
   // from.
-  const explicitSummaryFile = flagValue(rest, "--summary-file");
-  const injectedSpawn = deps.spawn !== undefined;
-  const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
+  const summaryPath = preflightSummaryTarget(rest, deps);
   const summary = buildPreflightSummary({
     steps,
     finishedAt: new Date().toISOString(),
@@ -29188,9 +29239,14 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
  * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
-function retroShippedGithubGateway(): ShippedGithub {
-  const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = buildBatchedGithub(owner, repo);
+export function retroShippedGithubGateway(
+  opts: { ownerRepo?: { owner: string; repo: string }; exec?: (args: string[]) => string; commitCwd?: string } = {},
+): ShippedGithub {
+  const { owner, repo } = opts.ownerRepo ?? resolveOwnerRepo();
+  // `opts` is a test seam: production passes none, so `exec` is the gateway's own `gh` and the commit index reads
+  // the process cwd, exactly as the bare construction did.
+  const commitTrailerIndex = buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: opts.commitCwd });
+  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex });
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
@@ -29207,6 +29263,104 @@ function retroShippedGithubGateway(): ShippedGithub {
           maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** BACKSTOP per awaited `gh` page of the retro's shipped-since walk: the sync gateway's own per-call bound, so it
+ *  fires only on a hung `gh`, never on a slow but healthy walk (the cadence wait before a call is not counted). */
+export const RETRO_SHIPPED_PAGE_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
+
+/** A pacer that never waits: the replayed gateway below reads memory, and the real calls are paced by `ghTextAsync`. */
+const REPLAY_PACER: GhCallPacer = { wait() {}, recordResult() {} };
+
+/**
+ * {@link retroShippedGithubGateway} with every read awaited, for the daemon's trigger. The SAME gateway code answers:
+ * it runs over a replay of `gh` and `git` answers read earlier, and a read not yet held throws
+ * {@link ShippedReadPending} so {@link shippedSinceAsync} awaits it and walks again. So the reads are the sync
+ * gateway's own, in its order and only when it would make them: a missed board page loads its whole half with
+ * `fetchBoardPrsRestAsync` (each page through `ghTextAsync`, SIGTERM then SIGKILL past `pageTimeoutMs`), and a
+ * missed commit-trailer `git` read runs bounded. A failed read is replayed as the failure, where the sync read
+ * failed; a read killed at its bound rejects with {@link ShippedReadTimeoutError} instead, naming it.
+ */
+export async function retroShippedGithubGatewayAsync(
+  opts: {
+    ownerRepo?: { owner: string; repo: string };
+    execAsync?: GhAsyncExecutor;
+    pageTimeoutMs?: number;
+    commitCwd?: string;
+    commitTimeoutMs?: number;
+  } = {},
+): Promise<ShippedGithub> {
+  const { owner, repo } = opts.ownerRepo ?? (await resolveOwnerRepoAtAsync(repoRoot));
+  const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
+  const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
+  const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
+  // boundGitCall aborts the signal it hands the runner exactly when the bound fires, so an aborted one names a timeout.
+  let commitSignal: AbortSignal | undefined;
+  const boundedGit: AsyncGitRunner = (args, signal, env) => ((commitSignal = signal), commitGit(args, signal, env));
+  const answers = new Map<string, { out: string } | { error: unknown }>();
+  const keyOf = (tool: "gh" | "git", args: string[]): string => `${tool}\u0000${args.join("\u0000")}`;
+  let missed: { tool: "gh" | "git"; args: string[] } | undefined;
+  const replay = (tool: "gh" | "git", args: string[]): string => {
+    const answer = answers.get(keyOf(tool, args));
+    if (answer === undefined) {
+      missed ??= { tool, args };
+      // A gh miss reads as an empty page, so the walk ends without a logged "fetch failed"; the pass is discarded.
+      if (tool === "gh") return "[]";
+      throw new Error(`git ${args.join(" ")} is not read yet`);
+    }
+    if ("error" in answer) throw answer.error;
+    return answer.out;
+  };
+  const ghPage = async (args: string[]): Promise<string> => {
+    try {
+      const out = await ghTextAsync(args, { timeout: pageTimeoutMs, maxBuffer: 1 << 26 }, opts.execAsync);
+      answers.set(keyOf("gh", args), { out });
+      return out;
+    } catch (e) {
+      const err = e as { killed?: boolean; code?: unknown; stderr?: unknown; message?: string };
+      if (err.killed) throw new ShippedReadTimeoutError(`retro shipped-since read: gh ${args.slice(0, 2).join(" ")} timed out after ${pageTimeoutMs}ms and was killed`);
+      // The sync gateway classifies `status` and `stderr`; an async exec carries the exit status as `code`.
+      const failure = Object.assign(new Error(err.message ?? String(e)), { status: typeof err.code === "number" ? err.code : null, stderr: String(err.stderr ?? "") });
+      answers.set(keyOf("gh", args), { error: failure });
+      throw failure;
+    }
+  };
+  const load = async (miss: { tool: "gh" | "git"; args: string[] }): Promise<void> => {
+    const before = answers.size;
+    try {
+      if (miss.tool === "gh") {
+        const half = miss.args[1]?.includes("state=open&") ? "open" : "closed";
+        await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), undefined, half);
+      } else {
+        answers.set(keyOf("git", miss.args), { out: await boundGitCall(boundedGit, miss.args, commitTimeoutMs) });
+      }
+    } catch (e) {
+      if (e instanceof ShippedReadTimeoutError) throw e;
+      if (commitSignal?.aborted) throw new ShippedReadTimeoutError(`retro shipped-since read: ${(e as Error).message}`);
+      // Held, not erased: the replay throws it where the sync read threw. A failed gh page is already held.
+      if (miss.tool === "git") answers.set(keyOf("git", miss.args), { error: e });
+    }
+    if (answers.size === before) throw new Error(`retro shipped-since read made no progress on ${miss.tool} ${miss.args.join(" ")}`);
+  };
+  let replayed: GitHub | undefined;
+  const read = <T>(query: (github: GitHub) => T): T => {
+    replayed ??= buildBatchedGithub(owner, repo, {
+      exec: (args) => replay("gh", args),
+      commitTrailerIndex: buildCommitTrailerIndex({ slug: `${owner}/${repo}`, exec: (args) => replay("git", args) }),
+      pacer: REPLAY_PACER,
+    });
+    const answer = query(replayed);
+    const miss = missed;
+    if (miss === undefined) return answer;
+    // The pass read a placeholder, so it is discarded with the gateway that read it, and walked again once loaded.
+    missed = undefined;
+    replayed = undefined;
+    throw new ShippedReadPending(() => load(miss));
+  };
+  return {
+    findMergedByTrailer: (taskId) => read((github) => github.findMergedByTrailer(taskId)),
+    headRefName: (prUrl) => read((github) => github.headRefName(prUrl)),
   };
 }
 
@@ -29250,7 +29404,8 @@ export async function retroTriggerCheckAsync(
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
   const ledgerNdjson = await (deps.readLedgerNdjson ?? readRetroTriggerLedgerAsync)(config);
-  const github = deps.github ?? retroShippedGithubGateway();
+  // Constructed where the sync check constructs its gateway, so an unresolvable origin still fails the check here.
+  const github = deps.github ?? (await retroShippedGithubGatewayAsync());
   let read: MergedCommitsRead;
   try {
     read = { commits: await (deps.readMergedCommits ?? (() => readRetroMergedCommitsAsync()))() };
@@ -29469,7 +29624,7 @@ export function retroTriggerCheck(
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
   const pre = retroTriggerPrelude(now, config, deps, readRetroTriggerLedger(config));
-  return "decided" in pre ? pre.decided : retroTriggerConclude(now, pre, pre.github.unavailable?.());
+  return "decided" in pre ? pre.decided : retroTriggerConcludeSync(now, pre, pre.github.unavailable?.());
 }
 
 /** A torn marker is never replayed as "no marker" — fail closed exactly like `retroCommand`'s own guard. */
@@ -29566,17 +29721,42 @@ function retroTriggerPrelude(
   return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github: deps.github ?? retroShippedGithubGateway() };
 }
 
-/** The GitHub-backed rest of {@link retroTriggerCheck}, given the probe's answer (`undefined` when GitHub is usable). */
-function retroTriggerConclude(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): RetroTriggerDecision | undefined {
-  const { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github } = ctx;
-  if (githubUnavailable) {
-    reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
+/** The GitHub-backed rest of {@link retroTriggerCheckAsync}, given the probe's answer (`undefined` when GitHub is usable):
+ *  {@link retroTriggerConcludeSync} with `shippedSince` awaited. A read killed at its bound declines NAMING it. */
+async function retroTriggerConclude(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): Promise<RetroTriggerDecision | undefined> {
+  if (retroTriggerProbeDeclined(now, ctx, githubUnavailable)) return undefined;
+  let shipped: ShippedRecord[];
+  try {
+    ({ shipped } = await shippedSinceAsync(ctx.runs, ctx.marker?.ts, ctx.github));
+  } catch (error) {
+    if (!(error instanceof ShippedReadTimeoutError)) throw error;
+    reportRetroTriggerDecline(ctx.ledgerPath, ctx.marker, now, error.message);
     return undefined;
   }
-  if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
+  return retroTriggerDecide(now, ctx, shipped);
+}
+
+/** The GitHub-backed rest of {@link retroTriggerCheck}, given the probe's answer (`undefined` when GitHub is usable). */
+function retroTriggerConcludeSync(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): RetroTriggerDecision | undefined {
+  if (retroTriggerProbeDeclined(now, ctx, githubUnavailable)) return undefined;
+  return retroTriggerDecide(now, ctx, shippedSince(ctx.runs, ctx.marker?.ts, ctx.github).shipped);
+}
+
+/** An unavailable GitHub declines the tick (reported once per reason); a usable one clears the decline latch. */
+function retroTriggerProbeDeclined(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): boolean {
+  if (githubUnavailable) {
+    reportRetroTriggerDecline(ctx.ledgerPath, ctx.marker, now, githubUnavailable);
+    return true;
+  }
+  if (lastRetroTriggerDecline?.ledgerPath === ctx.ledgerPath) {
     lastRetroTriggerDecline = undefined;
   }
-  const { shipped } = shippedSince(runs, marker?.ts, github);
+  return false;
+}
+
+/** The decision over the credited merges: those plus the runless ones, against the cadence thresholds. */
+function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: ShippedRecord[]): RetroTriggerDecision | undefined {
+  const { marker, policy, records, taskIdsWithRuns, github } = ctx;
   const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
@@ -30916,6 +31096,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
   readCodeScanningAlerts?: typeof readCodeScanningAlerts;
   alertFix?: typeof alertFixCommand;
   inbox?: typeof inboxCommand;
+  buildBatchedGithub?: typeof buildBatchedGithub;
   feedbackDocket?: typeof runFeedbackDocketRung;
 } = {}): {
   checkIntakeRungs: () => readonly IntakeRungDecision[];
@@ -30923,6 +31104,8 @@ export function buildIntakeRungsDaemonHooks(deps: {
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const { owner, repo } = resolveOwnerRepo();
+  const inboxGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
   const check =
     deps.check ??
     (() => {
@@ -31049,7 +31232,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
         };
       }
       if (rung === "inbox") {
-        const exitCode = await (deps.inbox ?? inboxCommand)([], { config });
+        const exitCode = await (deps.inbox ?? inboxCommand)([], { config, github: inboxGithub });
         return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
       }
       const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -31529,10 +31712,7 @@ export function citationStampPassFor(opts: {
   const readGitLog =
     opts.readGitLog ??
     ((wt: string) =>
-      execFileSync("git", ["-C", wt, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
-        encoding: "utf8",
-        maxBuffer: 1 << 26,
-      }));
+      hostWorktreeGit(wt, ["log", "--format=%x1e%aI%x1f%s%x1f%b"], { maxBuffer: 1 << 26 }));
   const gitLogCommits = parseGitLogCitationCommits(readGitLog(opts.worktreePath));
   const evidence = [...mineLedgerCitations(parseLedger(opts.followupLedgerNdjson)), ...mineGitLogCitations(gitLogCommits)];
   const changed = changedCitationStamps(corpus, aggregateCitationEvidence(evidence));
@@ -36014,9 +36194,22 @@ export function retractGardenBranch(o: {
   fetcher: GhApiFetcher;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): "deleted" | "kept_pr_exists" | "kept_unreadable" | "kept_delete_failed" {
+  return runStepsSync(retractGardenBranchSteps(o));
+}
+
+export function retractGardenBranchAsync(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => Promise<string> },
+): Promise<ReturnType<typeof retractGardenBranch>> {
+  return runStepsAsync(retractGardenBranchSteps(o));
+}
+
+function* retractGardenBranchSteps(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => string | Promise<string> },
+): Steps<ReturnType<typeof retractGardenBranch>> {
   let existing: ReturnType<typeof probeExistingPlanPr>;
   try {
-    existing = probeExistingPlanPr(o.fetcher, o.owner, o.repo, o.branch);
+    const rows = yield* step(() => o.fetcher(ratifyPrProbeRestArgs(o.owner, o.repo, o.branch)));
+    existing = probeExistingPlanPr(() => rows, o.owner, o.repo, o.branch);
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `pr probe failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_unreadable";
@@ -36026,7 +36219,7 @@ export function retractGardenBranch(o: {
     return "kept_pr_exists";
   }
   try {
-    o.git("push", "-q", "origin", "--delete", o.branch);
+    yield* step(() => o.git("push", "-q", "origin", "--delete", o.branch));
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_delete_failed";
@@ -36045,6 +36238,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const io: GardenLandIo = {
     git,
+    fetcher: opts.fetcher ?? ghJson,
     docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
     preflight: opts.preflight ?? planPrPreflight,
   };
@@ -36062,6 +36256,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
     preflight: opts.preflight ?? planPrPreflightAsync,
   };
@@ -36069,7 +36264,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     root,
     branch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
-    dispose: async () => worktreeRemove(opts.repoDir, root),
+    dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
 }
 
@@ -36088,6 +36283,7 @@ export interface GardenCheckoutOpts {
 
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
+  fetcher: GhApiFetcher;
   docsIndex: () => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
@@ -36120,12 +36316,12 @@ function* gardenLandSteps(
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
   if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
-  const fetcher = opts.fetcher ?? ghJson;
   try {
-    return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
+    const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
+    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(opts.owner, opts.repo, create)));
+    return createPlanPrRest(() => row, opts.owner, opts.repo, create).prUrl;
   } catch (e) {
-    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
+    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher: io.fetcher, log: opts.log });
     throw e;
   }
 }
@@ -38262,6 +38458,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
+      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig)),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
@@ -42479,10 +42676,7 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.pathState !== "managed") return snapshot;
 
   try {
-    const attached = execFileSync("git", ["-C", ownerPath, "symbolic-ref", "-q", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    const attached = hostWorktreeGit(ownerPath, ["symbolic-ref", "-q", "HEAD"]).trim();
     snapshot.attachmentState = attached === `refs/heads/${args.branch}` ? "exact" : "detached_or_other";
   } catch (e) {
     return {
@@ -42494,17 +42688,11 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.attachmentState !== "exact") return snapshot;
 
   try {
-    const status = execFileSync("git", ["-C", ownerPath, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const status = hostWorktreeGit(ownerPath, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]);
     if (status.length === 0) {
       snapshot.treeState = "clean";
     } else {
-      const untracked = execFileSync("git", ["-C", ownerPath, "ls-files", "--others", "--exclude-standard", "-z"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const untracked = hostWorktreeGit(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
       snapshot.treeState = untracked.length === 0 ? "tracked_dirty" : "untracked_dirty";
     }
   } catch (e) {
@@ -42517,23 +42705,12 @@ export function captureRegisteredFixOwnerSnapshot(
   if (snapshot.remoteState !== "exact") return snapshot;
 
   try {
-    snapshot.localSha = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    const contained = spawnSync(
-      "git",
-      ["-C", args.repoDir, "merge-base", "--is-ancestor", snapshot.localSha, args.observedRemoteSha],
-      { stdio: "ignore" },
-    );
+    snapshot.localSha = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
+    const contained = hostWorktreeGitResult(args.repoDir, ["merge-base", "--is-ancestor", snapshot.localSha, args.observedRemoteSha]);
     if (contained.status === 0) {
       snapshot.historyState = "contained";
     } else if (contained.status === 1) {
-      const remoteContainedByLocal = spawnSync(
-        "git",
-        ["-C", args.repoDir, "merge-base", "--is-ancestor", args.observedRemoteSha, snapshot.localSha],
-        { stdio: "ignore" },
-      );
+      const remoteContainedByLocal = hostWorktreeGitResult(args.repoDir, ["merge-base", "--is-ancestor", args.observedRemoteSha, snapshot.localSha]);
       snapshot.historyState = remoteContainedByLocal.status === 0
         ? "ahead"
         : remoteContainedByLocal.status === 1
@@ -42587,18 +42764,10 @@ function temporaryIndexTree(
   const dir = mkdtempSync(join(tmpdir(), "rmd-dirty-fix-owner-index-"));
   const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
   try {
-    if (seedIndexPath === undefined) {
-      execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
+    if (seedIndexPath === undefined) hostWorktreeGit(repoDir, ["read-tree", baseSha], { env });
+    else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
     mutate(env);
-    return execFileSync("git", ["-C", repoDir, "write-tree"], {
-      encoding: "utf8",
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    return hostWorktreeGit(repoDir, ["write-tree"], { env }).trim();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -42661,8 +42830,7 @@ export function preserveStagedFixOwnerResidue(
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): string {
   readTrackedDirtyOwnerPatch(ownerPath, localSha); // the HEAD and no-untracked guards; its diff is the working tree's
-  const gitOut = (args: string[]) =>
-    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] });
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args, { maxBuffer: 1 << 26 });
   const patch = gitOut(["diff", "--cached", "--binary", "--no-ext-diff", localSha]);
   const ownerIndex = resolve(ownerPath, gitOut(["rev-parse", "--git-path", "index"]).trim());
   return preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps, () =>
@@ -42678,8 +42846,7 @@ function nulPaths(raw: string): string[] {
 }
 
 function readFixOwnerResidue(ownerPath: string, localSha: string): FixOwnerResidue {
-  const gitOut = (args: string[]) =>
-    execFileSync("git", ["-C", ownerPath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args);
   let markerKind: FixOwnerResidue["markerKind"] = null;
   let markerSha: string | null = null;
   for (const marker of FIX_OWNER_OPERATION_MARKERS) {
@@ -42713,21 +42880,11 @@ function readFixOwnerResidue(ownerPath: string, localSha: string): FixOwnerResid
 }
 
 function readTrackedDirtyOwnerPatch(ownerPath: string, localSha: string): string {
-  const observedHead = execFileSync("git", ["-C", ownerPath, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  const observedHead = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
   if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
-  const untracked = execFileSync("git", ["-C", ownerPath, "ls-files", "--others", "--exclude-standard", "-z"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const untracked = hostWorktreeGit(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
   if (untracked.length > 0) throw new Error("dirty owner has untracked paths");
-  return execFileSync("git", ["-C", ownerPath, "diff", "--binary", "--no-ext-diff", localSha], {
-    encoding: "utf8",
-    maxBuffer: 1 << 26,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  return hostWorktreeGit(ownerPath, ["diff", "--binary", "--no-ext-diff", localSha], { maxBuffer: 1 << 26 });
 }
 
 function preserveTrackedDirtyPatch(
@@ -42743,18 +42900,10 @@ function preserveTrackedDirtyPatch(
   const treesMatch = deps.treesMatch ?? ((a: string, b: string) => a === b);
   const matchesDirtyRecovery = deps.matchesDirtyRecovery ?? refCommitMatchesDirtyRecovery;
   const ownerTree = ownerTreeOf ? ownerTreeOf() : temporaryIndexTree(ownerPath, localSha, (env) => {
-    execFileSync("git", ["-C", ownerPath, "add", "-A"], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    hostWorktreeGit(ownerPath, ["add", "-A"], { env });
   });
   const patchTree = temporaryIndexTree(repoDir, localSha, (env) => {
-    execFileSync("git", ["-C", repoDir, "apply", "--cached", "--binary", "--whitespace=nowarn"], {
-      input: patch,
-      env,
-      maxBuffer: 1 << 26,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    hostWorktreeGit(repoDir, ["apply", "--cached", "--binary", "--whitespace=nowarn"], { input: patch, env, maxBuffer: 1 << 26 });
   });
   if (!treesMatch(patchTree, ownerTree)) {
     throw new Error(`dirty recovery patch tree ${patchTree} does not match owner tree ${ownerTree}`);
@@ -42762,18 +42911,9 @@ function preserveTrackedDirtyPatch(
 
   const recoveryRef = `${DIRTY_FIX_OWNER_RECOVERY_REF_PREFIX}/${branch}/${localSha}/${patchTree}`;
   if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
-    const recoveryCommit = execFileSync(
-      "git",
-      ["-C", repoDir, "commit-tree", patchTree, "-p", localSha, "-m", `chore(recovery): preserve dirty fix owner ${branch}`],
-      {
-        encoding: "utf8",
-        env: { ...process.env, ...DIRTY_FIX_OWNER_RECOVERY_IDENTITY },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    ).trim();
-    execFileSync("git", ["-C", repoDir, "update-ref", recoveryRef, recoveryCommit, ZERO_GIT_OID], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const recoveryCommit = hostWorktreeGit(repoDir, ["commit-tree", patchTree, "-p", localSha, "-m",
+      `chore(recovery): preserve dirty fix owner ${branch}`], { env: DIRTY_FIX_OWNER_RECOVERY_IDENTITY }).trim();
+    hostWorktreeGit(repoDir, ["update-ref", recoveryRef, recoveryCommit, ZERO_GIT_OID]);
   }
   if (!matchesDirtyRecovery(repoDir, recoveryRef, localSha, patchTree)) {
     throw new Error(`dirty recovery ref ${recoveryRef} is not the expected immutable commit`);
@@ -42792,9 +42932,7 @@ function preserveTrackedDirtyPatch(
 // tracked state to its OWN already-preserved HEAD, never anywhere else, and only after the caller
 // has confirmed the recovery ref reproduces that exact tree.
 export function resetTrackedDirtyFixOwner(ownerPath: string, localSha: string): void {
-  execFileSync("git", ["-C", ownerPath, "reset", "--hard", localSha], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  hostWorktreeGit(ownerPath, ["reset", "--hard", localSha]);
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {
@@ -42855,8 +42993,7 @@ export function readRegistrationChanges(
   git?: PublishAbandonedFixOwnerAheadDeps["runGit"],
   headRef = "HEAD",
 ): RegistrationChange[] {
-  const runGit = git ?? ((args: string[]) => execFileSync("git", ["-C", repoDir, ...args],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const runGit = git ?? ((args: string[]) => hostWorktreeGit(repoDir, args));
   return paths.filter((path) => ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path)).map((path) => {
     try {
       const base = baseRef === undefined ? headRef : runGit(["merge-base", baseRef, headRef]).trim();
@@ -42955,11 +43092,10 @@ export function commitWorkerEdits(
   acceptance: readonly AcceptanceCriterion[] = [],
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
 ): WorkerEditCommit {
-  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
-    "git",
-    ["-C", repoDir, ...args],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      ...(options.priorHeadSha === undefined ? {} : { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }) },
+  const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
+    repoDir,
+    args,
+    options.priorHeadSha === undefined ? {} : { env: { GIT_OPTIONAL_LOCKS: "0" } },
   ));
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
@@ -43038,7 +43174,7 @@ export function commitWorkerEdits(
   } else {
     const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
+      hostWorktreeGit(repoDir, ["add", "-A", "--", ...declared], { env });
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
@@ -43168,7 +43304,7 @@ export const MERGE_HEAD_ABSENT_REASON =
   "a merge-conflict round's commit needs MERGE_HEAD, so current main is its second parent; no merge is in progress";
 
 function worktreeGitRunner(worktreePath: string): GitRunner {
-  return (args) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return (args) => hostWorktreeGit(worktreePath, args);
 }
 
 /**
@@ -43393,10 +43529,7 @@ export function harnessCommitForShellLessWorker(
 export function headProvenanceFields(worktreePath: string): { head_sha?: string; head_assignment?: string } {
   let headSha: string;
   try {
-    headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    headSha = hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "HEAD"]).trim();
   } catch {
     // No head to name: the row omits both fields rather than inventing a sha.
     return {};
@@ -43416,11 +43549,7 @@ export function createHarnessCommitRefusalRecorder(state: { reason?: string }): 
  *  `harnessCommitForShellLessWorker` ever reads git status, so "changed nothing" and "forgot the
  *  line" are otherwise indistinguishable from the refusal reason alone. */
 export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
-  const raw = execFileSync(
-    "git",
-    ["-C", worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const raw = hostWorktreeGit(worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
   return workerChangedPaths(raw).length > 0;
 }
 
@@ -43550,12 +43679,8 @@ export function missingCommitLinePrompt(input: {
   declaredPaths?: readonly string[];
 }): string {
   if (!writerCannotResume(input.provider, input.tools)) return COMMIT_LINE_RESUME_PROMPT;
-  const diffStat = execFileSync("git", ["-C", input.worktreePath, "diff", "HEAD", "--stat"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-  const untracked = execFileSync("git", ["-C", input.worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-  }).split("\0").filter((path) => path && (input.declaredPaths === undefined ||
+  const diffStat = hostWorktreeGit(input.worktreePath, ["diff", "HEAD", "--stat"]).trim();
+  const untracked = hostWorktreeGit(input.worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter((path) => path && (input.declaredPaths === undefined ||
     input.declaredPaths.some((declared) => pathIsUnderDeclaredSurface(path, [declared])))).join("\n");
   return `Task: ${input.title}\n\n` +
     `git diff --stat (HEAD):\n${diffStat || "(no tracked changes)"}\n` +
@@ -43698,31 +43823,25 @@ export function checkoutFixHeadRef(
   branch: string,
   deps: CheckoutFixHeadRefDeps = {},
 ): FixHeadRecovery | undefined {
-  const originSha = execFileSync("git", ["-C", repoDir, "rev-parse", `origin/${branch}`], { stdio: "pipe" })
-    .toString()
-    .trim();
+  const originSha = hostWorktreeGit(repoDir, ["rev-parse", `origin/${branch}`]).trim();
   const branchRef = `refs/heads/${branch}`;
   let localSha: string | null = null;
   try {
-    localSha = execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", branchRef], {
-      stdio: "pipe",
-    })
-      .toString()
-      .trim();
+    localSha = hostWorktreeGit(repoDir, ["rev-parse", "--verify", branchRef]).trim();
   } catch {
     localSha = null; // no local ref yet — the "create fresh" case below.
   }
 
   let recovery: FixHeadRecovery | undefined;
   if (localSha === null) {
-    execFileSync("git", ["-C", repoDir, "update-ref", branchRef, originSha, ZERO_GIT_OID], { stdio: "pipe" });
+    hostWorktreeGit(repoDir, ["update-ref", branchRef, originSha, ZERO_GIT_OID]);
   } else if (localSha !== originSha) {
     if (fixHeadHeldByWorktree(repoDir, branchRef)) {
       throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
     }
     let localIsAncestor = false;
     try {
-      execFileSync("git", ["-C", repoDir, "merge-base", "--is-ancestor", localSha, originSha], { stdio: "pipe" });
+      hostWorktreeGit(repoDir, ["merge-base", "--is-ancestor", localSha, originSha]);
       localIsAncestor = true;
     } catch {
       localIsAncestor = false; // non-zero exit ⇒ NOT an ancestor (ahead, or diverged) — refuse below.
@@ -43733,17 +43852,14 @@ export function checkoutFixHeadRef(
     }
     deps.beforeHeadCompareAndSwap?.();
     try {
-      execFileSync("git", ["-C", repoDir, "update-ref", branchRef, originSha, localSha], { stdio: "pipe" });
+      hostWorktreeGit(repoDir, ["update-ref", branchRef, originSha, localSha]);
     } catch {
       throw new FixRungCheckoutRefusedError(branch, localSha, originSha);
     }
   }
 
-  execFileSync("git", ["-C", worktreePath, "checkout", branch], { stdio: "pipe" });
-  const checkedOutSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  hostWorktreeGit(worktreePath, ["checkout", branch]);
+  const checkedOutSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   if (checkedOutSha !== originSha) throw new FixRungCheckoutRefusedError(branch, checkedOutSha, originSha);
   return recovery;
 }
@@ -43773,8 +43889,8 @@ export async function createFixRungWorktree(
   branch: string,
   deps: CheckoutFixHeadRefDeps = {},
 ): Promise<FixHeadRecovery | undefined> {
-  await execFilePromise("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
-  await execFilePromise("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`]);
+  await hostWorktreeGitAsync(repoDir, ["fetch", "origin", "--quiet"]);
+  await hostWorktreeGitAsync(repoDir, ["worktree", "add", worktreePath, `origin/${branch}`]);
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
 
@@ -46679,12 +46795,12 @@ export const TRIAGE_CASH_TOOLS: readonly string[] = TRIAGE_WORKER_TOOLS.filter((
  * on itself; a human merging merely supplies the commits that fetch then picks up.
  */
 function worktreeMergeBase(worktreePath: string): string {
-  return execFileSync("git", ["-C", worktreePath, "merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim();
+  return hostWorktreeGit(worktreePath, ["merge-base", "origin/main", "HEAD"]).trim();
 }
 
 export function worktreeChangedFiles(worktreePath: string): string[] {
   const run = (args: string[]): string[] =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })
+    hostWorktreeGit(worktreePath, args)
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
@@ -46933,17 +47049,12 @@ async function triageCommandLocked(
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
     // Built ONCE, here, because the reservation below now happens before the prompt rather than
-    // inside the propose branch. `spawnSync`, not `execFileSync`: a rejected push is a NORMAL
+    // inside the propose branch. A non-throwing runner, not `execFileSync`: a rejected push is a NORMAL
     // outcome (contention), and a throwing runner would make it indistinguishable from an
     // unreachable remote — the conflation `classifyPushFailure` exists to prevent. `worktreePath`,
     // NOT the module-level `repoRoot`: the reservation must be pushed to the SAME `origin` this
     // filing will push its branch to.
-    const triageRemoteRefReserver = gitRemoteRefReserver({
-      run: (args) => {
-        const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-      },
-    });
+    const triageRemoteRefReserver = gitRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)) });
     // W1-T2326: THE REMOTE HALF IS TAKEN HERE, BEFORE THE PROMPT IS BUILT — and that ORDERING is
     // the whole task. It used to be taken 100+ lines below, inside `decision.action === "propose"`,
     // and its result reached nothing but the `triage.id_minted` row: the worker was prompted from
@@ -47188,10 +47299,7 @@ async function triageCommandLocked(
     // nothing and escalates nothing; it makes the divergence legible at the moment it happens,
     // which is exactly what the three collisions of 2026-08-26 lacked.
     if (decision.action === "propose") {
-      const triageDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
+      const triageDiff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "--", "plan"], { maxBuffer: 64 * 1024 * 1024 });
       const unreserved = unreservedFiledIds(triageDiff, reservedIds);
       log("triage.id_check", { reserved: reservedIds, unreserved, ok: unreserved.length === 0 });
       if (unreserved.length > 0) {
@@ -47230,12 +47338,8 @@ async function triageCommandLocked(
       // from, in the SAME write as the `proposed` status transition (never half-written) —
       // fail-open to `summary: null` on any summarizer failure, exactly as before this task.
       await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: prUrl });
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/feedback/"], { stdio: "inherit" });
-      execFileSync(
-        "git",
-        ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
-        { stdio: "inherit" },
-      );
+      hostWorktreeGit(worktreePath, ["add", "-A", "--", "plan/feedback/"], { stdio: "inherit-stdout" });
+      hostWorktreeGit(worktreePath, ["commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`], { stdio: "inherit-stdout" });
       await gitPushRunBranchAsync(worktreePath);
     }
 
@@ -47279,12 +47383,8 @@ async function triageCommandLocked(
       const scopeFiles = triageDeclaredScope(feedbackId);
       let liveDiffFiles: string[] | undefined;
       try {
-        execFileSync("git", ["-C", worktreePath, "fetch", "origin", "main"], { stdio: "inherit" });
-        liveDiffFiles = execFileSync(
-          "git",
-          ["-C", worktreePath, "diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles],
-          { encoding: "utf8" },
-        )
+        hostWorktreeGit(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit-stdout" });
+        liveDiffFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles])
           .split("\n")
           .map((l) => l.trim())
           .filter(Boolean);
@@ -47474,13 +47574,10 @@ export async function planCommand(
         planReserveFrom,
         PLAN_MAX_NEW_TASKS,
         gitRemoteRefReserver({
-          // Same `spawnSync`-over-`worktreePath` shape triage's own remote reserve uses — a
+          // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
           // rejected push is NORMAL here (contention), so a throwing runner would make it
           // indistinguishable from an unreachable remote.
-          run: (args) => {
-            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-          },
+          run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
         }),
       ),
     );
@@ -47583,10 +47680,7 @@ export async function planCommand(
       // MERGE BASE, not the moving tip — see `worktreeMergeBase`. A bare `origin/main` here made a
       // plan shard landed by SOMEONE ELSE's PR read as an id THIS worker filed, so the unreserved-id
       // warning named ids the run never touched.
-      const planDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
+      const planDiff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "--", "plan"], { maxBuffer: 64 * 1024 * 1024 });
       const unreserved = unreservedFiledIds(planDiff, reservedIds);
       log("plan.id_check", { reserved: reservedIds, unreserved, ok: unreserved.length === 0 });
       if (unreserved.length > 0) {
@@ -47655,10 +47749,7 @@ export async function planCommand(
     // changed-files block is an assertion about the actual commit, not the worker's pre-harness
     // advisory list; constructing it before regeneration would immediately make the PR contradict
     // its own diff whenever the index changes.
-    const planPrFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    })
+    const planPrFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { maxBuffer: 64 * 1024 * 1024 })
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
@@ -48441,7 +48532,7 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-export async function inboxCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48480,7 +48571,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
@@ -53790,6 +53881,9 @@ export async function main(
   deps: {
     checkFreshness?: typeof checkCliFreshness;
     checkServiceFreshness?: typeof checkServiceFreshness;
+    /** The verb dispatch past the gate. Injectable so a test proves the GATE admits a verb
+     *  without running that verb — `preflight`'s real handler is the whole fast gate. */
+    dispatch?: typeof dispatchCommand;
   } = {},
 ): Promise<void> {
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
@@ -53954,7 +54048,9 @@ export async function main(
   realDeps();
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
-  await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  await flushThenExit(
+    deps.dispatch ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE),
+  );
 }
 
 // W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.

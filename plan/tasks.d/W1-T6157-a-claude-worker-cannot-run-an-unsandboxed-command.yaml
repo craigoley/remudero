@@ -1,0 +1,60 @@
+- id: W1-T6157
+  title: "A CLAUDE WORKER CANNOT RUN AN UNSANDBOXED COMMAND — settings/worker.json never sets sandbox.allowUnsandboxedCommands, whose installed default is true, and workers run under bypassPermissions, so a Bash call with dangerouslyDisableSandbox runs outside the OS sandbox with no prompt and escapes every filesystem.denyRead and denyWrite the policy declares, including the gitdir config and hooks denies #9809 adds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — whether a Claude worker's Bash can leave the OS sandbox
+  band_meaning: span
+  origin: "operator session 2026-10-07: security follow-up batch 3, raised by W1-T6148's builder (#9809); premise verified read-only on origin/main 44513355a and the #9809 head aeb2c5ad7 before filing"
+  plan_refs: [W1-T6148, W1-T2216, W1-T2211, W1-T2213, W1-T5016, W1-T2243]
+  files: [settings/worker.json, src/lib/settings.ts, test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 44513355a and #9809 (run-W1-T6148-1791352385978, open, head aeb2c5ad7). Static
+    reading only; no escape was attempted.
+    THE SWITCH. The installed SDK documents it (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, the sandbox
+    settings type): "allowUnsandboxedCommands — Allow commands to run outside the sandbox via the
+    dangerouslyDisableSandbox parameter. When false, the dangerouslyDisableSandbox parameter is completely ignored and
+    all commands must run sandboxed. Default: true." The Bash tool input carries `dangerouslyDisableSandbox?: boolean`
+    (sdk-tools.d.ts).
+    THE POLICY. settings/worker.json `sandbox` sets enabled, failIfUnavailable, autoAllowBashIfSandboxed,
+    filesystem.denyRead, network.allowedDomains and excludedCommands ["gh *"], and NO allowUnsandboxedCommands; the
+    #9809 head adds filesystem.denyWrite for the managed repos' .git config, config.worktree, commondir, hooks/** and
+    worktrees/*/{config.worktree,commondir,gitdir}, still without the switch. src/lib/settings.ts `SANDBOX_KEYS` admits
+    the key (W1-T2216's schema mirror); nothing sets it. `git grep dangerouslyDisableSandbox` over src/ hooks/ settings/
+    on main: zero, so hooks/deny-floor.sh does not refuse the parameter either.
+    THE MODE. Every worker spawn passes `permissionMode: "bypassPermissions"` (src/lib/worker.ts and the lanes in
+    containment.ts, sweep.ts, paired-trial.ts and the judges), which auto-approves the permission prompt an unsandboxed
+    request would otherwise raise. So a Claude worker that sets the parameter runs its command as its uid outside the
+    sandbox, where none of the denyRead / denyWrite entries or the egress allowlist apply.
+    A SECOND ROUTE TO MEASURE, NOT VERIFIED: `excludedCommands: ["gh *"]` runs matching commands outside the sandbox by
+    design. gh resolves user aliases (`gh alias set x '!<shell>'` runs a shell) and extensions from its config under the
+    worker's HOME, which the worker can write; whether the CLI's prefix match plus bypassPermissions lets `gh x` run an
+    arbitrary shell unsandboxed could not be settled from the repository.
+  design: |
+    The builder owns the mechanism; constraints:
+    (1) settings/worker.json sets `sandbox.allowUnsandboxedCommands: false`, and the settings renderer or its validator
+    (src/lib/settings.ts) REFUSES a worker policy where it is absent or true, so a later edit cannot drop it silently.
+    (2) Before setting it, MEASURE that nothing legitimate needs an unsandboxed command: grep the worker prompts and
+    lanes for dangerouslyDisableSandbox and name in the PR any lane that depended on it and what replaced it.
+    (3) MEASURE the gh route above on the installed CLI with a fixture HOME. If a gh alias or extension runs a shell
+    outside the sandbox, the PR either closes it (pin GH_CONFIG_DIR to a harness-owned read-only config for workers,
+    or narrow the exclusion to named subcommands) or files it as its own task and names the id; it does not widen this
+    task silently.
+    (4) No other sandbox key changes.
+  acceptance:
+    - claim: "the committed worker policy and the settings the renderer writes both carry sandbox allowUnsandboxedCommands false, the settings validator refuses a worker policy where the key is absent or true by name, and every other sandbox key the committed policy declares is unchanged"
+      proof: "unit test: test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts"
+  falsifier: |
+    At origin/main 44513355a, settings/worker.json's sandbox block has no allowUnsandboxedCommands key and the
+    validator accepts it, so the test fails.
+  notes: |
+    FIXTURES ONLY: any measurement of the gh route uses a fixture HOME and a gitRepo() fixture under the test's tmp
+    dir; nothing writes a real gh config, a worker HOME on the host or the operator's settings. ORDER: #9809 (W1-T6148,
+    open at filing) edits the same settings/worker.json sandbox block (adds filesystem.denyWrite) and src/lib/worker.ts;
+    whichever merges second rebases one hunk. Operator sessions are unchanged: .claude/settings.json is not this file.

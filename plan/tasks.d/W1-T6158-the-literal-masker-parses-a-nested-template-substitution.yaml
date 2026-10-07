@@ -1,0 +1,54 @@
+- id: W1-T6158
+  title: "THE LITERAL MASKER PARSES A NESTED TEMPLATE SUBSTITUTION — test-impact-map.ts scanSource ends a template literal at the first backtick even inside a `${...}` substitution, so containment.ts shellSingleQuote's nested template flips the parse and the widened git census masks runWorkerSmoke's execFileSync git init as literal text and never counts it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — what the shared comment/literal scanner treats as code, and the census it feeds
+  band_meaning: span
+  origin: "operator session 2026-10-07: security follow-up batch 3, raised by W1-T6136's builder (#9817); reproduced read-only on origin/main 44513355a before filing"
+  plan_refs: [W1-T6089, W1-T5701, W1-T6083, W1-T6136, W1-T6123, W1-T6106]
+  files: [src/lib/test-impact-map.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/the-literal-masker-parses-a-nested-template-substitution.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-07 on origin/main 44513355a by running `maskLiterals(stripComments(src, { keepLines: true }))`
+    over src/lib/containment.ts — the census's own call in
+    test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts.
+    THE SYMPTOM. Of containment.ts's two `execFileSync("git", ["init", "-q"], ...)` sites, `defaultExecutor`'s survives
+    masking (its line reads `execFileSync("   ", ["    ", "  "], { cwd, ... })`) and `runWorkerSmoke`'s inline
+    `(opts.initializeRepository ?? ((d) => { execFileSync("git", ["init", "-q"], { cwd: d, stdio: "ignore" }); }))(cwd)`
+    masks to an all-blank line, because the scanner believes it is inside a template literal spanning from
+    `` `worker-smoke-${token}` `` a few lines above to well below it. The same text masked in isolation is detected.
+    THE CAUSE. src/lib/test-impact-map.ts `scanSource` (behind `maskLiterals` and `stripComments`) scans a template
+    literal as "everything up to the next unescaped backtick" and does not track `${` ... `}` nesting. containment.ts
+    `shellSingleQuote` returns `` `'${s.split("'").join(`'\\''`)}'` `` — a template inside a substitution — so the inner
+    backtick closes the outer literal, and every later backtick pair is read inverted: masked spans run from line
+    1344 onward (first one 1344-1359), until runWorkerSmoke's git init falls inside one.
+    BLAST RADIUS. The census table in the leaf test counts containment.ts as 1 site (`defaultExecutor`), on main and on
+    #9817 (W1-T6136, open, which reclassifies that one entry as CHECKOUT). `maskLiterals` also backs
+    src/lib/affected-suites.ts's selector, and `stripComments` the import-graph reader, so any file holding a nested
+    template can hide code from all three.
+  design: |
+    The builder owns the mechanism; constraints:
+    (1) `scanSource` tracks template substitutions as code: inside `${`, it scans nested strings, templates, comments,
+    regexes and braces until the matching `}`, then resumes the template body. Masking blanks template TEXT only;
+    the code inside a substitution is kept, as any other code is.
+    (2) The existing guarantees hold: offsets and (with keepLines) line numbers are preserved, a `'`/`"` string still
+    ends at its line's end, and REGEX_PRECEDERS still decides a regex literal.
+    (3) Re-run the census over src/ after the fix and add every site it newly sees to the leaf test's table with its
+    class — at minimum containment.ts `runWorkerSmoke`'s git init (it git-inits the `<config.root>/tmp/worker-smoke-<token>/cwd`
+    it mkdirs itself, the same shape as `defaultExecutor`); the PR lists each newly visible site.
+  acceptance:
+    - claim: "maskLiterals and stripComments keep code inside a template substitution that itself holds a nested template, a source shaped like containment.ts shellSingleQuote followed by an execFileSync git call keeps that call visible after masking, offsets and line numbers are unchanged, and the leaf census table counts containment.ts runWorkerSmoke's git init"
+      proof: "unit test: test/the-literal-masker-parses-a-nested-template-substitution.test.ts"
+  falsifier: |
+    At origin/main 44513355a, masking a fixture holding `` `'${s.split("'").join(`'\\''`)}'` `` followed by an
+    `execFileSync("git", ...)` line blanks the git line, so the test fails.
+  notes: |
+    Source-text census only: nothing runs git. ORDER: #9817 (W1-T6136, open at filing) edits the same census table row
+    for src/lib/containment.ts and src/lib/affected-suites.ts; whichever merges second rebases one hunk, and the count
+    for containment.ts becomes 2 with both entries classified.

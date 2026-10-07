@@ -308,7 +308,7 @@ function spawnWorkerBoundaryArgs(scratch: string, cwd: string, extra: Record<str
   // `materializeWorkerHome` refuses to place a worker home inside a git work tree, and `cwd` here
   // IS one (that is the whole point of this fixture).
   const settingsFile = join(scratch, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd,
     permissionMode: "bypassPermissions" as const,

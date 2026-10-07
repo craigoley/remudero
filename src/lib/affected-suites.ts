@@ -17,12 +17,25 @@
  * A change the graph cannot model — config, the lockfile, a workflow, a test helper or fixture —
  * selects the FULL suite and says which file forced it.
  */
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import {
+  IMPACT_MAP_STALENESS_BOUND,
+  impactArmSelection,
+  impactDrift,
+  maskLiterals,
+  spawningSuites,
+  stripComments,
+  type ImpactArmInput,
+} from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { hostWorktreeGit } from "./worktree-git.js";
+
+export { stripComments };
 
 export interface AffectedSelection {
   /** THE FLOOR: suites to run, sorted. Empty when `fullRun` — the full suite needs no list. */
@@ -43,7 +56,17 @@ export interface AffectedSelection {
    *  "flake" rather than "selected": a currently-unstable suite staying selected tells you nothing
    *  about whether the selector's MODEL would have reached it, which is the half W1-T4406 must be
    *  able to trust. `narrow` is present only when `narrow` above was computed. */
-  recentOnly: { floor: string[]; narrow?: string[] };
+  recentOnly: { floor: string[]; narrow?: string[]; impact?: string[] };
+  /** W1-T6083 — THE IMPACT ARM, measured in shadow only: the suites main's coverage run saw EXECUTE
+   *  a changed function body, or LOAD a module whose module-scope code changed, plus the floor's
+   *  suites the map cannot speak for (spawners, suites it never saw). Absent when no impact input
+   *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
+  impact?: string[];
+  impactFallback?: string;
+  /** W1-T6084 — set when a read map was asked for and cannot speak for this change (missing, stale,
+   *  not an ancestor of the base): census membership and the non-code full-run triggers then follow
+   *  today's rules, and this says why. */
+  readMapFallback?: string;
 }
 
 /** Everything the selector decides from, as plain DATA — the selector itself reads nothing. */
@@ -56,6 +79,10 @@ export interface AffectedSuitesInput {
   recentFailures?: readonly string[];
   /** Suites naming a changed symbol or one of its src/ callers (ci-parity's callerReachableSuites). */
   symbolSuites?: readonly string[];
+  /** W1-T6083: main's impact map and the change's place against it — enables `impact`. */
+  impact?: ImpactArmInput;
+  /** W1-T6084: main's read map — which suites READ or LISTED each non-code path — and its drift. */
+  readMap?: ReadMapInput;
 }
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
@@ -65,71 +92,142 @@ const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
 const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 
-/** The file that forces a full run, or undefined when every change is modelled. */
-export function fullRunTrigger(changed: readonly string[]): string | undefined {
-  return changed.find((f) => !MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
+/** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
+const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
+
+/** The file that forces a full run, or undefined when every change is modelled. A file the read map
+ *  speaks for ({@link READ_MAPPED}) forces one only when `readMapUsable` is false. */
+export function fullRunTrigger(changed: readonly string[], readMapUsable = false): string | undefined {
+  return changed.find((f) => !(readMapUsable && READ_MAPPED.test(f)) &&
+    (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f))));
 }
 
-/** Characters after which a `/` can only begin a regex literal. */
-const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
+export const READ_MAP_FORMAT = "rmd-read-map-v1";
 
-/** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
- *  template or regex literal is kept, and so is every string's text (specifiers live in strings).
- *  Without this a JSDoc import link or a backticked test path in prose read as a graph edge, and the
- *  selector's 285-module strongly-connected component was made of comments. A regex literal is
- *  recognised by what precedes its `/`, so a quote inside one cannot open a string; a `'` or `"`
- *  string ends at its line's end, so one misread cannot swallow the rest of the file. */
-export function stripComments(content: string): string {
-  let out = "";
-  let last = ""; // the last significant (non-space, non-comment) character emitted
-  let i = 0;
-  const n = content.length;
-  while (i < n) {
-    const c = content[i]!;
-    const next = content[i + 1];
-    if (c === "/" && next === "/") {
-      while (i < n && content[i] !== "\n") i += 1;
-      continue;
-    }
-    if (c === "/" && next === "*") {
-      const end = content.indexOf("*/", i + 2);
-      i = end < 0 ? n : end + 2;
-      out += " ";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < n && content[j] !== c) {
-        if (content[j] === "\\") j += 1;
-        else if (c !== "`" && content[j] === "\n") break;
-        j += 1;
-      }
-      out += content.slice(i, j + 1);
-      i = j + 1;
-      last = c;
-      continue;
-    }
-    if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < n && content[j] !== "\n") {
-        const d = content[j]!;
-        if (d === "\\") j += 1;
-        else if (d === "[") inClass = true;
-        else if (d === "]") inClass = false;
-        else if (d === "/" && !inClass) break;
-        j += 1;
-      }
-      out += content.slice(i, j + 1);
-      i = j + 1;
-      last = "/";
-      continue;
-    }
-    out += c;
-    if (!/\s/.test(c)) last = c;
-    i += 1;
+/** One test file's record, as test/setup/read-map.ts writes it. */
+export interface ReadMapRecord {
+  suite: string;
+  reads: readonly string[];
+  listed: readonly string[];
+}
+
+/** Main's merged read map: for each non-code path, the suites that read it (indices into `suites`),
+ *  and for each directory, the suites that listed it — `dir/**` when the listing was recursive. */
+export interface ReadMap {
+  format: typeof READ_MAP_FORMAT;
+  /** The main sha whose full run recorded this map. */
+  sha: string;
+  suites: string[];
+  reads: Record<string, number[]>;
+  listed: Record<string, number[]>;
+}
+
+/** What the selector decides from beside the map: why it is absent, and its drift against the base. */
+export interface ReadMapInput {
+  map?: ReadMap;
+  mapProblem?: string;
+  drift: ImpactArmInput["drift"];
+  stalenessBound?: number;
+}
+
+/** Merges per-suite records into one map keyed by `sha`. A suite named twice (a retry) is unioned. */
+export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: string }): ReadMap {
+  const merged = new Map<string, { reads: Set<string>; listed: Set<string> }>();
+  for (const r of records) {
+    const into = merged.get(r.suite) ?? { reads: new Set<string>(), listed: new Set<string>() };
+    for (const p of r.reads) into.reads.add(p);
+    for (const p of r.listed) into.listed.add(p);
+    merged.set(r.suite, into);
   }
-  return out;
+  const suites = [...merged.keys()].sort();
+  const reads: Record<string, number[]> = {};
+  const listed: Record<string, number[]> = {};
+  suites.forEach((suite, i) => {
+    const entry = merged.get(suite)!;
+    for (const p of [...entry.reads].sort()) (reads[p] ??= []).push(i);
+    for (const p of [...entry.listed].sort()) (listed[p] ??= []).push(i);
+  });
+  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed };
+}
+
+/** The records one full run left in `dir` (test/setup/read-map.ts's files). A file that is not a
+ *  record is reported in `problems`, never silently read as an empty one. */
+export function readReadRecords(dir: string): { records: ReadMapRecord[]; problems: string[] } {
+  const records: ReadMapRecord[] = [];
+  const problems: string[] = [];
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
+    const value = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<ReadMapRecord> & { format?: string };
+    if (value.format !== "rmd-read-record-v1" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed)) {
+      problems.push(`${name} is not a read record`);
+      continue;
+    }
+    records.push({ suite: value.suite, reads: value.reads, listed: value.listed });
+  }
+  return { records, problems };
+}
+
+/** Parses the merged map at `path`; a missing or malformed file is a NAMED problem, never an empty map. */
+export function readReadMap(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf8")): { map?: ReadMap; problem?: string } {
+  let value: Partial<ReadMap> | undefined;
+  try {
+    value = JSON.parse(read(path)) as Partial<ReadMap>;
+  } catch (err) {
+    return { problem: `read map ${path} unreadable: ${(err as Error).message}` };
+  }
+  const object = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (value?.format !== READ_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
+      !object(value.reads) || !object(value.listed)) {
+    return { problem: `read map ${path} is not a ${READ_MAP_FORMAT} file` };
+  }
+  return { map: value as ReadMap };
+}
+
+/** The read map for a checkout: the map at `mapPath` and its drift against `base`. */
+export function readReadMapInput(
+  root: string, mapPath: string, base: string, run?: Parameters<typeof impactDrift>[3],
+): ReadMapInput {
+  const { map, problem } = readReadMap(mapPath);
+  return map ? { map, drift: impactDrift(root, map.sha, base, run) } : { mapProblem: problem, drift: { changedSinceMap: [] } };
+}
+
+/** Why the read map cannot speak for a change, or undefined when it can. */
+export function readMapProblem(input: ReadMapInput | undefined): string | undefined {
+  if (!input) return "no read map supplied";
+  const map = input.map;
+  if (!map) return `no read map (${input.mapProblem ?? "none supplied"})`;
+  if (input.drift.distance === undefined) {
+    return `read map ${map.sha.slice(0, 12)} is not an ancestor of the base (${input.drift.problem ?? "unknown"})`;
+  }
+  const bound = input.stalenessBound ?? IMPACT_MAP_STALENESS_BOUND;
+  if (input.drift.distance > bound) {
+    return `read map ${map.sha.slice(0, 12)} is stale: ${input.drift.distance} commits behind the base, past its bound of ${bound}`;
+  }
+  return undefined;
+}
+
+/** `dir`'s ancestors, nearest first, ending at the repo root (""): `a/b` → `a/b`, `a`, `""`. */
+function ancestors(dir: string): string[] {
+  const out: string[] = [];
+  for (let d = dir === "." ? "" : dir; ; d = d.slice(0, Math.max(d.lastIndexOf("/"), 0))) {
+    out.push(d);
+    if (d === "") return out;
+  }
+}
+
+/** The suites the map says READ `file`, and those that LISTED a directory it sits in: exactly that
+ *  directory, or an ancestor listed recursively — the census reader of the file's population. */
+export function readMapReaders(map: ReadMap, file: string): { readers: string[]; listers: Array<{ suite: string; dir: string }> } {
+  const name = (i: number) => map.suites[i]!;
+  const readers = Object.hasOwn(map.reads, file) ? map.reads[file]!.map(name) : [];
+  const listers: Array<{ suite: string; dir: string }> = [];
+  const slash = file.lastIndexOf("/");
+  const own = slash < 0 ? "." : file.slice(0, slash);
+  const keys = [own, ...ancestors(own).map((a) => (a === "" ? "**" : `${a}/**`))];
+  for (const key of keys) {
+    if (!Object.hasOwn(map.listed, key)) continue;
+    for (const i of map.listed[key]!) listers.push({ suite: name(i), dir: key });
+  }
+  return { readers, listers };
 }
 
 /** Every module specifier a file names: static and dynamic imports, re-exports and requires. */
@@ -146,26 +244,63 @@ function specifiers(content: string): string[] {
 }
 
 /** Repo paths a file names outright — `"scripts/x.mjs"`, or `join(ROOT, "scripts", "x.mjs")`: how
- *  a suite reaches a script it spawns or loads by URL rather than imports. */
-function namedPaths(content: string): string[] {
-  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs))["'`]/g)].map((m) => m[1]!);
+ *  a suite reaches a script it spawns or loads by URL rather than imports. `at` is the offset of the
+ *  path's first quote. */
+function namedPaths(content: string): Array<{ path: string; at: number }> {
+  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs))["'`]/g)]
+    .map((m) => ({ path: m[1]!, at: m.index }));
   for (const m of content.matchAll(/["'](src|scripts|bin)["']\s*,\s*((?:["'][\w.-]+["']\s*,\s*)*)["']([\w.-]+\.(?:ts|mjs|js|cjs))["']/g)) {
     const middle = [...m[2]!.matchAll(/["']([\w.-]+)["']/g)].map((p) => p[1]);
-    out.push([m[1], ...middle, m[3]].join("/"));
+    out.push({ path: [m[1], ...middle, m[3]].join("/"), at: m.index });
   }
   // A suite is selected by its own imports, never by being NAMED: a test path in a string is prose.
-  return out.filter((p) => !/\.test\.ts$/.test(p));
+  return out.filter(({ path }) => !/\.test\.ts$/.test(path));
+}
+
+/** Calls that spawn, fork or read the path in their arguments — through an argv array. */
+const PATH_SINKS = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "fork", "runBoundedSuite", "readFileSync", "readFile", "URL"]);
+/** Calls that resolve a repo-relative path against a directory. */
+const PATH_JOINS = new Set(["join", "resolve"]);
+
+/** W1-T6089 — whether the path named at `at` is USED at runtime: it sits in the arguments of a
+ *  PATH_SINKS call (through any argv `[…]`), or is joined onto a RUNTIME directory —
+ *  `join(deps.repoRoot, "src", "run-task.ts")` — which a module does only to touch the file (spawn
+ *  it, hand it to cluster as `exec:`, read it). A rootless `join("src", "x.ts")` is transparent: the
+ *  call around it decides. An enclosing `{` (object literal, block) or the file's top level ends the
+ *  walk: a path held as data in a table, array or constant is never used in place. */
+function usedAtRuntime(masked: string, at: number): boolean {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const c = masked[i]!;
+    if (c === ")" || c === "]" || c === "}") depth += 1;
+    else if (c === "(" || c === "[" || c === "{") {
+      if (depth > 0) depth -= 1;
+      else if (c === "{") return false;
+      else if (c === "(") {
+        const callee = /([\w$]+)\s*$/.exec(masked.slice(Math.max(0, i - 64), i))?.[1] ?? "";
+        if (PATH_SINKS.has(callee)) return true;
+        if (PATH_JOINS.has(callee) && !/^\s*["'`]/.test(masked.slice(i + 1, at + 1))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** The named-path edges `file` contributes to the graph. A src/ path written as a STRING inside a
- *  src/ module is data — authority.ts, config-schema.ts, worktree-sites.ts and
- *  baked-runtime-inputs.ts list src paths in tables — never an import, so it is no src→src edge:
- *  MEASURED 2026-10-06 those 114 string edges made almost every module reach src/run-task.ts and
- *  every src change select ~2,374 suites. A test or script naming a path it spawns or reads keeps
- *  its edge — that read is real. */
+ *  src/ module is usually data — authority.ts, config-schema.ts, worktree-sites.ts and
+ *  baked-runtime-inputs.ts list src paths in tables — never an import: MEASURED 2026-10-06 those 114
+ *  string edges made almost every module reach src/run-task.ts. It stays an edge only when the module
+ *  USES it ({@link usedAtRuntime}): serve-supervisor, operator-mcp and gate-gardener spawn
+ *  src/run-task.ts, measurement-cadence reads it. A test or script naming a path keeps its edge. */
 function namedEdges(file: string, content: string, known: ReadonlySet<string>): string[] {
   const fromSrc = file.startsWith("src/");
-  return namedPaths(content).filter((p) => known.has(p) && !(fromSrc && p.startsWith("src/")));
+  let masked: string | undefined;
+  return namedPaths(content).filter(({ path, at }) => {
+    if (!known.has(path)) return false;
+    if (!fromSrc || !path.startsWith("src/")) return true;
+    masked ??= maskLiterals(content);
+    return usedAtRuntime(masked, at);
+  }).map(({ path }) => path);
 }
 
 /** Resolves a relative specifier from `from` against the known files, TS's `.js` → `.ts` included. */
@@ -180,9 +315,14 @@ function resolve(from: string, spec: string, known: ReadonlySet<string>): string
 /** THE SELECTOR — see the file header. Pure: it decides from `input` alone. */
 export function selectAffectedSuites(changed: readonly string[], input: AffectedSuitesInput): AffectedSelection {
   const files = changed.filter((f) => f.length > 0);
-  const trigger = fullRunTrigger(files);
+  const mapProblem = readMapProblem(input.readMap);
+  const trigger = fullRunTrigger(files, mapProblem === undefined);
   if (trigger !== undefined) {
-    return { suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models`], recentOnly: { floor: [] } };
+    const why = READ_MAPPED.test(trigger) ? ` (the read map cannot speak for it: ${mapProblem})` : "";
+    return {
+      suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models${why}`], recentOnly: { floor: [] },
+      ...(why === "" ? {} : { readMapFallback: mapProblem! }),
+    };
   }
 
   const reasons = new Map<string, string>();
@@ -222,6 +362,48 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const pathReaders = input.pathReaders;
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
+  // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
+  // run: a suite whose reads happen in a spawned child, or through `git ls-files`, leaves no record).
+  const observed = new Set<string>();
+  const notes: string[] = [];
+  if (mapProblem === undefined) {
+    const map = input.readMap!.map!;
+    const spawners = files.some((f) => READ_MAPPED.test(f)) ? spawningSuites(input.files) : new Set<string>();
+    const since = new Set(input.readMap!.drift.changedSinceMap);
+    const known = new Set(map.suites);
+    for (const f of files) {
+      if (SUITE.test(f)) continue;
+      const { readers, listers } = readMapReaders(map, f);
+      for (const s of readers) {
+        observed.add(s);
+        pick(s, `read ${f} (read map)`);
+      }
+      for (const { suite, dir } of listers) {
+        observed.add(suite);
+        pick(suite, `listed ${dir} (read map: a census reader of ${f})`);
+      }
+      if (!READ_MAPPED.test(f)) continue;
+      // What the record cannot see: a suite spawning children that read the file, and suites newer than
+      // the map or edited since it was taken. Each is selected when it names the file, or is unseen.
+      const slash = f.lastIndexOf("/");
+      const names = slash < 0 ? [f] : [f, `${f.slice(0, slash)}/`];
+      for (const s of spawners) {
+        const text = input.files.get(s) ?? "";
+        if (names.some((n) => text.includes(n))) {
+          observed.add(s);
+          pick(s, `spawns children and names ${f}; the read map cannot credit their reads`);
+        }
+      }
+      for (const s of input.files.keys()) {
+        if (!SUITE.test(s)) continue;
+        if (!known.has(s)) pick(s, "absent from the read map");
+        else if (since.has(s)) pick(s, "changed after the read map's sha");
+        else continue;
+        observed.add(s);
+      }
+      if (readers.length === 0 && listers.length === 0) notes.push(`${f}: read by no suite on the read map`);
+    }
+  }
   for (const s of recent) pick(s, "failed recently");
 
   const suites = [...reasons.keys()].filter((s) => SUITE.test(s)).sort();
@@ -231,15 +413,25 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const selection: AffectedSelection = {
     suites,
     fullRun: false,
-    reasons: suites.map((s) => `${s}: ${reasons.get(s)}`),
+    reasons: [...suites.map((s) => `${s}: ${reasons.get(s)}`), ...notes],
     recentOnly: { floor: recentOnlyFloor },
+    ...(input.readMap !== undefined && mapProblem !== undefined ? { readMapFallback: mapProblem } : {}),
   };
   if (input.symbolSuites) {
     const changedTests = files.filter((f) => SUITE.test(f));
-    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...pathNamers]);
+    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...pathNamers, ...observed]);
     const narrow = new Set([...narrowStructural, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
     selection.recentOnly.narrow = selection.narrow.filter((s) => !narrowStructural.has(s));
+  }
+  if (input.impact) {
+    const arm = impactArmSelection(input.impact, {
+      changed: files, files: input.files, floor: suites, pathReaders: [...pathReaders, ...observed], pathNamers: [...pathNamers], recent,
+      fallback: selection.narrow ?? suites,
+    });
+    selection.impact = arm.suites;
+    selection.recentOnly.impact = arm.recentOnly;
+    if (arm.fallback !== undefined) selection.impactFallback = arm.fallback;
   }
   return selection;
 }
@@ -299,22 +491,48 @@ export function symbollessSourceFiles(changed: readonly string[], diffText: stri
     changedSymbols(sections.get(f) ?? "", readFile).length === 0);
 }
 
+/** This module's own checkout. The census and plan-reading listings run ITS diff-class.mjs, tsx and
+ *  tsconfig, pointed at the target tree as DATA: a worker worktree's own scripts/ are worker-written
+ *  code, and the host must not execute them (the W1-T6091 shape, worker-provider.ts). */
+const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** BACKSTOP on one listing child: it fires only when a listing hangs, and the overrun throws. */
+export const AFFECTED_LISTING_TIMEOUT_MS = 2 * 60_000;
+
+/** The listing child's whole environment: an allowlist, never the parent's, so no GH_, GITHUB_,
+ *  token, key or provider variable reaches it, under a throwaway HOME and TMPDIR. */
+export function affectedListingEnv(home: string, parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const tmp = join(home, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  const env: Record<string, string> = { HOME: home, TMPDIR: tmp, PATH: parent.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
+  for (const key of ["LANG", "LC_ALL"] as const) {
+    const value = parent[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+function listingLines(r: SpawnSyncReturns<string>, what: string): string[] {
+  if (r.status !== 0) throw new Error(`${what} exited ${r.status}: ${(r.error?.message ?? r.stderr ?? "").trim().slice(0, 200)}`);
+  return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
 /** Reads the selector's input from `repoRoot`: git's tracked code files and their contents, and
- *  diff-class's own census and plan-reading listings (spawned, as src/ always reaches scripts/). A
- *  tracked file missing from disk (a concurrent delete) imports nothing and is left out; any other
- *  failure THROWS, and {@link affectedSelectionOrFull} turns that into a named full run. */
+ *  diff-class's own census and plan-reading listings (spawned from {@link HARNESS_ROOT} with
+ *  `--plan-reading-root <repoRoot>`, as src/ always reaches scripts/). A tracked file missing from
+ *  disk (a concurrent delete) imports nothing and is left out; any other failure THROWS, and
+ *  {@link affectedSelectionOrFull} turns that into a named full run. */
 export function readAffectedSuitesInput(
   repoRoot: string,
   changed: readonly string[],
   extra: { recentFailures?: readonly string[]; symbolSuites?: readonly string[] } = {},
 ): AffectedSuitesInput {
-  const run = (cmd: string, args: string[]) => {
-    const r = spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
-    return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  };
+  const run = (cmd: string, args: string[]) =>
+    listingLines(spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" }), `${cmd} ${args.join(" ")}`);
   const files = new Map<string, string>();
-  for (const path of run("git", ["ls-files", "--", "src", "scripts", "bin", "test"])) {
+  // W1-T6136: coveragePrecheck (run-task.ts) passes a WORKER worktree, so the listing goes through the leaf.
+  const tracked = hostWorktreeGit(repoRoot, ["ls-files", "--", "src", "scripts", "bin", "test"], { maxBuffer: 1 << 26 });
+  for (const path of tracked.split("\n").map((l) => l.trim()).filter(Boolean)) {
     if (!CODE_FILE.test(path)) continue;
     try {
       files.set(path, readFileSync(join(repoRoot, path), "utf8"));
@@ -323,14 +541,29 @@ export function readAffectedSuitesInput(
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
-  const list = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`)), "changed.txt");
-  writeFileSync(list, changed.join("\n") + "\n");
-  const diffClass = join(repoRoot, "scripts", "diff-class.mjs");
-  const census = run(process.execPath, ["--import", "tsx", diffClass, "--list-census-suites", "--changed-files", list]);
-  const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f))
-    ? run(process.execPath, ["--import", "tsx", diffClass, "--list-plan-reading-suites", "--changed-files", list])
-    : [];
-  return { files, pathReaders: [...census, ...prose], ...extra };
+  return { files, pathReaders: readAffectedListings(repoRoot, changed), ...extra };
+}
+
+/** diff-class's census and plan-reading listings for `repoRoot`, from {@link HARNESS_ROOT}'s copy
+ *  with the tree passed as data. Reads no git; a listing that fails or overruns THROWS. */
+export function readAffectedListings(repoRoot: string, changed: readonly string[]): string[] {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`));
+  try {
+    const list = join(dir, "changed.txt");
+    writeFileSync(list, changed.join("\n") + "\n");
+    const env = affectedListingEnv(join(dir, "home"));
+    const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+    const listing = (flag: string) => listingLines(spawnSync(
+      process.execPath,
+      ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: AFFECTED_LISTING_TIMEOUT_MS },
+    ), `diff-class ${flag}`);
+    const census = listing("--list-census-suites");
+    const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f)) ? listing("--list-plan-reading-suites") : [];
+    return [...census, ...prose];
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** The selection, or a FULL run naming why its input could not be read — never a narrower guess. */
@@ -356,6 +589,7 @@ export interface ShadowFailure {
   file: string;
   floor: "selected" | "missed" | "flake";
   narrow?: "selected" | "missed" | "flake";
+  impact?: "selected" | "missed" | "flake";
   /** The file's own W1-T4398 retry in this shard: "recovered" when pass two did not fail it again.
    *  Absent when no retry ran or its outcome could not be read. */
   retry?: "recovered" | "failed";
@@ -366,11 +600,13 @@ export interface ShadowFailure {
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
 export function shadowRecord(
   selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
-): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
+): { fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; failures: ShadowFailure[] } {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
   const recentOnlyNarrow = new Set(selection.recentOnly.narrow ?? []);
+  const impact = selection.impact ? new Set(selection.impact) : undefined;
+  const recentOnlyImpact = new Set(selection.recentOnly.impact ?? []);
   const verdict = (set: Set<string>, recentOnly: Set<string>, file: string): "selected" | "missed" | "flake" => {
     if (selection.fullRun) return "selected";
     if (!set.has(file)) return "missed";
@@ -380,10 +616,13 @@ export function shadowRecord(
     fullRun: selection.fullRun,
     floorSize: selection.suites.length,
     ...(narrow ? { narrowSize: narrow.size } : {}),
+    ...(impact ? { impactSize: impact.size } : {}),
+    ...(selection.impactFallback === undefined ? {} : { impactFallback: selection.impactFallback }),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
       floor: verdict(floor, recentOnlyFloor, file),
       ...(narrow ? { narrow: verdict(narrow, recentOnlyNarrow, file) } : {}),
+      ...(impact ? { impact: verdict(impact, recentOnlyImpact, file) } : {}),
       ...(Object.hasOwn(retried, file) ? { retry: retried[file] } : {}),
     })),
   };

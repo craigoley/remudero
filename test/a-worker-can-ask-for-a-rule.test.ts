@@ -46,7 +46,7 @@ function readText(result: Awaited<ReturnType<ReturnType<typeof createWorkerRuleT
 test("W1-T4094: a worker can fetch a rule body by id or phrase", async (t) => {
   const root = fixture(t);
   const settingsFile = join(root, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   let options: Options | undefined;
   await spawnWorker({
     cwd: root,

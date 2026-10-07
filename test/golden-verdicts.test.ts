@@ -217,6 +217,12 @@ test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — CODEQL READ-MODEL LESSON: the cited incident executes and the CodeQL guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-codeql-read-model-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — COMMENT-LOAD LESSON: the cited incident executes and the comment-load guidance arms", () => {
   const { verdict, golden } = judgeCase("ci-comment-load-lesson");
   assert.equal(golden.violation, "none");

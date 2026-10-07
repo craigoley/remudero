@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { closeSync, constants, copyFileSync, fsyncSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
@@ -20,6 +21,9 @@ const CORPUS_LOCK = '.coverage-corpus-write.lock';
 const PREMAPPED_FILE = /^coverage-premapped-(\d+)-(\d{13})\.json$/;
 const PREMAPPED_PIECE = /^coverage-(?:premapped|lines|mapped)-/;
 const PREMAPPED_FORMAT = 'rmd-v8-coverage-premapped-v1';
+// W1-T6108: test/setup/tmp-hygiene.ts's record of which suite spawned the child reports beside it.
+const CHILD_RECORD_FILE = /^rmd-v8-children-\d+-\d{13}\.json$/;
+const CHILD_RECORD_FORMAT = 'rmd-v8-child-suites-v1';
 const digest = source => createHash('sha256').update(source).digest('hex');
 
 function fileBytes(file) {
@@ -154,6 +158,63 @@ function readCoverageSource(file, limit = Infinity) {
   }
 }
 
+/**
+ * W1-T6083: the suite one raw process report ran, repo-relative, as `{ test, root }` — or {} for a
+ * spawned child's report, which names no suite. Compaction drops every test/** script, so this is
+ * read BEFORE the filter; it is what lets an impact map say which suite executed what.
+ */
+export function reportSuiteIdentity(result, cwd = process.cwd()) {
+  for (const script of result) {
+    if (typeof script?.url !== 'string' || !script.url.startsWith('file:')) continue;
+    const rel = relative(cwd, fileURLToPath(script.url)).split(sep).join('/');
+    if (/^test\/.*\.test\.ts$/.test(rel)) return { test: rel, root: pathToFileURL(cwd + sep).href };
+  }
+  return {};
+}
+
+/**
+ * W1-T6108: the suite that spawned each child report in `directory`, read from the
+ * `rmd-v8-children-*.json` records test/setup/tmp-hygiene.ts writes when it moves a suite's children's
+ * reports into the flat coverage directory — absolute report path to repo-relative suite. A record
+ * that is not the setup's own shape throws: crediting a child to a guessed suite is worse than none.
+ */
+export function childSuitesIn(directory) {
+  const suites = new Map();
+  let names;
+  try {
+    names = readdirSync(directory);
+  } catch (error) {
+    throw new Error(`cannot read raw coverage directory ${directory}: ${error.message}`);
+  }
+  for (const name of names.filter((n) => CHILD_RECORD_FILE.test(n)).sort()) {
+    const path = join(directory, name);
+    const record = JSON.parse(readCoverageSource(path, CHUNK_BYTES));
+    if (record?.format !== CHILD_RECORD_FORMAT || typeof record.suite !== 'string' || !/^test\/.*\.test\.ts$/.test(record.suite) ||
+        !Array.isArray(record.reports) || record.reports.some((r) => typeof r !== 'string' || !RAW_COVERAGE_FILE.test(r))) {
+      throw new Error(`${path} is not a valid ${CHILD_RECORD_FORMAT} record`);
+    }
+    for (const report of record.reports) suites.set(join(directory, report), record.suite);
+  }
+  return suites;
+}
+
+/** The identity a raw report at `file` carries: the suite that spawned it, when a record names
+ *  one, else the suite its own scripts name. */
+function rawReportIdentity(file, result, childSuites, cwd = process.cwd()) {
+  const spawnedBy = childSuites(dirname(file)).get(file);
+  if (spawnedBy !== undefined) return { test: spawnedBy, root: pathToFileURL(cwd + sep).href, child: true };
+  return reportSuiteIdentity(result, cwd);
+}
+
+/** `childSuitesIn`, read once per directory. */
+function childSuiteCache() {
+  const cache = new Map();
+  return (directory) => {
+    if (!cache.has(directory)) cache.set(directory, childSuitesIn(directory));
+    return cache.get(directory);
+  };
+}
+
 function restoreReport(report, sourceMaps, file) {
   if (!Array.isArray(report?.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null || Array.isArray(report.sourceMapRefs)) {
     throw new Error(`${file} contains an invalid compact process report`);
@@ -166,7 +227,9 @@ function restoreReport(report, sourceMaps, file) {
     cache[url] = sourceMaps[index];
   }
   if (report.result.length === 0) throw new Error(`${file} contains an invalid compact process report`);
-  return { result: report.result, 'source-map-cache': cache };
+  const identity = typeof report.test === 'string' && typeof report.root === 'string'
+    ? { test: report.test, root: report.root, ...(report.child === true ? { child: true } : {}) } : {};
+  return { result: report.result, 'source-map-cache': cache, ...identity };
 }
 
 /** Validate a chunked manifest's piece names, sizes and checksums against its directory, and return
@@ -225,7 +288,30 @@ function* corpusReports(file, manifest, bytes) {
   if (count !== manifest.reportCount) throw new Error(`${file} has a process-report count mismatch`);
 }
 
+/**
+ * A process that loads one `.ts` file through BOTH tsx loaders (an ESM import and a CJS require)
+ * reports two scripts under one URL, but `source-map-cache` is keyed by URL and holds ONE map. Node
+ * maps both instances with it, so the other instance's offsets land on unrelated lines and its
+ * zero-count ranges erase real hits from every other process at the range merge (#9835: a pre-push
+ * fixture's children zeroed src/lib/worker-home.ts across all eight shards). A repeated URL keeps
+ * only the instances whose generated length the cached map describes; a URL that is not repeated,
+ * or has no cached map, is untouched.
+ */
+export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
+  const seen = new Map();
+  for (const script of result) seen.set(script?.url, (seen.get(script?.url) ?? 0) + 1);
+  if (![...seen.values()].some((n) => n > 1)) return result;
+  return result.filter((script) => {
+    const lineLengths = sourceMapCache?.[script.url]?.lineLengths;
+    if (seen.get(script.url) === 1 || !Array.isArray(lineLengths)) return true;
+    const generated = lineLengths.reduce((sum, n) => sum + n, 0) + lineLengths.length - 1;
+    const extent = Math.max(...script.functions.flatMap((fn) => fn.ranges.filter((r) => r.startOffset === 0).map((r) => r.endOffset)));
+    return extent === generated;
+  });
+}
+
 function* coverageReports(directories, bytes) {
+  const childSuites = childSuiteCache();
   for (const directory of directories) {
     const files = coverageFilesUnder(directory, true);
     if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
@@ -239,7 +325,9 @@ function* coverageReports(directories, bytes) {
       }
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
-        yield parsed;
+        const spawnedBy = Array.isArray(parsed?.result) ? rawReportIdentity(file, parsed.result, childSuites) : {};
+        if (Array.isArray(parsed?.result)) parsed.result = scriptsTheSourceMapDescribes(parsed.result, parsed['source-map-cache']);
+        yield spawnedBy.child ? { ...parsed, ...spawnedBy } : parsed;
         continue;
       }
       if (parsed?.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
@@ -267,6 +355,7 @@ function collectCompactReports(directories, onMap, onReport) {
   const sourceMapIndexes = new Map();
   let rawFileCount = 0;
   let reportCount = 0;
+  const childSuites = childSuiteCache();
 
   for (const directory of directories) {
     const files = coverageFilesUnder(directory);
@@ -275,7 +364,8 @@ function collectCompactReports(directories, onMap, onReport) {
       const raw = JSON.parse(readCoverageSource(file));
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
-      const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
+      const identity = rawReportIdentity(file, raw.result, childSuites);
+      const result = scriptsTheSourceMapDescribes(raw.result, raw['source-map-cache']).filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
       for (const script of result) {
@@ -291,7 +381,7 @@ function collectCompactReports(directories, onMap, onReport) {
         }
         sourceMapRefs[script.url] = sourceMapIndex;
       }
-      onReport({ result, sourceMapRefs });
+      onReport({ result, sourceMapRefs, ...identity });
       reportCount++;
     }
   }
@@ -365,6 +455,7 @@ export function writeCompactCoverageDirectories(directories, outputDirectory, { 
  * Translation has exactly two effects beyond its return value, and both are recorded so the
  * aggregator reproduces them in shard order: it populates Node's per-file line cache (the FIRST
  * content seen for a URL wins), and it assigns `count` on cached lines (the LAST assignment wins).
+ * Node 24 also sets `ignore` on TypeScript type-only lines, so that write is recorded too.
  * The range merge (`mergeCoverage`) is NOT pre-applied: it is order-sensitive and not associative,
  * so folding a shard locally could reorder or drop ranges. The aggregator merges the translated
  * reports in exactly the order it would have produced them itself.
@@ -386,13 +477,20 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
       const lines = getLines(url, source);
       if (lines && !lineState.has(url)) {
         const written = new Map();
-        lineState.set(url, { source: lines.map(line => line.src).join(''), written });
+        const ignored = new Set();
+        lineState.set(url, { source: lines.map(line => line.src).join(''), written, ignored });
         lines.forEach((line, index) => {
           let count = line.count;
+          let ignore = line.ignore;
           Object.defineProperty(line, 'count', {
             configurable: true, enumerable: true,
             get: () => count,
             set: (value) => { count = value; written.set(index, value); },
+          });
+          Object.defineProperty(line, 'ignore', {
+            configurable: true, enumerable: true,
+            get: () => ignore,
+            set: (value) => { ignore = value; if (value === true) ignored.add(index); },
           });
         });
       }
@@ -413,7 +511,7 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
     mapped.flush();
     const counts = { rawFileCount: bytes.rawFileCount, reportCount };
     const lines = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'lines', 'lines', maxChunkBytes);
-    for (const [url, { source, written }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written] }));
+    for (const [url, { source, written, ignored }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written], ignored: [...ignored] }));
     lines.flush();
     const manifest = { format: PREMAPPED_FORMAT, maxChunkBytes, ...counts, lineFileCount: lineState.size, lineChunks: lines.chunks, reportChunks: mapped.chunks };
     const source = JSON.stringify(manifest);
@@ -460,10 +558,14 @@ function* premappedReports(file, collector, bytes) {
     [['lines', manifest.lineChunks], ['mapped', manifest.reportChunks]], bytes);
   let lineFiles = 0;
   for (const chunk of manifest.lineChunks) for (const entry of readChunk(chunk, 'lines')) {
-    if (typeof entry?.url !== 'string' || typeof entry.source !== 'string' || !Array.isArray(entry.written)) {
+    if (typeof entry?.url !== 'string' || typeof entry.source !== 'string' || !Array.isArray(entry.written) || !Array.isArray(entry.ignored)) {
       throw new Error(`${file} contains an invalid premapped line record`);
     }
     const lines = collector.getLines(entry.url, entry.source);
+    for (const index of entry.ignored) {
+      if (!Number.isSafeInteger(index) || !lines?.[index]) throw new Error(`${file} ignores a line outside ${entry.url}`);
+      lines[index].ignore = true;
+    }
     for (const write of entry.written) {
       if (!Array.isArray(write) || !Number.isSafeInteger(write[0]) || !lines?.[write[0]] || !Number.isFinite(write[1])) {
         throw new Error(`${file} writes a line outside ${entry.url}`);
@@ -528,7 +630,30 @@ export function assertExpectedShardCount(directories, expectedShardCount) {
   }
 }
 
-function main(argv) {
+/**
+ * W1-T6083: the per-suite impact map of raw, compact or chunked coverage directories, written to
+ * `output` (run with `--import tsx`: the builder is TypeScript). `sourceRoot` supplies an unmapped
+ * script's text at the same sha, so its functions can be placed.
+ */
+export async function writeImpactMap(directories, output, { sha, sourceRoot } = {}) {
+  if (directories.length === 0) throw new Error('at least one coverage directory is required');
+  if (!sha) throw new Error('--impact-map requires --sha <the main sha the coverage ran on>');
+  const { buildImpactMap } = await import('../src/lib/test-impact-map.ts');
+  const bytes = { rawFileCount: 0, inputBytes: 0 };
+  const readSource = sourceRoot === undefined ? undefined : (path) => {
+    try {
+      return readFileSync(join(sourceRoot, path), 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+  };
+  const map = buildImpactMap(coverageReports(directories, bytes), { sha, root: pathToFileURL(process.cwd() + sep).href, readSource });
+  writeFileSync(output, JSON.stringify(map));
+  return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports, spawnCredited: map.spawnCredited.length };
+}
+
+export async function main(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -536,14 +661,23 @@ function main(argv) {
       output: { type: 'string', short: 'o' },
       'compact-output': { type: 'string' },
       'premap-output': { type: 'string' },
+      'impact-map': { type: 'string' },
+      sha: { type: 'string' },
+      'source-root': { type: 'string' },
       'shard-count': { type: 'string' },
     },
   });
-  if ([values.output, values['compact-output'], values['premap-output']].filter(Boolean).length !== 1) {
-    throw new Error('exactly one of --output, --compact-output or --premap-output is required');
+  if ([values.output, values['compact-output'], values['premap-output'], values['impact-map']].filter(Boolean).length !== 1) {
+    throw new Error('exactly one of --output, --compact-output or --premap-output is required, or --impact-map alone');
   }
   assertExpectedShardCount(positionals, values['shard-count']);
-  if (values['premap-output']) {
+  if (values['impact-map']) {
+    const r = await writeImpactMap(positionals, values['impact-map'], { sha: values.sha, sourceRoot: values['source-root'] });
+    console.log(
+      `coverage-merge-ratchet: impact map of ${r.rawFileCount} process report(s): ${r.suites} suite(s), ${r.files} source file(s), ` +
+        `${r.orphanReports} orphan report(s) -> ${values['impact-map']} (${r.spawnCredited} suite(s) credited with a child's report)`,
+    );
+  } else if (values['premap-output']) {
     const { rawFileCount, reportCount, lineFileCount, output, premappedBytes } =
       writePremappedCoverageDirectories(positionals, values['premap-output']);
     console.log(
@@ -572,10 +706,8 @@ function main(argv) {
 }
 
 if (isMainModule(import.meta.url)) {
-  try {
-    main(process.argv.slice(2));
-  } catch (error) {
+  main(process.argv.slice(2)).catch((error) => {
     console.error(`coverage-merge-ratchet: ${error.message}`);
     process.exitCode = 1;
-  }
+  });
 }

@@ -318,7 +318,7 @@ test("runReview (W1-T2205, end-to-end): the advisory reviewer's overlapping text
   const oldClaudeBinOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
   const oldOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   try {
-    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const ledgerPath = join(root, "ledger.ndjson");
 
     // The existing spawn seam keeps the real worker and ledger wrapper, but gives this
@@ -832,7 +832,7 @@ test("spawnWorker: W1-T113 — an all-absent toolchain refuses via the injected 
   // otherwise surface only deep inside worker-home setup or the SDK spawn.
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-toolchain-"));
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   await assert.rejects(
     () =>
       spawnWorker({
@@ -862,7 +862,7 @@ test("spawnWorker: W1-T113 — the darwin-only keychain gate provisions with the
   // reaching the SDK" shape the toolchain test above uses.
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-keychain-"));
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   const claudeBin = "/fresh/resolved/claude";
   const runnerCalls: string[][] = [];
   const runner = (argv: string[]) => {
@@ -942,7 +942,7 @@ function fakeQueryFn(behavior: "success" | "error") {
 
 function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd: dir,
     permissionMode: "bypassPermissions" as const,
