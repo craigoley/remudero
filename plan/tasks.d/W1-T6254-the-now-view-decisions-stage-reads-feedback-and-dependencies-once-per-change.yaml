@@ -1,0 +1,43 @@
+- id: W1-T6254
+  title: "THE NOW VIEW'S DECISIONS STAGE READS FEEDBACK AND DEPENDENCY GATES ONCE PER CHANGE — decisionsOf re-lists the grill store, re-reconciles feedback and re-derives dependency verification gates on every decisions build; measured on serve 2026-10-07 decisions.dependencies took ~1.4 s on every sampled build and decisions.feedback spiked to 15 s, and a views-worker CPU profile attributed 25 s of self time to decisionsOf with its inlined callees"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the decisions stage reuses its feedback and dependency inputs while they are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-07: now view 2.5-3.4 s per pass; views-worker CPU profile (serve lanes/claude/serve2-w2-_worker_9_.cpuprofile)"
+  plan_refs: [W1-T6253, W1-T5730]
+  files: [src/lib/now-view.ts, test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 on remudero-serve (b80ffa1e6): over 5 sampled now builds that ran the decisions
+    stage, decisions median 1656 ms (max 19297), decisions.feedback median 87 ms (max 15046),
+    decisions.dependencies median 1362 ms (max 1713), decisions.gates median 34 ms (max 2859). A 150 s
+    Profiler session on the views worker attributed 25.0 s of self time to decisionsOf (V8 inlines its
+    small callees), whose callees are escalationClasses, escalationDecisions, listGrilling,
+    grillDecisions, projectFeedbackGates (5.0 s self), nowActions and nowDependencyVerificationGates.
+    READ on origin/main: decisionsOf (src/lib/now-view.ts) calls listGrilling(instance) →
+    overlayQueuedFeedbackEntries → projectReconciledFeedback and nowDependencyVerificationGates({ plan,
+    rows, github, snapshot }) on every build, with no key on their inputs.
+  design: |
+    Key each input on what it reads: the grill listing and its reconciliation on the feedback root's
+    file identities plus the queue overlay's, and the dependency gates on (plan key, row generation,
+    github generation) — the same keys the build already carries in `b.keys`. Reuse the derived value
+    while its key is unchanged; recompute on any change, never serving one built from older inputs.
+    The 15 s feedback spike is measured, not explained: the task first records which call in the
+    feedback lap dominates (a lap split), then fixes that call.
+  acceptance:
+    - claim: "two decisions builds over unchanged feedback files list and reconcile the grill store once"
+      proof: 'grep: test("W1-T6254: unchanged feedback is listed and reconciled once across decisions builds" in test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts'
+    - claim: "two decisions builds over an unchanged plan, row generation and github generation derive dependency gates once"
+      proof: 'grep: test("W1-T6254: unchanged dependency inputs derive the gates once" in test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts'
+    - claim: "a changed feedback file or row generation recomputes its input"
+      proof: 'grep: test("W1-T6254: a changed input recomputes its decision source" in test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts'
+  falsifier: |
+    Keep the per-build listGrilling and nowDependencyVerificationGates calls: counting seams record two
+    calls for two builds over unchanged inputs, and the first two tests fail.
