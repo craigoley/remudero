@@ -1,0 +1,38 @@
+- id: W1-T6274
+  title: "A DAEMON DRAINING FOR A RESTART DISPATCHES NO NEW RUN — refillLane checks freshness, then awaits its merged-set and run-branch reads and dispatches what they chose, so a restart decided during those awaits is never seen: on 2026-10-07 the core daemon decided a freshness restart at 20:38:42Z and still started W1-T6262 at 20:39:46Z, a 20-minute run that delayed the restart to 21:15:32Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a decided restart holds every lane refill until the daemon stops
+  band_meaning: span
+  origin: "operator session 2026-10-07: daemon.freshness_decision 20:38:42Z then run.start W1-T6262 20:39:46Z; restart 21:15:32Z"
+  plan_refs: [W1-T4945, W1-T5083, W1-T6273]
+  files: [src/lib/daemon.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 in the core daemon's ledger: daemon.freshness_decision action "restart" busy:true
+    (upper_age) at 20:38:42Z; verdict freshness_yield for W1-T6254 (20:38:52) and W1-T6252 (20:40:26);
+    but run.start W1-T6262 at 20:39:46Z, which ran ~20 min before it yielded (20:59:43); the daemon
+    restarted at 21:15:32Z. READ on origin/main: refillLane (src/lib/daemon.ts) consults the freshness
+    decision before awaiting its merged-set and run-branch reads, then dispatches without re-checking, and
+    a restart decided inside one refill holds only that lane, not the rest of the phase. Once runs settle
+    the stop itself is correct (W1-T5083); the delay was the run the race admitted plus the designed
+    final sweep and detached sweep actions.
+  design: |
+    Re-check the restart (and stop/pause) gates immediately before a refill dispatches, holding the lane
+    with a recorded `dispatch.lane_refill_held` reason when one fired during the reads; latch a restart
+    decided inside a refill for the rest of the phase so every later refill holds and the phase ends in
+    the freshness stop; record a refilled lane's snapshot only once its dispatch is certain.
+  acceptance:
+    - claim: "a pending freshness restart refuses a new lane dispatch and records why"
+      proof: 'grep: test("W1-T6274: a pending freshness restart refuses a new dispatch and says why" in test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts'
+    - claim: "a restart decided while a refill's run-branch read is in flight holds the lane"
+      proof: 'grep: test("W1-T6274: a restart decided while a refill''s run-branch read is in flight holds the lane" in test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts'
+  falsifier: |
+    Remove the pre-dispatch re-check: a fixture daemon decides a restart while lane B's refill awaits its
+    run-branch read, and task C is dispatched onto B's freed lane (['A','B','C']); both tests fail.

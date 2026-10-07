@@ -1,0 +1,35 @@
+- id: W1-T6276
+  title: "THE GARDENER READS TEST-PINNED LEARNINGS ONCE PER TEST TREE — testPinnedLearnings walks every file under test/ (~2,800) and reads each synchronously on every knowledge-garden pass, on the daemon thread, though its answer changes only when the test tree does; the 2026-10-07 steady-state CPU profile caught the pass as an unbroken 39.9 s block, the longest left"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — the test-pin scan is computed once per test-tree identity
+  band_meaning: span
+  origin: "operator session 2026-10-07: steady-state daemon CPU profile (lanes/claude/daemon-cpu-steady.cpuprofile)"
+  plan_refs: [W1-T5689]
+  files: [src/lib/knowledge-gardener.ts, test/the-gardener-reads-test-pinned-learnings-once-per-test-tree.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 21:42–21:48Z (360 s Profiler session on the live daemon): the longest busy run,
+    39.9 s, was gardener.gardenPassSteps → knowledge-gardener → testPinnedLearnings (27.9 s inside it);
+    readFileUtf8 was 62.7 s of self time across the window. READ on origin/main: `testPinnedLearnings`
+    (src/lib/knowledge-gardener.ts) recursively readdirSyncs test/ and readFileSyncs every .js/.ts file to
+    match quoted learning ids, on every call.
+  design: |
+    Key the scan on the test tree's identity — the git tree object id of test/ at HEAD
+    (`git rev-parse HEAD:test`, one cheap call) — and reuse the pins while it is unchanged; an
+    unresolvable tree id falls back to today's full scan rather than serving an answer of unknown age.
+    The pin semantics (first file naming an id, fixtures skipped) are unchanged.
+  acceptance:
+    - claim: "two garden passes over an unchanged test tree scan it once"
+      proof: 'grep: test("W1-T6276: an unchanged test tree is scanned once across garden passes" in test/the-gardener-reads-test-pinned-learnings-once-per-test-tree.test.ts'
+    - claim: "a changed test tree is rescanned and finds a new pin"
+      proof: 'grep: test("W1-T6276: a changed test tree is rescanned" in test/the-gardener-reads-test-pinned-learnings-once-per-test-tree.test.ts'
+  falsifier: |
+    Keep the per-call walk: a counting readFile seam records two full scans for two passes over the same
+    tree, and the first test fails.
