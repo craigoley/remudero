@@ -9,11 +9,11 @@
 # docs/deploy-image-forensics.md, one heading per instruction. REQ numbers are cited by name from
 # deploy/entrypoint.sh, deploy/host-update.sh, deploy/verify-image.sh and test/; keep them.
 
-# Pin Node to the exact `.nvmrc` version, never the floating `node:22-bookworm-slim` tag.
+# Pin Node to the exact `.nvmrc` version, never the floating `node:24-bookworm-slim` tag.
 # `assertPinnedNodeVersion` (scripts/coverage-merge-ratchet.mjs) throws on any string mismatch, so
 # a moved floating tag reddened six merge-lcov tests with no change in this repo (W1-T2770).
 # test/merge-lcov-node-drift-cluster-and-image-pin.test.ts reads this line against `.nvmrc`.
-FROM node:22.22.3-bookworm-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 # ── REQ 1: an init that reaps ────────────────────────────────────────────────────────────────
 # tini must be PID 1. `spawnDetachedGroup` (src/lib/worker-containment.ts) spawns detached, so each

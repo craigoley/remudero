@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { IntervalHistogram } from "node:perf_hooks";
+import type { monitorEventLoopDelay } from "node:perf_hooks";
 import type { Clock } from "../src/lib/clock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -246,7 +246,7 @@ test("the lag monitor starts on first read and rolls its window every minute", (
     percentile: (p: number) => (p === 50 ? 1_000_000 : 812_000_000),
     max: 8_045_000_000,
     count: 42,
-  } as unknown as IntervalHistogram;
+  } as unknown as ReturnType<typeof monitorEventLoopDelay>;
   const read = createEventLoopLagMonitor({ now: () => t } as Clock, () => fake);
   assert.equal(read(), undefined, "the first read only starts the monitor");
   assert.equal(enabled, 1);
