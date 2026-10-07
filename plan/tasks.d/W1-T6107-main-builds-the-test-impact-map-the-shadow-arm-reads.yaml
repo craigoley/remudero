@@ -1,0 +1,50 @@
+- id: W1-T6107
+  title: "MAIN BUILDS THE TEST IMPACT MAP THE SHADOW ARM READS — PR #9760 (W1-T6083) adds buildImpactMap, `coverage-merge-ratchet.mjs --impact-map` and `select-affected-suites.mjs --impact-map/--base`, but nothing ever runs the builder and CI's shadow step passes no map, so the impact arm records nothing; the coverage-shard artifacts it needs are kept for one day"
+  repo: remudero
+  depends_on: [W1-T6083]
+  type: implement
+  verify: human  # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the impact map is produced on main and handed to the shadow selector
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
+  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088]
+  files: [.github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9760 head (1225b4c5d) and origin/main 23c0e7dfe. scripts/coverage-merge-
+    ratchet.mjs `writeImpactMap` builds the map through src/lib/test-impact-map.ts `buildImpactMap` from
+    raw, compact or chunked coverage directories and needs `--sha`; scripts/select-affected-suites.mjs
+    reads one through `readImpactArmInput` when given `--impact-map <path>` and `--base`. No caller passes
+    either: ci.yml's coverage-shard shadow step runs select-affected-suites with only --changed-files,
+    --diff and --failed-from, and no step or daemon path runs `--impact-map`. The input exists: every
+    coverage shard uploads `coverage-shard-<n>` (raw/ per-process reports, `retention-days: 1`) and the
+    coverage-ratchet-required job already downloads all eight with `pattern: coverage-shard-*`. W1-T6083's
+    shard design named a daemon-side fetch; #9760 built neither half of the delivery, so the map has no
+    producer and the arm reads its fallback on every run.
+  design: |
+    THE CHEAP CANDIDATE: a CI step, not a daemon fetch. (1) In coverage-ratchet-required, on a push to
+    main (class `push:SOURCE`) and on merge_group (whose tested commit becomes main's when the queue fast-
+    forwards), run `node --import tsx scripts/coverage-merge-ratchet.mjs --impact-map test-impact-map.json
+    --sha "$GITHUB_SHA"` over the eight downloaded shards' raw/ directories, and upload it as the
+    `test-impact-map` artifact with a retention long enough to cover IMPACT_MAP_STALENESS_BOUND commits
+    (at least 7 days). A builder failure is reported in the step summary and never fails the job: the map
+    is shadow evidence. (2) In the coverage-shard shadow step on pull_request, fetch the newest
+    `test-impact-map` artifact from a successful main ci.yml run (the workflow already holds
+    `actions: read`), and pass `--impact-map <path> --base <the PR base sha>` to select-affected-suites;
+    with no artifact, omit both flags so the selector records no impact arm, and print why. Live selection
+    does not change. THE COSTLY CANDIDATE (a daemon-side fetch keeping maps under state for local
+    selection) waits for the shadow record to show the impact arm is worth using outside CI.
+  acceptance:
+    - claim: "ci.yml builds the impact map from the downloaded coverage shards only on a push to main and on merge_group, uploads it as the test-impact-map artifact with a retention of at least 7 days, never fails the job on a builder error, and the coverage-shard shadow step passes --impact-map with --base when a main map was fetched and omits both when none exists"
+      proof: "unit test: test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts"
+  falsifier: |
+    Drop the `--impact-map` pass from the shadow step: the workflow fixture's shadow invocation carries no
+    map flag and the shadow-step test fails.
+  note: |
+    OPERATOR BUILD: a .github/workflows path routes this to operator-build. Depends on W1-T6083 (#9760,
+    open at filing): build after it merges. If W1-T6083 merges WITH a producer after all, retire this as a
+    duplicate. The impact arm stays SHADOW; flipping it live is a separate ruling on the shadow record.
