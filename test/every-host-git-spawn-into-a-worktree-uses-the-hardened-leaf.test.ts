@@ -210,11 +210,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "managed checkout",
   },
   "src/run-task.ts": {
-    count: 82,
+    count: 78,
     reason:
-      "HARNESS (W1-T6121 converted every worker and reviewer site): the remaining sites address the managed " +
-      "checkout, plan sync, gardener/approve worktrees, the origin/main reviewer tree, fix recovery refs and " +
-      "clones — each reasoned in HARNESS_SITES in test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts",
+      "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
+      "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
   },
 };
 
