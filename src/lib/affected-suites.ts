@@ -378,6 +378,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(verdictReuse) && files.some((f) => verdictReuseSeams.includes(f))) {
     pathReaders.push(verdictReuse);
   }
+  const claimsCheck = "test/claims-check.test.ts";
+  const claimsCheckEdges = ["src/lib/plan.ts", "src/run-task.ts", "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts"];
+  if (input.files.has(claimsCheck) && files.some((f) => claimsCheckEdges.includes(f))) {
+    pathReaders.push(claimsCheck);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
