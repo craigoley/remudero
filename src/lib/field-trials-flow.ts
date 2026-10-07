@@ -18,6 +18,7 @@
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
+import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -93,6 +94,7 @@ export interface FlowRow {
   assignmentId: string | null;
   requestedModel: string | null;
   selectedModel: string | null;
+  selectedEffort?: string | null;
   provider?: string | null;
   servedModel: string | null;
   servedModelReason?: string | null;
@@ -105,6 +107,7 @@ export interface FlowRow {
   risk: string | null;
   workLane: string | null;
   stackPinned: { harness: boolean; prompt: boolean; tool: boolean; scorer: boolean; environment: boolean } | null;
+  stackRevisions?: TrialRevisionPins;
   costUsd: number | null;
   billingMode: "api" | "subscription" | null;
   success: boolean | null;
@@ -148,6 +151,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
     requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
+    selectedEffort: text(record(assignment?.selected)?.effort), stackRevisions: trialRevisionPins(stack),
     provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
@@ -427,6 +431,7 @@ export interface FieldTrialsFlowSnapshot {
   followUpWindowDays: number;
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
   preventionAdoption?: { source: string; repo: string; evidence: ReturnType<typeof preventionAdoption> }[];
+  servedTrialCohorts?: { source: string; repo: string; evidence: ReturnType<typeof servedTrialCohorts> }[];
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
@@ -682,6 +687,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     learning: [] as LearningUnit[] };
   const transitions: ModelTransition[] = [];
   const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
+  const trialCohorts: NonNullable<FieldTrialsFlowSnapshot["servedTrialCohorts"]> = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
   const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
@@ -708,6 +714,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     privateKeys.add(source.repo);
     const pulls = Object.values(store?.pulls ?? {});
     preventionSources.push({ source: source.label, repo: source.repo, evidence: preventionAdoption(ledgerRows, input.asOf) });
+    trialCohorts.push({ source: source.label, repo: source.repo, evidence: servedTrialCohorts(ledgerRows, input.asOf, periodOf) });
     const ctx: SourceContext = { label: source.label, repo: source.repo, store, rows: ledgerRows, asOf: input.asOf,
       boots: ledgerRows.filter((row) => row.step === "daemon.boot"),
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
@@ -836,7 +843,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources,
+    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources, servedTrialCohorts: trialCohorts,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
