@@ -209,17 +209,23 @@ test("materializeWorkerHome: self-heals a symlink pointing at a STALE real-HOME 
 
 // ── W1-T505: narrow the `.claude` grant to a credential-only sibling ───────
 
+const USABLE = (token: string) => JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `r-${token}`, expiresAt: 1 } });
+const EMPTIED = JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "" } });
+// W1-T6252: the seed provisions ONE shared store under the (host-mounted) .claude, never a private fork.
+const SHARED = (realHome: string) => join(realHome, ".claude", "fleet-auth", "claude");
+
 test("given an injected real-home fixture whose .claude holds a .credentials.json, the seed uses private modes", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
-    seedClaudeFleetCredentials({ realHome });
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    assert.deepEqual(readdirSync(fleet), [".credentials.json"]);
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "token");
-    assert.equal(statSync(fleet).mode & 0o777, 0o700);
-    assert.equal(statSync(join(fleet, ".credentials.json")).mode & 0o777, 0o600);
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "provisioned");
+    const store = SHARED(realHome);
+    assert.deepEqual(readdirSync(store), [".credentials.json"]);
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("token"));
+    assert.equal(statSync(store).mode & 0o777, 0o700);
+    assert.equal(statSync(join(store, ".credentials.json")).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(realHome), [".claude"], "no private fork is created");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -229,80 +235,78 @@ test("given an injected real-home fixture whose .claude-fleet ALREADY exists, th
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
     const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
     mkdirSync(fleet);
     writeFileSync(join(fleet, ".credentials.json"), "refreshed");
     seedClaudeFleetCredentials({ realHome });
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed", "the old fork is left for recovery");
     assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
 });
-
-const USABLE = (token: string) => JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `r-${token}`, expiresAt: 1 } });
-const EMPTIED = JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "" } });
 
 // 2026-10-07: core's .claude-fleet fork was emptied at 10:27 (its refresh token rotated away by another
 // holder of the same login) while the owner file stayed usable; every Claude spawn and usage probe on
-// that container refused for five hours, until the container was recreated and re-seeded.
-test("an emptied .claude-fleet fork heals from a usable owner credential", () => {
+// that container refused for five hours. The same heal now applies to the shared store.
+test("an emptied shared credential store heals from a usable owner credential", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
     writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    mkdirSync(fleet, { mode: 0o700 });
-    writeFileSync(join(fleet, ".credentials.json"), EMPTIED);
+    const store = SHARED(realHome);
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    writeFileSync(join(store, ".credentials.json"), EMPTIED);
     assert.equal(seedClaudeFleetCredentials({ realHome }), "healed");
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), USABLE("owner"));
-    assert.equal(statSync(join(fleet, ".credentials.json")).mode & 0o777, 0o600);
-    assert.deepEqual(readdirSync(fleet), [".credentials.json"], "no staged file is left behind");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("owner"));
+    assert.equal(statSync(join(store, ".credentials.json")).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(store), [".credentials.json"], "no staged file is left behind");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
 });
 
-test("a usable .claude-fleet fork is never replaced, and an unusable owner never replaces an emptied one", () => {
+test("a usable shared store is never replaced, and an unusable owner never replaces an emptied one", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
     writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    mkdirSync(fleet, { mode: 0o700 });
-    writeFileSync(join(fleet, ".credentials.json"), USABLE("refreshed-by-a-worker"));
+    const store = SHARED(realHome);
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    writeFileSync(join(store, ".credentials.json"), USABLE("refreshed-by-a-worker"));
     assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), USABLE("refreshed-by-a-worker"));
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("refreshed-by-a-worker"));
 
-    writeFileSync(join(fleet, ".credentials.json"), EMPTIED);
+    writeFileSync(join(store, ".credentials.json"), EMPTIED);
     writeFileSync(join(realHome, ".claude", ".credentials.json"), EMPTIED);
     assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), EMPTIED);
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), EMPTIED);
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
 });
 
-test("a concurrent .claude-fleet create wins without replacing its credential", () => {
+test("a concurrent shared-store create wins without replacing its credential", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    seedClaudeFleetCredentials({
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("stale"));
+    const store = SHARED(realHome);
+    assert.equal(seedClaudeFleetCredentials({
       realHome,
       fsImpl: {
-        mkdirSync: ((path: string) => {
-          assert.equal(path, fleet);
-          mkdirSync(fleet);
-          writeFileSync(join(fleet, ".credentials.json"), "refreshed");
+        mkdirSync: ((path: string, opts?: { recursive?: boolean }) => {
+          if (opts?.recursive) return mkdirSync(path, opts as never);
+          assert.equal(path, store);
+          mkdirSync(store);
+          writeFileSync(join(store, ".credentials.json"), "refreshed");
           throw Object.assign(new Error("concurrent seed"), { code: "EEXIST" });
         }) as typeof mkdirSync,
       },
-    });
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
-    assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
+    }), "kept");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), "refreshed");
+    assert.deepEqual(readdirSync(dirname(store)), ["claude"], "the loser's staged file is removed");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -314,6 +318,7 @@ test("given an injected real-home fixture with no real .claude credential, the s
     mkdirSync(join(realHome, ".claude"));
     assert.doesNotThrow(() => seedClaudeFleetCredentials({ realHome }));
     assert.deepEqual(readdirSync(realHome), [".claude"]);
+    assert.deepEqual(readdirSync(join(realHome, ".claude")), []);
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -341,7 +346,7 @@ test("a failed seed publish removes its private staging paths and reports the er
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
     assert.throws(
       () => seedClaudeFleetCredentials({
         realHome,
@@ -352,6 +357,7 @@ test("a failed seed publish removes its private staging paths and reports the er
       { code: "EACCES" },
     );
     assert.deepEqual(readdirSync(realHome), [".claude"]);
+    assert.deepEqual(readdirSync(dirname(SHARED(realHome))), [], "neither the store nor its staged file survives");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -363,7 +369,7 @@ test("the seed is invoked before materializeWorkerHome on the spawn path", async
   const previousHome = process.env.HOME;
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
     writeFileSync(join(realHome, ".claude", "settings.json"), "operator settings");
     process.env.HOME = realHome;
     let spawned = false;
@@ -377,9 +383,8 @@ test("the seed is invoked before materializeWorkerHome on the spawn path", async
       providerRouting: {
         spawnCodex: async ({ workerHome }) => {
           spawned = true;
-          const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-          assert.equal(readlinkSync(join(workerHome, ".claude")), fleet);
-          assert.equal(readFileSync(join(workerHome, ".claude", ".credentials.json"), "utf8"), "token");
+          assert.equal(readlinkSync(join(workerHome, ".claude")), SHARED(realHome));
+          assert.equal(readFileSync(join(workerHome, ".claude", ".credentials.json"), "utf8"), USABLE("token"));
           assert.equal(existsSync(join(workerHome, ".claude", "settings.json")), false);
           return { text: "ok", model: "codex", provider: "codex" } as never;
         },

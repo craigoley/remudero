@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -790,19 +791,79 @@ export function loadPlanQuarantiningDuplicates(
   return quarantineDuplicates(merged.tasks, duplicateFiles, path, invalid);
 }
 
-/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine; `blobs[0]`, the monolith, stays fatal. */
-export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>): {
+type CachedPlanBlob = {
+  hash: string;
+  label: string;
+  tasks: Task[];
+  duplicates: string[];
+  error?: { prefix: "yaml" | "task" | "plain"; message: string };
+};
+
+/** One path's current pin only. A merge replaces the entries after validation succeeds. */
+export class PlanBlobCache {
+  entries = new Map<string, CachedPlanBlob>();
+  parsedBlobs = 0;
+  reusedBlobs = 0;
+}
+
+function cachedBlobParser(cache: PlanBlobCache, next: Map<string, CachedPlanBlob>, counts: { parsedBlobs: number; reusedBlobs: number }): typeof parseTasksFromYaml {
+  return (text, label, onDuplicate) => {
+    // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
+    const path = label.slice(label.indexOf(":") + 1);
+    const hash = createHash("sha256").update(text, "utf8").digest("hex");
+    let entry = cache.entries.get(path);
+    if (entry?.hash === hash) {
+      counts.reusedBlobs++;
+      if (entry.label !== label) entry = { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
+    } else {
+      counts.parsedBlobs++;
+      entry = { hash, label, tasks: [], duplicates: [] };
+      try {
+        entry.tasks = parseTasksFromYaml(text, label, (id) => entry!.duplicates.push(id));
+      } catch (err) {
+        if (!(err instanceof PlanError)) throw err;
+        // Strip only the diagnostic's generated prefix, never occurrences in the author's YAML.
+        const yamlPrefix = `plan is not valid YAML (${label}): `;
+        const taskPrefix = `${label}: task `;
+        entry.error = err.message.startsWith(yamlPrefix)
+          ? { prefix: "yaml", message: err.message.slice(yamlPrefix.length) }
+          : err.message.startsWith(taskPrefix)
+            ? { prefix: "task", message: err.message.slice(taskPrefix.length) }
+            : { prefix: "plain", message: err.message };
+      }
+    }
+    next.set(path, entry);
+    for (const id of entry.duplicates) onDuplicate?.(id);
+    if (entry.error) {
+      const prefix = entry.error.prefix === "yaml" ? `plan is not valid YAML (${label}): ` : entry.error.prefix === "task" ? `${label}: task ` : "";
+      throw new PlanError(prefix + entry.error.message);
+    }
+    return entry.tasks;
+  };
+}
+
+/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine; `blobs[0]`, the monolith, stays fatal.
+ *  W1-T6262: optional per-path content reuse; all duplicates and dependencies are checked on every merge. */
+export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>, cache?: PlanBlobCache): {
   plan: Plan;
   quarantined: QuarantinedTask[];
 } {
   const duplicateFiles = new Map<string, string[]>();
   const invalid: QuarantinedTask[] = [];
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
   const tasks = mergeBlobTasks(
     blobs,
     (id, earlierLabel, laterLabel) => recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
     (label, err, text) => invalid.push(...invalidShard(label, err, text)),
+    cache ? cachedBlobParser(cache, next, counts) : parseTasksFromYaml,
   );
-  return quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
+  const read = quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
+  if (cache) {
+    cache.entries = next;
+    Object.assign(cache, counts);
+  }
+  return read;
 }
 
 type OnInvalidShard = (file: string, err: PlanError, text: string) => void;
@@ -812,9 +873,9 @@ function invalidShard(file: string, err: PlanError, text: string): QuarantinedTa
   return (ids.length > 0 ? ids : [file]).map((id) => ({ id, files: [file], reason: "shard_invalid", error: err.message }));
 }
 
-function parseShard(text: string, file: string, onDuplicate: ((id: string) => void) | undefined, onInvalid: OnInvalidShard | undefined): Task[] {
+function parseShard(text: string, file: string, onDuplicate: ((id: string) => void) | undefined, onInvalid: OnInvalidShard | undefined, parse: typeof parseTasksFromYaml = parseTasksFromYaml): Task[] {
   try {
-    return parseTasksFromYaml(text, file, onDuplicate);
+    return parse(text, file, onDuplicate);
   } catch (err) {
     if (!onInvalid || !(err instanceof PlanError)) throw err;
     onInvalid(file, err, text);
@@ -1057,12 +1118,13 @@ function mergeBlobTasks(
   blobs: Array<{ label: string; text: string }>,
   onDuplicate?: (id: string, earlierLabel: string, laterLabel: string) => void,
   onInvalidShard?: OnInvalidShard,
+  parse: typeof parseTasksFromYaml = parseTasksFromYaml,
 ): Task[] {
   const tasks: Task[] = [];
   const labelOf = new Map<string, string>();
   for (const [i, { label, text }] of blobs.entries()) {
     const sameFile = onDuplicate && ((id: string) => onDuplicate(id, label, label));
-    for (const t of parseShard(text, label, sameFile, i === 0 ? undefined : onInvalidShard)) {
+    for (const t of parseShard(text, label, sameFile, i === 0 ? undefined : onInvalidShard, parse)) {
       const earlier = labelOf.get(t.id);
       if (earlier !== undefined) {
         if (!onDuplicate) throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);

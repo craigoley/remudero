@@ -7,7 +7,7 @@ import { readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BroadcastChannel, isMainThread, threadId } from "node:worker_threads";
 import { systemClock } from "./clock.js";
-import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobsQuarantiningDuplicates, type Plan, type QuarantinedTask } from "./plan.js";
+import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type QuarantinedTask } from "./plan.js";
 import { unpackPlanBlobs, type PlanText } from "./serve-plan-reload.js";
 
 type PlanLoad = { plan: Plan; quarantined: QuarantinedTask[] };
@@ -20,7 +20,7 @@ type PinPost = { pin: PlanPin; text?: PlanText; gitMs?: number };
 type PinMessage =
   | ({ type: "pin" } & PinPost)
   | { type: "ask" }
-  | { type: "adopted"; pin: PlanPin; threadId: number; tasks: number; gitMs?: number; parseMs?: number }
+  | { type: "adopted"; pin: PlanPin; threadId: number; tasks: number; gitMs?: number; parseMs?: number; parsedBlobs: number; reusedBlobs: number }
   | { type: "adopt_failed"; pin: PlanPin; threadId: number; reason: string };
 type PinLog = (step: string, extra?: Record<string, unknown>) => void;
 
@@ -29,6 +29,7 @@ export const PLAN_PIN_ADOPT_FAILED_STEP = "serve.plan_pin_adopt_failed";
 
 const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true; ref?: string }>();
 const published = new Map<string, PinPost>();
+const blobCaches = new Map<string, PlanBlobCache>();
 let pinLog: PinLog | undefined;
 const pinIdentity = (pin: PlanPin): string => `ref:${pin.repoDir}@${pin.ref}`;
 const channel = new BroadcastChannel("remudero-thread-plan-pin");
@@ -43,9 +44,11 @@ export function adoptThreadPlan({ pin, text, gitMs }: PinPost): void {
   try {
     if (!text) throw new Error(`the pin for ${pin.ref} carried no plan text, and a thread never reads git`);
     const startedAt = systemClock.now();
-    const read = mergePlanBlobsQuarantiningDuplicates(unpackPlanBlobs(text));
+    const cache = blobCaches.get(pin.path) ?? new PlanBlobCache();
+    const read = mergePlanBlobsQuarantiningDuplicates(unpackPlanBlobs(text), cache);
+    blobCaches.set(pin.path, cache);
     held.set(pin.path, { identity, load: { plan: read.plan, quarantined: read.quarantined }, pinned: true, ref: pin.ref });
-    post({ type: "adopted", pin, threadId, tasks: read.plan.tasks.length, gitMs, parseMs: systemClock.now() - startedAt });
+    post({ type: "adopted", pin, threadId, tasks: read.plan.tasks.length, gitMs, parseMs: systemClock.now() - startedAt, parsedBlobs: cache.parsedBlobs, reusedBlobs: cache.reusedBlobs });
   } catch (err) {
     post({ type: "adopt_failed", pin, threadId, reason: err instanceof Error ? err.message : String(err) });
   }
@@ -55,7 +58,7 @@ channel.onmessage = (event: unknown): void => {
   const message = (event as { data: PinMessage }).data;
   if (message.type === "pin") adoptThreadPlan(message);
   else if (message.type === "ask") for (const pinned of published.values()) post({ type: "pin", ...pinned });
-  else if (message.type === "adopted") pinLog?.(PLAN_PIN_ADOPTED_STEP, { ...message.pin, threadId: message.threadId, tasks: message.tasks, gitMs: message.gitMs, parseMs: message.parseMs });
+  else if (message.type === "adopted") pinLog?.(PLAN_PIN_ADOPTED_STEP, { ...message.pin, threadId: message.threadId, tasks: message.tasks, gitMs: message.gitMs, parseMs: message.parseMs, parsedBlobs: message.parsedBlobs, reusedBlobs: message.reusedBlobs });
   else pinLog?.(PLAN_PIN_ADOPT_FAILED_STEP, { ...message.pin, threadId: message.threadId, reason: message.reason });
 };
 if (!isMainThread) post({ type: "ask" });
@@ -140,5 +143,6 @@ export function swapThreadPlanParser(next: (path: string) => PlanLoad): (path: s
   parse = next;
   held.clear();
   published.clear();
+  blobCaches.clear();
   return prior;
 }

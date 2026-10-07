@@ -1,0 +1,46 @@
+- id: W1-T6267
+  title: "THE BOARD'S BLOCKED-PR SECTION DERIVES ONLY WHAT IT READS — deriveBoardStatusSections runs the whole buildStatusBoard (28.5% of a warm now@core build's CPU) to keep three outputs, and spawns git once per build to list run branches from a path that is not a repository"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which status-board derivations the board snapshot runs; it touches board and status-board
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (items C1c and C1d), from a CPU profile of warm now@core builds in an isolated replay"
+  plan_refs: [W1-T1006, W1-T6253, W1-T6015, W1-T1205]
+  files: [src/lib/board.ts, src/lib/status-board.ts, test/the-boards-blocked-pr-section-derives-only-what-it-reads.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 in an isolated replay of the production read model (836,723 fact rows; main 324ca50c): an
+    in-process CPU profile of 15 warm now@core builds (5.3 s CPU p50 each) puts buildStatusBoard at 28.5% of build CPU.
+    It splits as deriveBlockers 9.2%, deriveNeedsMe 5.3%, deriveCircuitBrokenBlockers 4.6%, deriveHeadroom 1.5% and
+    buildStatusBoard's own body 6.6%. Separately, 5.8% of build CPU was a synchronous git spawn.
+    The only caller on that path is board.ts's deriveBoardStatusSections (W1-T1006). It calls buildStatusBoard with
+    root and repoDir set to BLOCKED_PR_ROOT_SENTINEL ("/nonexistent-rmd-board-root") and keeps three outputs: the
+    blocked_pr rows of blockers, blockers.blockedPrsUnverifiedReason, and needsMe.mergeHeld. Everything else
+    buildStatusBoard derives is discarded: latches, queue head, headroom, needs-me's other rows, and the circuit-broken
+    rows deriveBlockers adds. W1-T1205's queue head calls defaultReadPushedRunBranches, so every now build forks git
+    from a heap over 1 GB, only to run `git -C /nonexistent-rmd-board-root ls-remote` and get "" back.
+    Related, not overlapping: W1-T6253 (merged) indexes the ledger once per generation; W1-T6015 removes the
+    snapshot stage's lastActivityByTask and liveRunSpend walks. Neither narrows what deriveBoardStatusSections derives.
+  design: |
+    (1) status-board.ts exports a narrow derivation of exactly those three outputs, built from the same functions
+    buildStatusBoard uses (deriveBlockers' blocked-PR half and its unverified reason, deriveMergeHeld). buildStatusBoard
+    then calls it for those sections, so the two can never disagree.
+    (2) deriveBoardStatusSections calls the narrow derivation. No latch, queue head, headroom or needs-me derivation,
+    and no git or ls-remote spawn, runs on the board path.
+    (3) Equivalence is proved, not assumed: a test drives both the narrow derivation and buildStatusBoard over the
+    same fixture ledgers (blocked PRs open, closed, merged, unverified because GitHub failed, a merge hold set and
+    released) and asserts deep equality of the three outputs.
+  acceptance:
+    - claim: "the board's blocked-PR rows, unverified reason and merge-held rows are deep-equal to buildStatusBoard's over the same ledgers, and deriving them spawns no process"
+      proof: "unit test: test/the-boards-blocked-pr-section-derives-only-what-it-reads.test.ts"
+    - claim: "the board no longer builds the whole status board for its blocked-PR section"
+      proof: "grep: deriveBlockedPrSections in src/lib/board.ts"
+  falsifier: |
+    Route deriveBoardStatusSections back through buildStatusBoard: the no-spawn assertion fails. Drop the GitHub-failed
+    unverified reason from the narrow derivation: the deep-equality case for it fails.
