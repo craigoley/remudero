@@ -1,3 +1,4 @@
+// @source-text-subject: this census reads each helper's callers from src/ as text — the call sites ARE its subject.
 /**
  * W1-T6136 — A CALLER-CHOSEN GIT TREE IS CLASSIFIED AT THE CALL.
  *
