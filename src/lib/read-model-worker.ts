@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
+import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createAgentView } from "./agent-view.js";
@@ -1353,7 +1354,8 @@ export function runReadModelViewWorker(
   clock: Clock = systemClock,
 ): void {
   const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
-  const log = (step: string, extra: Record<string, unknown>): void => post({ type: "log", step, extra });
+  const log = readModelWorkerLog(post, true, data.lane);
+  setLedgerMemoRetentionContext({ thread: "views", ...(data.lane ? { lane: data.lane } : {}), log, instances: data.instances });
   let ticker: ReadModelTicker | undefined;
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -1413,6 +1415,10 @@ export function runReadModelViewWorker(
     for (const msg of early.splice(0)) handle(msg);
     loop();
   })();
+}
+
+export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => void, viewsOnly: boolean, lane?: "fast" | "heavy"): (step: string, extra: Record<string, unknown>) => void {
+  return (step, extra) => post({ type: "log", step, extra: { ...extra, thread: viewsOnly ? "views" : "projector", ...(lane ? { lane } : {}) } });
 }
 
 /** The projector thread's handle on its view thread. */
@@ -1549,7 +1555,8 @@ export function runReadModelWorker(
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   let slowLane: SlowLane | undefined;
-  const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
+  const log = readModelWorkerLog((message) => port.postMessage(message), false);
+  setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
     data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane) },
