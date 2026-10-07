@@ -467,7 +467,9 @@ test('bounded head history and damaged cached producer identities stay unavailab
   assert.equal(next.headGreen!.state, 'unavailable');
   assert.equal(next.headGreen!.history.state, 'partial');
   assert.equal(next.headGreen!.history.reason, 'head-check-history-page-bound-or-pending');
-  assert.equal(fake.calls.slice(before).filter((path) => path.includes('filter=all')).length, 0);
+  const headChecks = `/commits/${f.sha}/check-runs?`;
+  assert.ok(fake.calls.slice(0, before).some((path) => path.includes(headChecks)), 'the exact-head query has a positive earlier control');
+  assert.equal(fake.calls.slice(before).filter((path) => path.includes(headChecks)).length, 0);
   assert.equal(observedCurrentHeadGreen(next, 'invalid cutoff'), null);
 });
 
