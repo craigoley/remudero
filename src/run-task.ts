@@ -38348,15 +38348,12 @@ async function deployCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** W1-T6062: the injectable escalation halves a persistently refused recycle opens its ONE
- *  needs-human issue through, or `{}` when this checkout cannot name its own owner/repo (the streak
- *  is still counted and logged). */
 function deployRefusalEscalation(ledgerPath: string): Partial<ReturnType<typeof refusalEscalationFor>> {
   try {
     const self = resolveOwnerRepo();
     return refusalEscalationFor(ghIssueGateway(self.owner, self.repo), ledgerPath);
   } catch {
-    return {}; // no resolvable owner/repo: count and log the refusal, open no issue
+    return {}; // W1-T6062: no resolvable owner/repo, so the refusal is counted and logged but opens no issue
   }
 }
 
@@ -38424,7 +38421,6 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
-      // W1-T6062: a recycle refused window after window opens ONE needs-human issue here.
       ...deployRefusalEscalation(ledgerPathFor(effectiveConfig)),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
