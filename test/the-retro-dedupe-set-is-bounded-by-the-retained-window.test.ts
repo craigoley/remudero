@@ -146,7 +146,7 @@ test("retro eviction opens one live cursor rather than restarting it for every d
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("771 rotations complete under a 128 MiB old-space ceiling", () => {
+test("771 rotations complete under a 128 MiB old-space ceiling and a bounded young generation", () => {
   const { root, state } = stateDir("retro-771-rotations-");
   try {
     let index = 0;
@@ -172,14 +172,22 @@ test("771 rotations complete under a 128 MiB old-space ceiling", () => {
 
     const retroUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "retro.ts")).href;
     const childSource = [
+      'import assert from "node:assert/strict";',
+      'import { getHeapStatistics } from "node:v8";',
       `import { readRetroLedgerNdjson } from ${JSON.stringify(retroUrl)};`,
+      // Node's default young-generation size depends on the host. Pin a smaller
+      // semi-space: V8's three-space multiplier keeps the TOTAL heap ceiling at
+      // 152 MiB, rather than allowing 320 MiB on the standard Linux builder.
+      // Neither the existing old-space cap, corpus nor 20-second bound changes.
+      'const heapLimit = getHeapStatistics().heap_size_limit;',
+      'assert.ok(heapLimit <= (128 + 3 * 8) * 1024 * 1024, `total heap ceiling was ${heapLimit} bytes`);',
       `const read = await readRetroLedgerNdjson(${JSON.stringify(state)}, { maxBytes: 2 * 1024 * 1024 });`,
-      "process.stdout.write(JSON.stringify({ rowsKept: read.rowsKept, droppedRows: read.droppedRows, dedupeEntriesPeak: read.dedupeEntriesPeak, heapUsed: process.memoryUsage().heapUsed }));",
+      "process.stdout.write(JSON.stringify({ rowsKept: read.rowsKept, droppedRows: read.droppedRows, dedupeEntriesPeak: read.dedupeEntriesPeak, heapUsed: process.memoryUsage().heapUsed, heapLimit }));",
     ].join("\n");
     const env = { ...process.env, NODE_V8_COVERAGE: undefined };
     const child = spawnSync(
       process.execPath,
-      ["--max-old-space-size=128", "--import", "tsx", "--input-type=module", "-e", childSource],
+      ["--max-old-space-size=128", "--max-semi-space-size=8", "--import", "tsx", "--input-type=module", "-e", childSource],
       { cwd: join(dirname(fileURLToPath(import.meta.url)), ".."), env, encoding: "utf8", timeout: 20_000 },
     );
 
@@ -189,6 +197,7 @@ test("771 rotations complete under a 128 MiB old-space ceiling", () => {
     assert.equal(result.rowsKept! + result.droppedRows!, index);
     assert.ok(result.dedupeEntriesPeak! < index / 40, `peak Set entries were ${result.dedupeEntriesPeak}`);
     assert.ok(result.heapUsed! < 128 * 1024 * 1024, `child used ${result.heapUsed} heap bytes`);
+    assert.ok(result.heapLimit! <= (128 + 3 * 8) * 1024 * 1024, `total heap ceiling was ${result.heapLimit} bytes`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
