@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { closeSync, constants, copyFileSync, fsyncSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
@@ -149,6 +150,20 @@ function readCoverageSource(file, limit = Infinity) {
   }
 }
 
+/**
+ * W1-T6083: the suite one raw process report ran, repo-relative, as `{ test, root }` — or {} for a
+ * spawned child's report, which names no suite. Compaction drops every test/** script, so this is
+ * read BEFORE the filter; it is what lets an impact map say which suite executed what.
+ */
+export function reportSuiteIdentity(result, cwd = process.cwd()) {
+  for (const script of result) {
+    if (typeof script?.url !== 'string' || !script.url.startsWith('file:')) continue;
+    const rel = relative(cwd, fileURLToPath(script.url)).split(sep).join('/');
+    if (/^test\/.*\.test\.ts$/.test(rel)) return { test: rel, root: pathToFileURL(cwd + sep).href };
+  }
+  return {};
+}
+
 function restoreReport(report, sourceMaps, file) {
   if (!Array.isArray(report?.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null || Array.isArray(report.sourceMapRefs)) {
     throw new Error(`${file} contains an invalid compact process report`);
@@ -161,7 +176,8 @@ function restoreReport(report, sourceMaps, file) {
     cache[url] = sourceMaps[index];
   }
   if (report.result.length === 0) throw new Error(`${file} contains an invalid compact process report`);
-  return { result: report.result, 'source-map-cache': cache };
+  const identity = typeof report.test === 'string' && typeof report.root === 'string' ? { test: report.test, root: report.root } : {};
+  return { result: report.result, 'source-map-cache': cache, ...identity };
 }
 
 function* corpusReports(file, manifest, bytes) {
@@ -264,6 +280,7 @@ function collectCompactReports(directories, onMap, onReport) {
       const raw = JSON.parse(readCoverageSource(file));
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
+      const identity = reportSuiteIdentity(raw.result);
       const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
@@ -280,7 +297,7 @@ function collectCompactReports(directories, onMap, onReport) {
         }
         sourceMapRefs[script.url] = sourceMapIndex;
       }
-      onReport({ result, sourceMapRefs });
+      onReport({ result, sourceMapRefs, ...identity });
       reportCount++;
     }
   }
@@ -381,21 +398,53 @@ export function assertExpectedShardCount(directories, expectedShardCount) {
   }
 }
 
-function main(argv) {
+/**
+ * W1-T6083: the per-suite impact map of raw, compact or chunked coverage directories, written to
+ * `output` (run with `--import tsx`: the builder is TypeScript). `sourceRoot` supplies an unmapped
+ * script's text at the same sha, so its functions can be placed.
+ */
+export async function writeImpactMap(directories, output, { sha, sourceRoot } = {}) {
+  if (directories.length === 0) throw new Error('at least one coverage directory is required');
+  if (!sha) throw new Error('--impact-map requires --sha <the main sha the coverage ran on>');
+  const { buildImpactMap } = await import('../src/lib/test-impact-map.ts');
+  const bytes = { rawFileCount: 0, inputBytes: 0 };
+  const readSource = sourceRoot === undefined ? undefined : (path) => {
+    try {
+      return readFileSync(join(sourceRoot, path), 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+  };
+  const map = buildImpactMap(coverageReports(directories, bytes), { sha, root: pathToFileURL(process.cwd() + sep).href, readSource });
+  writeFileSync(output, JSON.stringify(map));
+  return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports };
+}
+
+async function main(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
       output: { type: 'string', short: 'o' },
       'compact-output': { type: 'string' },
+      'impact-map': { type: 'string' },
+      sha: { type: 'string' },
+      'source-root': { type: 'string' },
       'shard-count': { type: 'string' },
     },
   });
-  if (Boolean(values.output) === Boolean(values['compact-output'])) {
-    throw new Error('exactly one of --output or --compact-output is required');
+  if ([values.output, values['compact-output'], values['impact-map']].filter(Boolean).length !== 1) {
+    throw new Error('exactly one of --output or --compact-output is required, or --impact-map alone');
   }
   assertExpectedShardCount(positionals, values['shard-count']);
-  if (values['compact-output']) {
+  if (values['impact-map']) {
+    const r = await writeImpactMap(positionals, values['impact-map'], { sha: values.sha, sourceRoot: values['source-root'] });
+    console.log(
+      `coverage-merge-ratchet: impact map of ${r.rawFileCount} process report(s): ${r.suites} suite(s), ${r.files} source file(s), ` +
+        `${r.orphanReports} orphan report(s) -> ${values['impact-map']}`,
+    );
+  } else if (values['compact-output']) {
     const outputDirectory = values['compact-output'];
     const rawBytes = positionals.flatMap((directory) => coverageFilesUnder(directory)).reduce((sum, file) => sum + fileBytes(file), 0);
     const { rawFileCount, reportCount, sourceMapCount, output, compactBytes } = writeCompactCoverageDirectories(positionals, outputDirectory);
@@ -416,10 +465,8 @@ function main(argv) {
 }
 
 if (isMainModule(import.meta.url)) {
-  try {
-    main(process.argv.slice(2));
-  } catch (error) {
+  main(process.argv.slice(2)).catch((error) => {
     console.error(`coverage-merge-ratchet: ${error.message}`);
     process.exitCode = 1;
-  }
+  });
 }

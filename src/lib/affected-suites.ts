@@ -22,7 +22,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 
+import { impactArmSelection, stripComments, type ImpactArmInput } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+
+export { stripComments };
 
 export interface AffectedSelection {
   /** THE FLOOR: suites to run, sorted. Empty when `fullRun` — the full suite needs no list. */
@@ -43,7 +46,13 @@ export interface AffectedSelection {
    *  "flake" rather than "selected": a currently-unstable suite staying selected tells you nothing
    *  about whether the selector's MODEL would have reached it, which is the half W1-T4406 must be
    *  able to trust. `narrow` is present only when `narrow` above was computed. */
-  recentOnly: { floor: string[]; narrow?: string[] };
+  recentOnly: { floor: string[]; narrow?: string[]; impact?: string[] };
+  /** W1-T6083 — THE IMPACT ARM, measured in shadow only: the suites main's coverage run saw EXECUTE
+   *  a changed function body, or LOAD a module whose module-scope code changed, plus the floor's
+   *  suites the map cannot speak for (spawners, suites it never saw). Absent when no impact input
+   *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
+  impact?: string[];
+  impactFallback?: string;
 }
 
 /** Everything the selector decides from, as plain DATA — the selector itself reads nothing. */
@@ -56,6 +65,8 @@ export interface AffectedSuitesInput {
   recentFailures?: readonly string[];
   /** Suites naming a changed symbol or one of its src/ callers (ci-parity's callerReachableSuites). */
   symbolSuites?: readonly string[];
+  /** W1-T6083: main's impact map and the change's place against it — enables `impact`. */
+  impact?: ImpactArmInput;
 }
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
@@ -68,68 +79,6 @@ const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 /** The file that forces a full run, or undefined when every change is modelled. */
 export function fullRunTrigger(changed: readonly string[]): string | undefined {
   return changed.find((f) => !MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
-}
-
-/** Characters after which a `/` can only begin a regex literal. */
-const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
-
-/** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
- *  template or regex literal is kept, and so is every string's text (specifiers live in strings).
- *  Without this a JSDoc import link or a backticked test path in prose read as a graph edge, and the
- *  selector's 285-module strongly-connected component was made of comments. A regex literal is
- *  recognised by what precedes its `/`, so a quote inside one cannot open a string; a `'` or `"`
- *  string ends at its line's end, so one misread cannot swallow the rest of the file. */
-export function stripComments(content: string): string {
-  let out = "";
-  let last = ""; // the last significant (non-space, non-comment) character emitted
-  let i = 0;
-  const n = content.length;
-  while (i < n) {
-    const c = content[i]!;
-    const next = content[i + 1];
-    if (c === "/" && next === "/") {
-      while (i < n && content[i] !== "\n") i += 1;
-      continue;
-    }
-    if (c === "/" && next === "*") {
-      const end = content.indexOf("*/", i + 2);
-      i = end < 0 ? n : end + 2;
-      out += " ";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < n && content[j] !== c) {
-        if (content[j] === "\\") j += 1;
-        else if (c !== "`" && content[j] === "\n") break;
-        j += 1;
-      }
-      out += content.slice(i, j + 1);
-      i = j + 1;
-      last = c;
-      continue;
-    }
-    if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < n && content[j] !== "\n") {
-        const d = content[j]!;
-        if (d === "\\") j += 1;
-        else if (d === "[") inClass = true;
-        else if (d === "]") inClass = false;
-        else if (d === "/" && !inClass) break;
-        j += 1;
-      }
-      out += content.slice(i, j + 1);
-      i = j + 1;
-      last = "/";
-      continue;
-    }
-    out += c;
-    if (!/\s/.test(c)) last = c;
-    i += 1;
-  }
-  return out;
 }
 
 /** Every module specifier a file names: static and dynamic imports, re-exports and requires. */
@@ -240,6 +189,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     const narrow = new Set([...narrowStructural, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
     selection.recentOnly.narrow = selection.narrow.filter((s) => !narrowStructural.has(s));
+  }
+  if (input.impact) {
+    const arm = impactArmSelection(input.impact, {
+      changed: files, files: input.files, floor: suites, pathReaders, pathNamers: [...pathNamers], recent,
+      fallback: selection.narrow ?? suites,
+    });
+    selection.impact = arm.suites;
+    selection.recentOnly.impact = arm.recentOnly;
+    if (arm.fallback !== undefined) selection.impactFallback = arm.fallback;
   }
   return selection;
 }
@@ -356,6 +314,7 @@ export interface ShadowFailure {
   file: string;
   floor: "selected" | "missed" | "flake";
   narrow?: "selected" | "missed" | "flake";
+  impact?: "selected" | "missed" | "flake";
   /** The file's own W1-T4398 retry in this shard: "recovered" when pass two did not fail it again.
    *  Absent when no retry ran or its outcome could not be read. */
   retry?: "recovered" | "failed";
@@ -366,11 +325,13 @@ export interface ShadowFailure {
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
 export function shadowRecord(
   selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
-): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
+): { fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; failures: ShadowFailure[] } {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
   const recentOnlyNarrow = new Set(selection.recentOnly.narrow ?? []);
+  const impact = selection.impact ? new Set(selection.impact) : undefined;
+  const recentOnlyImpact = new Set(selection.recentOnly.impact ?? []);
   const verdict = (set: Set<string>, recentOnly: Set<string>, file: string): "selected" | "missed" | "flake" => {
     if (selection.fullRun) return "selected";
     if (!set.has(file)) return "missed";
@@ -380,10 +341,13 @@ export function shadowRecord(
     fullRun: selection.fullRun,
     floorSize: selection.suites.length,
     ...(narrow ? { narrowSize: narrow.size } : {}),
+    ...(impact ? { impactSize: impact.size } : {}),
+    ...(selection.impactFallback === undefined ? {} : { impactFallback: selection.impactFallback }),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
       floor: verdict(floor, recentOnlyFloor, file),
       ...(narrow ? { narrow: verdict(narrow, recentOnlyNarrow, file) } : {}),
+      ...(impact ? { impact: verdict(impact, recentOnlyImpact, file) } : {}),
       ...(Object.hasOwn(retried, file) ? { retry: retried[file] } : {}),
     })),
   };
