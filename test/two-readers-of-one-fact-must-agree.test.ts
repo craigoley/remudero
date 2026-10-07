@@ -8,6 +8,7 @@ import { checkReaderAgreement, type ReaderFigures } from "../src/lib/reader-agre
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { runSweep, type SweepDeps } from "../src/lib/sweep.js";
+import { buildBatchedGithub } from "../src/lib/status.js";
 
 const figures: ReaderFigures = {
   dispatchStreaks: { "W1-T2982": 2 }, openPrCount: 3, queuedTaskCount: 4,
@@ -114,10 +115,11 @@ test("W1-T4841: defaults compare cached queue with a fresh projection and count 
     const result = await checkReaderAgreement({ ledgerPath: path, runId: "SWEEP-test",
       owner: "owner", repo: "repo", plan: loadPlanFromYaml("[]\n", "fixture"), openPrCount: 2,
       readJson: async args => { argsSeen.push(args); return [[{ number: 1 }], [{ number: 2 }, { number: 1 }]]; },
+      queueGithub: () => buildBatchedGithub("owner", "repo", { fetchAll: () => [], fetchAllIssues: () => [] }),
       appendLine: () => {} });
     assert.deepEqual(result, [{ figure: "queued_task_count", subject: "repository", board_value: 1, independent_value: 0 }]);
     assert.deepEqual(argsSeen, [["api", "repos/owner/repo/pulls?state=open&per_page=100", "--paginate", "--slurp"]]);
-    assert.ok(shim.calls().length > 0);
+    assert.equal(shim.calls().length, 0, "the queue projection shells no gh of its own");
   } finally {
     process.env.PATH = previousPath;
   }
