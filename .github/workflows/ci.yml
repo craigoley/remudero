@@ -101,7 +101,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # W1-T1009: HEAVY band. 35m/2100s sits in the gap between the longest observed non-hung run
     # (1637s) and the first observed hang (2647s). INVARIANT: it must stay strictly below
-    # ci-gate.yml's WAIT_CAP_SECONDS (2400s), or ci-gate times out first and the misattribution
+    # ci-gate.yml's WAIT_CAP_SECONDS (4500s), or ci-gate times out first and the misattribution
     # defect returns intact. Re-derive this if that cap is ever retuned (W1-T312).
     timeout-minutes: 35
     steps:
@@ -739,7 +739,7 @@ jobs:
     # so it is a third Playwright-carrying job and must be banded like the other two rather than
     # left at the light-band 10-15m: under the observed non-hung tail a light bound kills honest
     # work. 35m is the derived heavy FLOOR, and it stays strictly below ci-gate.yml's
-    # WAIT_CAP_SECONDS (2400s = 40m) so ci-gate never times out first and misattributes the hang.
+    # WAIT_CAP_SECONDS (4500s = 75m) so ci-gate never times out first and misattributes the hang.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1339,9 +1339,9 @@ jobs:
     # cancellations died on the `Test with coverage` step below, none on `npx playwright install` —
     # same band as `ci`, for its own reason and at its own number. PR #9943's shard 1 reached the
     # former 39m ceiling during Test with coverage (37m36s in that step, after setup) before the
-    # suite completed. Give the measured long tail 49m while retaining 16m below ci-gate's 65m
-    # WAIT_CAP_SECONDS. FALSIFIER: test/ci-cache-concurrency-and-job-timeouts.test.ts checks both
-    # the larger bound and its strict relation to the gate cap.
+    # suite completed. Give the measured long tail 49m; with the 20m aggregator, ci-gate's 75m
+    # WAIT_CAP_SECONDS leaves six minutes of scheduling room. FALSIFIER:
+    # test/workflow-job-timeouts.test.ts enforces that full dependency path and the margin.
     timeout-minutes: 49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
