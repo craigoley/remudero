@@ -365,6 +365,7 @@ export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVer
 export interface FreshnessDecision {
   action: "restart" | "defer";
   reason: string;
+  restartTrigger?: "change" | "idle" | "age" | "withheld_reviews" | "unreadable";
   /** Change pressure: the summed freshness weight of every advance scored this lifetime. */
   weight: number;
   /** Staleness pressure: grows linearly from the first stale reading, reaching the threshold at the horizon. */
@@ -406,12 +407,17 @@ export function decideFreshnessRestart(input: {
   const withheldPressure = withheld > 0 ? threshold.value : 0;
   const pressure = weight + agePressure + withheldPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
+  const restartTrigger = input.changes === undefined ? "unreadable"
+    : withheldPressure > 0 ? "withheld_reviews"
+    : weight >= threshold.value ? "change"
+    : !input.busy ? "idle" : "age";
   if (!input.busy) {
-    return { action: "restart", reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+    return { action: "restart", restartTrigger, reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
   }
   if (withheldPressure > 0) {
     return {
       action: "restart",
+      restartTrigger,
       reason:
         `busy, but ${withheld} review(s) withheld for stale reviewer code: pressure ${pressure} ` +
         `(change ${weight} + staleness ${agePressure} + withheld ${withheldPressure}) >= ${threshold.value}: drain and restart`,
@@ -424,6 +430,7 @@ export function decideFreshnessRestart(input: {
   if (pressure >= threshold.value) {
     return {
       action: "restart",
+      restartTrigger,
       reason: `busy, but pressure ${pressure} (change ${weight} + staleness ${agePressure}) >= ${threshold.value}: drain and restart`,
       weight,
       agePressure,
@@ -439,4 +446,41 @@ export function decideFreshnessRestart(input: {
     pressure,
     state,
   };
+}
+
+/** PRIMARY CONTROL: W1-T6093's quiet window opens on an advance and re-arms on each new SHA. */
+export const FRESHNESS_COALESCE_WINDOW_MS: RecordedDeployRestartThreshold = {
+  value: 10 * 60_000,
+  reason: "All eight measured follow-on daemon boots on 2026-10-06 came 1–10 minutes after the previous boot.",
+};
+
+export function coalesceFreshnessRestart(input: {
+  decision: FreshnessDecision;
+  newSha: string;
+  lastAdvanceAtMs: number;
+  staleSinceMs: number;
+  nowMs: number;
+  window: RecordedDeployRestartThreshold;
+  threshold?: RecordedDeployRestartThreshold;
+  ageHorizonMs?: number;
+}): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number } {
+  const { decision } = input;
+  if (decision.action === "defer") return decision;
+  const windowEndsAtMs = input.lastAdvanceAtMs + input.window.value;
+  if (decision.restartTrigger !== "change") {
+    const reason = decision.restartTrigger === "unreadable" ? "unreadable_advance"
+      : decision.restartTrigger === "withheld_reviews" ? "withheld_reviews" : decision.reason;
+    return { action: "restart", reason, heldMs: 0, windowEndsAtMs };
+  }
+  const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
+  const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
+  const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const agePressure = Math.floor((threshold.value * heldMs) / horizonMs);
+  if (agePressure >= threshold.value / 2) {
+    return { action: "restart", reason: "upper_age", heldMs, windowEndsAtMs };
+  }
+  if (input.nowMs >= windowEndsAtMs) {
+    return { action: "restart", reason: "window_quiet", heldMs, windowEndsAtMs };
+  }
+  return { action: "hold", reason: `coalescing ${input.newSha}: waiting for a quiet advance window`, heldMs, windowEndsAtMs };
 }
