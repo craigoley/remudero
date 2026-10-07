@@ -1,0 +1,46 @@
+- id: W1-T6084
+  title: "EACH SUITE RECORDS THE NON-CODE FILES IT READS, AND CENSUS MEMBERSHIP AND THE MODELLED FULL-RUN TRIGGERS COME FROM THAT RECORD — today census membership is guessed from source text and any change to openapi/, deploy/, .github/ or a json file outside the modelled areas forces the full suite (43 of the last 300 main commits, 14%)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — an observed read record replaces source-text guesses as the input to census membership and full-run triggers
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-selection REPORT, ranked item 4)"
+  plan_refs: [W1-T5895, W1-T4787, W1-T6092, W1-T6083, W1-T4404]
+  files: [test/setup/read-map.ts, test/setup/tmp-hygiene.ts, src/lib/affected-suites.ts, scripts/diff-class.mjs, test/each-suite-records-the-non-code-files-it-reads.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (research-selection): of the last 300 main commits, 43 forced a full run because a
+    changed path sits outside `MODELLED` in src/lib/affected-suites.ts (openapi 14, deploy 9, .github 8,
+    test/helpers 3, package.json 3). A src change pulls 109 census suites (850 s), several of which are
+    not whole-tree walkers (W1-T6092), while W1-T4787 records whole-tree suites the census rules MISSED.
+    Both directions come from one cause: membership is inferred from source text (`enumeratesPopulation`,
+    `namedPaths`, `sourceTextPathsRead` in scripts/diff-class.mjs), not observed. W1-T5895 hand-models the
+    two contract files; the same reader question recurs for every non-code input.
+  design: |
+    test/setup/read-map.ts, loaded by the existing setup preload, patches fs read entry points
+    (readFileSync, readFile, promises.readFile, readdirSync, readdir, opendir, existsSync, statSync) to
+    record repo-relative non-code paths each test FILE reads when RMD_READ_MAP_DIR is set, and is a no-op
+    otherwise (~0 cost). The patch PRESERVES `util.promisify.custom` and function identity properties, so
+    promisified callers keep working. A directory listing records the directory. Main's full run writes
+    the per-suite records; they are merged into one read map keyed by main sha (the same retention path
+    as W1-T6083's impact map). selectAffectedSuites then: selects the suites that READ a changed non-code
+    path instead of forcing the full run for openapi/, deploy/ and *.json (other unmodelled paths keep
+    the full fallback with their reason); and takes census membership from the map (a suite that listed
+    a changed file's directory is a census reader for that change). A missing or stale map falls back to
+    today's rules and says so.
+  acceptance:
+    - claim: "the read hook records the repo-relative non-code paths a suite reads and listed, and leaves util.promisify.custom working on the patched functions; a change to openapi/daemon.yaml selects the suites the read map says read it instead of the full suite; census membership for a change is the suites that listed its directory, and a missing read map falls back to today's rules with a reason"
+      proof: "unit test: test/each-suite-records-the-non-code-files-it-reads.test.ts"
+  falsifier: |
+    Patch fs.readFile without copying util.promisify.custom: promisify(readFile) resolves the wrong shape
+    and the first test fails.
+  note: |
+    SUPERSEDES the hand-modelled halves of W1-T5895 (openapi readers derived from content) and W1-T4787
+    (census misses) once its map exists: both stay queued and are not edited here; a builder of either
+    should read this task first, and each can be retired as a duplicate when this one merges.
