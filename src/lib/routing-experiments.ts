@@ -28,6 +28,13 @@ export interface RoutingExperiment {
 }
 
 export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
+  ...["low", "medium", "high"].map((effort) => ({
+    id: `haiku55-vs-luna6-${effort}`, capability: "economy", effort,
+    arms: { claude: "haiku55", codex: "luna6" },
+    claudeModel: /^claude-haiku-5-5$/, codexModel: /^gpt-6-luna$/,
+    startedOn: "2026-10-07", revisitOn: "2026-10-07", reviewCadence: "daily" as const,
+    minTasksPerArm: 20,
+  })),
   {
     id: "sol-vs-sonnet",
     capability: "balanced",
