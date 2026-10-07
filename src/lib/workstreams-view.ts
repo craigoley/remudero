@@ -23,7 +23,7 @@
  * insert alone re-derived all ~3,400 tasks, ~85% of a warm rebuild. `workstreams.built` counts what it reused.
  * Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
  */
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -202,12 +202,15 @@ export function createLiveLedgerTail(path: string): () => LedgerLines {
   };
   return () => {
     try {
-      if (!existsSync(path)) {
+      let fd: number;
+      try {
+        fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         held = undefined;
         // ledger-read-intent: live — preserve the whole-file reader's absent-file metadata.
         return readLedgerLines(path);
       }
-      const fd = openSync(path, "r");
       let bytes: Buffer;
       let st: ReturnType<typeof fstatSync>;
       try {
