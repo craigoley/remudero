@@ -164,6 +164,13 @@ function plantPointer(wt: string, seed: string, name: string): string {
   return evil;
 }
 
+/** worktreeAdd LINKS node_modules to the harness's own; the sweep candidate is replaced by an empty directory
+ *  of the fixture's, so nothing this suite does can reach the real tree (removeDir also refuses). */
+function ownNodeModules(wt: string): void {
+  rmSync(join(wt, "node_modules"), { force: true });
+  mkdirSync(join(wt, "node_modules"));
+}
+
 const STALE = [{ claim: "c", proof: "grep: alpha-anchor in plan/tasks.yaml" }];
 const scanConfig = (dir: string) => ({ root: join(dir, "state") }) as unknown as Config;
 const sweep = (dir: string) => sweepReclaimableArtifacts(scanConfig(dir), () => {}, {
@@ -237,7 +244,7 @@ describe("W1-T6136: a planted .git pointer reaches none of the converted helpers
     const { wt, seed, head, n } = cutLane(join(scan, "lane"));
     const planted = plantPointer(wt, seed, "leaf");
     const plantedCommits = raw(planted, "rev-list", "--count", "HEAD").trim();
-    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    ownNodeModules(wt);
     writeFileSync(join(wt, "MASTER-PLAN.md"), "# plan\n\nedited\n");
 
     assert.throws(() => readAffectedSuitesInput(wt, ["src/x.ts"]), isRefusal, "coveragePrecheck's listing refuses");
@@ -262,7 +269,7 @@ describe("W1-T6136: on an intact lane the converted helpers behave as before", (
     const scan = join(root, "intact-scan");
     mkdirSync(scan);
     const { wt, seed, head, n } = cutLane(join(scan, "lane"));
-    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    ownNodeModules(wt);
 
     assert.deepEqual(sweep(scan).kept.map((k) => [relative(scan, k.path), k.reason]), [["lane/node_modules", "too-young"]],
       "a clean lane reads clean through the leaf and reaches the age gate");
