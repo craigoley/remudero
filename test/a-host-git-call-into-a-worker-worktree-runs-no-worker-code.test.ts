@@ -18,11 +18,17 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError } from "../src/lib/git-push.js";
+import { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError, worktreeGitCapture, worktreePushExec } from "../src/lib/git-push.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { recordWorktreeBase, stampRunWorktreeAssignment, worktreeAdd } from "../src/lib/worker.js";
 import { openWeightWritablePath } from "../src/lib/worker-provider.js";
-import { hostWorktreeGit, pinWorktreeGit, recordedWorktreeGitDir, WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
+import {
+  hostWorktreeGit,
+  pinnedConfigValue,
+  pinWorktreeGit,
+  recordedWorktreeGitDir,
+  WorktreePointerRefusedError,
+} from "../src/lib/worktree-git.js";
 import { appendTaskTrailerToCommit, commitWorkerEdits } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
@@ -226,5 +232,64 @@ describe("W1-T6106: the open-weight write tools cannot write the .git entry", ()
     }
     assert.equal(openWeightWritablePath(wt, "hooks/pre-push"), join(realpathSync(wt), "hooks", "pre-push"));
     assert.equal(openWeightWritablePath(wt, ".github/x.yml"), join(realpathSync(wt), ".github", "x.yml"));
+  });
+});
+
+describe("W1-T6106: the leaf's edges", () => {
+  it("a detached head pushes a sha refspec through the gate; an unreachable remote fails the push as git did", () => {
+    const { wt, remote } = cutLane();
+    const n = counter;
+    const stdinLog = join(root, `harness-stdin-edge-${n}`);
+    script(join(harnessHooks, "pre-push"), `cat >> '${stdinLog}'\nexit 0`);
+    writeFileSync(join(wt, "f.txt"), "f\n");
+    const head = commitWorkerEdits(wt, ["f.txt"], "feat(f): detached").sha!;
+    raw(wt, "checkout", "-q", "--detach");
+    withLiveWritesAllowed(() => worktreePushExec(wt)("git", ["-C", wt, "push", "origin", `${head}:refs/heads/edge-${n}`], { stdio: "ignore" }));
+    assert.equal(raw(remote, "rev-parse", `refs/heads/edge-${n}`).trim(), head);
+    assert.equal(readFileSync(stdinLog, "utf8"), `${head} ${head} refs/heads/edge-${n} ${"0".repeat(40)}\n`);
+    raw(wt, "remote", "add", "gone", join(root, `no-such-remote-${n}`));
+    assert.throws(() => worktreePushExec(wt)("git", ["-C", wt, "push", "gone", "HEAD:refs/heads/x"], { stdio: "inherit" }),
+      (e: unknown) => e instanceof PushFailedError && /^Command failed: git -C \S+ push gone/m.test(e.message));
+    assert.throws(() => worktreeGitCapture(wt)("git", ["-C", join(wt, "elsewhere"), "status"]), /must address/);
+  });
+
+  it("a plain repository pins to its own .git directory; one whose recorded pointer became a directory is refused", () => {
+    const plain = gitRepo({ kind: "t6106-plain" });
+    assert.equal(pinWorktreeGit(plain.dir).source, "git-directory");
+    assert.equal(recordedWorktreeGitDir(plain.dir), null);
+    plain.cleanup();
+    const { wt } = cutLane();
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(root, "no-such-gitdir")}\n`);
+    assert.throws(() => pinWorktreeGit(wt, () => {}), /no longer names the gitdir/, "a pointer to nothing is refused");
+    rmSync(join(wt, ".git"));
+    mkdirSync(join(wt, ".git"));
+    assert.throws(() => pinWorktreeGit(wt, () => {}), /replaced by a directory/);
+  });
+
+  it("an unrecorded pointer to an outside gitdir that does not name the worktree back is refused", () => {
+    const { wt } = cutLane();
+    recordWorktreeBase(wt, raw(wt, "rev-parse", "HEAD").trim());
+    writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("no-back")}\n`);
+    assert.throws(() => pinWorktreeGit(wt, () => {}), /does not name this worktree back/);
+    assert.equal(existsSync(marker("planted-fsmonitor-no-back")), false);
+  });
+
+  it("a pinned config read answers unset as undefined and refuses to call an unreadable config unset", () => {
+    const { wt } = cutLane();
+    const pin = pinWorktreeGit(wt);
+    assert.equal(pinnedConfigValue(pin, "remudero.never-set"), undefined);
+    writeFileSync(join(pin.gitDir, "config.worktree"), "[core\n\tbroken = \n");
+    assert.throws(() => pinnedConfigValue(pin, "core.hooksPath"));
+  });
+
+  it("a fix round's commit onto a prior head stages through the leaf's temporary index", () => {
+    const { wt, branch } = cutLane();
+    const n = counter;
+    const prior = raw(wt, "rev-parse", "HEAD").trim();
+    writeFileSync(join(wt, "g.txt"), "g\n");
+    const commit = commitWorkerEdits(wt, ["g.txt"], "fix(g): a round", {}, [], { priorHeadSha: prior, branch });
+    assert.equal(commit.committed, true, commit.reason);
+    assert.equal(raw(wt, "rev-parse", `refs/heads/${branch}`).trim(), commit.sha);
+    assert.equal(existsSync(marker(`tracked-pre-commit-${n}`)), false);
   });
 });
