@@ -1,0 +1,47 @@
+- id: W1-T6271
+  title: "A WORKSTREAMS REBUILD PARSES ONLY THE LEDGER ROWS APPENDED SINCE THE LAST ONE — with per-task projection reuse (PR 9922) a warm rebuild costs about 240 ms of CPU, and the largest stage left is re-reading and re-parsing the whole live ledger (90-96 ms p50) on every ring insert"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how the workstreams view reads its live ledger rows between builds
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item M3), from an isolated replay of current main after PR 9922"
+  plan_refs: [W1-T5050, W1-T6253, W1-T5758]
+  files: [src/lib/workstreams-view.ts, test/a-workstreams-rebuild-parses-only-the-appended-ledger-rows.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 in an isolated replay of the production read model (online-backup copy; 14.8 MB live ledger),
+    on main 0b38ba7c, which contains PR 9922 (workstreams per-task projection reuse). Across 153 builds, a warm rebuild
+    costs 235-240 ms of CPU p50; before PR 9922 the same workload measured 885-1,030 ms. Per stage p50 over 80 warm
+    builds:
+    - ledger: 90-96 ms (p90 115-128). readLedgerLines re-reads and JSON-parses the whole live file on every build.
+    - projection: 46-59 ms.
+    - assemble: 30-34 ms.
+    - plan: 18-20 ms.
+    - ring: 2 ms.
+    The view rebuilds on every activity-ring insert: 27,207 builds in the 24 h to 2026-10-07 19:00Z, about 19 a minute.
+    The live file only grows between rotations, so nearly all of each re-parse is rows the previous build already
+    parsed. It also allocates a fresh row array of the whole file per build, churn that drives peak RSS rather than
+    retained heap: heap after GC is flat at about 164 MiB, while maxRSS reaches about 1.24 GB in the same replay.
+  design: |
+    (1) Per instance, the view keeps the live file's identity (dev, ino), the byte offset parsed up to (always just past
+    the last complete line), and the rows parsed so far, with the same torn-line accounting readLedgerLines applies.
+    (2) Each build stats the live file. If it is the same file and has not shrunk, only bytes from the offset to the last
+    newline are read and parsed and appended. A partial final line is left for the next build. A new inode, a shrink
+    or a read failure discards the held rows and reads the file whole, exactly as today.
+    (3) The rows handed on are a new array per build (the held rows plus the appended ones), so no consumer's identity-
+    keyed cache (projectPlan's ledgerIndex check, PR 9922's held projections) sees a mutated array.
+    (4) LedgerLines' `present` and `torn` agree with a whole-file read in every case; a test compares them.
+  acceptance:
+    - claim: "after appends, a partial final line that is later completed, a rotation to a new file, a truncation and an unreadable file, the rows, torn count and presence equal a whole-file readLedgerLines of the same file, and an append-only build reads only the appended bytes"
+      proof: "unit test: test/a-workstreams-rebuild-parses-only-the-appended-ledger-rows.test.ts"
+    - claim: "the workstreams view reads its live ledger through the appended-rows reader"
+      proof: "grep: liveLedgerTail in src/lib/workstreams-view.ts"
+  falsifier: |
+    Consume a partial final line: the completed-later case parses a torn row and the equality fails. Keep the held
+    rows across a rotation: the new-inode case answers the old file's rows and the equality fails.
