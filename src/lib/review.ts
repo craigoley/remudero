@@ -1692,11 +1692,6 @@ export function proofSandboxStatus(): ProofSandboxStatus {
   return proofSandboxMemo;
 }
 
-/** How many proof children this process has started unsandboxed — {@link judgeReview} reads the delta. */
-export function unsandboxedProofSpawnCount(): number {
-  return unsandboxedProofSpawns;
-}
-
 /** A path's real location, or `undefined` when nothing is there to mount or mask. */
 function realpathIfPresent(path: string): string | undefined {
   try {
