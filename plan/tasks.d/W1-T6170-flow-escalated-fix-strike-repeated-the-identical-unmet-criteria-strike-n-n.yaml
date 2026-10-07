@@ -27,3 +27,11 @@
     - PR #9838: 0.29 PR-hours — fix strike repeated the identical unmet criteria (strike 0/2) — no further strike can add information — escalating before the cap
     - PR #9317: 0.12 PR-hours — fix strike repeated the identical unmet criteria (strike 0/2) — no further strike can add information — escalating before the cap
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearing of an escalation for repeated unmet criteria, but the supplied plan does not explain how those criteria will be satisfied or how escalation safeguards will be preserved.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not verify the claimed automatic clearing behavior. With no implementation description or bounded actual-change view, the proposed remedy cannot be verified from what is shown."
+    judged_at: "2026-10-07T13:32:13.309Z"
+    pin: "6c73fd3a8c4b31cd0c5622fc01bcc47f1ad9b9f66876670265fc9f557cc8bc84"
