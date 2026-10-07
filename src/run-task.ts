@@ -32891,7 +32891,7 @@ export function usageCredentialSink(config: Config): (event: ClaudeCredentialSee
       appendLedger(ledgerPathFor(config), {
         run_id: "USAGE-PROBE",
         task_id: "DAEMON",
-        step: `usage.credential_${event.kind}`,
+        step: event.kind === "provisioned" ? "usage.credential_provisioned" : "usage.credential_healed",
         store: event.store,
         prior_verdict: event.priorVerdict,
       });
