@@ -124,16 +124,37 @@ test("proofSandboxArgv mounts the checkout, its git dirs and its install, and no
   assert.ok(bind("--ro-bind", install), "the node_modules link target is read-only");
   assert.ok(bind("--ro-bind", workspace), "a workspace package link out of the install is read-only");
   const maskedBy = (p: string) => argv.find((a, i) => argv[i - 1] === "--ro-bind" && argv[i + 1] === p);
-  const configMask = maskedBy(join(real(common), "config"));
-  assert.ok(configMask !== undefined && configMask !== "/dev/null", "a common dir's config (a token-bearing remote) is masked by a regular file");
-  assert.equal(readFileSync(configMask!, "utf8"), "", "the config mask is EMPTY: git reads no remote, and no error");
-  assert.ok(configMask!.startsWith(`${real(home)}/`), "the config mask lives in the throwaway HOME the caller removes");
+  assert.ok(maskedBy(join(real(common), "config")) !== undefined, "a common dir's config (a token-bearing remote) is masked");
   assert.equal(maskedBy(real(key)), "/dev/null", "an App key inside some bind is masked by /dev/null");
   assert.equal(argv.some((a) => a === real(daemonHome) || a.startsWith(`${real(daemonHome)}/`)), false,
     "nothing of the daemon's HOME is mounted");
   const noKey = proofSandboxArgv({ cwd, home, env: { HOME: daemonHome, GH_APP_PRIVATE_KEY_PATH: join(root, "absent.pem") } });
   assert.equal(noKey.filter((a) => a === "/dev/null").length, 0, "an absent key path needs no mask");
   assert.throws(() => proofSandboxArgv({ cwd: "/", home }), ProofSandboxUnavailableError);
+});
+
+test("the shared git config is masked by an empty file in the throwaway HOME, never by an unreadable /dev/null", () => {
+  // bwrap mounts binds nodev: a /dev/null over a file reads as EACCES, and git refuses an unreadable config outright.
+  const root = makeTempDir("t6124-config-mask");
+  const common = join(root, "managed", ".git");
+  const gitdir = join(common, "worktrees", "review-PR1");
+  const cwd = join(root, "worktrees", "review-PR1");
+  const home = join(root, "proof-home");
+  for (const d of [gitdir, cwd, home]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(common, "config"), "[remote \"origin\"]\n\turl = https://x-access-token:fixture@github.com/o/r\n");
+  writeFileSync(join(gitdir, "commondir"), "../..\n");
+  writeFileSync(join(cwd, ".git"), `gitdir: ${gitdir}\n`);
+  const real = (p: string) => execFileSync("realpath", [p], { encoding: "utf8" }).trim();
+  const target = join(real(common), "config");
+  const maskOf = (argv: string[]) => argv.find((a, i) => argv[i - 1] === "--ro-bind" && argv[i + 1] === target);
+  const first = maskOf(proofSandboxArgv({ cwd, home, env: {} }));
+  assert.ok(first !== undefined && first !== "/dev/null", "the config is masked by a regular file");
+  assert.ok(first!.startsWith(`${real(home)}/`), "the mask lives in the throwaway HOME its caller removes");
+  assert.equal(readFileSync(first!, "utf8"), "", "the mask is EMPTY: git reads no remote and no error");
+  assert.equal(maskOf(proofSandboxArgv({ cwd, home, env: {} })), first, "a second argv for the same HOME reuses its mask");
+  const fileHome = join(root, "home-is-a-file");
+  writeFileSync(fileHome, "");
+  assert.throws(() => proofSandboxArgv({ cwd, home: fileHome, env: {} }), /ENOTDIR/, "a mask that cannot be made is refused, never skipped");
 });
 
 test("proofCheckoutGitDirs and proofLinkedModuleRoots read each checkout shape", () => {

@@ -1798,7 +1798,11 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   const masks: { from: string; path: string }[] = [];
   if (git.common !== undefined && existsSync(join(git.common, "config"))) {
     const empty = join(home, ".rmd-masked-git-config");
-    if (!existsSync(empty)) writeFileSync(empty, "", { mode: 0o444 });
+    try {
+      writeFileSync(empty, "", { mode: 0o444, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; // this HOME's earlier argv already made it
+    }
     masks.push({ from: empty, path: join(git.common, "config") });
   }
   const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
