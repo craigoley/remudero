@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { runTask, lintPlanCommand, HANDLERS, type LintPlanStatusDeps } from "../src/run-task.js";
 import { assertLintClean } from "../src/lib/task-linter.js";
 import { loadPlan } from "../src/lib/plan.js";
+import { proofCheckoutGitDirs } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
@@ -455,6 +456,64 @@ function seedWiringPlan(repo: GitRepo): void {
   repo.git("commit", "-qm", "seed the real committed lint fixture and test corpus");
 }
 
+/** Observe the real HEAD, index and working files without opening the sandbox-masked config.
+ *  Only the observer's metadata is writable; no shared Git metadata is refreshed. */
+function checkoutStatusWithoutConfig(root: string): string {
+  const { common, worktree } = proofCheckoutGitDirs(root);
+  assert.ok(common, "the cleanliness observer must resolve a real Git repository");
+  const gitDir = mkdtempSync(join(tmpdir(), "rmd-wiring-status-"));
+  try {
+    copyFileSync(join(worktree ?? common, "HEAD"), join(gitDir, "HEAD"));
+    copyFileSync(join(worktree ?? common, "index"), join(gitDir, "index"));
+    symlinkSync(join(common, "objects"), join(gitDir, "objects"), "dir");
+    symlinkSync(join(common, "refs"), join(gitDir, "refs"), "dir");
+    if (existsSync(join(common, "packed-refs"))) {
+      copyFileSync(join(common, "packed-refs"), join(gitDir, "packed-refs"));
+    }
+    return execFileSync("git", ["-C", root, "status", "--porcelain"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_DIR: gitDir,
+        GIT_COMMON_DIR: gitDir,
+        GIT_WORK_TREE: root,
+        GIT_INDEX_FILE: join(gitDir, "index"),
+        GIT_OPTIONAL_LOCKS: "0",
+      },
+    }).trim();
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+}
+
+test("the cleanliness observer detects tracked changes and nested probes with unreadable repo config", (t) => {
+  const repo = gitRepo({ kind: "lint-wiring-status-control" });
+  t.after(() => repo.cleanup());
+  const tracked = join(repo.dir, "tracked.txt");
+  writeFileSync(tracked, "original\n");
+  repo.git("add", ".");
+  repo.git("commit", "-qm", "seed the cleanliness control");
+  const index = join(repo.dir, ".git", "index");
+  const indexBefore = readFileSync(index);
+  const config = join(repo.dir, ".git", "config");
+  writeFileSync(config, "[invalid config\n");
+  assert.throws(() => repo.git("status", "--porcelain"), /bad config/, "control: ordinary status cannot read this config");
+  assert.equal(checkoutStatusWithoutConfig(repo.dir), "", "a clean tree is still observable");
+  writeFileSync(tracked, "changed\n");
+  assert.match(checkoutStatusWithoutConfig(repo.dir), /M tracked\.txt/, "tracked content changes remain visible");
+  rmSync(tracked);
+  assert.match(checkoutStatusWithoutConfig(repo.dir), /D tracked\.txt/, "tracked deletion remains visible");
+  writeFileSync(tracked, "original\n");
+  const shards = join(repo.dir, "test", "fixtures", "wiring", "tasks.d");
+  mkdirSync(shards, { recursive: true });
+  writeFileSync(join(shards, "probe.yaml"), "fixture\n");
+  assert.match(checkoutStatusWithoutConfig(repo.dir), /\?\? test\//, "an untracked nested probe is observed");
+  rmSync(join(repo.dir, "test"), { recursive: true, force: true });
+  assert.equal(checkoutStatusWithoutConfig(repo.dir), "", "restoration is observed too");
+  assert.deepEqual(readFileSync(index), indexBefore, "the observer must not refresh the original index");
+  assert.equal(readFileSync(config, "utf8"), "[invalid config\n", "the observer must not rewrite repo config");
+});
+
 test("W1-T497 ACCEPTANCE 1+3: the isolated --base probe leaves the shared checkout clean while warning on a zero-resolving proof", async (t) => {
   const repo = gitRepo({ kind: "lint-wiring-isolated" });
   t.after(() => repo.cleanup());
@@ -463,12 +522,12 @@ test("W1-T497 ACCEPTANCE 1+3: the isolated --base probe leaves the shared checko
   const shardPath = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
   mkdirSync(dirname(shardPath), { recursive: true }); // the fixture ships no tasks.d until a probe needs one
-  const livePlanBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
+  const livePlanBefore = checkoutStatusWithoutConfig(REPO_ROOT);
   writeFileSync(shardPath, probeShardYaml(), "utf8");
   try {
     // DURING, not only after: the dirty window IS the race, so the live tree is checked while the
     // probe is on disk rather than once it has been cleaned up.
-    const livePlanDuring = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
+    const livePlanDuring = checkoutStatusWithoutConfig(REPO_ROOT);
     assert.equal(livePlanDuring, livePlanBefore, "the entire shared checkout must be untouched WHILE the probe shard exists");
     assert.ok(repo.git("status", "--porcelain").includes("tasks.d/"), "the real new shard is visible in its own Git checkout");
     const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"], repo.dir);
@@ -480,6 +539,7 @@ test("W1-T497 ACCEPTANCE 1+3: the isolated --base probe leaves the shared checko
     assert.match(combined, /resolves to ZERO tests today/, "the warning carries the check's own zero-match message");
     assert.doesNotMatch(combined, new RegExp(`✗ ${PROBE_ID}`), "a name-resolution-only violation must never BLOCK");
     assert.equal(exitCode, 0, "a warn-only violation must not fail the lint-plan run");
+    assert.equal(checkoutStatusWithoutConfig(REPO_ROOT), livePlanBefore, "the lint run must leave the shared checkout untouched");
   } finally {
     rmSync(shardPath, { force: true });
   }
@@ -569,12 +629,12 @@ test("W1-T1225 ACCEPTANCE: the isolated --base probe warns on case-only grep and
   const dirAsFileRel = relative(repo.dir, dirAsFileAbs);
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
   mkdirSync(dirname(shardPath), { recursive: true });
-  const sharedBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
+  const sharedBefore = checkoutStatusWithoutConfig(REPO_ROOT);
   mkdirSync(dirAsFileAbs, { recursive: true }); // a REAL directory: existsSync true, readFileSync throws EISDIR
   writeFileSync(caseFileAbs, GREP_CASE_FILE_TEXT, "utf8");
   writeFileSync(shardPath, grepProbeShardYaml(caseFileRel, dirAsFileRel), "utf8");
   try {
-    assert.equal(execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim(), sharedBefore, "case file, directory and shard must not mutate the shared checkout");
+    assert.equal(checkoutStatusWithoutConfig(REPO_ROOT), sharedBefore, "case file, directory and shard must not mutate the shared checkout");
     const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"], repo.dir);
     assert.match(
       combined,
@@ -588,6 +648,7 @@ test("W1-T1225 ACCEPTANCE: the isolated --base probe warns on case-only grep and
     // stayed silent (the catch branch degraded it to "not on disk", not a second warning).
     const warnCount = (combined.match(new RegExp(`⚠ ${GREP_PROBE_ID}: \\[proof-grep-unmatchable\\]`, "g")) ?? []).length;
     assert.equal(warnCount, 1, "the directory-as-file criterion must stay silent, not add a second warning");
+    assert.equal(checkoutStatusWithoutConfig(REPO_ROOT), sharedBefore, "the lint run must leave the shared checkout untouched");
   } finally {
     rmSync(shardPath, { force: true });
     rmSync(tmpDir, { recursive: true, force: true });
