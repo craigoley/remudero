@@ -1128,7 +1128,8 @@ test(
       const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
       assert.ok(
         ledgerLines.some((l) => l.step === "pr.opened" && l.plan_only === true),
-        "the retro reached a real, plan-only, opened PR -- W1-T136's mergeable-PR path",
+        "the retro reached a real, plan-only, opened PR -- W1-T136's mergeable-PR path; " +
+          JSON.stringify({ ledger: ledgerLines, daemon: lines }),
       );
       assert.ok(
         ledgerLines.some((l) => l.step === "retro.marker.advanced"),
