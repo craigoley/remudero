@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
-import { FOUNDRY_HAIKU_PRICE, OPENWEIGHT_CONTEXT_WINDOWS, openWeightAllowancePath,
+import { openWeightPriceFor, OPENWEIGHT_CONTEXT_WINDOWS, openWeightAllowancePath,
   openWeightReservationUsd, openWeightUsageUsd, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 
 const MODEL = "claude-haiku-5-5";
@@ -25,7 +25,7 @@ function response(over: Record<string, unknown> = {}) {
 
 test("Haiku 5.5 prices the whole prompt tier and reserves the one-hour cache-write ceiling", () => {
   assert.equal(OPENWEIGHT_CONTEXT_WINDOWS[MODEL].totalTokens, 1_000_000);
-  assert.equal(FOUNDRY_HAIKU_PRICE.readAt, "2026-10-07");
+  assert.equal(openWeightPriceFor(MODEL).readAt, "2026-10-07");
   assert.equal(openWeightUsageUsd(MODEL, 100_000, 1_000), 0.0105);
   assert.equal(openWeightUsageUsd(MODEL, 100_001, 1_000), (100_001 * 0.5 + 1_000 * 2.5) / 1_000_000);
   assert.equal(openWeightUsageUsd(MODEL, 100_001, 1_000, 50_000, 10_000),
