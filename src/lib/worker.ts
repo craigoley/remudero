@@ -181,6 +181,7 @@ import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   GITDIR_RECORD_PREFIX,
+  HOST_GIT_CONFIG,
   hostWorktreeGit,
   pinnedConfigValue,
   pinWorktreeGit,
@@ -5244,6 +5245,21 @@ function ensureWorktreeConfigEnabled(repoDir: string): void {
   execFileSync("git", ["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
 }
 
+/** W1-T6147: the environment for the git that CUTS a tree. `worktree add` checks out and runs post-checkout from the SOURCE
+ * clone's hooks path — a relative `core.hooksPath=hooks` is the base's tracked hooks/, none is the common gitdir's hooks/,
+ * which a codex writer can write — so the leaf's {@link HOST_GIT_CONFIG} rides at command-line precedence (the env form of
+ * `-c`, leaving argv unchanged) and the harness's own hooks dir is the only one git reads. */
+function noHookGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(k)) env[k] = v;
+  env.GIT_CONFIG_COUNT = String(HOST_GIT_CONFIG.length);
+  HOST_GIT_CONFIG.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -5289,7 +5305,7 @@ export function worktreeAdd(
   execFileSync(
     "git",
     ["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base],
-    { stdio: "inherit" },
+    { stdio: "inherit", env: noHookGitEnv() },
   );
   // Record the base BEFORE the currency check below: a refusal throws out of this function with no return value, so the
   // record must already be on disk to be attributable (W1-T405).
@@ -5367,9 +5383,9 @@ const execFilePromise = promisify(execFile);
 
 /** Async Git calls used by daemon worktree creation. The two commands whose sync form inherits stdio
  * forward both streams to stderr, including output produced before a failure. */
-async function worktreeGit(args: string[], forwardOutput = false): Promise<string> {
+async function worktreeGit(args: string[], forwardOutput = false, env?: NodeJS.ProcessEnv): Promise<string> {
   try {
-    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8" });
+    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8", ...(env ? { env } : {}) });
     if (forwardOutput) {
       if (stdout) process.stderr.write(stdout);
       if (stderr) process.stderr.write(stderr);
@@ -5409,7 +5425,7 @@ export async function worktreeAddAsync(
     // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
-  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
+  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv());
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
   // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
   const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
@@ -5437,7 +5453,8 @@ export async function worktreeAddAsync(
     const from = createdBase;
     try {
       await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"]);
-      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead]);
+      // W1-T6147: the tree has no worktree hooksPath yet, so this merge would run post-merge from the clone's.
+      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead], false, noHookGitEnv());
     } catch {
       break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
     }

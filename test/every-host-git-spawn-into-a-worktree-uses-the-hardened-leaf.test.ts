@@ -79,7 +79,8 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
     count: 9,
     reason:
       "HARNESS (W1-T6122): worktreeAdd 3 + worktreeAddAsync 6 cut and wire the tree before any worker runs; " +
-      "they read the gitdir the leaf later pins to, so they must precede it",
+      "they read the gitdir the leaf later pins to, so they must precede it; the add and the async catch-up " +
+      "merge run the leaf's HOST_GIT_CONFIG, so no tracked or gitdir hook fires while the tree is cut (W1-T6147)",
   },
   "src/lib/sweep.ts": {
     count: 7,
