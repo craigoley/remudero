@@ -750,3 +750,24 @@ test('private repair cells separate observed current-head green from legacy firs
   const future = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
   assert.equal(Object.values(future.families.repair).reduce((sum, partition) => sum + partition.cells.toFirstObservedCurrentHeadGreen.observed, 0), 0);
 });
+
+
+test("a Codex cash zero never substitutes for a missing trial notional receipt", () => {
+  const assigned = (id: string) => ({ step: "worker.assignment", ts: T(10), task_id: "W1-Tusage",
+    worker_assignment: { id, selected: { provider: "codex", model: "gpt-6.1-sol" } } });
+  const attempt = (id: string, extra: Record<string, unknown>) => ({ step: "worker.attempt", ts: T(10, 1),
+    selection_assignment_id: id, total_cost_usd: 0, billing_mode: "subscription", ...extra });
+  const rows = [assigned("explicit"), assigned("legacy"), assigned("zero"),
+    attempt("explicit", { provider: "codex" }), attempt("legacy", {}),
+    attempt("zero", { provider: "codex", notional_cost_usd: 0 })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const counts = snapshot.assignmentTelemetry[0]!;
+  assert.equal(counts.assignments, 3);
+  assert.equal(counts.costMissingAssignments, 2);
+  assert.equal(counts.subscriptionNotionalUsd, 0);
+  assert.equal(counts.apiCostEstimateUsd, 0);
+  assert.equal(projectFlowRow(rows[0]!, "assignment").provider, "codex");
+  assert.equal(projectFlowRow(rows[3]!, "attempt").provider, "codex");
+});
