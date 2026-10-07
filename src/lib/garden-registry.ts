@@ -199,11 +199,16 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const settle = (exit: number | null, error?: string): void => {
       running = false;
       if (hourly && exit === 0) reportedBucket = bucket;
-      wiring.log(GARDEN_PASS_STEP, { name, ms: clock.now() - startedMs, exit, ...(error === undefined ? {} : { error }) });
+      // One completion timestamp for both destinations: the logger's own latency
+      // is not child execution, and the persisted card can correlate this row.
+      const finishedMs = clock.now();
+      const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
+      const executionMs = admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
+      wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
+        ...(error === undefined ? {} : { error }) });
       const phase = error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
       observe(event(phase, { passId, exit,
-        queueMs: admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs),
-        executionMs: admittedMs === undefined ? null : Math.max(0, clock.now() - admittedMs),
+        queueMs, executionMs,
         reason: error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
     };
     let pass: Promise<number | null>;

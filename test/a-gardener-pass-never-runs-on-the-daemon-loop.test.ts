@@ -106,6 +106,56 @@ test("gardener lifecycle measures admission separately from execution and preser
   assert.ok(observed.some((r) => r.name === "gate" && r.phase === "running"));
 });
 
+test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-correlation-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  // Controlled process outcomes, not a claim of measured production work. The
+  // real admission queue and persistence must retain the same generated UUID.
+  let now = Date.parse("2026-10-07T12:00:00Z");
+  const clock = clockFromMillisFn(() => now);
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "correlation-fixture",
+    codeSha: "1".repeat(40), clock, log: () => {},
+    gardens: ["plan", "gate", "export"].map((name) => ({ name, enabled: true, cadenceMs: 60_000, scope: "repository" })) });
+  await writer.flush();
+  const completionRows = rows();
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    completionRows.log(step, extra);
+    now += 17; // Logging latency must not be counted as child execution.
+  };
+  const observe = (event: GardenerRuntimeEvent) => writer.record(event);
+  const releases: Array<(exit: number | null) => void> = [];
+  const spawnPass = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const plan = startGardenOffLoop("plan", 60_000, { spawnPass, clock, log, observe });
+  const gate = startGardenOffLoop("gate", 60_000, { spawnPass, clock, log, observe });
+  t.after(() => { plan.stop(); gate.stop(); });
+  await wait(0); assert.equal(releases.length, 1);
+  now += 100; releases[0]!(0); await wait(0);
+  assert.equal(releases.length, 2);
+  now += 200; releases[1]!(null); await wait(0);
+  const failed = startGardenOffLoop("export", 60_000, { clock, log, observe,
+    spawnPass: () => { throw new Error("controlled pre-admission failure"); } });
+  t.after(() => failed.stop());
+  await writer.flush();
+  const saved = await readGardenerRuntime(stateDir);
+  assert.deepEqual(completionRows.out.map((row) => row.extra.name), ["plan", "gate", "export"]);
+  assert.ok(completionRows.out.every((row) => row.step === GARDEN_PASS_STEP), "one existing completion row per terminal pass");
+  for (const row of completionRows.out) {
+    const entry = saved.gardens.find((garden) => garden.name === row.extra.name)!;
+    assert.match(String(row.extra.passId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(row.extra.passId, entry.passId);
+    assert.equal(row.extra.queueMs, entry.queueMs);
+    assert.equal(row.extra.executionMs, entry.executionMs);
+    assert.equal(row.extra.exit, entry.exit);
+    if (entry.queueMs !== null && entry.executionMs !== null) assert.equal(row.extra.ms, entry.queueMs + entry.executionMs);
+  }
+  assert.equal(saved.gardens.find((garden) => garden.name === "plan")!.executionMs, 100);
+  assert.equal(saved.gardens.find((garden) => garden.name === "gate")!.executionMs, 200);
+  const rejected = saved.gardens.find((garden) => garden.name === "export")!;
+  assert.equal(rejected.queueMs, null); assert.equal(rejected.executionMs, null);
+  assert.equal(rejected.reason, "spawn-failed");
+});
+
 test("gardener lifecycle reports idle and spawn failures while an observer cannot break a pass", async (t) => {
   const observed: GardenerRuntimeEvent[] = [], logs: string[] = [];
   const idle = startGardenOffLoop("plan", 60_000, { log: () => {}, due: () => false,
