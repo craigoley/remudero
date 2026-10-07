@@ -837,7 +837,7 @@ function deriveSnapshot(
 export async function runBenchmarkCohortPass(
   stateDir: string,
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
-    onBeforeLivePrefixVerify?: () => void; caseFiles?: TaskCaseFile[] } = {},
+    onBeforeLivePrefixVerify?: () => void; onBeforeLiveCacheVerify?: () => void; caseFiles?: TaskCaseFile[] } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
@@ -857,6 +857,21 @@ export async function runBenchmarkCohortPass(
     const fault = faults.get(entry.name);
     return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   });
+  const cachedLive = current.find((entry) => entry.form === "live" && !changed.includes(entry));
+  const cachedPrefix = cachedLive ? known.get(cachedLive.name) : undefined;
+  if (cachedLive && cachedPrefix) {
+    // Equal size/mtime is not proof of equal bytes, even while recovering a
+    // refused rewrite. Verify only the previously audited live prefix before
+    // reusing its projection; immutable archives are not rescanned here.
+    try {
+      opts.onBeforeLiveCacheVerify?.();
+      if ((await sourceHashes(cachedLive.path, undefined, cachedPrefix.size)).full !== cachedPrefix.sha256)
+        changed.push(cachedLive);
+    } catch {
+      return { state: "unavailable", snapshot: emptySnapshot("ledger-live-unreadable-before-scan", checkpoint.lastGood),
+        scannedSources: 0, pendingSources: 1 };
+    }
+  }
   if (changed.length === 0 && checkpoint.lastGood && !checkpoint.baselineSources
     && checkpoint.sources.length + faults.size === current.length) {
     const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0

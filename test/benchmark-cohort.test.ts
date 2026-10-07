@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -435,6 +435,67 @@ test("benchmark cohorts refuse unproven live rewrites and recover a completed to
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("benchmark live rewrites and restorations are checked even when size and mtime match", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-equal-generation-"));
+  try {
+    const live = join(stateDir, "ledger.ndjson");
+    const assignment = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    const attempt = row({ ts: "2026-09-26T11:01:00.000Z", step: "worker.attempt",
+      selection_assignment_id: "a1", success: true });
+    const stamp = new Date("2026-09-26T12:00:00.000Z");
+    const write = (text: string) => { writeFileSync(live, text); utimesSync(live, stamp, stamp); return statSync(live); };
+    const first = write(assignment + attempt);
+    const initial = await runBenchmarkCohortPass(stateDir);
+    assert.equal(initial.state, "complete");
+    const cached = await runBenchmarkCohortPass(stateDir);
+    assert.equal(cached.state, "complete");
+    assert.equal(cached.scannedSources, 0, "an unchanged prefix still uses the existing projection");
+    const corrected = assignment.replace("gpt-5-nano", "gpt-6-luna") + attempt;
+    const rewrittenStat = write(corrected);
+    assert.equal(first.size, rewrittenStat.size, "different bytes share the same actual size");
+    assert.equal(first.mtimeMs, rewrittenStat.mtimeMs, "the file really has the same actual mtime");
+    assert.notEqual(readFileSync(live, "utf8"), assignment + attempt, "a real rewrite is present");
+    const rewritten = await runBenchmarkCohortPass(stateDir);
+    assert.equal(rewritten.state, "unavailable", "metadata equality cannot authorize changed evidence");
+    assert.equal(rewritten.snapshot.reason, "retired-source-evidence-not-reconciled");
+    assert.equal(rewritten.snapshot.cohorts[0].dimensions.model, "gpt-5-nano");
+    const restoredStat = write(assignment + attempt);
+    assert.equal(restoredStat.size, rewrittenStat.size);
+    assert.equal(restoredStat.mtimeMs, rewrittenStat.mtimeMs);
+    const restored = await runBenchmarkCohortPass(stateDir);
+    assert.equal(restored.state, "complete", "restored bytes are actually rescanned, not left indefinitely partial");
+    assert.equal(restored.scannedSources, 1);
+    assert.equal(restored.snapshot.sourceRows.assignments, 1);
+    assert.equal(restored.snapshot.cohorts[0].joinedAttempts, 1);
+    assert.equal(readFileSync(live, "utf8"), assignment + attempt, "the reader never repairs source bytes itself");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cached live verification preserves evidence when its real source disappears", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-cache-read-refused-"));
+  try {
+    const live = join(stateDir, "ledger.ndjson");
+    const assignment = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    writeFileSync(live, assignment);
+    const initial = await runBenchmarkCohortPass(stateDir);
+    assert.equal(initial.state, "complete");
+    const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+    const saved = readFileSync(checkpoint, "utf8");
+    const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => unlinkSync(live) });
+    assert.equal(missing.state, "unavailable");
+    assert.equal(missing.snapshot.reason, "ledger-live-unreadable-before-scan");
+    assert.equal(missing.snapshot.lastGoodAt, initial.snapshot.asOf);
+    assert.equal(missing.snapshot.sourceRows.assignments, 1, "last good evidence is retained, never an invented empty ledger");
+    assert.equal(missing.scannedSources, 0);
+    assert.equal(missing.pendingSources, 1);
+    assert.equal(readFileSync(checkpoint, "utf8"), saved, "an unreadable cache check cannot overwrite the checkpoint");
+    writeFileSync(live, assignment);
+    assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
 test("benchmark cohorts distinguish an unreadable state root from a ledger with no sources", async () => {
