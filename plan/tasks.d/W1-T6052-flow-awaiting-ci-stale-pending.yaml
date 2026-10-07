@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.35
   status: queued
@@ -27,3 +27,14 @@
     - PR #9167: 0.36 PR-hours — stale-pending — checks pending 76m (>= 60m ceiling) — escalating
     - PR #9156: 0.34 PR-hours — stale-pending — checks pending 74m (>= 60m ceiling) — escalating
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/sweep.ts and one test file. Nothing in the description or file list points to secrets, auth, deletion of data or branches, or changes to merge, deploy or review policy."
+      - "The acceptance criterion is a grep for a named test in the test file. That makes it verifiable from what is shown, and the PR still has to pass CI and review."
+      - "The task is narrowly scoped to clearing a stale-pending awaiting-ci blocker, and it asks for no operator-only decision. The family has no track record (0 merged, 0 declined), so this is neutral and not a concern in itself."
+      - "The sweep logic could in principle take actions such as clearing or cancelling CI state. The description does not say it does, so I treat that as a residual uncertainty and not as evidence of danger."
+    judged_at: "2026-10-06T22:30:03.659Z"
+    pin: "6825bf09474e436f164571d9fa516e6e0866714146cca9d58a77339b8770b05e"
