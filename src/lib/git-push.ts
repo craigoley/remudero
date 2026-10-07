@@ -478,15 +478,10 @@ function* prePushGateSteps(
   return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env: prePushGateEnv() };
 }
 
-/** The only daemon variables the gate inherits: executable discovery, locale, temp, and its own switch. */
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
 
-/**
- * W1-T6120 — THE GATE'S ENVIRONMENT IS AN ALLOWLIST, NOT `process.env`. The daemon carries GH_TOKEN, GH_APP_* and
- * provider keys for the push that follows; nothing the gate starts needs one, so none crosses. `HOME` is set per run
- * by {@link withGateHome}, never the daemon's, so no credential helper or CLI config is found through it either; and
- * every git the hook spawns carries {@link HOST_GIT_CONFIG} at command-line precedence.
- */
+/** W1-T6120 — the gate's env is an ALLOWLIST: GH_TOKEN, GH_APP_* and provider keys stay with the push. Its git calls
+ *  carry {@link HOST_GIT_CONFIG}, and {@link withGateHome} gives it a throwaway HOME. */
 export function prePushGateEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of GATE_ENV_ALLOWLIST) if (typeof base[key] === "string") env[key] = base[key];
@@ -543,11 +538,10 @@ export function worktreePushExec(worktreePath: string): PushExec {
     const pushArgs = leafArgs(worktreePath, args);
     const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
     if (gate) {
-      // Both streams on a pass too: a check the gate skipped says so on stderr, and skipped is not passed.
       const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
         cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
       }));
-      if (opts.stdio !== "ignore") writeThrough(res);
+      if (opts.stdio !== "ignore") writeThrough(res); // on a pass too: a skipped check says so on stderr
       if (res.error !== undefined || res.status !== 0) throw gateRefusal(worktreePath, pushArgs, res.error ?? res);
     }
     try {
