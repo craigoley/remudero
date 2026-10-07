@@ -45359,7 +45359,7 @@ export function buildSweepHook(
     // so a reply steers this same tick. Contained like `mainHealthRung` above.
     if (escalationAnswerGateway) {
       try {
-        const answers = readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
       } catch (e) {
         log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });

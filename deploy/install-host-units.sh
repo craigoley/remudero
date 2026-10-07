@@ -362,6 +362,7 @@ deploy_code_idle() {
   fi
   if printf '%s\n' "$processes" | grep -E 'claude .*--output-format|codex .*exec' >/dev/null; then
     echo "rmd-relaunch: deploy code -- active workers; deferring." >&2
+    DEPLOY_CODE_BUSY=1
     return 1
   else
     match_status=$?
@@ -379,6 +380,7 @@ deploy_code_idle() {
     fi
     if [ -n "$locks" ]; then
       echo "rmd-relaunch: deploy code -- active locks at $dir; deferring." >&2
+      DEPLOY_CODE_BUSY=1
       return 1
     fi
   done
@@ -402,6 +404,7 @@ deploy_code_clean() {
 
 refresh_deploy_code() {
   local container="$1" code="$STATE_DIR/remudero" install_head
+  DEPLOY_CODE_BUSY=0
   deploy_code_idle "$container" || return 1
   deploy_code_clean || return 1
   if ! git -C "$code" fetch --quiet origin main 2>/dev/null; then
@@ -426,6 +429,26 @@ refresh_deploy_code() {
     return 1
   fi
   deploy_code_idle "$container" && deploy_code_clean
+}
+
+# W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
+# `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
+# now hands a busy recycle to recycle-container.sh's own pause-and-drain. Only workers or locks
+# qualify -- an unreadable probe, a dirty tree, or a daemon tree older than the install head defers.
+deploy_code_busy_handoff() {
+  local code="$STATE_DIR/remudero" install_head daemon_head
+  [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
+  deploy_code_clean || return 1
+  if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
+     ! daemon_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" rev-parse HEAD 2>/dev/null)" || [ -z "$daemon_head" ]; then
+    echo "rmd-relaunch: deploy code -- busy, and a head is unreadable; deferring." >&2
+    return 1
+  fi
+  if ! GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} does not contain install head ${install_head}; deferring." >&2
+    return 1
+  fi
+  echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
 }
 DEPLOY_CODE_REFRESH
 }
@@ -884,7 +907,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     # Refresh the source CLI before loading it; standalone executable entrypoints own their
     # runtime and retain the supervisor invocation without requiring a source checkout.
     if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
-      refresh_deploy_code '${CONTAINER_NAME}' || exit 0
+      refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
