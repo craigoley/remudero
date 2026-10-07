@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778); the counts are that PR's own census exceptions"
   plan_refs: [W1-T6106, W1-T4614, W1-T3224]
   files: [src/run-task.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

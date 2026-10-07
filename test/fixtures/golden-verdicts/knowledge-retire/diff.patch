@@ -1,17 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -79,0 +80,6 @@
+@@ -85,0 +86,6 @@
 +
-+## Pass 2026-10-06T23:10:18.176Z
++## Pass 2026-10-07T10:29:54.880Z
 +
-+- retire daemon-launchd-keepalive-restart: Workers offered it have rarely used it, compared with other learnings.
++- retire canonical-checkout-lags-by-design: Workers offered it have rarely used it, compared with other learnings.
 +
 +Learnings used when offered: 19%. Dangling Why pointers: 1.
 diff --git a/learnings/platform.yaml b/learnings/platform.yaml
 --- a/learnings/platform.yaml
 +++ b/learnings/platform.yaml
-@@ -270,1 +270,2 @@
+@@ -307,1 +307,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire daemon-launchd-keepalive-restart
++  # knowledge gardener: retire canonical-checkout-lags-by-design
 +  lifecycle: superseded
