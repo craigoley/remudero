@@ -98,7 +98,7 @@ test("Foundry Haiku bills an empty thinking-only turn as failure and retains mea
       clock: fixedClock(NOW), fetchImpl: async () => response({ content: [{ type: "thinking", thinking: "done" }] }),
     }, f.config, { model: MODEL, effort: "high" });
     assert.equal(result.isError, true);
-    assert.match(result.text, /no visible text/);
+    assert.match(result.stderr, /no visible text/);
     assert.ok(result.costUsd > 0);
     const state = JSON.parse(readFileSync(openWeightAllowancePath(f.config), "utf8"));
     assert.equal(Object.values(state.reservations).length, 1);
@@ -118,7 +118,7 @@ test("Foundry Haiku stops a real failed local Read before a fabricated follow-up
       },
     }, f.config, { model: MODEL, effort: "medium" });
     assert.equal(result.isError, true);
-    assert.match(result.text, /tool Read failed/);
+    assert.match(result.stderr, /tool Read failed/);
     assert.equal(sent, 1, "the model never receives an invented successful tool result");
   } finally { f.close(); }
 });
