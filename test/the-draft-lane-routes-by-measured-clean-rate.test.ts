@@ -54,7 +54,7 @@ async function draftFixture(run: (args: Parameters<typeof spawnWorker>[0], confi
   readStats: () => ReturnType<typeof draftStatsFromRows> = () => ({}), prompt = "draft P1", cap = 10) {
   return withTempDir("rmd-draft-routing-", async (root) => {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
     const config = { root, workerHomeRoot: join(root, "worker-home"), claudeBin: "/unused", dailyCapUsd: { normal: cap, squeezed: cap },
       workerProviders: { enabled: ["cash"], cashEndpoint: "https://example.test/" } } as Config;
     const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];

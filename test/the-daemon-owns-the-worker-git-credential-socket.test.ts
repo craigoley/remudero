@@ -105,7 +105,7 @@ function capturingQuery(captured: CapturedQuery): SpawnWorkerArgs["queryFn"] {
 /** A real `spawnWorker` call with no real worker: the git wiring runs before the injected query. */
 function spawnArgs(scratch: string, cwd: string, captured: CapturedQuery): SpawnWorkerArgs {
   const settingsFile = join(scratch, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd,
     permissionMode: "bypassPermissions",

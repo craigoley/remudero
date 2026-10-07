@@ -146,7 +146,7 @@ test("a semantic provider failure still posts the binding deterministic verdict"
   const settingsFile = join(root, "settings.json");
   try {
     writeFileSync(diffPath, "diff --git a/src/x.ts b/src/x.ts\n+const semantic = true;\n", "utf8");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const fakeClaude = join(bin, "claude");
     writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     chmodSync(fakeClaude, 0o755);

@@ -48,7 +48,7 @@ const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", impo
 
 function clockBoundSpawnArgs(dir: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd: dir,
     permissionMode: "bypassPermissions" as const,

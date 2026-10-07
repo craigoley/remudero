@@ -513,7 +513,7 @@ test("the real cash mount passes the squeeze promotion without reading subscript
   const root = mkdtempSync(join(tmpdir(), "rmd-cash-luna-squeeze-"));
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const selections: string[] = [];
     const config = {
       claudeBin: "/unused/claude",
