@@ -224,7 +224,8 @@ test("W1-T6083: changed tests select themselves, census path readers stay select
 test("W1-T6083: a suite that spawns children, or one the map never saw, is selected whenever the floor reaches it", () => {
   const files = new Map([
     ...FIXTURE_FILES,
-    ["test/spawns.test.ts", 'import { spawnSync } from "node:child_process";\n'],
+    // W1-T6108: a spawner is a suite whose children run repo code, not one that merely imports child_process.
+    ["test/spawns.test.ts", 'import { spawnSync } from "node:child_process";\nspawnSync(process.execPath, ["src/tool.mjs"]);\n'],
     ["test/via-helper.test.ts", 'import { run } from "./helpers/run.js";\n'],
     ["test/helpers/run.ts", 'import { spawnSync } from "node:child_process";\nexport const run = () => spawnSync(process.execPath, ["bin/rmd"]);\n'],
     ["test/git-only.test.ts", 'import { g } from "./helpers/git.js";\n'],
@@ -235,7 +236,7 @@ test("W1-T6083: a suite that spawns children, or one the map never saw, is selec
   const body = diffOf("src/m.ts", ["@@ -16 +16 @@", "-a", "+b"]);
   const reached = armFor(fixture.map, body, {}, { files, floor: [A, B, "test/spawns.test.ts", "test/via-helper.test.ts", "test/git-only.test.ts", "test/unseen.test.ts"] });
   assert.deepEqual(reached.suites, ["test/git-only.test.ts", "test/spawns.test.ts", "test/unseen.test.ts", "test/via-helper.test.ts"]);
-  assert.match(reached.reasons.join("\n"), /spawns children the map cannot credit/);
+  assert.match(reached.reasons.join("\n"), /spawns repo code but the map credits it no child report/);
   assert.match(reached.reasons.join("\n"), /absent from the impact map/);
   assert.deepEqual(armFor(fixture.map, body, {}, { files, floor: [] }).suites, [], "nothing the floor does not reach");
   // A suite changed after the map's sha is stale in it: the floor's reach selects it.

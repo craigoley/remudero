@@ -14,9 +14,11 @@
  *     executable edit (module scope, a declaration line, an exported binding) selects every suite
  *     that LOADED the module, because V8 credits module-scope code to every loader;
  *   - comment, blank, import and type-only lines are inert: they select nothing;
- *   - a suite whose process spawns children is credited with none of their code (a child's report
- *     names no suite, and many children blank NODE_V8_COVERAGE), so it is selected whenever the
- *     floor reaches it, as is every suite the map never saw;
+ *   - a spawned child's report is credited to the suite that spawned it (W1-T6108: the test setup
+ *     records the suite beside each child report). A suite whose children run repo code is still
+ *     selected whenever the floor reaches it when the map credits it no child report, and so is one
+ *     that blanks or redirects NODE_V8_COVERAGE for its children; a suite that only spawns git is
+ *     not. So is every suite the map never saw;
  *   - a missing or stale map, a map whose sha the base does not descend from, a changed non-code
  *     input (W1-T6084's read map does not exist yet), or a changed file the map's own sha predates
  *     falls back to the narrow selection and names why.
@@ -124,8 +126,11 @@ export interface ImpactMap {
   sha: string;
   /** Every suite the map saw, sorted; files index into it. */
   suites: string[];
-  /** Process reports that named no suite — spawned children, credited to nobody. */
+  /** Process reports that named no suite — credited to nobody. */
   orphanReports: number;
+  /** W1-T6108: suite indices credited with at least one spawned child's report. Absent from a map
+   *  built before children were attributed, which then credits no suite's children. */
+  spawnCredited?: number[];
   files: Record<string, ImpactMapFile>;
 }
 
@@ -138,6 +143,8 @@ export interface CoverageProcessReport {
   test?: string;
   /** The file URL (trailing slash) the process ran under; defaults to the builder's root. */
   root?: string;
+  /** W1-T6108: the report is a child's that `test` spawned, not `test`'s own process. */
+  child?: boolean;
   result: V8Script[];
   "source-map-cache"?: Record<string, { lineLengths?: number[]; data?: { mappings?: string } } | null>;
 }
@@ -264,6 +271,7 @@ export function buildImpactMap(
   const loaded = new Map<string, Set<string>>();
   const fns = new Map<string, Map<string, Set<string>>>();
   const suites = new Set<string>();
+  const credited = new Set<string>();
   let orphans = 0;
   const decodedCache = new Map<string, { starts: number[]; decoded: Array<Array<[number, number]>> }>();
   for (const report of reports) {
@@ -273,6 +281,7 @@ export function buildImpactMap(
       continue;
     }
     suites.add(suite);
+    if (report.child === true) credited.add(suite);
     const root = typeof report.root === "string" ? report.root : rootUrl;
     for (const script of report.result) {
       const path = repoPath(script.url, root);
@@ -320,7 +329,7 @@ export function buildImpactMap(
       .sort((a, b) => a[0]! - b[0]! || a[1]! - b[1]!);
     files[path] = { loadedBy: ids(loaded.get(path)!), functions };
   }
-  return { format: IMPACT_MAP_FORMAT, sha: opts.sha, suites: order, orphanReports: orphans, files };
+  return { format: IMPACT_MAP_FORMAT, sha: opts.sha, suites: order, orphanReports: orphans, spawnCredited: ids(credited), files };
 }
 
 /** A map read from disk, or why there is none. A wrong format is a problem, never a guess. */
@@ -488,19 +497,19 @@ export function impactTouches(
 }
 
 const SPAWN_IMPORT = /["'](?:node:)?(?:child_process|worker_threads)["']/;
-/** A helper spawning repo code rather than only `git`: node, tsx, a shell, a repo path, a worker. */
+/** A spawn of repo code rather than only `git`: node, tsx, a shell, a repo path, a worker. */
 const CODE_SPAWN = /process\.execPath|["'`](?:node|tsx|bash|sh|npx|npm)["'`]|\bfork\s*\(|\bnew\s+Worker\s*\(|["'`](?:src|scripts|bin)\/[\w./-]+["'`]/;
+/** A child env that sets NODE_V8_COVERAGE — blanked (the coverage-session-blanking census) or pointed
+ *  elsewhere — so the child's report never reaches the map under the suite that spawned it. */
+const COVERAGE_ENV = /\bNODE_V8_COVERAGE\s*[:=](?!=)/;
 
-/** Suites whose own process spawns children: the suite imports child_process or worker_threads,
- *  or reaches (through test/ helpers it imports) a helper that spawns repo code. Their children's
- *  coverage is credited to nobody, so the map cannot speak for them. */
-export function spawningSuites(files: ReadonlyMap<string, string>): Set<string> {
+/** The suites `test` reaches whose own text, or a test/ helper they import, matches `matches`. */
+function suitesReaching(files: ReadonlyMap<string, string>, matches: (text: string) => boolean): Set<string> {
   const stripped = new Map<string, string>();
   const text = (f: string) => {
     if (!stripped.has(f)) stripped.set(f, stripComments(files.get(f) ?? ""));
     return stripped.get(f)!;
   };
-  const helperSpawns = (f: string) => SPAWN_IMPORT.test(text(f)) && CODE_SPAWN.test(text(f));
   const deps = (f: string) => {
     const out: string[] = [];
     for (const m of text(f).matchAll(/\b(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g)) {
@@ -514,17 +523,13 @@ export function spawningSuites(files: ReadonlyMap<string, string>): Set<string> 
   const out = new Set<string>();
   for (const suite of files.keys()) {
     if (!SUITE.test(suite)) continue;
-    if (SPAWN_IMPORT.test(text(suite))) {
-      out.add(suite);
-      continue;
-    }
     const seen = new Set<string>();
-    const queue = deps(suite);
+    const queue = [suite];
     while (queue.length > 0) {
       const f = queue.shift()!;
       if (seen.has(f)) continue;
       seen.add(f);
-      if (helperSpawns(f)) {
+      if (matches(text(f))) {
         out.add(suite);
         break;
       }
@@ -532,6 +537,20 @@ export function spawningSuites(files: ReadonlyMap<string, string>): Set<string> 
     }
   }
   return out;
+}
+
+/** Suites whose children run repo code: the suite, or a test/ helper it imports, imports
+ *  child_process or worker_threads AND spawns node, tsx, a shell, a repo path or a worker. A suite
+ *  that only shells `git` is not one (W1-T6108). */
+export function spawningSuites(files: ReadonlyMap<string, string>): Set<string> {
+  return suitesReaching(files, (t) => SPAWN_IMPORT.test(t) && CODE_SPAWN.test(t));
+}
+
+/** Suites whose children's coverage the map cannot credit whatever it was built from: the suite or
+ *  a helper it imports sets NODE_V8_COVERAGE in a child env (blanked for a nested runner, or a raw
+ *  directory of its own). */
+export function uncreditableSpawners(files: ReadonlyMap<string, string>): Set<string> {
+  return suitesReaching(files, (t) => SPAWN_IMPORT.test(t) && COVERAGE_ENV.test(t));
 }
 
 /** What the arm decides from, beside the selector's own input. */
@@ -611,9 +630,14 @@ export function impactArmSelection(input: ImpactArmInput, ctx: ImpactArmContext)
     base: input.baseText ?? (() => undefined),
     head: (p) => ctx.files.get(p),
   });
+  const spawners = spawningSuites(ctx.files);
+  const unloaded: string[] = [];
   for (const t of touches) {
     const file = map.files[t.path];
-    if (!file) continue; // loaded by no in-process suite on the map's sha; spawners cover it below
+    if (!file) {
+      unloaded.push(t.path); // loaded by no process on the map's sha; the floor's spawners cover it below
+      continue;
+    }
     if (t.moduleScope) for (const i of file.loadedBy) pick(map.suites[i]!, `loads ${t.path} (module-scope edit)`);
     for (const row of file.functions) {
       if (!t.functions.includes(`${row[0]}:${row[1]}`)) continue;
@@ -621,10 +645,14 @@ export function impactArmSelection(input: ImpactArmInput, ctx: ImpactArmContext)
     }
   }
   const known = new Set(map.suites);
-  const spawners = spawningSuites(ctx.files);
+  const uncreditable = uncreditableSpawners(ctx.files);
+  const credited = map.spawnCredited === undefined ? undefined : new Set(map.spawnCredited.map((i) => map.suites[i]));
   const since = new Set(input.drift.changedSinceMap);
   for (const s of ctx.floor) {
-    if (spawners.has(s)) pick(s, "spawns children the map cannot credit; the floor reaches it");
+    if (uncreditable.has(s)) pick(s, "sets NODE_V8_COVERAGE for its children, so the map cannot credit them; the floor reaches it");
+    else if (spawners.has(s) && credited === undefined) pick(s, "spawns children the map cannot credit (it predates child attribution); the floor reaches it");
+    else if (spawners.has(s) && !credited!.has(s)) pick(s, "spawns repo code but the map credits it no child report; the floor reaches it");
+    else if (spawners.has(s) && unloaded.length > 0) pick(s, `spawns repo code and ${unloaded[0]} is loaded by no process on the map's sha; the floor reaches it`);
     else if (!known.has(s)) pick(s, "absent from the impact map; the floor reaches it");
     else if (since.has(s)) pick(s, "changed after the impact map's sha; the floor reaches it");
   }

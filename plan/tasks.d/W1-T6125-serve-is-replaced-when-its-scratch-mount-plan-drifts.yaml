@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6110 (PR #9770), verified read-only on origin/main and the #9770 head before filing"
   plan_refs: [W1-T6110, W1-T4267, W1-T6090]
   files: [src/lib/serve-policy-convergence.ts, test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

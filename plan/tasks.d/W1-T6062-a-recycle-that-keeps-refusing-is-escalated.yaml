@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: Node 24 rollout readiness check (W1-T6061's silent failure)"
   plan_refs: [W1-T6061, W1-T443]
   files: [src/lib/deployer.ts, test/a-recycle-that-keeps-refusing-is-escalated.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

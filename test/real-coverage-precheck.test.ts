@@ -48,7 +48,12 @@ function fixture() {
   repo.git("push", "-q", "origin", "main");
   repo.git("checkout", "-q", "-b", branch);
   const hookLog = join(repo.dir, "hook.log");
-  const hook = join(repo.dir, ".git/hooks/pre-push");
+  // W1-T6106: a host push runs only the HARNESS's pre-push, for a repo whose config enables hooks.
+  const hooksDir = join(repo.dir, ".git", "harness-hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  repo.git("config", "core.hooksPath", hooksDir);
+  process.env.RMD_HARNESS_HOOKS_DIR = hooksDir;
+  const hook = join(hooksDir, "pre-push");
   writeFileSync(hook, `#!/bin/sh\nwhile read -r _lref sha _rref _rsha; do\n  printf '%s\\n' "$sha" >> '${hookLog}'\ndone\n`);
   chmodSync(hook, 0o755);
   put("src/feature.ts", "export function normalize(n: number): number {\n  if (n < 0) {\n    return -n;\n  }\n  return n;\n}\n");

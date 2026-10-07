@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6090 (PR #9761)"
   plan_refs: [W1-T4267, W1-T6090, W1-T4102, W1-T3245]
   files: [src/lib/deployer.ts, deploy/install-host-units.sh, test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

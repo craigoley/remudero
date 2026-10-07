@@ -21,6 +21,9 @@ const CORPUS_LOCK = '.coverage-corpus-write.lock';
 const PREMAPPED_FILE = /^coverage-premapped-(\d+)-(\d{13})\.json$/;
 const PREMAPPED_PIECE = /^coverage-(?:premapped|lines|mapped)-/;
 const PREMAPPED_FORMAT = 'rmd-v8-coverage-premapped-v1';
+// W1-T6108: test/setup/tmp-hygiene.ts's record of which suite spawned the child reports beside it.
+const CHILD_RECORD_FILE = /^rmd-v8-children-\d+-\d{13}\.json$/;
+const CHILD_RECORD_FORMAT = 'rmd-v8-child-suites-v1';
 const digest = source => createHash('sha256').update(source).digest('hex');
 
 function fileBytes(file) {
@@ -169,6 +172,49 @@ export function reportSuiteIdentity(result, cwd = process.cwd()) {
   return {};
 }
 
+/**
+ * W1-T6108: the suite that spawned each child report in `directory`, read from the
+ * `rmd-v8-children-*.json` records test/setup/tmp-hygiene.ts writes when it moves a suite's children's
+ * reports into the flat coverage directory — absolute report path to repo-relative suite. A record
+ * that is not the setup's own shape throws: crediting a child to a guessed suite is worse than none.
+ */
+export function childSuitesIn(directory) {
+  const suites = new Map();
+  let names;
+  try {
+    names = readdirSync(directory);
+  } catch (error) {
+    throw new Error(`cannot read raw coverage directory ${directory}: ${error.message}`);
+  }
+  for (const name of names.filter((n) => CHILD_RECORD_FILE.test(n)).sort()) {
+    const path = join(directory, name);
+    const record = JSON.parse(readCoverageSource(path, CHUNK_BYTES));
+    if (record?.format !== CHILD_RECORD_FORMAT || typeof record.suite !== 'string' || !/^test\/.*\.test\.ts$/.test(record.suite) ||
+        !Array.isArray(record.reports) || record.reports.some((r) => typeof r !== 'string' || !RAW_COVERAGE_FILE.test(r))) {
+      throw new Error(`${path} is not a valid ${CHILD_RECORD_FORMAT} record`);
+    }
+    for (const report of record.reports) suites.set(join(directory, report), record.suite);
+  }
+  return suites;
+}
+
+/** The identity a raw report at `file` carries: the suite that spawned it, when a record names
+ *  one, else the suite its own scripts name. */
+function rawReportIdentity(file, result, childSuites, cwd = process.cwd()) {
+  const spawnedBy = childSuites(dirname(file)).get(file);
+  if (spawnedBy !== undefined) return { test: spawnedBy, root: pathToFileURL(cwd + sep).href, child: true };
+  return reportSuiteIdentity(result, cwd);
+}
+
+/** `childSuitesIn`, read once per directory. */
+function childSuiteCache() {
+  const cache = new Map();
+  return (directory) => {
+    if (!cache.has(directory)) cache.set(directory, childSuitesIn(directory));
+    return cache.get(directory);
+  };
+}
+
 function restoreReport(report, sourceMaps, file) {
   if (!Array.isArray(report?.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null || Array.isArray(report.sourceMapRefs)) {
     throw new Error(`${file} contains an invalid compact process report`);
@@ -181,7 +227,8 @@ function restoreReport(report, sourceMaps, file) {
     cache[url] = sourceMaps[index];
   }
   if (report.result.length === 0) throw new Error(`${file} contains an invalid compact process report`);
-  const identity = typeof report.test === 'string' && typeof report.root === 'string' ? { test: report.test, root: report.root } : {};
+  const identity = typeof report.test === 'string' && typeof report.root === 'string'
+    ? { test: report.test, root: report.root, ...(report.child === true ? { child: true } : {}) } : {};
   return { result: report.result, 'source-map-cache': cache, ...identity };
 }
 
@@ -242,6 +289,7 @@ function* corpusReports(file, manifest, bytes) {
 }
 
 function* coverageReports(directories, bytes) {
+  const childSuites = childSuiteCache();
   for (const directory of directories) {
     const files = coverageFilesUnder(directory, true);
     if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
@@ -255,7 +303,8 @@ function* coverageReports(directories, bytes) {
       }
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
-        yield parsed;
+        const spawnedBy = Array.isArray(parsed?.result) ? rawReportIdentity(file, parsed.result, childSuites) : {};
+        yield spawnedBy.child ? { ...parsed, ...spawnedBy } : parsed;
         continue;
       }
       if (parsed?.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
@@ -283,6 +332,7 @@ function collectCompactReports(directories, onMap, onReport) {
   const sourceMapIndexes = new Map();
   let rawFileCount = 0;
   let reportCount = 0;
+  const childSuites = childSuiteCache();
 
   for (const directory of directories) {
     const files = coverageFilesUnder(directory);
@@ -291,7 +341,7 @@ function collectCompactReports(directories, onMap, onReport) {
       const raw = JSON.parse(readCoverageSource(file));
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
-      const identity = reportSuiteIdentity(raw.result);
+      const identity = rawReportIdentity(file, raw.result, childSuites);
       const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
@@ -565,7 +615,7 @@ export async function writeImpactMap(directories, output, { sha, sourceRoot } = 
   };
   const map = buildImpactMap(coverageReports(directories, bytes), { sha, root: pathToFileURL(process.cwd() + sep).href, readSource });
   writeFileSync(output, JSON.stringify(map));
-  return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports };
+  return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports, spawnCredited: map.spawnCredited.length };
 }
 
 export async function main(argv) {
@@ -590,7 +640,7 @@ export async function main(argv) {
     const r = await writeImpactMap(positionals, values['impact-map'], { sha: values.sha, sourceRoot: values['source-root'] });
     console.log(
       `coverage-merge-ratchet: impact map of ${r.rawFileCount} process report(s): ${r.suites} suite(s), ${r.files} source file(s), ` +
-        `${r.orphanReports} orphan report(s) -> ${values['impact-map']}`,
+        `${r.orphanReports} orphan report(s) -> ${values['impact-map']} (${r.spawnCredited} suite(s) credited with a child's report)`,
     );
   } else if (values['premap-output']) {
     const { rawFileCount, reportCount, lineFileCount, output, premappedBytes } =

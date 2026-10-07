@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: Node 24 upgrade follow-up"
   plan_refs: [W1-T5883, W1-T2770]
   files: [.github/dependabot.yml, test/the-image-node-major-moves-only-by-plan.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
