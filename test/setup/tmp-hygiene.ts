@@ -31,6 +31,7 @@ import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
 import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
+import { installReadMapFromEnv } from "./read-map.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -77,6 +78,10 @@ function refuseSelfSyncEscape(): void {
 }
 
 refuseSelfSyncEscape();
+
+// W1-T6084: record the non-code files this test file reads, when main's full run asks for it
+// (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.
+installReadMapFromEnv();
 
 // Coverage runs execute each test file in a separate instrumented process. Those fixture reads
 // never leave the test harness, so making every child wait on the production cross-process gap
