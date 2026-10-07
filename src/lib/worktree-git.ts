@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -133,20 +133,32 @@ export function pinWorktreeGit(worktreePath: string, log: WorktreeGitLog = stder
     log("worktree_git.pointer_refused", { worktree, recorded_git_dir: recorded, observed, reason });
     throw new WorktreePointerRefusedError(worktree, recorded, observed, reason);
   };
-  let kind: "file" | "directory" | "other";
+  // One open, never a check-then-read: the kind and the pointer text come from the SAME descriptor, so
+  // the entry cannot be swapped between them. O_NOFOLLOW refuses a symlinked `.git` (ELOOP).
+  let fd: number;
   try {
-    const st = lstatSync(dotGit);
-    kind = st.isFile() ? "file" : st.isDirectory() ? "directory" : "other";
-  } catch {
-    // No `.git` entry at all: nothing to pin, so nothing runs.
+    fd = openSync(dotGit, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // A symlink is refused as a foreign entry; anything else unopenable means there is nothing to pin.
+    if (code === "ELOOP") return refuse(dotGit, "the .git entry is neither a pointer file nor a directory");
     return refuse("<absent>", "the worktree has no .git entry");
+  }
+  let kind: "file" | "directory" | "other";
+  let text = "";
+  try {
+    const st = fstatSync(fd);
+    kind = st.isFile() ? "file" : st.isDirectory() ? "directory" : "other";
+    if (kind === "file") text = readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
   }
   if (kind === "other") return refuse(dotGit, "the .git entry is neither a pointer file nor a directory");
   if (kind === "directory") {
     if (recorded !== null) return refuse(dotGit, "the .git pointer file was replaced by a directory");
     return { worktree, gitDir: dotGit, source: "git-directory" };
   }
-  const match = /^gitdir: (.+)\n?$/.exec(readFileSync(dotGit, "utf8"));
+  const match = /^gitdir: (.+)\n?$/.exec(text);
   if (!match) return refuse(dotGit, "the .git file is not a single gitdir: line");
   const pointed = resolve(worktree, match[1]!);
   const pointedReal = real(pointed);

@@ -14,7 +14,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -269,6 +269,11 @@ describe("W1-T6106: the leaf's edges", () => {
     rmSync(join(wt, ".git"));
     mkdirSync(join(wt, ".git"));
     assert.throws(() => pinLane(wt, () => {}), /replaced by a directory/);
+    // A symlinked `.git` is refused without being followed: the pointer is read through one
+    // O_NOFOLLOW descriptor, never checked and then re-read by path.
+    rmSync(join(wt, ".git"), { recursive: true, force: true });
+    symlinkSync(recordedGitDir(wt)!, join(wt, ".git"));
+    assert.throws(() => pinLane(wt, () => {}), /neither a pointer file nor a directory/);
   });
 
   it("an unrecorded pointer to an outside gitdir that does not name the worktree back is refused", () => {
