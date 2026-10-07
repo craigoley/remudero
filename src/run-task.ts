@@ -17126,12 +17126,8 @@ const realCoverageChangedFiles = (wt: string): string[] =>
  * timeout/spawn-error mapping are the ones `spawnSync` gave.
  */
 const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
-const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({
-  status: null,
-  output: "",
-  timedOut: false,
-  spawnError: new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message,
-});
+const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
+const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
   new Promise((resolve) => {
     execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
@@ -17147,7 +17143,7 @@ const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, 
     try {
       sandbox = proofSandboxArgv({ cwd: wt, home });
     } catch (error) {
-      return coverageSandboxRefusal(error);
+      return { status: null, output: "", timedOut: false, spawnError: coverageSandboxText(error) };
     }
     const startFailure = await coverageSandboxStart(status.binary, sandbox, wt, env);
     if (startFailure !== undefined) return coverageSandboxRefusal(startFailure);
