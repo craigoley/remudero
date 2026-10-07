@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -5774,10 +5775,11 @@ export function decideFixSuperseded(
 /** W1-T4105 — true when `sha` is already in the fix worktree's own history (the worker pushed it). */
 export function headIsInWorktree(worktreePath: string, sha: string): boolean {
   try {
-    execFileSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
     return true;
   } catch {
-    // Not an ancestor (exit 1) or unreadable: either way not provably the worker's own push.
+    // Not an ancestor (exit 1), unreadable, or a refused `.git` pointer (W1-T6122, its own
+    // worktree_git.pointer_refused row): none of them is provably the worker's own push.
     return false;
   }
 }
@@ -6908,23 +6910,14 @@ export interface BaselineRatchetWorktreeState {
  */
 export function readBaselineRatchetWorktreeState(worktreePath: string): BaselineRatchetWorktreeState | undefined {
   try {
-    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim();
-    const tracked = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "-z", "HEAD"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    })
-      .split("\0")
-      .filter(Boolean);
-    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    })
-      .split("\0")
-      .filter(Boolean);
+    const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+    const tracked = hostWorktreeGit(worktreePath, ["diff", "--name-only", "-z", "HEAD"]).split("\0").filter(Boolean);
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
     if (headSha.length === 0) return undefined;
     return { headSha, changedPaths: [...new Set([...tracked, ...untracked])].sort() };
   } catch {
-    // An unreadable git worktree is a refusal, never evidence that it is clean.
+    // An unreadable git worktree — or one whose `.git` pointer the leaf refused (W1-T6122) — is a
+    // refusal, never evidence that it is clean.
     return undefined;
   }
 }

@@ -39,6 +39,16 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/run-task.ts", "irreversibleSignalForWorktree"],
   ["src/run-task.ts", "pushFixRound"],
   ["src/lib/worker.ts", "stampRunWorktreeAssignment"],
+  // W1-T6122: the WORKER/REVIEWER sites outside run-task.ts.
+  ["src/lib/worker.ts", "excludeNodeModulesFromGit"],
+  ["src/lib/sweep.ts", "headIsInWorktree"],
+  ["src/lib/sweep.ts", "readBaselineRatchetWorktreeState"],
+  ["src/lib/retro.ts", "defaultFreshShardTextReader"],
+  ["src/lib/retro.ts", "stampCitationsAndCommit"],
+  ["src/lib/orientation.ts", "regenerateOrientation"],
+  ["src/lib/relint.ts", "newMonolithIdsAgainstBase"],
+  ["src/lib/composition-root.ts", "realReviewWorktree"],
+  ["src/lib/review-worktree-reclaim.ts", "defaultReadHeadSha"],
 ];
 
 /**
@@ -58,16 +68,17 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
       "worktree reads around them",
   },
   "src/lib/worker.ts": {
-    count: 10,
-    reason: "worktreeAdd/worktreeAddAsync cut and wire the worktree (before any worker runs), plus reaper/probe reads not yet converted",
+    count: 9,
+    reason:
+      "HARNESS (W1-T6122): worktreeAdd 3 + worktreeAddAsync 6 cut and wire the tree before any worker runs; " +
+      "they read the gitdir the leaf later pins to, so they must precede it",
   },
-  "src/lib/sweep.ts": { count: 11, reason: "NOT YET CONVERTED: the sweep's fix-round worktree reads and writes" },
-  "src/lib/retro.ts": { count: 6, reason: "NOT YET CONVERTED: the retro worktree's commit and reads" },
-  "src/lib/orientation.ts": { count: 4, reason: "NOT YET CONVERTED: orientation reads of a run worktree" },
-  "src/lib/relint.ts": { count: 2, reason: "NOT YET CONVERTED: relint's worktree reads" },
-  "src/lib/composition-root.ts": { count: 1, reason: "NOT YET CONVERTED: one worktree read" },
-  "src/lib/review-worktree-reclaim.ts": { count: 1, reason: "NOT YET CONVERTED: the reviewer worktree reclaim read" },
-  "src/spike.ts": { count: 1, reason: "NOT YET CONVERTED: the spike's worktree read" },
+  "src/lib/sweep.ts": {
+    count: 7,
+    reason:
+      "HARNESS (W1-T6122): the refusal-amendment 4 and plan-repair 3 commits run in trees worktreeAdd cut " +
+      "from origin/main that only the sweep writes; they keep main's own commit hooks",
+  },
 };
 
 function srcFiles(dir = join(REPO, "src")): string[] {
