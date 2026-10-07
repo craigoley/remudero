@@ -115,10 +115,12 @@ test("calibration driver refuses drifting runtime pins before dispatch", async (
 
   // The production derivation: source-shipped pins at the executing revision, tools only when clean, environment from the stamp.
   const harnessPin = { source: "executing-module-git" as const, revision: SHA };
-  const clean = deriveRuntimePins({ harnessRevision: harnessPin, installRoot: "/install", git: () => "", readStamp: () => `${SHA}\n` });
+  const clean = deriveRuntimePins({ harnessRevision: harnessPin, installRoot: "/install",
+    git: (_cwd, args) => args[0] === "rev-parse" ? SHA : "", readStamp: () => `${SHA}\n` });
   assert.deepEqual(clean.revisions.toolRevision, { source: "resolved-artifact", revision: SHA });
   assert.deepEqual(clean.revisions.environmentRevision, { source: "resolved-artifact", revision: SHA });
-  const dirty = deriveRuntimePins({ harnessRevision: harnessPin, installRoot: "/install", git: () => " M settings/worker.json\n", readStamp: () => "unknown" });
+  const dirty = deriveRuntimePins({ harnessRevision: harnessPin, installRoot: "/install",
+    git: (_cwd, args) => args[0] === "rev-parse" ? SHA : " M settings/worker.json\n", readStamp: () => "unknown" });
   assert.deepEqual(dirty.revisions.toolRevision, { state: "unavailable", reason: "executing-source-not-clean" });
   assert.deepEqual(dirty.revisions.environmentRevision, { state: "unavailable", reason: "artifact-not-resolved" });
   const unpinned = deriveRuntimePins({ harnessRevision: { state: "unavailable", reason: "executing-source-not-clean" }, installRoot: "/install",
