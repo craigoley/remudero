@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-06 (P7 of the 2026-10-04 restart research, research/restart/report.md on the Azure host): approve coalescing restarts"
   plan_refs: [W1-T4945, W1-T5308, W1-T5476, W1-T2965]
   files: [src/lib/deploy-judge.ts, src/lib/daemon.ts, test/back-to-back-self-merges-share-one-daemon-restart.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

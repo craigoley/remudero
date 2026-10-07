@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: security follow-up batch 3, raised by W1-T6148's builder (#9809); premise verified read-only on origin/main 44513355a and the #9809 head aeb2c5ad7 before filing"
   plan_refs: [W1-T6148, W1-T2216, W1-T2211, W1-T2213, W1-T5016, W1-T2243]
   files: [settings/worker.json, src/lib/settings.ts, test/a-claude-worker-cannot-run-an-unsandboxed-command.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
