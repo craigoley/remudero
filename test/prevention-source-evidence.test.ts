@@ -161,6 +161,26 @@ test("the actual Git producer registers an owning source build but refuses a fil
   assert.deepEqual(spec.scorecard({ ...inventory, preventionSources: undefined }, { actions: [], acting: [] }).prevention_sources, []);
 });
 
+test("a delivered source fix retains physical task credit before the final coauthor footer", (t) => {
+  const repo = gitRepo({ kind: "prevention-separated-footer" }); t.after(() => repo.cleanup());
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true }); mkdirSync(join(repo.dir, "src"));
+  const record = join(repo.dir, "plan", "tasks.d", "W1-T8001.yaml"); writeFileSync(record, shard());
+  repo.git("add", "."); repo.git("commit", "-qm", "filing\n\nRemudero-Task: W1-T8001\n\nsource path mentioned: src/run-task.ts\n\nsrc/run-task.ts\n\nCo-authored-by: fixture <fixture@remudero.invalid>");
+  const git = (args: string[]) => repo.git(...args) + "\n";
+  assert.deepEqual(readCiFrictionPlanTasks(git, "plan/tasks.d", "HEAD")[0]!.preventionSource,
+    { state: "unavailable", reason: "no-credited-owning-source-build" }, "body source-path prose cannot become a changed file");
+  writeFileSync(join(repo.dir, "src", "run-task.ts"), "export const prevention = true;\n");
+  repo.git("add", "."); repo.git("commit", "-qm", "repair delivered\n\nRemudero-Task: W1-T8001\n\nRemudero-Task: W1-T8001\n\nCo-authored-by: fixture <fixture@remudero.invalid>");
+  assert.equal(repo.git("show", "-s", "--format=%(trailers:key=Remudero-Task,valueonly)").trim(), "", "the real formal-trailer query has the production false-zero shape");
+  const task = readCiFrictionPlanTasks(git, "plan/tasks.d", "HEAD")[0]!;
+  assert.equal(task.preventionSource && "state" in task.preventionSource, false);
+  if (task.preventionSource && !("state" in task.preventionSource)) {
+    assert.equal(task.preventionSource.mergeRevision, repo.git("rev-parse", "HEAD"));
+    assert.equal(task.preventionSource.blob, repo.git("rev-parse", "HEAD:src/run-task.ts"));
+    assert.equal(task.preventionSource.mergedAt, repo.git("show", "-s", "--format=%cI"));
+  }
+});
+
 test("the Git registration reader bounds blob reads and preserves unreadable and invalid results", () => {
   const ids = Array.from({ length: 35 }, (_, n) => `W1-T${8001 + n}`);
   const run = (mode: string) => {
@@ -168,7 +188,9 @@ test("the Git registration reader bounds blob reads and preserves unreadable and
     const git = (args: string[]) => {
       if (args[0] === "grep") return ids.map((id) => `HEAD:plan/tasks.d/${id}.yaml`).join("\n");
       if (args[0] === "show") return shard().replace(/W1-T8001/g, args[1]!.split("/").at(-1)!.replace(".yaml", ""));
-      if (args[0] === "log") return `${T(2)}\t${ids.join(",")}\t${SHA}\n\nsrc/run-task.ts\n`;
+      if (args[0] === "log") return args.some(arg => arg.startsWith("--format=%x01"))
+        ? `\x01${T(2)}\t${mode === "bad-revision" ? "invalid" : SHA}\x00${ids.map(id => `Remudero-Task: ${id}`).join("\n")}\x00\nsrc/run-task.ts\n`
+        : `${T(2)}\t${ids.join(",")}\n`;
       if (args[0] === "rev-parse") { reads += 1; if (mode === "throw") throw new Error("missing blob"); return mode === "invalid" ? "bad" : BLOB; }
       throw new Error(`unexpected Git operation ${args[0]}`);
     };
@@ -180,4 +202,7 @@ test("the Git registration reader bounds blob reads and preserves unreadable and
   for (const [mode, reason] of [["throw", "owning-source-blob-unreadable"], ["invalid", "owning-source-blob-invalid"]]) {
     assert.deepEqual(run(mode!).tasks[0]!.preventionSource, { state: "unavailable", reason });
   }
+  const malformed = run("bad-revision");
+  assert.equal(malformed.reads(), 0);
+  assert.deepEqual(malformed.tasks[0]!.preventionSource, { state: "unavailable", reason: "no-credited-owning-source-build" });
 });

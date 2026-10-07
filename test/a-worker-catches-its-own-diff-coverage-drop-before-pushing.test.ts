@@ -29,6 +29,9 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+
+usePassThroughProofSandbox();
 
 const TASK_ID = "T-COVERAGE-PRECHECK";
 
@@ -399,14 +402,16 @@ test("W1-T4797: the fix rung's push is refused before it leaves the worktree whe
   const log = (step: string, extra?: Record<string, unknown>) => void logged.push([step, extra]);
   const pushed: string[] = [];
   const push = (wt: string, _branch: string, sha?: string) => void pushed.push(`${wt}@${sha}`);
+  // "/w" is no repository: the conflict-marker read (now through the hardened leaf, W1-T6121) is not under test here.
+  const noMarkers = (): string[] => [];
 
   await assert.rejects(
-    () => pushFixRoundPrechecked(log, "/w", "run-b", "abc", scriptedPorts([ran(1, UNCOVERED_OUTPUT)]).ports, push),
+    () => pushFixRoundPrechecked(log, "/w", "run-b", "abc", { ...scriptedPorts([ran(1, UNCOVERED_OUTPUT)]).ports, conflictMarkers: noMarkers }, push),
     (e: unknown) => e instanceof FixRoundPushError && /src\/feature\.ts:2/.test(e.refusal?.text ?? "") && e.refusal?.censuses[0] === "diff-coverage",
   );
   assert.deepEqual(pushed, [], "an uncovered head was never pushed");
 
-  await pushFixRoundPrechecked(log, "/w", "run-b", "def", scriptedPorts([ran(0, "")]).ports, push);
+  await pushFixRoundPrechecked(log, "/w", "run-b", "def", { ...scriptedPorts([ran(0, "")]).ports, conflictMarkers: noMarkers }, push);
   assert.deepEqual(pushed, ["/w@def"]);
   assert.deepEqual(logged.map(([step, extra]) => [step, extra?.outcome, extra?.site]), [["push.coverage_precheck", "uncovered", "rung.fix_push"], ["push.coverage_precheck", "covered", "rung.fix_push"]]);
 });

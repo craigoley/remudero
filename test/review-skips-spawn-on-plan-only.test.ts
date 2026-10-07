@@ -141,7 +141,7 @@ async function driveReview(diffText: string): Promise<Driven> {
   const oldClaudeBin = process.env[CLAUDE_BIN_ENV_OVERRIDE];
   const oldToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   try {
-    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
     const fakeClaude = join(binDir, "claude");
     writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n");

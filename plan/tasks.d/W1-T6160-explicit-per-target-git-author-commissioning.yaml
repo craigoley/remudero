@@ -1,0 +1,95 @@
+- id: W1-T6160
+  title: "Commission or replace a target's Git author explicitly through graceful recycle, with validation and effective-identity verification"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 2
+  budget_usd: 55.00
+  origin: "feedback#fb-1789365371529-7b4ba1"
+  plan_refs: ["§7B", "W1-T3454", "W1-T4210"]
+  files:
+    - deploy/recycle-container.sh
+    - deploy/entrypoint.sh
+    - test/git-author-commissioning.test.ts
+    - test/git-author-commissioning-preflight.test.ts
+    - test/git-author-commissioning-preservation.test.ts
+    - test/git-author-commissioning-failures.test.ts
+    - docs/operator-guide.md
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3454 deliberately preserves a non-empty outgoing container author over conflicting
+    shell values. The current recycler implements that precedence in its declared-runtime
+    capture loop. The entrypoint also leaves an already-configured name/email pair alone.
+    Consequently, exporting RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL cannot reliably
+    replace a bad persisted identity. This is a missing explicit replacement operation,
+    not a defect in the normal preservation contract. W1-T4210 addresses a missing private
+    instance identity, not replacement of an existing one. Neither record covers this ask.
+    The feedback's live-console diagnosis is supplied evidence, not independently verified
+    production state. The two blocking code paths are confirmed in this checkout.
+  design: |
+    Add an explicit non-interactive commissioning/replacement mode to the existing host
+    recycler, scoped to one declared --instance target. Read the requested complete author
+    pair from the invoking environment, not author literals in the repository or command
+    arguments. Only this explicit mode may supersede the captured outgoing author values;
+    exporting conflicting values without it must retain today's container-first behaviour.
+
+    Preflight before pause, pull, stop, removal, or identity writes: resolve the instance,
+    require both non-empty values, reject whitespace-only or malformed/control-character
+    input, and verify the resolved container, target checkout and mounts are consistent.
+    Reject ambiguous or unknown targets and partial pairs without modifying anything.
+    Commissioning uses the same supported fresh-target path and graceful replacement
+    lifecycle as the recycler; never edit the host's Git configuration as a workaround.
+
+    Make a complete explicitly configured author pair authoritative in the supported boot
+    path even when the container HOME already contains a different identity. An ordinary
+    boot without that pair retains the existing configured-identity/default behaviour.
+    Avoid a permanently carried force-replacement switch: carry the chosen pair through
+    the existing declared RMD_GIT_AUTHOR_* names. A later normal recycle must preserve it.
+    Fail loudly on write/read errors rather than claiming a successful identity change.
+
+    After replacement, verify both the replacement container's author environment and the
+    effective author Git will use from the target checkout as the worker user. A global
+    config match is insufficient if a local override or Git author environment masks it.
+    Treat mismatch, unreadable configuration or probe failure as a failed commissioning,
+    not success; report the failed phase and a concrete recovery action. Bound the probe.
+    Preserve credential capture, runtime drift refusal, graceful drain/pause cleanup,
+    image and mount checks, and existing intentional credential-forwarding exceptions.
+
+    Emit an audit receipt identifying target, explicit operation and verified/refused/failed
+    outcome without printing author values or credentials, including on errors. Document
+    initial commission, bad-identity replacement, ordinary preservation, verification and
+    recovery. Local syntax/effective-identity validation does not certify GitHub account or
+    Vercel team membership; document that operational prerequisite without adding a new
+    token or live service dependency. This task builds the operation, not a live fleet change.
+  acceptance:
+    - claim: "the explicit mode commissions a fresh target and replaces a non-empty bad container author plus an already-configured persisted identity, verified from the target checkout"
+      proof: "unit test: test/git-author-commissioning.test.ts"
+    - claim: "invalid pairs and unknown, ambiguous or mismatched targets refuse before pause, pull, stop, removal or identity writes and leave sibling instances unchanged"
+      proof: "unit test: test/git-author-commissioning-preflight.test.ts"
+    - claim: "an ordinary recycle preserves a non-empty outgoing author over conflicting exports, later recycles retain the commissioned pair, and undeclared runtime variables still refuse"
+      proof: "unit test: test/git-author-commissioning-preservation.test.ts"
+    - claim: "identity write errors, post-replacement mismatches, local or environment masking and failed or timed-out probes return failure with phase-specific recovery and a value-redacted target audit receipt"
+      proof: "unit test: test/git-author-commissioning-failures.test.ts"
+  falsifier: |
+    Execute the real recycler with a fixture Docker adapter and the real entrypoint with
+    isolated HOME/config and a fixture target repository. Seed conflicting outgoing and
+    shell author pairs plus bad persisted Git configuration. Without explicit mode the
+    outgoing pair must win; with it the complete requested pair must become effective.
+    Assert a sibling fixture is untouched and an undeclared runtime name still refuses.
+    Remove the explicit capture override and then the boot replacement behaviour separately:
+    each removal must fail the corresponding test, and restoration must pass. Inject each
+    write/probe failure and a repository-local masking identity to falsify success reporting.
+  note: |
+    One lifecycle concern, high blast radius because these scripts own container replacement
+    and boot. Each criterion names a distinct declared future test file dedicated to its claim:
+    commissioning/replacement, preflight refusal, preservation, or failure reporting.
+    These are filing-head forward references, not proof that the operation is built.
+    The implementation must exercise every case named by each file's corresponding criterion
+    and demonstrate failure at its merge base and success at its head for each proof.
+    The harness reserved W1-T6160 for this intake. No existing task is amended or re-decided;
+    W1-T3454's normal container-first preservation contract remains binding.

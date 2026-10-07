@@ -1,5 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { execFileSync } from "node:child_process";
+import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -55,7 +55,7 @@ import {
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
-import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync } from "./git-push.js";
+import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1505,12 +1505,36 @@ function defaultDirtyFleetRebaseGit(
   args: readonly string[],
   opts: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding } = {},
 ): string {
-  return execFileSync(file, [...args], {
+  // The cut checks out the PR's bytes and runs post-checkout there, so it carries the leaf's overrides.
+  const hardened = args[2] === "worktree" ? HOST_GIT_CONFIG.flatMap(([k, v]) => ["-c", `${k}=${v}`]) : [];
+  return execFileSync(file, [...hardened, ...args], {
     cwd: opts.cwd,
     encoding: opts.encoding ?? "utf8",
     stdio: opts.stdio ?? "pipe",
     maxBuffer: 1 << 24,
   }) as string;
+}
+
+/**
+ * W1-T6133 — the git seam for a tree cut at a PR's OWN head. It takes the `-C <worktreePath> …` argv
+ * the callers' seams already build and runs it through the leaf (pinned gitdir, the harness's hooks);
+ * a push goes through the push leaf, whose pre-push gate is the harness's copy, never the tree's.
+ */
+export function prHeadTreeGit(worktreePath: string): (file: string, args: readonly string[]) => string {
+  return (file, args) => {
+    if (args[0] !== "-C" || args[1] !== worktreePath) {
+      throw new Error(`sweep: a PR-head tree step must address ${worktreePath} with -C; got ${args.slice(0, 2).join(" ")}`);
+    }
+    if (args[2] !== "push") return hostWorktreeGit(worktreePath, args.slice(2), { maxBuffer: 1 << 24 });
+    worktreePushExec(worktreePath)(file, [...args], { stdio: "inherit" });
+    return "";
+  };
+}
+
+/** {@link rebaseDirtyFleetBranchViaGit}'s default: the managed checkout raw (CHECKOUT), its PR-head tree via the leaf. */
+function dirtyFleetRebaseGit(repoDir: string, worktreePath: string): DirtyFleetRebaseGit {
+  const tree = prHeadTreeGit(worktreePath);
+  return (file, args, opts) => (args[1] === repoDir ? defaultDirtyFleetRebaseGit(file, args, opts) : tree(file, args));
 }
 
 /** Default for {@link BuildSweepEffectsDeps.planRepairGitImpl} — the real spawn, appended last
@@ -1531,7 +1555,7 @@ export function rebaseDirtyFleetBranchViaGit(
 ): DirtyFleetRebaseOutcome {
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: `PR #${pr.prNumber} has no headRefName to rebase` };
-  const git = deps.git ?? defaultDirtyFleetRebaseGit;
+  const git = deps.git ?? dirtyFleetRebaseGit(repoDir, worktreePath);
   const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
   const ref = `refs/heads/${branch}`;
   const remoteRef = `refs/remotes/origin/${branch}`;
@@ -7006,7 +7030,7 @@ export function missingTaskTrailerRepairDecision(
       reason: "missing trailer repair refused: head branch does not match run-<taskId>-<epoch>, so no task id is derivable",
     };
   }
-  if (pr.taskExistsOnMain !== true) {
+  if (taskId !== "unfiled" && pr.taskExistsOnMain !== true) {
     return {
       action: "stand-down",
       reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
@@ -7650,7 +7674,7 @@ export async function renumberPlanPrIds(
     owner,
     repo,
     log,
-    planRepairGitImpl: run = defaultPlanRepairGit,
+    planRepairGitImpl: run = prHeadTreeGit(wt),
     worktreeAddImpl: add = worktreeAdd,
     worktreeRemoveImpl: remove = worktreeRemove,
     planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
@@ -7705,11 +7729,18 @@ export async function renumberPlanPrIds(
   }
 }
 
-/** A git runner in `cwd`, the shape {@link gitRemoteRefReserver} takes. */
+/** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gitRemoteRefReserver} takes.
+ *  A refused pointer is not an exit status and propagates: renumberPlanPrIds reports it as its error. */
 export function planRepairGitRun(cwd: string): RemoteReserveDeps["run"] {
   return (args) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    try {
+      return { status: 0, stdout: hostWorktreeGit(cwd, args), stderr: "" };
+    } catch (error) {
+      if (error instanceof WorktreePointerRefusedError) throw error;
+      const failed = error as { status?: unknown; stdout?: unknown; stderr?: unknown };
+      // A signalled git reports a null status; 1 keeps it a failure, as spawnSync's `?? 1` did.
+      return { status: typeof failed.status === "number" ? failed.status : 1, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? "") };
+    }
   };
 }
 
@@ -13593,7 +13624,25 @@ export async function runSweep(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    const { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    // W1-T6052: an old pending snapshot is not proof CI is still running. The arm reader
+    // proves every required context on a fresh head; only that exact open head can clear it.
+    if (pr.checksState === "pending" &&
+        (pendingAgeMinutes(pr, now) ?? 0) >= policy.pendingCeilingMinutes && deps.readArmFacts) {
+      try {
+        const fresh = await deps.readArmFacts(pr);
+        if (fresh?.prNumber === pr.prNumber && fresh.headSha === pr.headSha &&
+            fresh.state === "open" && fresh.checksGreen) {
+          pr = { ...pr, checksState: "green", checksPendingSince: undefined,
+            ciFailures: undefined, cancelledRequiredChecks: undefined, redRequiredChecks: undefined };
+          log("sweep.stale_pending_cleared", { pr_number: pr.prNumber, head_sha: pr.headSha,
+            reason: "fresh exact-head required checks concluded green" });
+        }
+      } catch (error) {
+        log("sweep.stale_pending_read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha,
+          reason: String(error) });
+      }
+    }
     let stackParentWithdrawal:
       | { check: StackPrerequisiteCheck; outcome?: DisarmOutcome; error?: string }
       | undefined;

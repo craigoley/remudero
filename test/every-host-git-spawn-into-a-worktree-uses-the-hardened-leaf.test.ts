@@ -56,6 +56,12 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/relint.ts", "newMonolithIdsAgainstBase"],
   ["src/lib/composition-root.ts", "realReviewWorktree"],
   ["src/lib/review-worktree-reclaim.ts", "defaultReadHeadSha"],
+  // W1-T6133: the sweep's PR-head trees and the worker's credential wiring and lane-reaper reads.
+  ["src/lib/sweep.ts", "prHeadTreeGit"],
+  ["src/lib/sweep.ts", "planRepairGitRun"],
+  ["src/lib/worker.ts", "wireCredentialHelperSocket"],
+  ["src/lib/worker.ts", "credentialHelperSocketWired"],
+  ["src/lib/worker.ts", "laneWorkKeepReason"],
 ];
 
 /**
@@ -67,18 +73,20 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
 const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
   "src/lib/git-push.ts": { count: 4, reason: "seam argv: pushRunBranchSteps/leasedForcePushSteps; the defaults run it through the leaf" },
   "src/run-task.ts": {
-    count: 75,
+    count: 13,
     reason:
-      "2 seam argv in pushFixRound (its exec/capture default to the leaf); the rest NOT YET CONVERTED — " +
-      "runPlanScopedFixRound, commitGeneratorOutputViaGit, buildProofAmendmentGitOps, " +
-      "captureWorktreeSnapshotViaGit, preserveTrackedDirtyPatch, inspectFreshReviewerWorktree and the " +
-      "worktree reads around them",
+      "W1-T6121 converted every worker and reviewer site; what is left is HARNESS-only, each recorded with " +
+      "its function and reason in test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts: " +
+      "2 seam argv in pushFixRound (its exec/capture default to the leaf), the fresh origin/main reviewer " +
+      "tree inspectFreshReviewerWorktree reads, the clone the test-only triageClaimReserverFor and " +
+      "mergedTriageSubjects bind, and the approve worktrees approveCommand/approveBatchCommand write themselves",
   },
   "src/lib/worker.ts": {
     count: 9,
     reason:
       "HARNESS (W1-T6122): worktreeAdd 3 + worktreeAddAsync 6 cut and wire the tree before any worker runs; " +
-      "they read the gitdir the leaf later pins to, so they must precede it",
+      "they read the gitdir the leaf later pins to, so they must precede it; the add and the async catch-up " +
+      "merge run the leaf's HOST_GIT_CONFIG, so no tracked or gitdir hook fires while the tree is cut (W1-T6147)",
   },
   "src/lib/sweep.ts": {
     count: 7,
@@ -93,11 +101,10 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  * RAW_SITE_EXCEPTIONS so the two ratchets can move independently (W1-T6121/W1-T6122 lower that one).
  * Each reason opens with what the site addresses: WORKTREE (a worker, fix or reviewer worktree, so a
  * conversion is owed — the file's owner task is named, or none yet), CHECKOUT (a harness-owned
- * checkout, clone or scratch dir no worker writes), CALLER (a tree the caller chooses, classified at
- * conversion) or NOT GIT (a `-C` flag of another program). Exact in both directions, so it only shrinks.
+ * checkout, clone or scratch dir no worker writes) or NOT GIT (a `-C` flag of another program). W1-T6136
+ * resolved every caller-chosen tree at its callers. Exact in both directions, so it only shrinks.
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
-  "src/lib/affected-suites.ts": { count: 1, reason: "CALLER: readAffectedSuitesInput's injected run(\"git\", …) reads whatever tree its caller binds" },
   "src/lib/benchmark-aa-readiness.ts": { count: 1, reason: "CHECKOUT: deriveRuntimePins reads the harness checkout it runs from (-C cwd)" },
   "src/lib/benchmark-run.ts": { count: 1, reason: "CHECKOUT: executingHarnessRevision reads the harness checkout (-C cwd)" },
   "src/lib/branch-reaper.ts": { count: 5, reason: "CHECKOUT: the reaper's injected exec(\"git\", …) steps run in the managed checkout" },
@@ -106,9 +113,8 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/clone-reaper.ts": { count: 2, reason: "CHECKOUT: defaultOriginOf(Async) read a reaped clone's origin (-C dir)" },
   "src/lib/commit-message.ts": { count: 1, reason: "CHECKOUT: readRangeCommitMessages reads the repo root (cwd: repoRoot)" },
   "src/lib/composition-root.ts": { count: 2, reason: "CHECKOUT (W1-T6122's file): realReviewWorktree's repoDir reads/adds against the managed checkout" },
-  "src/lib/containment.ts": { count: 1, reason: "CALLER: containment's defaultExecutor runs git in its caller's cwd" },
+  "src/lib/containment.ts": { count: 1, reason: "CHECKOUT (W1-T6136): defaultExecutor's git init runs in the probe scratch dir it mkdirs itself" },
   "src/lib/deployer.ts": { count: 1, reason: "CHECKOUT: realDeployDeps reads the install checkout (-C o.installPath)" },
-  "src/lib/disk-artifact-reclaim.ts": { count: 1, reason: "CALLER: defaultCountDirtyFiles counts a reclaim candidate's dirt (-C checkoutPath), which may be a worktree" },
   "src/lib/dispatch-claim.ts": { count: 1, reason: "CHECKOUT: gitClaimRunnerAsync runs claim refs in the managed checkout (-C repoDir)" },
   "src/lib/export-gardener.ts": { count: 1, reason: "CHECKOUT: referencesOutside reads the repo root (-C root)" },
   "src/lib/feedback-landing.ts": { count: 2, reason: "CHECKOUT: defaultGit (-C root) and sourceRepositoryFromCwd (-C process.cwd())" },
@@ -129,7 +135,12 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/host-resource-gardener.ts": { count: 1, reason: "CHECKOUT: gitHeartbeatSource reads the repo root" },
   "src/lib/hot-file-gardener.ts": { count: 2, reason: "CHECKOUT: readMainHistory/hotFileGardenSpec read the repo root" },
   "src/lib/image-drift.ts": { count: 1, reason: "CHECKOUT: defaultGit reads the managed checkout (-C repoDir)" },
-  "src/lib/inbox.ts": { count: 2, reason: "CALLER: gitGrepAnchorTrue(Async) git grep an evidence anchor in their caller's cwd" },
+  "src/lib/inbox.ts": {
+    count: 2,
+    reason:
+      "CHECKOUT (W1-T6136): gitGrepAnchorTrue(Async) grep origin/main in the harness repoRoot (run-task.ts " +
+      "buildInboxDraftHook/inboxCommand), status-board's deps.repoDir and panel-graph's deps.root",
+  },
   "src/lib/install-root.ts": { count: 4, reason: "CHECKOUT: inspect/provisionInstallRoot clone and read the install root (-C path)" },
   "src/lib/learnings.ts": { count: 2, reason: "CHECKOUT: defaultGitBlobReader/defaultChurnCommitReader read the managed checkout" },
   "src/lib/machine-filing-judge.ts": { count: 1, reason: "CHECKOUT: mainRecords reads origin/main at the repo root" },
@@ -142,16 +153,16 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/operator-sync.ts": { count: 1, reason: "CHECKOUT: defaultGit runs in the operator checkout (-C repoDir)" },
   "src/lib/opportunity-intake.ts": { count: 1, reason: "CHECKOUT: opportunityIntakePortsOver reads the workspace root (-C ws.root)" },
   "src/lib/owner-repo.ts": { count: 3, reason: "CHECKOUT: resolveOwnerRepoAt(Async)/gitFailureReason read a checkout's origin (-C root)" },
-  "src/lib/paired-trial.ts": { count: 1, reason: "CALLER: gitProbe reads the trial's tree (-C dir)" },
   "src/lib/panel-graph.ts": { count: 1, reason: "CHECKOUT: replyRefusal reads the repo root (-C root)" },
-  "src/lib/plan-architect.ts": { count: 4, reason: "CALLER: gitAddAndCommitWithRollback commits plan files in its caller's tree (-C cwd)" },
   "src/lib/plan-gardener.ts": { count: 4, reason: "CHECKOUT: the plan gardener's origin/main reads at the repo root" },
   "src/lib/plan-pr-emitter.ts": { count: 9, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree (-C repoDir)" },
-  "src/lib/plan-pr-merge-safety.ts": { count: 2, reason: "CALLER: planSafetyGit(Sync|Async) run git in their caller's cwd" },
+  "src/lib/plan-pr-merge-safety.ts": {
+    count: 2,
+    reason: "CHECKOUT (W1-T6136): arm-auto-merge.ts planMergeSafetyInClone binds planSafetyGitSync/Async to <root>/repos/<repo>",
+  },
   "src/lib/plan.ts": { count: 1, reason: "CHECKOUT: loadPlanAtRef reads a ref at the repo root" },
   "src/lib/pr-open.ts": { count: 1, reason: "CHECKOUT: mergeBaseFor reads the repo root" },
   "src/lib/prevention-source-evidence.ts": { count: 1, reason: "CHECKOUT: captureImportedModule reads the harness module's own checkout" },
-  "src/lib/proof-base-stale.ts": { count: 1, reason: "CALLER: certainStaleProofs reads its caller's tree (-C dir)" },
   "src/lib/replay-harness.ts": { count: 1, reason: "CHECKOUT: sourceGit reads the replay source checkout (-C sourceDir)" },
   "src/lib/repo-location.ts": { count: 1, reason: "CHECKOUT: resolveRepoRoot asks git for a directory's top level (-C dir)" },
   "src/lib/report-commands.ts": {
@@ -174,12 +185,18 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/sre-lane.ts": { count: 3, reason: "CHECKOUT: mergedPrsSince reads origin/main in the managed checkout" },
   "src/lib/sre-runbooks.ts": { count: 1, reason: "CHECKOUT: daemonSreRunbookHost reads the managed checkout" },
   "src/lib/status-board.ts": { count: 4, reason: "CHECKOUT: status-board ref reads of the managed checkout (-C repoDir)" },
-  "src/lib/status.ts": { count: 2, reason: "CALLER: buildGitLogSupersessionSearch/buildCommitTrailerIndex run git log in opts.cwd" },
-  "src/lib/sweep.ts": {
-    count: 7,
+  "src/lib/status.ts": {
+    count: 2,
     reason:
-      "WORKTREE (W1-T6122's file): rebaseDirtyFleetBranchViaGit and renumberPlanPrIds run(cwd…) and " +
-      "planRepairGitRun address the sweep's repair worktree; buildSweepEffects's 4 address the managed checkout",
+      "CHECKOUT (W1-T6136): buildCommitTrailerIndex reads the process cwd or run-task.ts's repoRoot / " +
+      "<root>/repos/<repo>; buildGitLogSupersessionSearch has no production caller",
+  },
+  "src/lib/sweep.ts": {
+    count: 6,
+    reason:
+      "CHECKOUT (W1-T6133): buildSweepEffects's 4 address the managed checkout; renumberPlanPrIds's and " +
+      "rebaseDirtyFleetBranchViaGit's -C argv goes to their git seam, whose default prHeadTreeGit runs the " +
+      "PR-head tree through the leaf and leaves only rebaseDirtyFleetBranchViaGit's repoDir steps raw",
   },
   "src/lib/synthetic-tasks.ts": { count: 2, reason: "CHECKOUT: git/mergedCommit read the managed checkout" },
   "src/lib/task-id-reservation.ts": { count: 2, reason: "CHECKOUT: reservation reads of the harness module checkout and the managed checkout" },
@@ -187,26 +204,24 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/test-impact-map.ts": { count: 2, reason: "CHECKOUT: impactDrift/readImpactArmInput read the repo root (cwd: root)" },
   "src/lib/wipe-test.ts": { count: 2, reason: "CHECKOUT: runWipeTestPair reads its own scratch checkout (-C repoDir)" },
   "src/lib/worker-provider.ts": {
-    count: 8,
+    count: 7,
     reason:
-      "WORKTREE (follow-up conversion, no owner yet): isGitWorktree and codexGitWritableRoots (cwd), " +
+      "WORKTREE (follow-up conversion, no owner yet): isGitWorktree (cwd), " +
       "selectOpenWeightUnitTestSuites's 5 run(\"git\", …) into the worker worktree; NOT GIT: codexExecArgs's -C " +
       "is codex's",
   },
   "src/lib/worker.ts": {
-    count: 28,
+    count: 23,
     reason:
-      "WORKTREE (W1-T6122's file): wireCredentialHelperSocket, credentialHelperSocketWired, " +
-      "laneWorkKeepReason's -C path, defaultLaneListGit (cwd); the rest are worktreeAdd/Remove, pruneStaleRuns " +
-      "and branch reads of the managed checkout",
+      "CHECKOUT (W1-T6133 converted the WORKTREE sites): defaultLaneListGit lists the managed checkout's " +
+      "registration (cwd: repoDir); the rest are worktreeAdd/Remove, pruneStaleRuns and branch reads of the " +
+      "managed checkout",
   },
   "src/run-task.ts": {
-    count: 118,
+    count: 78,
     reason:
-      "WORKTREE (W1-T6121's file): commitGeneratorOutputViaGit (-C opts.cwd x6), planCriteriaAtHeadForRepair, " +
-      "materializeReviewerSnapshot, assertReviewerSnapshotIntegrity, repairCensusRefusedPush, " +
-      "buildBaseProofDir, lintPlanForReview, readDispatchFilingSnapshot (-C cwd); the rest address the managed " +
-      "checkout, a fix-owner repoDir, a base-proof or reviewer snapshot dir, or a clone",
+      "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
+      "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
   },
 };
 
