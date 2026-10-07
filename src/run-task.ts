@@ -41184,6 +41184,22 @@ function readQuestionsNdjson(root: string): Array<Record<string, unknown>> {
   return out;
 }
 
+const openPrViewPlans = new WeakMap<(root: string) => Plan, { path: string; identity: string; plan: Plan }>();
+
+function openPrPlanIdentity(path: string): { kind: "readable"; identity: string } | { kind: "unreadable"; reason: string } {
+  const identity = planFilesIdentity(path);
+  if (identity.split("\n").some((line) => line === "-" || line.endsWith("=-"))) {
+    return { kind: "unreadable", reason: "plan file metadata is unavailable" };
+  }
+  try {
+    // W1-T6247: distinguish an unreadable listing from planFilesIdentity's empty-directory fallback.
+    readdirSync(join(dirname(path), "tasks.d"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "unreadable", reason: String(err) };
+  }
+  return { kind: "readable", identity };
+}
+
 /**
  * Build the observed open-PR state the sweep reconciles — the real gateway
  * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
@@ -41228,6 +41244,8 @@ export function buildOpenPrViews(
      *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
      *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
     readMainPlan?: (root: string) => Plan;
+    /** Plan-file location for identity checks and the default loader; omitted uses the checkout. */
+    mainPlanPath?: string;
     /** W1-T3585 — the SAME freshly-derived merged-task set daemon dispatch consults (the daemon's
      *  own `refreshMerged()` projection, never a second GitHub walk this producer invents), threaded
      *  through so {@link currentPlanIneligibilityReason} can resolve an unmet dependency exactly as
@@ -41272,8 +41290,19 @@ export function buildOpenPrViews(
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
   let mainPlan: Plan | undefined;
+  const mainPlanPath = deps.mainPlanPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const planReader = deps.readMainPlan ?? loadPlan;
   try {
-    mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    const observation = openPrPlanIdentity(mainPlanPath);
+    const identity = observation.kind === "readable" ? observation.identity : undefined;
+    const held = openPrViewPlans.get(planReader);
+    if (identity !== undefined && held?.path === mainPlanPath && held.identity === identity) {
+      mainPlan = held.plan;
+    } else {
+      openPrViewPlans.delete(planReader);
+      mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(mainPlanPath);
+      if (identity !== undefined) openPrViewPlans.set(planReader, { path: mainPlanPath, identity, plan: mainPlan });
+    }
   } catch {
     // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;
