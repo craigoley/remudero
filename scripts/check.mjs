@@ -25,8 +25,9 @@
 // container"). Refusing is safer than defaulting.
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
+import { resolve } from "node:path";
 
-const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--");
+const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--").map((arg) => resolve(arg));
 
 if (targets.length === 0) {
   console.error(

@@ -4,19 +4,10 @@
  * `scripts/check.mjs` bundles a scoped test run and `tsc --noEmit` into ONE invocation, so a
  * session cannot run the typecheck before writing its last file and get a stale all-clear.
  *
- * WHAT THIS SUITE COVERS, AND WHAT IT DELIBERATELY DOES NOT.
- *
- * It covers the SAFETY property: the script refuses to run with no target. That matters because
- * `node --test` with no argument walks the whole tree, and the full suite is CI's and
- * `rmd preflight --ci-parity`'s to run, never this scoped verb's (inside an agent container it
- * cannot pass honestly — docs/troubleshooting.md). A regression that made the
- * script default to "everything" would be actively dangerous, so it is pinned here.
- *
- * It does NOT drive the full happy path, because that path runs `tsc` over the whole project — a
- * ~10s cost on every CI run of the suite, to re-prove something the compiler already proves. That
- * behaviour is evidenced in the impl-GC report by manual reproduction instead: `tsx --test` exits 0
- * on a `Date`-for-`number` argument while `npm run check` on the same file exits 1 and names
- * TS2345. Saying so plainly here rather than implying broader coverage than exists.
+ * Empty, separator-only, missing and directory targets must refuse before either child starts.
+ * The real happy path uses a tiny isolated project, so this control never selects the repository's
+ * whole suite or whole-project typecheck. A literal dash-prefixed filename reaches the real Node
+ * child, and missing binaries exercise both default spawn error arms.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
