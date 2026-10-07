@@ -203,3 +203,18 @@
     outcomes, not refusals.
   src: ledger 09-26..10-03; W1-T5542
   cited: "2026-10-03"
+
+- id: codeql-read-model-lane
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/ledger-projector.ts, src/lib/read-model-worker.ts, src/lib/board-projection.ts, src/lib/read-model-db.ts]
+  fact: >-
+    When changing the read-model projection or worker lane, inspect the CodeQL `security-and-quality`
+    findings on the pull request and repair each finding in the changed behavior before retrying the
+    gate; this lane repeatedly incurred CodeQL refusals across 28 repaired pull requests.
+  evidence: >-
+    The CodeQL workflow scans JavaScript/TypeScript with `security-and-quality`; the CI learning
+    window records 28 refusals and repairs, including repeated changes to the read-model projector,
+    worker, board projection and database.
+  src: "ci-learning:8075:CodeQL"
+  cited: "2026-10-07"
