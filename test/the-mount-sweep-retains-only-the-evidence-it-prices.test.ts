@@ -40,6 +40,7 @@ test("unpriced mount observations consume neither retained records nor dedupe id
   collector.add(JSON.stringify(kept));
   for (let i = 0; i < 20_000; i++) collector.add(JSON.stringify({ step: "probe", run_id: `probe-${i}`, cost_usd: 99, payload: "x".repeat(200) }));
   const result = collector.result();
+  assert.equal(result.records.length, 1, "report the regression's count before formatting its entire discarded corpus");
   assert.deepEqual(result.records, [kept]);
   assert.equal(collector.identityCount(), 1, "excluded rows are rejected before their identities enter the Set");
   assert.equal(result.rawRowsWithRunId, 20_002, "raw counts include ignored rows and duplicates, as before");
