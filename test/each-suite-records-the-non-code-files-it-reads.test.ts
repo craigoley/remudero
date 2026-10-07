@@ -153,6 +153,8 @@ test("a test file run under the suite preload writes its record, and an unset di
     const run = (env: Record<string, string>) => {
       const clean = { ...process.env };
       delete clean.NODE_TEST_CONTEXT;
+      // Blank, never delete: node re-injects a deleted NODE_V8_COVERAGE into the child.
+      clean.NODE_V8_COVERAGE = undefined;
       delete clean.RMD_READ_MAP_DIR;
       return spawnSync(process.execPath, ["--import", TSX, "--import", PRELOAD, "test/fx.test.ts"], {
         cwd: repo,
