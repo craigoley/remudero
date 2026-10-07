@@ -138,6 +138,7 @@ export function pinWorktreeGit(worktreePath: string, log: WorktreeGitLog = stder
     const st = lstatSync(dotGit);
     kind = st.isFile() ? "file" : st.isDirectory() ? "directory" : "other";
   } catch {
+    // No `.git` entry at all: nothing to pin, so nothing runs.
     return refuse("<absent>", "the worktree has no .git entry");
   }
   if (kind === "other") return refuse(dotGit, "the .git entry is neither a pointer file nor a directory");

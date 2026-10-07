@@ -540,6 +540,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
       input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
+  // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
+  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
+    trigger: (input) =>
+      input.changed.includes("src/lib/worktree-git.ts") ||
+      addsMatch(input, CLOCK_SCOPE_RE, (text) => text.split("\n").filter((line) => /"-C",\s*(?:wt|worktreePath|[\w$]+\.worktreePath|worktreeRoot|batchWorktree|ownerPath)\b/.test(line))),
+    remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
 ];
 
 /**

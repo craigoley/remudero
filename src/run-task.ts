@@ -4793,7 +4793,6 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   // verified first and a MISSING base FAILS OPEN (proceed and trailer), matching this
   // function's own best-effort contract; only a base that is present AND zero commits behind
   // suppresses the amend.
-  // W1-T6106: every git here runs through the hardened leaf, so the amend runs no worktree hook.
   try {
     hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "--quiet", "origin/main"]);
     const ahead = hostWorktreeGit(worktreePath, ["rev-list", "--count", "origin/main..HEAD"]);
@@ -4877,7 +4876,6 @@ export function diffIsClassifiedIrreversible(diffText: string): boolean {
  */
 function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
-    // W1-T6106: the leaf adds --no-ext-diff --no-textconv, so a diff driver cannot run here.
     const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], { maxBuffer: 64 * 1024 * 1024 });
     return diffIsClassifiedIrreversible(patch);
   } catch {
@@ -17042,8 +17040,6 @@ export async function pushFixRound(
       `which is the tree CI builds — merge origin/main into the branch and fix the errors:\n${merged.text}`;
     throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
   }
-  // W1-T6106: both defaults go through the hardened worktree git leaf, which runs the harness's pre-push gate
-  // (never the worktree's tracked hooks/) before the push.
   const capture = deps.capture ?? worktreeGitCaptureAsync(wt);
   const push = deps.exec ?? worktreePushExecAsync(wt);
   try {
@@ -43104,7 +43100,6 @@ export function commitWorkerEdits(
   acceptance: readonly AcceptanceCriterion[] = [],
   options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
 ): WorkerEditCommit {
-  // W1-T6106: through the hardened leaf — the worktree's `.git` pointer and tracked hooks/ never run here.
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
     args,

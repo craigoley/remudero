@@ -48,7 +48,7 @@ function script(path: string, body: string): void {
 
 /** A seeded origin + checkout whose TRACKED hooks/ each leave a marker, and a run worktree cut from it by
  *  the real `worktreeAdd` (which records the gitdir and wires `core.hooksPath=hooks`). */
-function runWorktree(): { wt: string; branch: string; remote: string; seed: string } {
+function cutLane(): { wt: string; branch: string; remote: string; seed: string } {
   const n = ++counter;
   const remote = gitRepo({ bare: true, kind: `t6106-remote-${n}` }).dir;
   const seed = gitRepo({ kind: `t6106-seed-${n}` });
@@ -98,7 +98,7 @@ after(() => {
 
 describe("W1-T6106: the worktree's tracked hooks never run on a host commit or push", () => {
   it("the controls: a raw git -C commit and push in the same worktree DO run the tracked hooks", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     const n = counter;
     writeFileSync(join(wt, "control.txt"), "c\n");
     raw(wt, "add", "control.txt");
@@ -110,7 +110,7 @@ describe("W1-T6106: the worktree's tracked hooks never run on a host commit or p
   });
 
   it("a host commit, trailer amend and push land, run none of them, and run the HARNESS's pre-push with git's stdin line", async () => {
-    const { wt, branch, remote } = runWorktree();
+    const { wt, branch, remote } = cutLane();
     const n = counter;
     const stdinLog = join(root, `harness-stdin-${n}`);
     script(join(harnessHooks, "pre-push"), `touch '${marker(`harness-pre-push-${n}`)}'\ncat >> '${stdinLog}'\nexit 0`);
@@ -137,7 +137,7 @@ describe("W1-T6106: the worktree's tracked hooks never run on a host commit or p
   });
 
   it("a refusal by the harness gate refuses the push in the shape the daemon classifies, and nothing lands", () => {
-    const { wt, branch, remote } = runWorktree();
+    const { wt, branch, remote } = cutLane();
     script(join(harnessHooks, "pre-push"), "echo 'census-precheck: this branch grows 1 census count(s)' >&2\nexit 1");
     writeFileSync(join(wt, "b.txt"), "b\n");
     assert.equal(commitWorkerEdits(wt, ["b.txt"], "feat(b): refused").committed, true);
@@ -147,7 +147,7 @@ describe("W1-T6106: the worktree's tracked hooks never run on a host commit or p
   });
 
   it("the W1-T4614 assignment trailer still lands on a host commit, from the harness's host hook", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     const n = counter;
     assert.equal(stampRunWorktreeAssignment(wt, "asg-6106"), true);
     writeFileSync(join(wt, "c.txt"), "c\n");
@@ -159,7 +159,7 @@ describe("W1-T6106: the worktree's tracked hooks never run on a host commit or p
 
 describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => {
   it("worktreeAdd records the gitdir it cut, and the leaf pins to it", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     const recorded = recordedWorktreeGitDir(wt);
     assert.ok(recorded, "the base record names a gitdir");
     assert.equal(pinWorktreeGit(wt).gitDir, recorded);
@@ -167,14 +167,14 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
   });
 
   it("the control: a raw git -C status in a worktree pointing at the planted gitdir runs its fsmonitor", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("control")}\n`);
     raw(wt, "status", "--porcelain");
     assert.ok(existsSync(marker("planted-fsmonitor-control")), "control: the planted core.fsmonitor command is live");
   });
 
   it("commit, diff, push and stamp through the leaf all refuse, and no planted marker is written", async () => {
-    const { wt, branch, remote } = runWorktree();
+    const { wt, branch, remote } = cutLane();
     const n = counter;
     writeFileSync(join(wt, "d.txt"), "d\n");
     writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("leaf")}\n`);
@@ -193,7 +193,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
   });
 
   it("an UNRECORDED worktree whose pointer names a gitdir planted inside it is refused too", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     const planted = join(wt, "planted");
     raw(wt, "init", "-q", planted);
     raw(planted, "config", "core.fsmonitor", `sh -c 'touch "${marker("planted-inside")}"'`);
@@ -205,7 +205,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
   });
 
   it("code-executing config in the pinned gitdir's own config is disabled, while its credential helper stays", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     raw(wt, "config", "--worktree", "core.fsmonitor", `sh -c 'touch "${marker("pinned-fsmonitor")}"'`);
     raw(wt, "config", "--worktree", "credential.helper", "!fixture-credential-helper");
     writeFileSync(join(wt, "e.txt"), "e\n");
@@ -220,7 +220,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
 
 describe("W1-T6106: the open-weight write tools cannot write the .git entry", () => {
   it("refuses .git (any case) and paths under it, and still allows the tracked hooks/", () => {
-    const { wt } = runWorktree();
+    const { wt } = cutLane();
     for (const path of [".git", ".GIT", "./.git", "sub/../.git", ".git/config"]) {
       assert.throws(() => openWeightWritablePath(wt, path), /\.git entry/, path);
     }

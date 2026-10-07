@@ -407,12 +407,8 @@ function reportForeignHead(
   console.error(foreignHeadRefusalMessage(branch, lastPublished, newSha, observed));
 }
 
-/**
- * W1-T6106 — THE RUN-BRANCH PUSH'S DEFAULT GIT, THROUGH THE HARDENED LEAF. The steps above still build
- * `["-C", <worktree>, …]` argv (the shape every injected seam observes); these defaults strip that
- * prefix and hand the rest to {@link hostWorktreeGit}, which pins the repository and disables every
- * code-executing config — `core.hooksPath` included, so git itself runs no pre-push hook at all.
- */
+/** W1-T6106 — the run-branch push's default git: the steps' `["-C", <worktree>, …]` argv, minus that
+ *  prefix, through {@link hostWorktreeGit}, which pins the repository and runs no worktree hook. */
 function leafArgs(worktreePath: string, args: string[]): string[] {
   if (args[0] !== "-C" || args[1] !== worktreePath) {
     throw new Error(`git-push: a worktree push step must address ${worktreePath} with -C; got ${args.slice(0, 2).join(" ")}`);
@@ -439,13 +435,10 @@ interface PrePushGate {
 }
 
 /**
- * THE PRE-PUSH GATE, FROM THE HARNESS'S COPY. git no longer runs a hook on a host push (the leaf points
- * `core.hooksPath` at the harness's host-hooks dir, which holds no pre-push), so the gate the fleet
- * relies on — "the harness retries the push through the hook" — is run by the push leaf itself, BEFORE
- * the push: the HARNESS's `hooks/pre-push` ({@link harnessHooksDir}), never the worktree's tracked
- * copy, fed the `<local ref> <local sha> <remote ref> <remote sha>` line git would have given it. It
- * applies only to a worktree whose own pinned (daemon-owned) config enables hooks — what `worktreeAdd`
- * and the W1-T4614 stamp write — so a worktree that ran no hook before still runs none.
+ * THE PRE-PUSH GATE, FROM THE HARNESS'S COPY. git runs no hook on a host push now, so the push leaf runs
+ * the gate itself, first: the HARNESS's `hooks/pre-push` ({@link harnessHooksDir}), never the worktree's
+ * tracked copy, fed the stdin line git would have given it. Only for a worktree whose pinned
+ * (daemon-owned) config enables hooks, so a worktree that ran no hook before still runs none.
  */
 function* prePushGateSteps(
   worktreePath: string,
@@ -474,13 +467,12 @@ function* prePushGateSteps(
   const localRef = src === "HEAD" ? (headRef ?? "HEAD") : src.startsWith("refs/") || /^[0-9a-f]{40,64}$/.test(src) ? src : `refs/heads/${src}`;
   const localSha = (yield* tryRead(["rev-parse", src])) ?? ZERO_SHA;
   const remoteRef = dst ?? localRef;
-  // What git reads off the remote's advertisement. Unreadable reads as a new ref, as git reports one: the
-  // hook's only reader (the identity-transition check) abstains on it, and the push that follows reports
-  // the transport failure itself.
+  // Unreadable reads as a new ref: the hook's only reader (identity-transition) abstains on it, and the
+  // push that follows reports the transport failure itself.
   const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
+  if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
-  // The daemon's own environment, as git gave it to the hook: no pin and no overrides, so the gate's own
-  // child suites see the config they always saw. The hook scrubs GIT_DIR and its family itself (W1-T3224).
+  // The daemon's env as git gave it to the hook — no pin, no overrides; the hook scrubs GIT_DIR (W1-T3224).
   const env = { ...process.env };
   for (const k of Object.keys(env)) {
     if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(k)) delete env[k];
