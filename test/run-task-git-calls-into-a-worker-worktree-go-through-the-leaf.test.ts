@@ -335,6 +335,7 @@ describe("W1-T6121: a fix-round commit through run-task's own functions runs no 
 
   it("commitGeneratorOutputViaGit and the proof-amendment git ops commit, running none of the lane's hooks", () => {
     const { wt, n } = cutLane();
+    const start = raw(wt, "rev-parse", "HEAD").trim();
     writeFileSync(join(wt, "generated.txt"), "g\n");
     const generated = runTask.commitGeneratorOutputViaGit({ cwd: wt, message: "chore: generator output" });
     assert.equal(generated.changed, true);
@@ -345,6 +346,8 @@ describe("W1-T6121: a fix-round commit through run-task's own functions runs no 
     const sha = ops.gitCommit(wt, "chore(plan): amend a proof");
     assert.equal(sha, raw(wt, "rev-parse", "HEAD").trim());
     assert.equal(raw(wt, "status", "--porcelain"), "");
+    assert.deepEqual(runTask.readFixRoundCommitsViaGit(wt, start), [
+      { subject: "chore: generator output", changedFiles: 1 }, { subject: "chore(plan): amend a proof", changedFiles: 1 }]);
     assert.deepEqual(trackedHooksThatRan(n), [], "no tracked hook ran");
   });
 
