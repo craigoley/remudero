@@ -2834,6 +2834,7 @@ function measurementEntriesFrom(rows: ReadonlyArray<Record<string, unknown>>, n:
 }
 
 const memoRetentionHolder = "measurement-cadence";
+const memoReducerVersion = "1";
 
 /**
  * The request-path reader: the newest `n` rows, each verb SUMMARIZED, read through a rotation memo
@@ -2844,7 +2845,7 @@ const memoRetentionHolder = "measurement-cadence";
 export function createLatestMeasurementReader(): (stateDir: string, n: number) => Promise<LatestMeasurementRowsResult> {
   const memo = createLedgerRotationMemo((rows) =>
     rows.filter((row) => row.step === "measurement_cadence.ran").map((row) => summarizeMeasurementRow(row)),
-    { holder: memoRetentionHolder, writeRetention: appendLedger },
+    { holder: memoRetentionHolder, durableDigest: { reducerVersion: memoReducerVersion }, writeRetention: appendLedger },
   );
   return async (stateDir, n) => {
     const read = await readLedgerUnionRecordsMemoized(stateDir, memo, {

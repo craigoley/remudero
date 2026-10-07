@@ -589,6 +589,7 @@ export interface ReportedAnomalies {
 
 const reportedOnceMemos = new Map<string, LedgerRotationMemo>();
 const memoRetentionHolder = "cost-anomaly";
+const memoReducerVersion = "1";
 
 /**
  * Every run id either sentinel ever reported, over EVERY rotation plus `liveRows` (the caller's own
@@ -609,7 +610,7 @@ export async function readReportedAnomalies(
   }
   let memo = reportedOnceMemos.get(stateDir);
   if (memo === undefined) {
-    memo = createLedgerRotationMemo(reportedOnceRows, { holder: memoRetentionHolder, writeRetention: appendLedger });
+    memo = createLedgerRotationMemo(reportedOnceRows, { holder: memoRetentionHolder, durableDigest: { reducerVersion: memoReducerVersion }, writeRetention: appendLedger });
     reportedOnceMemos.set(stateDir, memo);
   }
   const read = await readLedgerUnionRecordsMemoized(
