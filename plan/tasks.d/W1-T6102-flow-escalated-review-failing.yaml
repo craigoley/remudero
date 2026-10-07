@@ -1,0 +1,40 @@
+- id: W1-T6102
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — escalated:review failing cost 1.67 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.48
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:escalated:review failing"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-escalated-review-failing.test.ts
+  acceptance:
+    - claim: "escalated:review failing is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6102: flow-escalated-review-failing clears without a person\" in test/flow-escalated-review-failing.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    escalated:review failing cost 1.67 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9717: 1.37 PR-hours — review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating
+    - PR #9505: 0.18 PR-hours — review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating
+    - PR #9367: 0.07 PR-hours — review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating — derived repair: add `Remudero-Task: unfiled` to the PR body — mergeability unread this pass; inherited last known "clean" observed 2026-10-05T16:43:34.511Z for this exact head b3e176d (W1-T4470)
+    - PR #9557: 0.05 PR-hours — review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating — mergeability unread this pass; inherited last known "clean" observed 2026-10-06T12:09:05.138Z for this exact head 323c9ee (W1-T4470)
+    - PR #9249: 0.03 PR-hours — review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating — derived repair: add `Remudero-Task: unfiled` to the PR body — mergeability unread this pass; inherited last known "clean" observed 2026-10-05T05:49:46.509Z for this exact head 9a18066 (W1-T4470)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/sweep.ts and one test file. Nothing in the description or files suggests secrets, auth, deletion, or changes to merge, deploy or review policy."
+      - "The task title and acceptance criterion describe automating clearance of a failing \"escalated:review\" blocker by its owner. That is an internal flow-gardener fix, and the grep-based acceptance can be checked from a test."
+      - "The family has no track record (0 merged, 0 declined, Beta mean 0.50), which is neutral rather than a concern. No ACTUAL CHANGE view was supplied, so I am judging only from the description and files."
+      - "One residual uncertainty is that \"cleared without a person\" touches review-escalation handling. The description doesn't show it altering review policy, so it stays low and still has to pass CI and review."
+    judged_at: "2026-10-07T00:56:57.177Z"
+    pin: "0a0f8ec94b917de9231844b1e2d028e52e7bba1e2fd83ca02f09d8a11fea777c"

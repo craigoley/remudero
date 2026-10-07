@@ -103,7 +103,8 @@ test('coverage sharding: every declared lossless V8 bundle is required before No
   assert.doesNotMatch(runBodies('coverage-ratchet'), /--test-shard=/, 'coverage must use the recorded-duration selector rather than Node\'s opaque shard assignment');
   // W1-T4398: the retry wrapper hands coverage/raw to the instrumented first pass alone.
   assert.match(runBodies('coverage-ratchet'), /test-with-retry\.mjs --coverage-first-pass coverage\/raw \\\s+node --enable-source-maps/);
-  assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --compact-output coverage\/compact/);
+  // W1-T5923: each shard ships its reports already source-mapped; the aggregator replays only the range merge.
+  assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --premap-output coverage\/premapped coverage\/raw/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /cp coverage\/raw\/coverage-\*\.json/);
   const upload = shards.steps?.find((step) => step.name === 'Upload coverage shard');
   assert.match(upload?.uses ?? '', /^actions\/upload-artifact@[0-9a-f]{40}$/);
@@ -136,6 +137,7 @@ test('hosted coverage admission accepts legacy bundles and bounded manifests but
     for (const [kind, name, accepted] of [
       ['legacy', 'coverage-bundle-1-0000000000000-0.json', true],
       ['bounded', 'coverage-corpus-1-0000000000000.json', true],
+      ['premapped', 'coverage-premapped-1-0000000000000.json', true],
       ['partial', 'coverage-reports-1-0000000000000-00000000.json', false],
       ['missing', undefined, false],
     ] as const) {

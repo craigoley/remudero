@@ -27,3 +27,11 @@
     - PR #9610: 0.28 PR-hours — plan-only PR is red on task-id-existence — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     - PR #9249: 0.21 PR-hours — plan-only PR is red on task-id-existence — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The filed record requests automatic clearance of a task-id-existence blocker but does not describe the remedy or provide evidence verifying the blocker diagnosis; the supplied escalation rule explicitly covers findings that cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The acceptance proof searches for a test declaration, which does not establish that clearance preserves the task-id-existence requirement. No behavioral results or bounded actual-change view are supplied."
+    judged_at: "2026-10-06T22:31:25.215Z"
+    pin: "648fcbc2222195f1e4cb865280ec5cbceb966f2cda1406b16368f2bf5214e03e"

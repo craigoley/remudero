@@ -20,6 +20,8 @@ function fixture() {
   for (const path of [
     "scripts/diff-coverage-local.mjs", "scripts/diff-coverage.mjs", "scripts/lib/argv.mjs",
     "scripts/lib/git.mjs", "scripts/lib/repo-root.mjs", "scripts/lib/lcov.mjs", ".github/workflows/ci.yml",
+    // W1-T5923: ci.yml's coverage invocation names the duration reporter, so the fixture needs it.
+    "scripts/test-duration-reporter.mjs",
   ]) {
     mkdirSync(join(repo.dir, path, ".."), { recursive: true });
     copyFileSync(join(process.cwd(), path), join(repo.dir, path));

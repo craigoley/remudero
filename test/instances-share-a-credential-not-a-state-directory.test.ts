@@ -82,10 +82,10 @@ test("W1-T4863: each instance renders its own writable claude directory", () => 
     assert.ok(!launchers[name].includes(`${stateMountSource(launchers[name])}:/home/node/.claude:ro`), `${name}`);
   }
 
-  // The tracked registry must not name one directory twice either.
-  const dirs = [...readFileSync(REAL_REGISTRY, "utf8").matchAll(/^ {4}claude_dir:\s*(\S+)/gm)].map((m) => m[1]);
-  assert.equal(dirs.length, INSTANCES.length);
-  assert.equal(new Set(dirs).size, dirs.length, `the tracked registry shares a claude_dir: ${dirs.join(", ")}`);
+  // The TRACKED registry shares the owner's claude_dir again (W1-T6061, operator ruling 2026-10-06):
+  // recycle-container.sh cannot yet mount the owner's credential into a split instance. Whether the
+  // tracked registry may split is test/site-and-console-recycle-again.test.ts's call, and W1-T6095
+  // re-opens it once the recycler carries the mount.
 });
 
 test("W1-T4863: the credential keeps one refresh owner across instances", () => {

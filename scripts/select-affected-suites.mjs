@@ -23,6 +23,25 @@ import {
 import { callerReachableSuites } from "../src/lib/ci-parity.ts";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.ts";
 
+/** test-with-retry.mjs's marker before pass two (W1-T4398), naming the files it re-runs. */
+const RETRY_MARK = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
+
+/**
+ * Each retried file's own pass-two outcome, read from the same log: "failed" when pass two's TAP names
+ * it again, "recovered" when it does not. No retry → {}. A retry that failed without naming any file
+ * cannot say which file recovered, so it also returns {} rather than calling every file recovered.
+ */
+export function retryOutcomes(log, root = REPO_ROOT) {
+  const all = log.split(/\r?\n/);
+  const at = all.findIndex((line) => RETRY_MARK.test(line));
+  if (at < 0) return {};
+  const retried = RETRY_MARK.exec(all[at])[1].split(", ").map((file) => file.trim()).filter(Boolean);
+  const after = all.slice(at + 1).join("\n");
+  const failedAgain = new Set(parseFailingTestFiles(after, root));
+  if (failedAgain.size === 0 && after.includes("FLAKE-RETRY: retry ALSO failed")) return {};
+  return Object.fromEntries(retried.map((file) => [file, failedAgain.has(file) ? "failed" : "recovered"]));
+}
+
 const lines = (path) => readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
 
 export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_STEP_SUMMARY } = {}) {
@@ -46,8 +65,9 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
     }
     return readAffectedSuitesInput(root, changed, extra);
   });
-  const failed = values["failed-from"] ? parseFailingTestFiles(readFileSync(values["failed-from"], "utf8"), root) : [];
-  const record = shadowRecord(selection, failed);
+  const log = values["failed-from"] ? readFileSync(values["failed-from"], "utf8") : "";
+  const failed = log ? parseFailingTestFiles(log, root) : [];
+  const record = shadowRecord(selection, failed, retryOutcomes(log, root));
 
   const size = selection.fullRun ? "FULL" : `${record.floorSize} floor${record.narrowSize === undefined ? "" : `, ${record.narrowSize} narrow`}`;
   const missed = record.failures.filter((f) => f.floor === "missed" || f.narrow === "missed");

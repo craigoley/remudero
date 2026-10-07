@@ -20,6 +20,7 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
@@ -28,6 +29,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { systemClock } from "./clock.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -529,6 +531,8 @@ export function materializeWorkerHome(opts: {
 
 const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSync };
 type WorkerHomeFsOps = typeof workerHomeFsOps;
+const workerHomeFsOpsAsync = { readdir, readFile, rm, stat };
+type WorkerHomeFsOpsAsync = typeof workerHomeFsOpsAsync;
 
 /** W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its per-spawn
  *  uniqueness token. INVARIANT: a dot can never collide with a runId's own characters — every runId in
@@ -605,6 +609,8 @@ export function reapWorkerHome(
 export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerHomeSweepOpts {
+  /** {@link sweepStaleWorkerHomesAsync} only: the awaited fs surface (tests). Defaults to `node:fs/promises`. */
+  fsAsync?: Partial<WorkerHomeFsOpsAsync>;
   /** Reap a worker-home dir older than this, when its run id resolves to nothing — no live lock and
    *  no terminal ledger verdict. Default 24h. */
   maxAgeMs?: number;
@@ -669,6 +675,11 @@ function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHo
   } catch {
     return false; // absent/unreadable ledger — nothing to find
   }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/** The line scan both ledger readers share, so the sync and awaited sweeps cannot drift. */
+function ledgerTextHasVerdict(raw: string, runId: string): boolean {
   for (const rawLine of raw.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -769,6 +780,111 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
     } catch {
       kept.push(name); // a permissions hiccup on one entry never blocks the rest
     }
+  }
+  log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
+  return { removed, kept };
+}
+
+/** {@link findLiveInflightLockForRun}, awaited: the same KEEP-only signal. */
+async function findLiveInflightLockForRunAsync(inflightDir: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await f.readdir(inflightDir);
+  } catch {
+    return false; // absent/unreadable inflight dir proves nothing, as the sync read answers
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".lock")) continue;
+    let raw: string;
+    try {
+      raw = await f.readFile(join(inflightDir, entry), "utf8");
+    } catch {
+      continue; // vanished between readdir and read, as the sync read skips it
+    }
+    if (parseInflightLockInfo(raw)?.run_id === runId) return true;
+  }
+  return false;
+}
+
+/** {@link hasTerminalLedgerVerdict}, awaited, through the same line scan. */
+async function hasTerminalLedgerVerdictAsync(ledgerPath: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await f.readFile(ledgerPath, "utf8");
+  } catch {
+    return false; // absent/unreadable ledger has nothing to find, as the sync read answers
+  }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/**
+ * {@link sweepStaleWorkerHomes} OFF THE EVENT LOOP: the same W1-T1064 predicate in the same order
+ * (live lock keeps, terminal verdict removes, else the age backstop), the same log rows, with every
+ * fs read and removal awaited. The ledger read alone is a whole-file read per candidate, which the
+ * sync sweep did on the daemon loop. Never rejects.
+ */
+export async function sweepStaleWorkerHomesAsync(root: string, opts: WorkerHomeSweepOpts = {}): Promise<WorkerHomeSweepSummary> {
+  const f = { ...workerHomeFsOpsAsync, ...opts.fsAsync };
+  const now = opts.now ?? systemClock.now;
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS;
+  const log = opts.log;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const parent = dirname(root);
+  const prefix = `${basename(root)}-`;
+  const stateRoot = opts.stateRoot ?? parent;
+  const inflightDir = opts.inflightDir ?? join(stateRoot, "state", "inflight");
+  const ledgerPath = opts.ledgerPath ?? join(stateRoot, "state", LEDGER_FILENAME);
+  let entries: string[];
+  try {
+    entries = await f.readdir(parent);
+  } catch {
+    return { removed, kept }; // parent unreadable/absent, as the sync sweep answers
+  }
+  const remove = async (name: string, full: string, fields: Record<string, unknown>): Promise<void> => {
+    try {
+      await f.rm(full, { recursive: true, force: true });
+      removed.push(name);
+      log?.("worker_home_reap.removed", { name, ...fields });
+    } catch {
+      kept.push(name); // a failed removal on one entry never blocks the rest
+    }
+  };
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = join(parent, name);
+    let st: Awaited<ReturnType<typeof stat>>;
+    try {
+      st = await f.stat(full);
+    } catch {
+      continue; // vanished between readdir and stat, as the sync sweep skips it
+    }
+    if (!st.isDirectory()) {
+      kept.push(name);
+      continue;
+    }
+    const runId = stripPerSpawnToken(name.slice(prefix.length));
+    if (await findLiveInflightLockForRunAsync(inflightDir, runId, f)) {
+      kept.push(name);
+      continue;
+    }
+    if (await hasTerminalLedgerVerdictAsync(ledgerPath, runId, f)) {
+      await remove(name, full, {
+        run_id: runId,
+        reason: "terminal-verdict",
+        detail: `terminal ledger verdict for run ${runId}, no live inflight lock — removed before the age ceiling`,
+      });
+      continue;
+    }
+    if (now() - st.mtimeMs <= maxAgeMs) {
+      kept.push(name);
+      continue;
+    }
+    await remove(name, full, {
+      run_id: runId,
+      reason: "age-ceiling",
+      detail: `no live lock or ledger verdict for run ${runId}; aged past the ${maxAgeMs}ms ceiling`,
+    });
   }
   log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
   return { removed, kept };

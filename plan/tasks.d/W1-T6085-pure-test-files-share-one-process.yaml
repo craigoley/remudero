@@ -1,0 +1,35 @@
+- id: W1-T6085
+  title: "PURE TEST FILES SHARE ONE PROCESS — every test file pays its own node + tsx start and loads ~437 src modules (pure files average 1.9 s, 35% of serial suite time); a census-admitted pool of files that write no env, chdir, spawn or globals runs under --experimental-test-isolation=none, measured 1.53 to 0.74 s plain and 4.15 to 1.56 s under coverage on 4 files with identical line hits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — which test files may share one process, admitted by a census, and the runner that runs them so
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, ranked item 4)"
+  plan_refs: [W1-T4112, W1-T5923, W1-T6030]
+  files: [scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs, test/pure-test-files-share-one-process.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (research-coverage, main @57ff4242e): serial suite 8,828 s over 2,631 timed
+    files; pure files (no git fixture, no CLI spawn) are 35.2% of the time at 1.9 s each, most of it
+    process start and module load (each process loads ~437 src modules through tsx; sweep.ts alone
+    0.6-1.4 s). --experimental-test-isolation=none on 4 pure files: 1.53 -> 0.74 s plain and
+    4.15 -> 1.56 s under coverage, with the same line hits. Estimated ~1,500 s (17%) of a full run.
+  design: |
+    scripts/pure-test-pool.mjs (plain .mjs, because ci runs test-tier-manifest.mjs under plain node) admits a test file to the pool only when a static census finds no
+    process.env write, process.chdir, child_process/spawn/exec import, global or prototype assignment,
+    module-mock, timer fake or process-level listener, and the file sits in the fast tier; anything the
+    census cannot read is refused, never admitted. scripts/test-tier-manifest.mjs runs each shard's
+    admitted files in ONE child with --experimental-test-isolation=none (same preload, same reporters)
+    and every other file as today. A pool child that fails re-runs its files isolated once and names the
+    file that failed alone, so a cross-file leak is reported as a pool defect, not a test failure.
+  acceptance:
+    - claim: "the census admits a file with no env, chdir, spawn or global writes and refuses each of those writes by name; a shard runs its admitted files in one child under --experimental-test-isolation=none and the rest isolated; a pool failure re-runs the pool isolated and names the file that leaks"
+      proof: "unit test: test/pure-test-files-share-one-process.test.ts"
+  falsifier: |
+    Admit a fixture file that assigns process.env: the census test finds it in the pool and fails.

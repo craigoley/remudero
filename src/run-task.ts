@@ -448,7 +448,7 @@ import {
   workerInstallationScope,
   type OrphanSweepDeps,
 } from "./lib/worker-containment.js";
-import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
+import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
@@ -1250,8 +1250,9 @@ import {
 } from "./lib/emissions.js";
 import {
   cloneReapRoots,
-  defaultOpenFileCount,
+  defaultOpenFileCountAsync,
   reapStaleClones,
+  reapStaleClonesAsync,
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
@@ -2322,7 +2323,8 @@ export function buildSweepEffects(
                 ? `merge-base worktree unavailable: ${baseProof.baseWorktreeFailure}`
                 : "merge-base proof evidence is unavailable";
           } else {
-            const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+            // Awaited and bounded: a read killed at its bound throws naming it, into the fallback below.
+            const diff = await ghPrDiffAsync(pr.prUrl);
             const discriminated = await discriminateReviewReuseAsync({
               prior,
               diff,
@@ -2793,6 +2795,7 @@ import {
   materializeWorkerHome,
   perRunWorkerHomeDir,
   sweepStaleWorkerHomes,
+  sweepStaleWorkerHomesAsync,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
@@ -2894,7 +2897,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { fetchPrDiff } from "./lib/pr-diff.js";
+import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
@@ -7679,10 +7682,9 @@ async function runReview(args: {
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
-  const diffOutcome = fetchPrDiff(prUrl, headSha, {
-    api: (u) => String(ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })),
-    local: (sha) => execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
-  });
+  // Both reads awaited and bounded (MEASURED 2026-10-06: the sync read held the daemon loop); a read killed at its
+  // bound is a named refusal below, never a hang.
+  const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   if (diffOutcome.kind === "refused") {
     // The pending status remains unsatisfied. Record a named refusal and return a withheld
     // result so both the CLI and sweep can retry or escalate without losing this attempt.
@@ -34778,39 +34780,69 @@ export function logCloneReapSurvey(
   } = {},
 ): CloneReapSummary | null {
   try {
-    const readPolicy =
-      deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
-    const policyBlock = readPolicy();
-    // W1-T2694 (design (ii)): after the `enabled` read above, before this rung's own reap call
-    // below. A refusal forces `enabled: false` (dry-run only) rather than skipping the survey
-    // outright — the SAFE direction for a rung whose armed state DELETES, per design (v)'s "can
-    // only refuse, never widen".
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("scratchReap", policyBlock, SCRATCH_REAP_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "scratchReap", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const { maxAgeHours } = policyBlock;
-    const reap = deps.reap ?? reapStaleClones;
-    const roots = (deps.roots ?? cloneReapRoots)();
-    const summary = reap(roots, {
-      dryRun: !enabled,
-      maxAgeMs: maxAgeHours * 60 * 60 * 1000,
-    });
-    const actionable = summary.candidates.filter(
-      (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
-    );
-    log("daemon.clone_reap", {
-      dry_run: summary.dryRun,
-      reaped: summary.reaped.length,
-      bytes_reclaimed: summary.bytesReclaimed,
-      candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
-      dispositions: tallyDispositions(summary.candidates),
-      roots_surveyed: roots.length,
-    });
-    return summary;
+    const plan = cloneReapPlan(config, log, deps);
+    const summary = (deps.reap ?? reapStaleClones)(plan.roots, plan.opts);
+    return logCloneReapRow(log, summary, plan.roots.length);
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
   }
+}
+
+/** {@link logCloneReapSurvey} OFF THE EVENT LOOP: the same policy read, ratification pin, roots and
+ *  ledger line, with the survey and reap awaited ({@link reapStaleClonesAsync}). */
+export async function logCloneReapSurveyAsync(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap"> & { reap?: typeof reapStaleClonesAsync } = {},
+): Promise<CloneReapSummary | null> {
+  try {
+    const plan = cloneReapPlan(config, log, deps);
+    const summary = await (deps.reap ?? reapStaleClonesAsync)(plan.roots, plan.opts);
+    return logCloneReapRow(log, summary, plan.roots.length);
+  } catch {
+    return null; // best-effort, exactly like the sync survey — never blocks the dispatch
+  }
+}
+
+/** The policy read and roots both clone-reap surveys share, so they cannot drift. */
+function cloneReapPlan(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap">,
+): { roots: string[]; opts: { dryRun: boolean; maxAgeMs: number } } {
+  const readPolicy =
+    deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
+  const policyBlock = readPolicy();
+  // W1-T2694 (design (ii)): after the `enabled` read above, before this rung's own reap call
+  // below. A refusal forces `enabled: false` (dry-run only) rather than skipping the survey
+  // outright — the SAFE direction for a rung whose armed state DELETES, per design (v)'s "can
+  // only refuse, never widen".
+  const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+  const pin = ratificationPinCheck("scratchReap", policyBlock, SCRATCH_REAP_CONTRACT_VERSION, pins);
+  if (!pin.fire) log("rung.unratified", { rung: "scratchReap", diff: pin.diff });
+  const enabled = pin.fire && policyBlock.enabled;
+  const roots = (deps.roots ?? cloneReapRoots)();
+  return { roots, opts: { dryRun: !enabled, maxAgeMs: policyBlock.maxAgeHours * 60 * 60 * 1000 } };
+}
+
+/** The one `daemon.clone_reap` line both surveys write. */
+function logCloneReapRow(
+  log: (step: string, fields: Record<string, unknown>) => void,
+  summary: CloneReapSummary,
+  rootsSurveyed: number,
+): CloneReapSummary {
+  const actionable = summary.candidates.filter(
+    (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
+  );
+  log("daemon.clone_reap", {
+    dry_run: summary.dryRun,
+    reaped: summary.reaped.length,
+    bytes_reclaimed: summary.bytesReclaimed,
+    candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
+    dispositions: tallyDispositions(summary.candidates),
+    roots_surveyed: rootsSurveyed,
+  });
+  return summary;
 }
 
 /**
@@ -34888,6 +34920,14 @@ export function logWorktreeReapBootSurvey(
   }
 }
 
+/** The rung's default sweeps: each the awaited twin of the sync sweep it replaced, so none of them
+ *  walks a tree or reads a ledger on the daemon loop. Exported so a test pins the identity. */
+export const DISK_RECLAIM_DEFAULT_SWEEPS = {
+  sweepTempDirs: sweepStaleTempDirsAsync,
+  reapClonesSurvey: logCloneReapSurveyAsync,
+  sweepWorkerHomes: sweepStaleWorkerHomesAsync,
+} as const;
+
 /**
  * W1-T411 — the disk-reclaim RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
  * `runTaskBody` beside `pruneStaleRuns` and W1-T406's {@link logWorktreeReapBootSurvey}. Three
@@ -34933,10 +34973,14 @@ export async function logDiskReclaimRung(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: {
-    sweepTempDirs?: typeof sweepStaleTempDirs;
-    reapClonesSurvey?: typeof logCloneReapSurvey;
-    cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
-    sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
+    sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
+    reapClonesSurvey?: (
+      ...a: Parameters<typeof logCloneReapSurveyAsync>
+    ) => CloneReapSummary | null | Promise<CloneReapSummary | null>;
+    cloneReapDeps?: Parameters<typeof logCloneReapSurveyAsync>[2];
+    sweepWorkerHomes?: (
+      ...a: Parameters<typeof sweepStaleWorkerHomes>
+    ) => ReturnType<typeof sweepStaleWorkerHomes> | Promise<ReturnType<typeof sweepStaleWorkerHomes>>;
     workerHomeRoot?: () => string;
     /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
      *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
@@ -34946,8 +34990,9 @@ export async function logDiskReclaimRung(
     objectPolicy?: () => { enabled: boolean };
     ratifications?: Ratifications;
     /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
-     *  its own; production leaves this unset and gets {@link defaultOpenFileCount}, never the
-     *  fail-closed `() => 1` object-reaper.ts falls back to when NOTHING supplies a counter. */
+     *  its own; production leaves this unset and gets the AWAITED, bounded
+     *  {@link defaultOpenFileCountAsync}, never the fail-closed `() => 1` object-reaper.ts falls back
+     *  to when NOTHING supplies a counter. */
     objectOpenFileCount?: (dir: string) => number;
     /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
     objectStreakPath?: () => string;
@@ -34963,13 +35008,14 @@ export async function logDiskReclaimRung(
   objectsPruned: number;
   objectsWouldPrune: number;
 }> {
-  const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
-  const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
-  const sweepWorkerHomes = deps.sweepWorkerHomes ?? sweepStaleWorkerHomes;
+  // AWAITED (2026-10-06): every sweep's default is the off-loop twin of the sync sweep it replaced.
+  const sweepTempDirs = deps.sweepTempDirs ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepTempDirs;
+  const reapClonesSurvey = deps.reapClonesSurvey ?? DISK_RECLAIM_DEFAULT_SWEEPS.reapClonesSurvey;
+  const sweepWorkerHomes = deps.sweepWorkerHomes ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepWorkerHomes;
 
   let tempDirsRemoved = 0;
   try {
-    tempDirsRemoved = sweepTempDirs().removed.length;
+    tempDirsRemoved = (await sweepTempDirs()).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -34980,7 +35026,7 @@ export async function logDiskReclaimRung(
     // Suppressed logger: logCloneReapSurvey already best-effort-catches internally, but an
     // injected `reapClonesSurvey` test double could still throw — belt-and-suspenders so this
     // guard behaves identically to the other two.
-    const summary = reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
+    const summary = await reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
     clonesReaped = summary?.reaped.length ?? 0;
     cloneBytesReclaimed = summary?.bytesReclaimed ?? 0;
   } catch {
@@ -34990,7 +35036,7 @@ export async function logDiskReclaimRung(
   let workerHomesRemoved = 0;
   try {
     const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
-    workerHomesRemoved = sweepWorkerHomes(root, { stateRoot: config.root }).removed.length;
+    workerHomesRemoved = (await sweepWorkerHomes(root, { stateRoot: config.root })).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -35053,12 +35099,13 @@ export async function logDiskReclaimRung(
         dryRun: !enabled,
         // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
         // falls back to when nothing supplies a counter.
-        openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
+        ...(deps.objectOpenFileCount ? { openFileCount: deps.objectOpenFileCount } : { openFileCountAsync: defaultOpenFileCountAsync }),
         streakPath,
         ownInflightLock: deps.objectOwnInflightLock,
         ...activeWorkerProbes(inflight),
       });
-      objectsPruned += r.pruned;
+      // An unknown yield adds nothing: the decision row below names it, and a sum cannot.
+      if (r.pruned !== "unknown") objectsPruned += r.pruned;
       objectsWouldPrune += r.wouldPrune ?? 0;
       // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
       // that decides whether arming this rung is worth anything, and it is unreadable unless the
@@ -35069,6 +35116,9 @@ export async function logDiskReclaimRung(
           reason: r.refusedBecause,
           consecutive_refusals: r.consecutiveRefusals,
           refusing_since: r.refusingSinceIso,
+          // Named outcomes, never a reading: a handle probe killed at its bound, an unread count.
+          ...(r.handleProbe ? { handle_probe: r.handleProbe } : {}),
+          ...(r.looseBefore === "unknown" ? { loose_before: r.looseBefore } : {}),
         }]);
       } else if (r.carriedBy !== undefined) {
         // WHICH BARRIER CARRIED IT: `quiet` (both held) or `expiry` (the store was busy).

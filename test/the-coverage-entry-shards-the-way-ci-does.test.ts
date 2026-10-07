@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_COVERAGE_SHARD_COUNT, coverageGateLockDir, coverageScratchDir, coverageShardConcurrency, runCiParity, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
+import { unwrapLowPriority } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -116,7 +117,7 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
       "test/coverage-shard-4.test.ts",
     ]);
     for (const call of shardCalls) {
-      assert.equal(call.file, process.execPath, "each coverage shard shells node directly, as ci.yml does");
+      assert.equal(unwrapLowPriority(call.file, call.args).file, process.execPath, "each coverage shard shells node (under nice), as ci.yml does");
       assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
       assert.equal(call.args.some((arg) => arg.startsWith("--test-shard=")), false, "coverage shards receive duration-balanced file lists, not Node's opaque shard assignment");
       assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");

@@ -1,0 +1,39 @@
+- id: W1-T6088
+  title: "THE MERGE GROUP RUNS THE FAST TIER ONCE — W1-T3207's guard skips ci's quieter fast-tier harness only on pull_request SOURCE diffs, so a merge_group commit runs the 8 ci shards AND the coverage lane's full instrumented suite over the same tests, ~3,480 runner-seconds per queued PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # a workflow-graph change to required checks: an operator build, as W1-T5940 and W1-T5705 park theirs
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — whether ci's fast-tier test step runs on a merge_group SOURCE diff the coverage lane already runs in full
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, ranked item 7)"
+  plan_refs: [W1-T3207, W1-T4406, W1-T5940, W1-T1041]
+  files: [.github/workflows/ci.yml, test/the-merge-group-runs-the-fast-tier-once.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main .github/workflows/ci.yml, the Test step: the W1-T3207 skip fires only
+    when `CLASS = SOURCE` and `GITHUB_EVENT_NAME = pull_request`; on merge_group the same SOURCE diff falls
+    through to `test-tier-manifest.mjs --run fast --shard N/8`, while W1-T4406 runs the coverage shards'
+    full instrumented suite on merge_group too. MEASURED (research-coverage): ~3,480 runner-seconds per
+    queued PR. W1-T1041 (closed) asked the general two-harness question; this is the one duplicate it left.
+    W1-T5940 (queued, operator build) re-scopes what the merge group runs as a whole; this is the cheap,
+    separable half and does not decide W1-T5940's selection.
+  design: |
+    Extend the W1-T3207 guard so a merge_group SOURCE run skips ci's fast-tier step exactly when the
+    coverage lane in the same run executes the full suite, with the same log line and step-summary entry
+    naming W1-T3207 and the event. Any merge_group run where coverage is narrowed or skipped keeps the
+    fast tier. The workflow guard mutation step (W1-T3220) must still distinguish the new guard.
+  acceptance:
+    - claim: "on merge_group a SOURCE diff whose coverage lane runs the full suite skips ci's fast-tier step with a W1-T3207 summary line, and keeps it when coverage does not run in full"
+      proof: "unit test: test/the-merge-group-runs-the-fast-tier-once.test.ts"
+  falsifier: |
+    Leave the guard pull_request-only: the merge_group fixture event still reaches the fast-tier run and the
+    test fails.
+  note: |
+    OPERATOR BUILD: a .github/workflows path routes this task to operator-build. The merge queue was
+    disabled on 2026-10-05 (W1-T5940's rationale); the saving lands only while it is on. If W1-T5940 merges
+    first and already runs the fast tier once on merge_group, retire this as a duplicate.
