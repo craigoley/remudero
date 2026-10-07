@@ -16,10 +16,11 @@ raw: "Root incident: two RMD instances are force-updating the shared Remudero
   Reconcile all nine observed records before releasing PR #5508 hold."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
