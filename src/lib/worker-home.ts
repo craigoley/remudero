@@ -84,79 +84,102 @@ export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
 type ClaudeFleetSeedFsOps = typeof claudeFleetSeedFsOps;
 
-/** Seed the real home's credential-only grant once, before a worker home is planned. The exclusive
- * directory create protects a refreshed token from concurrent spawns; an existing sibling is owned
- * by the worker's token refresh and is never copied over WHILE IT HOLDS A CREDENTIAL. A fork the CLI
- * has emptied (another holder of the same login rotated its refresh token away) heals from a usable
- * owner credential instead of refusing every spawn until the container is recreated. */
+/** What {@link seedClaudeFleetCredentials} changed, for a caller that records it (W1-T6252). `store` is the
+ *  shared store's path; `priorVerdict` is `absent` for a provisioning and the replaced credential's
+ *  reason class for a heal. Carries no credential bytes. */
+export interface ClaudeCredentialSeedEvent {
+  kind: "provisioned" | "healed";
+  store: string;
+  priorVerdict: string;
+}
+
+/** W1-T6252: provision, and heal, the ONE shared credential store every fleet Claude process resolves.
+ * Inside a container `<realHome>/.claude` is the host's bind mount, so every container creates and then
+ * resolves the SAME `.claude/fleet-auth/claude/.credentials.json`, and the CLI's own refresh lock beside
+ * it serialises renewals. A private `.claude-fleet` fork per container made three refreshing copies of one
+ * OAuth lineage, so any holder's refresh rotated the token out from under the others. An existing fork is
+ * left on disk for recovery and is no longer resolved once the store exists; no new fork is created.
+ * The exclusive directory create makes concurrent containers converge on one winner. A store holding a
+ * usable credential is owned by the CLI's refresh and is never copied over; an unusable one heals from a
+ * usable owner credential instead of refusing every spawn until someone intervenes. */
 export function seedClaudeFleetCredentials(opts: {
   realHome: string;
   fsImpl?: Partial<ClaudeFleetSeedFsOps>;
-}): "seeded" | "healed" | "kept" | "skipped" {
+  onEvent?: (event: ClaudeCredentialSeedEvent) => void;
+}): "provisioned" | "healed" | "kept" | "skipped" {
   const f = { ...claudeFleetSeedFsOps, ...opts.fsImpl };
-  const targetDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-  // An explicitly provisioned shared child is the authority. Preserve existing private forks
-  // for recovery, but never create a new fork when this common store is available.
-  if (f.existsSync(sharedClaudeCredentialDir(opts.realHome))) return "skipped";
-  if (f.existsSync(targetDir)) return healClaudeFleetFork(opts.realHome, targetDir, f);
-
-  let credential: Buffer;
-  try {
-    credential = f.readFileSync(join(opts.realHome, ".claude", ".credentials.json"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "skipped";
-    throw error;
+  const store = sharedClaudeCredentialDir(opts.realHome);
+  if (f.existsSync(store)) {
+    const prior = healClaudeCredentialStore(opts.realHome, store, f);
+    if (prior === undefined) return "kept";
+    opts.onEvent?.({ kind: "healed", store, priorVerdict: prior });
+    return "healed";
   }
 
-  // Prepare the private file before publishing the directory, then claim the directory with an
-  // exclusive mkdir. A competing seed gets EEXIST and leaves the winner's token untouched.
-  const stagedFile = join(opts.realHome, `.claude-fleet-seed-${randomUUID()}`);
+  const credential = readOwnerCredential(opts.realHome, f);
+  if (credential === undefined || classifyWorkerCredentialFile(() => credential.toString("utf8")).kind !== "usable") {
+    return "skipped";
+  }
+
+  // Stage the file beside the store (same filesystem, so the rename is atomic), then claim the store
+  // with an exclusive mkdir. A competing provisioner gets EEXIST and leaves the winner's token untouched.
+  const parent = dirname(store);
+  f.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const stagedFile = join(parent, `.credentials-seed-${randomUUID()}`);
   let createdDir = false;
   let published = false;
   try {
     f.writeFileSync(stagedFile, credential, { mode: 0o600, flag: "wx" });
     f.chmodSync(stagedFile, 0o600);
     try {
-      f.mkdirSync(targetDir, { mode: 0o700 });
+      f.mkdirSync(store, { mode: 0o700 });
       createdDir = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return "kept";
       throw error;
     }
-    f.chmodSync(targetDir, 0o700);
-    f.renameSync(stagedFile, join(targetDir, ".credentials.json"));
+    f.chmodSync(store, 0o700);
+    f.renameSync(stagedFile, join(store, ".credentials.json"));
     published = true;
   } finally {
     if (!published) {
       f.rmSync(stagedFile, { force: true });
-      if (createdDir) f.rmSync(targetDir, { recursive: true, force: true });
+      if (createdDir) f.rmSync(store, { recursive: true, force: true });
     }
   }
-  return "seeded";
+  opts.onEvent?.({ kind: "provisioned", store, priorVerdict: "absent" });
+  return "provisioned";
 }
 
-/** Replace an existing fork's credential only when the fork is unusable and the owner's is usable.
- *  The replacement is staged inside the fork and renamed over it, so a reader sees one file or the other. */
-function healClaudeFleetFork(realHome: string, targetDir: string, f: ClaudeFleetSeedFsOps): "healed" | "kept" {
-  const forkFile = join(targetDir, ".credentials.json");
-  if (classifyWorkerCredentialFile(() => f.readFileSync(forkFile, "utf8") as string).kind === "usable") return "kept";
-  let owner: Buffer;
+/** The owner's credential bytes, or `undefined` when there is no owner file. Any other read failure throws:
+ *  a permissions problem is not an absence. */
+function readOwnerCredential(realHome: string, f: ClaudeFleetSeedFsOps): Buffer | undefined {
   try {
-    owner = f.readFileSync(join(realHome, ".claude", ".credentials.json")) as Buffer;
+    return f.readFileSync(join(realHome, ".claude", ".credentials.json")) as Buffer;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "kept";
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  if (classifyWorkerCredentialFile(() => owner.toString("utf8")).kind !== "usable") return "kept";
-  const stagedFile = join(targetDir, `.credentials.json.heal-${randomUUID()}`);
+}
+
+/** Replace the store's credential only when it is unusable and the owner's is usable. Returns the replaced
+ *  credential's reason class, or `undefined` when nothing was replaced. The replacement is staged inside
+ *  the store and renamed over it, so a reader sees one file or the other. */
+function healClaudeCredentialStore(realHome: string, store: string, f: ClaudeFleetSeedFsOps): string | undefined {
+  const storeFile = join(store, ".credentials.json");
+  const prior = classifyWorkerCredentialFile(() => f.readFileSync(storeFile, "utf8") as string);
+  if (prior.kind === "usable") return undefined;
+  const owner = readOwnerCredential(realHome, f);
+  if (owner === undefined || classifyWorkerCredentialFile(() => owner.toString("utf8")).kind !== "usable") return undefined;
+  const stagedFile = join(store, `.credentials.json.heal-${randomUUID()}`);
   try {
     f.writeFileSync(stagedFile, owner, { mode: 0o600, flag: "wx" });
     f.chmodSync(stagedFile, 0o600);
-    f.renameSync(stagedFile, forkFile);
+    f.renameSync(stagedFile, storeFile);
   } finally {
     f.rmSync(stagedFile, { force: true });
   }
-  return "healed";
+  return prior.reasonClass;
 }
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
