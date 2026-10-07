@@ -52,12 +52,6 @@ const HANDOFF_CLOSED_STEPS = [
 
 export type ServeImageDrift = { expected: string; actual: string } | { kind: "unknown"; reason: string };
 
-export type ServePolicyDeps = DeployDeps & {
-  escalate?: (e: Escalation) => void;
-  serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
-  serveImageDrift?: () => ServeImageDrift | undefined;
-};
-
 export interface ServePolicyInputs {
   drift: ResourcePolicyDrift[] | undefined;
   mountDrift?: MountPlanDrift[] | undefined;
@@ -154,7 +148,11 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
 export function runServePolicyCycle(
-  deps: ServePolicyDeps,
+  deps: DeployDeps & {
+    escalate?: (e: Escalation) => void;
+    serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
+    serveImageDrift?: () => ServeImageDrift | undefined;
+  },
   opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
     return { replaced: false, reason: "serve policy is converged only by the primary instance's watchdog tick" };
@@ -217,7 +215,7 @@ export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
-): Partial<ServePolicyDeps> {
+): Partial<Parameters<typeof runServePolicyCycle>[0]> {
   let registryText: string;
   try {
     registryText = readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
