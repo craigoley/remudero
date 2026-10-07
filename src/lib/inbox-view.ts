@@ -12,7 +12,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readSlowLaneInbox, type ClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readInboxStores, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -40,12 +40,13 @@ export interface InboxRefresh {
 }
 
 /** What serve's inbox readers take from one pass (W1-T5897): enough to build every lane, the census and the threads. */
-function persistedContent(classified: ClassifiedInbox): PersistedInboxContent {
+function persistedContent(classified: ClassifiedInbox, stores: InboxStores): PersistedInboxContent {
   const ledgerRows = classified.ledgerLines.filter((row) => row.step === "fleet_lane.decided" || (row.step === "ratify.approved" && row.released === "verify-human"));
   const projection = [...classified.projection];
   return {
     ...inboxClassificationEvidence(classified), proposals: classified.proposals, classifications: classified.classifications, ledgerRows,
     mergedTaskIds: projection.filter(([, p]) => p.merged).map(([id]) => id), projectionIndeterminate: projection.some(([, p]) => p.indeterminate === true),
+    stores,
   };
 }
 
@@ -70,7 +71,9 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
       return fresh.length === current.length ? null : fresh;
     });
   }
-  const content = persistedContent(classified);
+  // The stores are read once, with the pass, and persisted with it: the bodies and every legacy read page the same.
+  const stores = readInboxStores(deps.inboxRoot, proposals);
+  const content = persistedContent(classified, stores);
   const identity = persistedInboxIdentity(content);
   const now = clock.now();
   const changed = identity !== memo.identity;
@@ -83,7 +86,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   }
   const generatedAt = fixedClock(memo.writtenAtMs!).iso();
   return {
-    bodies: inboxViewBodies(inboxLanes(classified, deps.inboxRoot), inboxStoreSource(generatedAt)),
+    bodies: inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt)),
     proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt,
   };
 }

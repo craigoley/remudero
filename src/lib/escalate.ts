@@ -1368,10 +1368,11 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): S
  *  lookupDuplicateEscalation} search, so the judge never sees a duplicate (and never runs at all on
  *  an unreadable surface — W1-T2912). A `demote` opens the issue fleet-notice-labelled with the
  *  judge's reason as the first comment; anything else — deliver, an exempt class, or a judge failure
- *  — opens it needs-human-labelled. */
+ *  — opens it needs-human-labelled. W1-T5765: every gateway call is awaited, so an async gateway
+ *  keeps the daemon loop ticking; a sync one is still accepted. */
 export async function escalateWithJudge(
   e: Escalation,
-  deps: EscalateDeps & EscalationJudgeDeps,
+  deps: EscalateDeps<AsyncIssueGateway> & EscalationJudgeDeps,
 ): Promise<string> {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
@@ -1379,8 +1380,8 @@ export async function escalateWithJudge(
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
-  const dedup = runStepsSync(lookupDuplicateEscalation(resolved, deps));
-  if (dedup.kind === "found") return runStepsSync(recordDuplicateEscalation(resolved, dedup.issue, deps));
+  const dedup = await runStepsAsync(lookupDuplicateEscalation(resolved, deps));
+  if (dedup.kind === "found") return runStepsAsync(recordDuplicateEscalation(resolved, dedup.issue, deps));
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
 
   const verdict = await judgeEscalation(resolved, deps);
@@ -1394,7 +1395,7 @@ export async function escalateWithJudge(
     judge_reason: verdict.reason,
   });
   const messageCheck = checkOperatorMessageSafe(resolved);
-  const url = runStepsSync(
+  const url = await runStepsAsync(
     verdict.decision === "demote"
       ? createEscalationIssue(resolved, deps, {
           queueLabel: FLEET_NOTICE_LABEL,
@@ -1411,7 +1412,7 @@ export async function escalateWithJudge(
   );
   // W1-T4659: same supersede as escalate() above — either branch just opened a genuinely new issue.
   const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
-  if (prRef) runStepsSync(closeSupersededEscalations(resolved, prRef, dedup.open, url, deps));
+  if (prRef) await runStepsAsync(closeSupersededEscalations(resolved, prRef, dedup.open, url, deps));
   return url;
 }
 

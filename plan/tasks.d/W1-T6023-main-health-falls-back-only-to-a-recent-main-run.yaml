@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: red-main research (main.health.observed decided_by_sha audit)"
   plan_refs: [W1-T5490, W1-T4351, W1-T5806]
   files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/main-health-falls-back-only-to-a-recent-main-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

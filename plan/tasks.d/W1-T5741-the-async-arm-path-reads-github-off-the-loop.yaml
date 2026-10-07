@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: found while building W1-T5284 (#9159)"
   plan_refs: [W1-T5284, W1-T5689, W1-T5615, W1-T2855]
   files: [src/lib/arm-auto-merge.ts, test/the-async-arm-path-reads-github-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

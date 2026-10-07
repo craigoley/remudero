@@ -1,0 +1,52 @@
+- id: W1-T6061
+  title: "SITE AND CONSOLE RECYCLE AGAIN — since W1-T4863 gave each instance its own claude_dir, recycle-container resolves the App key under ~/.claude-site and ~/.claude-console, which were never created, so every site and console recycle refuses and both run images 46+ baked commits stale"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: Node 24 rollout readiness check (host, read-only)"
+  plan_refs: [W1-T4863, W1-T4198, W1-T5883]
+  files: [.remudero/daemon-instances.yaml, test/site-and-console-recycle-with-the-owners-app-key.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06T22:20Z on the Azure host: site's deploy.restart_refused row and both
+    state/DEPLOY_FAILED markers (site 22:20:33Z, console 17:15:03Z) carry recycle-container's refusal
+    "no GH_TOKEN could be captured, and App auth is not usable either ... the App private key is
+    missing or empty on this host at /home/craigoleyagent/.claude-site/rmd-app.pem". The repo
+    registry (.remudero/daemon-instances.yaml, W1-T4863) sets site's claude_dir to .claude-site and
+    console's to .claude-console, and recycle-container maps the container key path
+    /home/node/.claude/rmd-app.pem through that claude_dir; neither host directory exists, while the
+    host's /etc registry still names the shared .claude. W1-T4863's own comment required both
+    directories "before the next --install". Result: remudero-site-daemon has run since
+    2026-10-04T01:02Z and is 46 baked-path commits behind; console since 10-05T17:44Z. Core
+    recycles (its key is under its own claude_dir). Nothing escalated (W1-T6062). Open alerts #9511
+    and #9387 (site/console read model disagrees with its ledger) may be stale-image symptoms.
+    The Node 24 rollout (W1-T5883) needs site and console to recycle.
+  design: |
+    Site and console declare gh_app_private_key_host_path pointing at the credential owner's key
+    (/home/craigoleyagent/.claude/rmd-app.pem), so recycle-container mounts it read-only through
+    app-private-key-mount.sh (#9649) instead of resolving it under the instance's own claude_dir.
+    The key keeps one owner, like the subscription credential (W1-T4863). A test reads the registry
+    and requires every live non-primary instance either to declare a key host path that is the
+    primary instance's own key or to carry no App fields at all.
+  acceptance:
+    - claim: "every live non-primary instance's App key resolves to the credential owner's key"
+      proof: 'grep: test("W1-T6061: a non-primary instance mounts the owner''s App key read-only" in test/site-and-console-recycle-with-the-owners-app-key.test.ts'
+  falsifier: |
+    Remove site's gh_app_private_key_host_path: the test names site, whose key would resolve under its
+    own missing claude_dir.
+  note: |
+    DISPATCH HOLD: the change is only half the fix; the operator does the host half, in order:
+    (1) mkdir -m 700 /home/craigoleyagent/.claude-site /home/craigoleyagent/.claude-console (owned by
+    craigoleyagent); (2) copy the registry change into /etc/remudero/daemon-instances.yaml;
+    (3) deploy/install-host-units.sh --instance site --install and --instance console --install (owner
+    credential mounted read-only, W1-T4863); (4) let the watchdog recycle, or run
+    deploy/recycle-container.sh --instance <name>; (5) verify docker inspect image and node version,
+    and that state/DEPLOY_FAILED is retracted. Do this BEFORE W1-T5883 merges.

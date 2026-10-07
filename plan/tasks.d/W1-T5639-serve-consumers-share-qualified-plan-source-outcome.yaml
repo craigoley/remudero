@@ -30,7 +30,7 @@
     - test/serve-board-projection-stays-off-the-event-loop.test.ts
     - test/serve-plan-reload.test.ts
     - test/panel-graph.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A failed plan read is not a successfully read empty plan. OBSERVED at main 773178740:

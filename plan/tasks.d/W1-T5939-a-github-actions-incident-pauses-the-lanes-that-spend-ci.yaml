@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
   plan_refs: [W1-T5920, W1-T5921, W1-T5909, W1-T1223, W1-T3194]
   files: [src/lib/actions-incident.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/a-github-actions-incident-pauses-the-lanes-that-spend-ci.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

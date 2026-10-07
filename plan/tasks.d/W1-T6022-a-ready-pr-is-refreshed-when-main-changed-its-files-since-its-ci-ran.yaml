@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: main red 11:35-13:37 (#9539 vs #9542); merge queue vs strict vs daemon guard research"
   plan_refs: [W1-T5696, W1-T3277, W1-T5903, W1-T5921, W1-T5939, W1-T1014, W1-T5940]
   files: [src/lib/sweep.ts, test/a-ready-pr-is-refreshed-when-main-changed-its-files-since-its-ci-ran.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5806 (#9288) builder's follow-up"
   plan_refs: [W1-T5806, W1-T5283]
   files: [src/lib/main-health-rung.ts, test/a-red-main-escalation-names-its-first-red-pr.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

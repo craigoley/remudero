@@ -159,3 +159,13 @@ test("W1-T4450: each fix round keeps its own transcript", async () => {
   const archived = readdirSync(join(root, "state", "transcripts", "W1-T4450X")).filter((f) => f.startsWith("DAEMON-4450.fix-1-"));
   assert.equal(archived.length, 2, archived.join(", "));
 });
+
+test("a commit-message repair re-ask keeps its PR round but has a distinct worker cost identity", async () => {
+  const asked = fixRung({ root: mkdtempSync(join(tmpdir(), "rmd-repair-cost-ask-")), runId: "daemon-repair-cost" });
+  await runFixRung(asked.run);
+  const attempts = asked.lines.filter((line) => line.step === "worker.attempt");
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts.every((line) => line.repair_pr_url === asked.run.prUrl));
+  assert.equal(attempts[0]!.repair_round_id, attempts[1]!.repair_round_id);
+  assert.notEqual(attempts[0]!.worker_run_id, attempts[1]!.worker_run_id);
+});

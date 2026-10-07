@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: W1-T5999 follow-up (research r-5999); built on run-W1-T5999-1791296617622 (7b31026c), held as PR #9589"
   plan_refs: [W1-T5999, W1-T5325, W1-T4052, W1-T6027, W1-T6028]
   files: [src/run-task.ts, test/a-signal-ended-fix-round-that-left-work-still-commits-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

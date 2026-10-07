@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: W1-T5941 queue-safety proof (the gate before re-enabling the merge queue) failed sequences (c) and (d) on main"
   plan_refs: [W1-T5920, W1-T5941, W1-T2430, W1-T1223]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-light-pass-never-retries-a-deferred-requeue-blind-to-its-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

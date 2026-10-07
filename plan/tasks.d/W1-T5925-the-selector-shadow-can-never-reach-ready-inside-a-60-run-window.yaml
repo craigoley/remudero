@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
   plan_refs: [W1-T5705, W1-T5704, W1-T5697]
   files: [src/lib/selector-shadow-gardener.ts, src/lib/ledger.ts, test/the-selector-shadow-can-never-reach-ready-inside-a-60-run-window.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

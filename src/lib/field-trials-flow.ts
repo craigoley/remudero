@@ -17,14 +17,16 @@
  * checked per repository, salted pseudonyms, small cells withheld, and REFUSED if any private join
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
+import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
-import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStore, RUN_BRANCH_RE,
+import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -95,6 +97,9 @@ export interface FlowRow {
   servedModelReason?: string | null;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
+  repair?: RepairCostContext;
+  importedModule?: ImportedModuleEvidence;
+  preventions?: PreventionSourceRegistration[];
   taskClass: string | null;
   risk: string | null;
   workLane: string | null;
@@ -145,6 +150,9 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
+    repair: projectRepairCostContext(row),
+    importedModule: importedModuleOf(benchmark?.loadedModule),
+    preventions: preventionRegistrationsOf(row.prevention_sources),
     notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
       ? row.notional_cost_usd : null,
     taskClass: taskClass?.state === "observed" ? text(taskClass.value) : text(row.task_class),
@@ -328,8 +336,8 @@ function flowCells(units: FlowUnit[]) {
 }
 
 type RepairBucket = "adverse-signal" | "no-adverse-signal-in-window" | "window-immature" | "unknown";
-type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number;
-  reverted: boolean; followUp: boolean; bucket: RepairBucket };
+type RepairUnit = Unit & { firstPass: string; reviewRounds: number | null; repairCommits: number | null; fixDispatches: number; reworkCost: RepairCostReport;
+  toFirstObservedCurrentHeadGreen: Duration; reverted: boolean; followUp: boolean; bucket: RepairBucket };
 
 function repairCells(units: RepairUnit[]) {
   const count = (predicate: (unit: RepairUnit) => boolean) => units.filter(predicate).length;
@@ -337,6 +345,9 @@ function repairCells(units: RepairUnit[]) {
   for (const unit of units) firstPass[unit.firstPass] = (firstPass[unit.firstPass] ?? 0) + 1;
   const observed = units.filter((unit) => unit.reviewRounds !== null);
   return { mergedPrs: units.length, firstPass,
+    reworkCost: repairCostCells(units.map((unit) => unit.reworkCost)),
+    toFirstObservedCurrentHeadGreen: { ...durationCell(units.map((unit) => unit.toFirstObservedCurrentHeadGreen)),
+      basis: "pr-created-to-observed-current-head-gate-success" as const, firstEver: "unavailable-retention-uncertified" as const },
     reviewRounds: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.reviewRounds!, 0) },
     repairCommits: { observed: observed.length, total: observed.reduce((sum, unit) => sum + unit.repairCommits!, 0) },
     fixDispatches: units.reduce((sum, unit) => sum + unit.fixDispatches, 0),
@@ -413,6 +424,7 @@ export interface FieldTrialsFlowSnapshot {
   causalClaims: "none";
   followUpWindowDays: number;
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  preventionAdoption?: { source: string; repo: string; evidence: ReturnType<typeof preventionAdoption> }[];
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
     workLane: number; harnessPinned: number; promptPinned: number; toolPinned: number; scorerPinned: number;
     environmentPinned: number; attemptReceipts: number; nonStarterAssignments: number; costMissingAssignments: number;
@@ -567,6 +579,7 @@ function verifiedStage(taskId: string, rows: FlowRow[], caseFiles: readonly Task
 
 function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: Map<string, string | null>,
   rowsByTask: Map<string, FlowRow[]>): RepairUnit[] {
+  const reworkCosts = repairCostsByPull(ctx.rows, ctx.repo);
   const windowMs = FOLLOW_UP_WINDOW_DAYS * DAY_MS;
   const scanComplete = ctx.store?.cursors.pulls.state === "complete";
   const mergedByTask = new Map<string, GithubPull[]>();
@@ -585,9 +598,13 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
       : Date.parse(ctx.asOf) - mergedAt < windowMs ? "window-immature"
         : !scanComplete ? "unknown" : "no-adverse-signal-in-window";
     const detail = pull.detail.state === "observed" ? pull.detail : null;
+    const green = observedCurrentHeadGreen(pull, ctx.asOf);
     return withDigest({ key: `${ctx.label}|${periodOf(pull.mergedAt)}|${task === undefined ? "unlinked" : stratum(classOf.get(task) ?? null)}`,
       firstPass: detail === null ? "unavailable" : detail.checks.state, reviewRounds: detail?.reviews.changesRequested ?? null,
+      toFirstObservedCurrentHeadGreen: green === null ? { excluded: "missing-join" as const }
+        : { ms: Date.parse(green.completedAt) - Date.parse(pull.createdAt!), observed: true },
       repairCommits: detail === null ? null : Math.max(0, detail.commits.count - 1),
+      reworkCost: reworkCosts.get(pull.number) ?? repairCostCells([]),
       fixDispatches: (rowsByTask.get(task ?? "") ?? []).filter((row) => row.step === "fix.dispatch").length,
       reverted, followUp, bucket });
   });
@@ -662,6 +679,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
     learning: [] as LearningUnit[] };
   const transitions: ModelTransition[] = [];
+  const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
   const reasons: string[] = [];
   const privateKeys = new Set<string>();
   const assignmentTelemetry = new Map<string, FieldTrialsFlowSnapshot["assignmentTelemetry"][number]>();
@@ -687,6 +705,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         deploymentsKnown: Object.keys(store?.deployments ?? {}).length } });
     privateKeys.add(source.repo);
     const pulls = Object.values(store?.pulls ?? {});
+    preventionSources.push({ source: source.label, repo: source.repo, evidence: preventionAdoption(ledgerRows, input.asOf) });
     const ctx: SourceContext = { label: source.label, repo: source.repo, store, rows: ledgerRows, asOf: input.asOf,
       boots: ledgerRows.filter((row) => row.step === "daemon.boot"),
       mergedByNumber: new Map(pulls.filter((pull) => pull.mergedAt !== null).map((pull) => [pull.number, pull])),
@@ -812,7 +831,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes, reviewFindingEvidence,
+    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
