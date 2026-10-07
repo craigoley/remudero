@@ -3,7 +3,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -19,6 +19,7 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
@@ -509,6 +510,9 @@ export interface ReviewVerdict {
   state: ReviewState;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
+  /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
+   *  ProofSandboxStatus}). It rides `review.posted`'s `decision_verdict`, so a degraded review is on the record. */
+  proofSandboxDegraded?: string;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -1562,6 +1566,8 @@ export const PROOF_ENV_ALLOWLIST = [
   "GIT_CONFIG_KEY_0",
   "GIT_CONFIG_VALUE_0",
   "GIT_TERMINAL_PROMPT",
+  // W1-T6124: the browser cache's location, set by {@link proofChildEnv} so a throwaway HOME still finds Chromium.
+  "PLAYWRIGHT_BROWSERS_PATH",
 ] as const;
 
 /** The `GIT_CONFIG_*` keys {@link buildProofEnv} only ever forwards TOGETHER (W1-T1096). This allowlist names index 0
@@ -1587,6 +1593,316 @@ export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.P
   return child;
 }
 
+// ── W1-T6124: A REVIEW PROOF RUNS SANDBOXED, WITHOUT THE DAEMON'S CREDENTIALS ─────────────────────────────────────
+// A proof is the PR's OWN test code, run by design. W1-T499's allowlist kept GH_TOKEN out of its env, but the child
+// still ran as the daemon's uid with the daemon's HOME: it could write ~/.gitconfig (where deploy/entrypoint.sh keeps
+// the GH_TOKEN credential helper every later daemon git call honours), write the daemon's checkout and state, and read
+// the GitHub App key at GH_APP_PRIVATE_KEY_PATH. Two layers now: EVERY platform gets a throwaway HOME plus the env
+// allowlist; Linux additionally runs the child under bubblewrap in the shape of worker-provider.ts
+// `openWeightCheckSandboxArgv` (deploy/Dockerfile REQ 8 ships it) — new user/net/pid/ipc namespaces, only the checkout,
+// its git and node_modules link targets and a small runtime mounted. NETWORK: none is granted; a grep over test/ found
+// no proof that needs it, and loopback still works inside the namespace for tests that start a local server.
+
+/** The Linux runner a proof child starts under (W1-T6124). */
+export const PROOF_SANDBOX_BINARY = "bwrap";
+
+/** Host runtime roots bound read-only into a proof sandbox, the same set the open-weight check sandbox binds. */
+const PROOF_SANDBOX_RUNTIME_ROOTS = ["/usr", "/lib", "/lib64", "/bin", "/usr/local"] as const;
+
+/** The /etc entries a test runtime reads (user lookup, localhost, linker cache, TLS roots) — never /etc wholesale. */
+const PROOF_SANDBOX_ETC = [
+  "/etc/passwd",
+  "/etc/group",
+  "/etc/hosts",
+  "/etc/nsswitch.conf",
+  "/etc/localtime",
+  "/etc/ld.so.cache",
+  "/etc/ssl",
+  "/etc/ca-certificates",
+  "/etc/alternatives",
+  "/etc/fonts",
+] as const;
+
+/** How this process runs proof children: under bwrap, or UNSANDBOXED with the named reason — the reason is what
+ *  {@link ReviewVerdict.proofSandboxDegraded} records, so a degraded review is never silently read as a sandboxed one. */
+export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string };
+
+/** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
+ *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
+export class ProofSandboxUnavailableError extends RmdError {
+  constructor(readonly sandboxReason: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof sandbox could not start: ${sandboxReason}`, { sandboxReason });
+  }
+}
+
+let proofSandboxMemo: ProofSandboxStatus | undefined;
+let unsandboxedProofSpawns = 0;
+
+/** Test-only: pin (or with no argument, forget) the process's sandbox status. Production probes once. */
+export function setProofSandboxForTests(status?: ProofSandboxStatus): void {
+  proofSandboxMemo = status;
+}
+
+/** A spawn failure's first useful line, bounded for a ledger row. */
+function spawnFailureText(error: unknown): string {
+  const err = error as NodeJS.ErrnoException & { stderr?: string | Buffer | null };
+  if (err.code === "ENOENT") return `${PROOF_SANDBOX_BINARY} is not installed`;
+  const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
+  const line = stderr.split("\n").find((l) => l.trim() !== "") ?? String(err.message ?? error);
+  return line.trim().slice(0, 160);
+}
+
+export interface ProofSandboxProbeDeps {
+  platform?: NodeJS.Platform;
+  exec?: typeof execFileSync;
+}
+
+/** Decide, once per process, whether proof children can run under bwrap. Off Linux there is no bwrap and the review
+ *  still runs (an operator's darwin review must not be refused), recorded as degraded. On Linux the probe starts the
+ *  REAL sandbox argv around node itself, so a pass also proves the runtime is visible inside it. */
+export function probeProofSandbox(deps: ProofSandboxProbeDeps = {}): ProofSandboxStatus {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "linux") {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap is Linux-only; this ${platform} host ran the proof with a throwaway HOME and the env allowlist only`,
+    };
+  }
+  const exec = deps.exec ?? execFileSync;
+  const dir = makeTempDir("proof-sandbox-probe");
+  try {
+    exec(PROOF_SANDBOX_BINARY, [...proofSandboxArgv({ cwd: dir, home: dir }), process.execPath, "-e", ""], {
+      cwd: dir,
+      env: buildProofEnv(),
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+    return { mode: "bwrap", binary: PROOF_SANDBOX_BINARY };
+  } catch (error) {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap cannot start on this Linux host (${spawnFailureText(error)}); ran with a throwaway HOME and the env allowlist only`,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The process's memoised {@link probeProofSandbox} answer. */
+export function proofSandboxStatus(): ProofSandboxStatus {
+  proofSandboxMemo ??= probeProofSandbox();
+  return proofSandboxMemo;
+}
+
+/** How many proof children this process has started unsandboxed — {@link judgeReview} reads the delta. */
+export function unsandboxedProofSpawnCount(): number {
+  return unsandboxedProofSpawns;
+}
+
+/** A path's real location, or `undefined` when nothing is there to mount or mask. */
+function realpathIfPresent(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    return undefined; // absent: there is nothing at this path for a bind to expose
+  }
+}
+
+function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(pathSep) ? root : `${root}${pathSep}`);
+}
+
+/** The git directories a checkout's own `git` calls need: a worktree's private gitdir and the shared common dir it
+ *  names. Read by OPENING `.git` once (EISDIR means an ordinary clone), never by a stat-then-read pair. */
+export function proofCheckoutGitDirs(cwd: string): { common?: string; worktree?: string } {
+  const dotGit = join(cwd, ".git");
+  let text: string;
+  try {
+    text = readFileSync(dotGit, "utf8");
+  } catch (error) {
+    // EISDIR: an ordinary clone, whose .git sits inside the bound checkout. Anything else: no git dir to bind.
+    return (error as NodeJS.ErrnoException).code === "EISDIR" ? { common: dotGit } : {};
+  }
+  const gitdir = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
+  if (gitdir === undefined) return {};
+  const worktree = resolve(cwd, gitdir);
+  let common = worktree;
+  try {
+    common = resolve(worktree, readFileSync(join(worktree, "commondir"), "utf8").trim());
+  } catch (error) {
+    // No commondir file: a gitdir that is its own common dir. Any other read failure is the same answer.
+  }
+  return existsSync(worktree) ? { common, worktree } : {};
+}
+
+/** Where a checkout's `node_modules` really lives when it is a link to a shared install, plus every top-level package
+ *  link out of that install (npm workspaces link `node_modules/@scope/pkg` to the install's own `packages/`). */
+export function proofLinkedModuleRoots(cwd: string): string[] {
+  let target: string;
+  try {
+    target = realpathSync(join(cwd, "node_modules"));
+  } catch (error) {
+    // No node_modules (or a dangling link): nothing outside the checkout to mount.
+    return [];
+  }
+  const checkout = realpathSync(cwd);
+  const roots = isWithin(target, checkout) ? [] : [target];
+  const scan = (dir: string, depth: number): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (depth === 0 && entry.isDirectory() && entry.name.startsWith("@")) scan(path, 1);
+      if (!entry.isSymbolicLink()) continue;
+      let real: string;
+      try {
+        real = realpathSync(path);
+      } catch (error) {
+        continue; // a dangling package link resolves to nothing the sandbox could mount
+      }
+      if (!isWithin(real, target) && !isWithin(real, checkout)) roots.push(real);
+    }
+  };
+  scan(target, 0);
+  return roots;
+}
+
+export interface ProofSandboxArgvInput {
+  cwd: string;
+  home: string;
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+}
+
+/** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
+ *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
+ *  masked by /dev/null), the node_modules link targets and the browser cache. NOT mounted: the daemon's HOME, its
+ *  checkout and state, and the App key — masked by /dev/null too if some bind happens to contain it. */
+export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
+  const env = input.env ?? process.env;
+  const cwd = realpathSync(input.cwd);
+  const home = realpathSync(input.home);
+  if (cwd === "/" || home === "/") throw new ProofSandboxUnavailableError("refusing / as a writable sandbox bind");
+  const runtime: string[] = PROOF_SANDBOX_RUNTIME_ROOTS.filter((p) => existsSync(p));
+  const binds: { path: string; writable: boolean }[] = [];
+  const nodePrefix = dirname(dirname(realpathSync(input.execPath ?? process.execPath)));
+  if (!runtime.some((root) => isWithin(nodePrefix, root))) binds.push({ path: nodePrefix, writable: false });
+  for (const path of PROOF_SANDBOX_ETC) if (existsSync(path)) binds.push({ path, writable: false });
+  const browsers = realpathIfPresent(playwrightCacheRoot(env, "linux", env.HOME ?? home));
+  if (browsers !== undefined) binds.push({ path: browsers, writable: false });
+  for (const path of proofLinkedModuleRoots(cwd)) binds.push({ path, writable: false });
+  const found = proofCheckoutGitDirs(cwd);
+  const git = {
+    common: found.common === undefined ? undefined : realpathSync(found.common),
+    worktree: found.worktree === undefined ? undefined : realpathSync(found.worktree),
+  };
+  if (git.common !== undefined && !isWithin(git.common, cwd)) binds.push({ path: git.common, writable: false });
+  if (git.worktree !== undefined && !isWithin(git.worktree, cwd)) binds.push({ path: git.worktree, writable: true });
+  binds.push({ path: cwd, writable: true });
+  if (home !== cwd) binds.push({ path: home, writable: true });
+  // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
+  binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
+  const masks: string[] = [];
+  if (git.common !== undefined && existsSync(join(git.common, "config"))) masks.push(join(git.common, "config"));
+  const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
+  if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push(key);
+  const dirs = new Set<string>();
+  for (const { path } of binds) {
+    for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
+  }
+  const createDirs = [...dirs].sort((a, b) => a.split(pathSep).length - b.split(pathSep).length);
+  return [
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-user",
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    ...runtime.flatMap((path) => ["--ro-bind", path, path]),
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    ...createDirs.flatMap((path) => ["--dir", path]),
+    ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
+    ...masks.flatMap((path) => ["--ro-bind", "/dev/null", path]),
+    "--chdir", cwd,
+    "--",
+  ];
+}
+
+/** The proof child's env: {@link buildProofEnv}'s allowlist with HOME replaced by a throwaway one, and the browser
+ *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
+export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...buildProofEnv(parent),
+    HOME: home,
+    PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
+  };
+}
+
+interface PreparedProofChild {
+  file: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  /** The sandbox argv around node itself, run first: a sandbox that cannot start must not read as the proof's exit. */
+  startCheck?: { file: string; args: string[] };
+  cleanup: () => void;
+}
+
+/** One proof child's argv and env, with its throwaway HOME made (`rmd-proof-home-*`) and the cleanup that removes it. */
+function prepareProofChild(command: string, args: readonly string[], cwd: string): PreparedProofChild {
+  const child = proofChildCommand(command, args);
+  const home = makeTempDir("proof-home");
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  const env = proofChildEnv(home);
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") {
+    unsandboxedProofSpawns += 1;
+    return { ...child, env, cleanup };
+  }
+  try {
+    const sandbox = proofSandboxArgv({ cwd, home });
+    return {
+      file: status.binary,
+      args: [...sandbox, child.file, ...child.args],
+      env,
+      startCheck: { file: status.binary, args: [...sandbox, process.execPath, "-e", ""] },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    throw error instanceof ProofSandboxUnavailableError ? error : new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+function startCheckSync(child: PreparedProofChild, cwd: string): void {
+  try {
+    execFileSync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<void> {
+  try {
+    await execFileAsync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
 /** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout, and a DECLARED env ({@link buildProofEnv})
  *  rather than an implicit inherit of `process.env` (W1-T499), which once let a proof inherit the orchestrator's whole
  *  environment. Exported (W1-T387) so `checkProofCommand` can wrap it for diagnostics, never for the verdict. TRAP:
@@ -1607,10 +1923,19 @@ export function proofChildCommand(
 }
 
 export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) => {
-  const child = proofChildCommand(command, args);
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) startCheckSync(child, cwd);
+    return spawnPreparedProofSync(child, cwd, timeoutMs);
+  } finally {
+    child.cleanup();
+  }
+};
+
+function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutMs: number): string {
   return execFileSync(child.file, child.args, {
     cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
+    env: { ...child.env, NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
     // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
@@ -1624,7 +1949,7 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     killSignal: "SIGKILL",
     encoding: "utf8",
   });
-};
+}
 
 /** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
 function execFileAsync(
@@ -1650,14 +1975,19 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) => {
-  const child = proofChildCommand(command, args);
-  return execFileAsync(child.file, child.args, {
-    cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-  });
+export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) await startCheckAsync(child, cwd);
+    return await execFileAsync(child.file, child.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+  } finally {
+    child.cleanup();
+  }
 };
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
@@ -1668,6 +1998,19 @@ const reviewerOwnedCheckouts = new Set<string>();
 const failedProofToolchainInstalls = new Set<string>();
 export function registerReviewerCheckout(path: string): void {
   reviewerOwnedCheckouts.add(resolve(path));
+}
+
+/** W1-T6124: how a PR checkout is installed. `--ignore-scripts` because npm ci otherwise runs the PR's OWN root
+ *  lifecycle scripts (preinstall/install/postinstall/prepare); this repo's package.json and workspaces declare none,
+ *  and esbuild/@swc/core (the only dependencies with install scripts) resolve their platform binary from an optional
+ *  dependency without them — measured: `npm ci --ignore-scripts` then `node --import tsx` runs. */
+export const PROOF_INSTALL_ARGS: readonly string[] = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
+
+/** The install's env: {@link buildProofEnv}'s allowlist, so no GH_TOKEN, GH_APP_* or other credential reaches npm or
+ *  an `${VAR}` a PR's own .npmrc interpolates. HOME stays the daemon's so npm's cache keeps a fresh install inside its
+ *  120s bound; with scripts off, npm itself is the only code that runs. */
+export function proofInstallEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return buildProofEnv(parent);
 }
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
@@ -1710,7 +2053,7 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -1736,7 +2079,7 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const install = execFileAsync("npm", ["ci"], { cwd, timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const install = execFileAsync("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
     () => undefined,
     () => undefined, // Best effort; the runner check below decides availability.
   );
@@ -3410,6 +3753,13 @@ export function judgeCriterion(
             loadError = e.loadError;
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofSandboxUnavailableError) {
+            // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
+            proofExec = "not_executable";
+            proofSkip = "runner-absent";
+            reason =
+              `${reason} — NOTE: the proof sandbox could not start (${e.sandboxReason}); ` +
+              "not executed, keyword floor applied";
           } else if (e instanceof ProofRunnerUnavailableError) {
             proofExec = "not_executable";
             proofSkip = "runner-absent";
@@ -4427,6 +4777,7 @@ export function judgeReview(
   // byte-identical to pre-W1-T65. W1-T2743: ONE memo per judgeReview call. Built here rather than inside
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
   const proofMemo = evidence.headCheckoutDir ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof) : undefined;
+  const unsandboxedBefore = unsandboxedProofSpawns;
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
@@ -4639,6 +4990,7 @@ export function judgeReview(
   return {
     state,
     cannotEvaluate,
+    ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,
     testTheater,
     summary,
@@ -4677,12 +5029,20 @@ export function judgeReview(
   };
 }
 
+/** W1-T6124: the verdict's degraded-sandbox record when a proof child started unsandboxed since `before`. */
+function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDegraded"> {
+  if (unsandboxedProofSpawns === before) return {};
+  const status = proofSandboxStatus();
+  return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
+}
+
 /** Resolve each requested head/base observation without blocking, then fold with the same judge. */
 export async function judgeReviewAsync(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
+  const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
     | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string }
     | { error: unknown };
@@ -4707,7 +5067,7 @@ export async function judgeReviewAsync(
       throw new Error("async proof observation pending");
     };
     const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
-    if (pending.size === 0) return verdict;
+    if (pending.size === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
