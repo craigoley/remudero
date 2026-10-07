@@ -52,18 +52,39 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY \
 # worktree, so a loose truthiness test would let a stray value turn the fleet's gates off.
 [ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0
 
+# W1-T6120 — EVERY SCRIPT BELOW RUNS FROM THIS HOOK'S OWN CODE ROOT, never from the tree being pushed.
+# The push leaf runs the HARNESS's copy of this file with the worker worktree as cwd, so a relative
+# `scripts/x.mjs` (or `--import tsx`, or the cwd's tsconfig) would run the code the worker wrote, as the
+# daemon. The cwd is DATA: each check reads it as the repository it judges. When this file is the tree's
+# own hook (a worker or an operator pushing their checkout), the two roots coincide and nothing changes.
+gate_root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)"
+tree_root="$(pwd -P)"
+tsx_loader="$gate_root/node_modules/tsx/dist/loader.mjs"
+if [ ! -f "$tsx_loader" ]; then
+  tsx_loader=""
+  echo "pre-push: no tsx loader under $gate_root — each loader-run check below reads absent: skipped, NOT passed" >&2
+fi
+[ -f "$gate_root/tsconfig.json" ] && export TSX_TSCONFIG_PATH="$gate_root/tsconfig.json"
+export RMD_GATE_ROOT="$gate_root"
+# A check whose QUESTION is the tree's own code (its census suites, its package.json lint argv, its
+# capability generator) runs only when the tree is the gate root; from the harness it is skipped by name.
+own_tree=0
+[ "$gate_root" = "$tree_root" ] && own_tree=1
+# A loader-run check with no loader under the gate root could only exit 1, which reads as a violation.
+has() { [ -f "$gate_root/scripts/$1" ] && { [ "${2:-}" != tsx ] || [ -n "$tsx_loader" ]; }; }
+
 fail=0
 
 # A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED — AND IT IS NOT A VIOLATION EITHER. All
 # checks below are skipped-with-a-name when their entry point is absent, and the prechecks' own exit
 # 2 (an unreadable diff) is honoured as unreadable. Blocking a push because a check was missing
 # would be this repo's recurring defect: a bound that fires on a healthy condition.
-if [ -f scripts/rule15-precheck.mjs ]; then
+if has rule15-precheck.mjs tsx; then
   # VIA THE LOADER, like every other entry point here: the script imports `src/lib/review.js`, a
   # path that exists only under tsx, so a bare `node` exits 1 with ERR_MODULE_NOT_FOUND — which the
   # exit-code arms below would have read as a rule-15 VIOLATION. A check that cannot run must not be
   # able to masquerade as a check that failed; package.json's own `rule15-precheck` alias is tsx.
-  node --import tsx scripts/rule15-precheck.mjs
+  node --import "$tsx_loader" "$gate_root/scripts/rule15-precheck.mjs"
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: rule15-precheck could not read the diff — not blocking on an unreadable check" >&2
@@ -77,8 +98,8 @@ fi
 # W1-T3072 — ask the reviewer's exact Rule 25 question while the diff is still local. This is
 # separate from rule15: one prevents a plan criterion riding with implementation, the other keeps
 # measurement instruments from riding with the product they judge.
-if [ -f scripts/rule25-precheck.mjs ]; then
-  node --import tsx scripts/rule25-precheck.mjs
+if has rule25-precheck.mjs tsx; then
+  node --import "$tsx_loader" "$gate_root/scripts/rule25-precheck.mjs"
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: rule25-precheck could not read the diff — not blocking on an unreadable check" >&2
@@ -92,10 +113,30 @@ fi
 # W1-T3423 — a CI control-plane edit can be mechanically incomplete while its only existing
 # detectors run after the push. This static route reads only the local merge-base diff and tracked
 # control-plane inputs; status 2 is an unreadable local fact, not permission to strand the fleet.
-if [ -f scripts/ci-control-plane-precheck.mjs ]; then
-  node --import tsx scripts/ci-control-plane-precheck.mjs
+if has ci-control-plane-precheck.mjs tsx; then
+  if [ "$own_tree" -eq 1 ]; then
+    node --import "$tsx_loader" "$gate_root/scripts/ci-control-plane-precheck.mjs"
+  else
+    # Its capability arm spawns the TREE's generator, so a diff reaching it is skipped by name (exit 4).
+    node --import "$tsx_loader" -e '
+      const { pathToFileURL } = require("node:url");
+      const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
+      Promise.all([at("/scripts/ci-control-plane-precheck.mjs"), at("/scripts/lib/git.mjs")]).then(([m, g]) => {
+        let files;
+        try { files = g.gitOrThrow(["diff", "--name-only", "origin/main...HEAD"]).split("\n").filter(Boolean); }
+        catch (e) { console.error(String(e.message ?? e)); process.exit(2); }
+        if (m.affectedCapabilitySnapshot(files)) {
+          console.error("pre-push: ci-control-plane-precheck — this diff moves a capability-snapshot input, whose check runs the branch\x27s own generator; the host gate runs no worktree code: skipped, NOT passed (CI runs it)");
+          process.exit(4);
+        }
+        process.exit(m.runCiControlPlanePrecheck({ readChangedFiles: () => files }));
+      }, () => process.exit(2));
+    '
+  fi
   rc=$?
-  if [ "$rc" -eq 2 ]; then
+  if [ "$rc" -eq 4 ]; then
+    :
+  elif [ "$rc" -eq 2 ]; then
     echo "pre-push: ci-control-plane-precheck could not read the diff — not blocking on an unreadable check" >&2
   elif [ "$rc" -ne 0 ]; then
     fail=1
@@ -106,13 +147,13 @@ fi
 
 # W1-T3205: BEGIN test-tier admission
 # Refuse before push, but never mutate the duration ledger from a gate.
-if [ -f scripts/test-tier-manifest.mjs ]; then
+if has test-tier-manifest.mjs; then
   # W1-T4430 — WHAT THIS REFUSES FLIPPED. A new test file with no manifest row is the fast tier
   # and is ADMITTED (no row is ever seeded for it); the check now refuses only a GHOST row, one that
   # names a test file no longer on disk, and names the fix ("remove the row, or restore the file").
   # `--base` is still passed so this stays CI's exact invocation, though the ghost check does not
   # need it: a stale row is stale whichever commit introduced it.
-  node scripts/test-tier-manifest.mjs --check --base origin/main || fail=1
+  node "$gate_root/scripts/test-tier-manifest.mjs" --check --base origin/main || fail=1
 else
   echo "pre-push: scripts/test-tier-manifest.mjs absent — skipped, NOT passed" >&2
 fi
@@ -143,8 +184,20 @@ fi
 # because a census names none of a caller's symbols. scripts/census-precheck.mjs imports each one's
 # own counter, reads files and spawns only read-only git. It blocks only growth this branch causes
 # against origin/main's merge base; a census main already fails is not this push's to answer for.
-if [ -f scripts/census-precheck.mjs ]; then
-  node scripts/census-precheck.mjs --base origin/main
+if has census-precheck.mjs; then
+  if [ "$own_tree" -eq 1 ]; then
+    node "$gate_root/scripts/census-precheck.mjs" --base origin/main
+  else
+    # The counts run from the gate root over this tree as data, against the GATE ROOT's admission table;
+    # a census suite to run is this tree's own test file, so it reads NOT MEASURED instead (exit 2).
+    node -e '
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.env.RMD_GATE_ROOT + "/scripts/census-precheck.mjs").href).then((m) => {
+        const runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
+        process.exitCode = m.main(["--base", "origin/main"], { admitted: () => m.listAdmittedCensusMembers(process.env.RMD_GATE_ROOT), runSuites });
+      }, (e) => { console.error(String(e?.message ?? e)); process.exitCode = 2; });
+    '
+  fi
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: census-precheck could not measure — not blocking on an unreadable check" >&2
@@ -160,8 +213,10 @@ fi
 # MEASURED 2026-09-16..30: 14 of 55 single-shard test reds were the PR's own shard failing `lint-plan:fast`. The script
 # spawns that npm script's argv (offline, no test runner), abstains on a stale origin/main, and reports a
 # machine-filing-admission-only finding without blocking.
-if [ -f scripts/lint-plan-precheck.mjs ]; then
-  node scripts/lint-plan-precheck.mjs --base origin/main
+if [ "$own_tree" -ne 1 ] && has lint-plan-precheck.mjs; then
+  echo "pre-push: lint-plan-precheck runs the branch's own package.json lint argv; the host gate runs no worktree code: skipped, NOT passed (CI runs it)" >&2
+elif has lint-plan-precheck.mjs; then
+  node "$gate_root/scripts/lint-plan-precheck.mjs" --base origin/main
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check" >&2
@@ -203,9 +258,9 @@ fi
 if [ -z "$head_sha" ]; then
   head_sha="HEAD"
 fi
-if [ -f scripts/head-identity-gate.mjs ]; then
+if has head-identity-gate.mjs tsx; then
   if [ -n "$head_ref" ] && [ "$head_ref" != "HEAD" ]; then
-    if ! node --import tsx scripts/head-identity-gate.mjs --head-ref "$head_ref"; then
+    if ! node --import "$tsx_loader" "$gate_root/scripts/head-identity-gate.mjs" --head-ref "$head_ref"; then
       echo "pre-push: head-identity-gate would REFUSE this head in CI — advisory here, so the push" >&2
       echo "pre-push: continues. Fix it before CI does: add an anchored \`Remudero-Task: <id>\` trailer" >&2
       echo "pre-push: to the head commit, or push a \`run-<taskId>-<epochMs>\` branch." >&2
@@ -229,15 +284,15 @@ fi
 # SAME remote ref on both sides, so a ref-shaped identity can never be lost here; what can be is a trailer.
 # Both messages are read exactly as the gate reads one (--first-parent --no-merges).
 zero_sha="0000000000000000000000000000000000000000"
-if [ -f scripts/head-identity-gate.mjs ] && [ -n "$head_ref" ] && [ -n "${_remote_sha:-}" ] \
+if has head-identity-gate.mjs tsx && [ -n "$head_ref" ] && [ -n "${_remote_sha:-}" ] \
    && [ "$_remote_sha" != "$zero_sha" ] && [ "${_local_sha:-}" != "$zero_sha" ] && [ "$head_sha" != "HEAD" ]; then
   if git cat-file -e "${_remote_sha}^{commit}" 2>/dev/null; then
     RMD_IDT_REF="$head_ref" \
     RMD_IDT_OLD="$(git log -1 --first-parent --no-merges --format=%B "$_remote_sha" 2>/dev/null)" \
     RMD_IDT_NEW="$(git log -1 --first-parent --no-merges --format=%B "$head_sha" 2>/dev/null)" \
-    node --import tsx -e '
+    node --import "$tsx_loader" -e '
       const { pathToFileURL } = require("node:url");
-      import(pathToFileURL(process.cwd() + "/scripts/head-identity-gate.mjs").href).then((gate) => {
+      import(pathToFileURL(process.env.RMD_GATE_ROOT + "/scripts/head-identity-gate.mjs").href).then((gate) => {
         const { RMD_IDT_REF: headRef, RMD_IDT_OLD: oldMsg, RMD_IDT_NEW: newMsg } = process.env;
         if (!oldMsg || !newMsg) process.exit(2);
         const was = gate.evaluateHeadIdentityGate({ headCommitMessage: oldMsg, headRef });
@@ -265,8 +320,8 @@ fi
 # A plan-only shard on its own run branch would create false implementation credit at merge.
 # This narrow check runs before the first push, when the branch can still be renamed. An
 # unreadable base, diff or shard is unknown, not a reason to strand fleet work.
-if [ -f scripts/worker-branch-shape.mjs ]; then
-  node scripts/worker-branch-shape.mjs --self-credit-only --base origin/main --head-ref "$head_ref" --head-sha "$head_sha"
+if has worker-branch-shape.mjs; then
+  node "$gate_root/scripts/worker-branch-shape.mjs" --self-credit-only --base origin/main --head-ref "$head_ref" --head-sha "$head_sha"
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: worker-branch-shape could not read local evidence — not blocking" >&2
@@ -280,8 +335,8 @@ fi
 # BEGIN proof-resolve precheck (2026-09-29) — the reviewer's certain proof refusals, asked before the push.
 # MEASURED 2026-09-15..29: 14 of 40 reviewer-unmet fix rounds were a `unit test:` title no test carried. The script
 # reuses the reviewer's own resolver, spawns no test runner, blocks only on a title miss, and reports a grep miss.
-if [ -f scripts/proof-resolve-precheck.mjs ]; then
-  node --import tsx scripts/proof-resolve-precheck.mjs --base origin/main --head-ref "${head_ref:-}"
+if has proof-resolve-precheck.mjs tsx; then
+  node --import "$tsx_loader" "$gate_root/scripts/proof-resolve-precheck.mjs" --base origin/main --head-ref "${head_ref:-}"
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: proof-resolve-precheck could not read this head — not blocking on an unreadable check" >&2
