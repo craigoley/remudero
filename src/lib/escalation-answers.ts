@@ -51,7 +51,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { appendQuestionAnswer } from "./worker.js";
 import {
@@ -101,14 +101,14 @@ export interface EscalationIssueReaction {
  *  omitting all three (every W1-T4471 test double) just reads zero issue-level reactions. */
 export interface EscalationAnswerGateway {
   /** OPEN issues carrying `label` — the same REST read {@link "./escalate.js".IssueGateway.listOpen}
-   *  makes. THROWS on a `gh` read failure; the caller degrades to "nothing new this pass". */
-  listOpen(label: string): OpenIssue[];
-  /** Every comment on one issue, oldest first (GitHub's own order). THROWS on a `gh` read
+   *  makes. REJECTS on a `gh` read failure; the caller counts the pass as unreadable. */
+  listOpen(label: string): Promise<OpenIssue[]>;
+  /** Every comment on one issue, oldest first (GitHub's own order). REJECTS on a `gh` read
    *  failure; the caller skips just that issue this pass. */
-  listComments(issueNumber: number): EscalationIssueComment[];
-  /** Every reaction on the issue ITSELF, oldest first. THROWS on a `gh` read failure; the caller
+  listComments(issueNumber: number): Promise<EscalationIssueComment[]>;
+  /** Every reaction on the issue ITSELF, oldest first. REJECTS on a `gh` read failure; the caller
    *  skips just that issue's reactions this pass. Optional — see the interface's own header. */
-  listReactions?(issueNumber: number): EscalationIssueReaction[];
+  listReactions?(issueNumber: number): Promise<EscalationIssueReaction[]>;
   /** The repository owner's own GitHub login — the ONLY login {@link readEscalationAnswers}
    *  ever accepts a reaction from (see this module's header on why a reaction, unlike a comment,
    *  cannot be checked via `author_association`). Optional — see the interface's own header. */
@@ -146,16 +146,21 @@ interface RestReactionRow {
  *  never a repo-content write in that census's sense: it changes nothing an operator or the fix
  *  rung reads back).
  */
-export function ghEscalationAnswerGateway(owner: string, repo: string): EscalationAnswerGateway {
+export function ghEscalationAnswerGateway(
+  owner: string,
+  repo: string,
+  deps: { execAsync?: GhAsyncExecutor; exec?: (args: string[]) => string } = {},
+): EscalationAnswerGateway {
   const repoArg = `${owner}/${repo}`;
-  const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const read = (args: string[]) => ghTextAsync(args, {}, deps.execAsync);
+  const write = deps.exec ?? ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   return {
     ownerLogin: owner,
-    listOpen(label) {
-      return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
+    async listOpen(label) {
+      return parseLabelledIssuesRest(await read(labelledIssuesRestArgs(repoArg, label, "open")));
     },
-    listComments(issueNumber) {
-      const raw = run(["api", `repos/${repoArg}/issues/${issueNumber}/comments?per_page=100`, "--paginate"]);
+    async listComments(issueNumber) {
+      const raw = await read(["api", `repos/${repoArg}/issues/${issueNumber}/comments?per_page=100`, "--paginate"]);
       const rows = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
         const page = JSON.parse(chunk) as unknown;
         if (!Array.isArray(page)) throw new Error(`listComments: expected a JSON array page, got ${typeof page}`);
@@ -169,8 +174,8 @@ export function ghEscalationAnswerGateway(owner: string, repo: string): Escalati
         authorType: r.user?.type ?? "User",
       }));
     },
-    listReactions(issueNumber) {
-      const raw = run(["api", `repos/${repoArg}/issues/${issueNumber}/reactions?per_page=100`, "--paginate"]);
+    async listReactions(issueNumber) {
+      const raw = await read(["api", `repos/${repoArg}/issues/${issueNumber}/reactions?per_page=100`, "--paginate"]);
       const rows = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
         const page = JSON.parse(chunk) as unknown;
         if (!Array.isArray(page)) throw new Error(`listReactions: expected a JSON array page, got ${typeof page}`);
@@ -184,10 +189,10 @@ export function ghEscalationAnswerGateway(owner: string, repo: string): Escalati
       }));
     },
     reactPlusOne(commentId) {
-      run(["api", `repos/${repoArg}/issues/comments/${commentId}/reactions`, "-f", "content=+1"]);
+      write(["api", `repos/${repoArg}/issues/comments/${commentId}/reactions`, "-f", "content=+1"]);
     },
     reactPlusOneOnIssue(issueNumber) {
-      run(["api", `repos/${repoArg}/issues/${issueNumber}/reactions`, "-f", "content=+1"]);
+      write(["api", `repos/${repoArg}/issues/${issueNumber}/reactions`, "-f", "content=+1"]);
     },
   };
 }
@@ -293,20 +298,20 @@ export interface EscalationAnswerResult {
  * A failed read degrades only its own slice (the whole list, or one issue) and is counted in
  * `unreadable`; a failed reaction never un-lands an answer. `root` holds the question store.
  */
-export function readEscalationAnswers(
+export async function readEscalationAnswers(
   root: string,
   runId: string,
   gateway: EscalationAnswerGateway,
   deps: LedgerWriterDeps,
   clock: Clock = systemClock,
-): EscalationAnswerResult {
+): Promise<EscalationAnswerResult> {
   const writeLedger = deps.writeLedger ?? appendLedger;
   let accepted = 0;
   let ignored = 0;
   let unreadable = 0;
   let issues: OpenIssue[];
   try {
-    issues = gateway.listOpen(NEEDS_QUESTION_LABEL);
+    issues = await gateway.listOpen(NEEDS_QUESTION_LABEL);
   } catch {
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
@@ -332,7 +337,7 @@ export function readEscalationAnswers(
     if (!taskId) continue; // an issue with no recoverable task referent steers nothing
     let comments: EscalationIssueComment[];
     try {
-      comments = gateway.listComments(issue.number);
+      comments = await gateway.listComments(issue.number);
     } catch {
       unreadable++; // counted, then just this issue is skipped this pass
       continue;
@@ -364,7 +369,7 @@ export function readEscalationAnswers(
     if (!gateway.listReactions || !gateway.ownerLogin) continue;
     let reactions: EscalationIssueReaction[];
     try {
-      reactions = gateway.listReactions(issue.number);
+      reactions = await gateway.listReactions(issue.number);
     } catch {
       unreadable++; // counted, then just this issue's reactions are skipped this pass
       continue;

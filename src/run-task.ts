@@ -45320,22 +45320,24 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = await tickReadFor?.();
     try {
       await mainHealthRung?.();
     } catch (e) {
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
     }
-    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
-    // so a reply steers this same tick. Contained like `mainHealthRung` above.
+    // Land owner replies before requesting views; a prebuilt read-plane snapshot also needs its
+    // local answer evidence refreshed below so a reply steers this same tick.
+    let ownerRepliesLanded = false;
     if (escalationAnswerGateway) {
       try {
-        const answers = readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        ownerRepliesLanded = answers.accepted > 0;
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
       } catch (e) {
         log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
       }
     }
+    const tickRead = await tickReadFor?.();
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
@@ -45354,6 +45356,13 @@ export function buildSweepHook(
         isMerged,
           readMainPlan: resolvedReadMainPlan,
       });
+      if (tickRead && ownerRepliesLanded) {
+        const questionLines = readQuestionsNdjson(repoRoot);
+        const ledger = readLedgerLines(ledgerPath);
+        for (const pr of openPrs) {
+          pr.pendingAnswer = pr.taskId ? operatorVerdictEvidence(pr.taskId, ledger, questionLines) : undefined;
+        }
+      }
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
