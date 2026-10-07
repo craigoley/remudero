@@ -7,7 +7,6 @@
   verify: auto
   risk: medium
   status: done
-  retirement: closed
   # plan gardener: retire W1-T5973 commit 2065b130042e98dd38af2d711387a9193cea9404 — Every acceptance proof now holds on main, and did not when it was filed.
   # backlog gardener: retirement evidence=e3576e178302f6fb
   attempts: 0
