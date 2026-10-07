@@ -12,7 +12,7 @@ import {
   type DeployDeps,
   type RefusalStreak,
 } from "../src/lib/deployer.js";
-import { escalatePersistingRefusal } from "../src/lib/deploy-refusal-escalation.js";
+import { escalatePersistingRefusal, refusalEscalationFor, refusalEscalationOrNone } from "../src/lib/deploy-refusal-escalation.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -264,4 +264,65 @@ test("W1-T6062: the shipped streak survives a fresh process and clears on retrac
   make().setRefusalStreak!(undefined);
   assert.equal(existsSync(deployRefusalStreakPath(root)), false);
   assert.equal(make().refusalStreak!(), undefined);
+});
+
+test("W1-T6062: the close half hands the issue url and comment to the gateway", () => {
+  const closed: Array<[string, string]> = [];
+  const gateway: IssueGateway = { create: () => "u", closeWithComment: (url, comment) => { closed.push([url, comment]); } };
+  refusalEscalationFor(gateway, "/unused/ledger.ndjson").closeRefusalIssue("https://github.com/o/r/issues/7", "recycled and verified");
+  assert.deepEqual(closed, [["https://github.com/o/r/issues/7", "recycled and verified"]]);
+});
+
+test("W1-T6062: a gateway that cannot close issues refuses rather than silently leaving the issue open", () => {
+  const gateway: IssueGateway = { create: () => "u" };
+  assert.throws(() => refusalEscalationFor(gateway, "/unused/ledger.ndjson").closeRefusalIssue("u", "c"), /cannot close issues/);
+});
+
+test("W1-T6062: a checkout that cannot name its owner and repo gets no escalation halves", () => {
+  const halves = refusalEscalationOrNone(
+    () => { throw new Error("not a git checkout"); },
+    () => { throw new Error("the gateway must not be built without an owner/repo"); },
+    "/unused/ledger.ndjson",
+  );
+  assert.deepEqual(halves, {});
+});
+
+test("W1-T6062: a resolvable owner and repo binds both halves to a gateway for that repo", () => {
+  const built: Array<[string, string]> = [];
+  const halves = refusalEscalationOrNone(
+    () => ({ owner: "o", repo: "r" }),
+    (owner, repo) => { built.push([owner, repo]); return { create: () => "u" }; },
+    "/unused/ledger.ndjson",
+  );
+  assert.deepEqual(built, [["o", "r"]]);
+  assert.equal(typeof halves.escalateRefusal, "function");
+  assert.equal(typeof halves.closeRefusalIssue, "function");
+});
+
+test("W1-T6062: a streak file that cannot be written is logged and never breaks the cycle", (t) => {
+  const h = harness(scratch(t));
+  (h.deps as { setRefusalStreak: (s: RefusalStreak | undefined) => void }).setRefusalStreak = () => {
+    throw new Error("disk full");
+  };
+  runDeployCycle(h.deps);
+  const row = h.rows.find((r) => r.step === "deploy.refusal_streak_unwritable");
+  assert.equal(row?.data.error, "disk full");
+  assert.equal(h.rows.filter((r) => r.step === "deploy.restart_refused").length, 1, "the refusal itself is still recorded");
+});
+
+test("W1-T6062: a failed issue close is logged with the issue and the verified recycle still completes", (t) => {
+  const h = harness(scratch(t));
+  for (let i = 0; i < REFUSAL_ESCALATE_AT; i += 1) runDeployCycle(h.deps);
+  const url = h.streak()!.issueUrl;
+  assert.ok(url, "the streak holds the open issue's url");
+  (h.deps as { closeRefusalIssue: (u: string, c: string) => void }).closeRefusalIssue = () => {
+    throw new Error("gateway down");
+  };
+  h.setRefusing(undefined);
+  const out = runDeployCycle(h.deps);
+  assert.equal(out.deployed, true, out.reason);
+  const row = h.rows.find((r) => r.step === "deploy.refusal_close_failed");
+  assert.equal(row?.data.issue, url);
+  assert.equal(row?.data.error, "gateway down");
+  assert.equal(h.streak(), undefined, "the streak is forgotten even though the close failed");
 });

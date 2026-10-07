@@ -452,7 +452,7 @@ import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { refusalEscalationFor } from "./lib/deploy-refusal-escalation.js";
+import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -38389,15 +38389,6 @@ async function deployCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
-function deployRefusalEscalation(ledgerPath: string): Partial<ReturnType<typeof refusalEscalationFor>> {
-  try {
-    const self = resolveOwnerRepo();
-    return refusalEscalationFor(ghIssueGateway(self.owner, self.repo), ledgerPath);
-  } catch {
-    return {}; // W1-T6062: no resolvable owner/repo, so the refusal is counted and logged but opens no issue
-  }
-}
-
 /**
  * `rmd deploy-run [--dry-run]` — ONE supervisor cycle (the launchd unit runs this on
  * its interval). No-op unless a deploy is triggered AND the daemon is idle. `--dry-run`
@@ -38462,7 +38453,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
-      ...deployRefusalEscalation(ledgerPathFor(effectiveConfig)),
+      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig)),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no

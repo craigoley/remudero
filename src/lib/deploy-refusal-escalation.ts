@@ -54,3 +54,18 @@ export function refusalEscalationFor(
     },
   };
 }
+
+/** {@link refusalEscalationFor} for a checkout that may not name its own owner/repo: with none, the
+ *  halves are absent, so the refusal is counted and logged but opens no issue. */
+export function refusalEscalationOrNone(
+  resolveSelf: () => { owner: string; repo: string },
+  gatewayFor: (owner: string, repo: string) => IssueGateway,
+  ledgerPath: string,
+): Partial<ReturnType<typeof refusalEscalationFor>> {
+  try {
+    const self = resolveSelf();
+    return refusalEscalationFor(gatewayFor(self.owner, self.repo), ledgerPath);
+  } catch {
+    return {}; // no resolvable owner/repo: the refusal is counted and logged but opens no issue
+  }
+}
