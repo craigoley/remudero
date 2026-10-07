@@ -18,20 +18,24 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError, worktreeGitCapture, worktreePushExec } from "../src/lib/git-push.js";
+import * as gitPush from "../src/lib/git-push.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { recordWorktreeBase, stampRunWorktreeAssignment, worktreeAdd } from "../src/lib/worker.js";
-import { openWeightWritablePath } from "../src/lib/worker-provider.js";
-import {
-  hostWorktreeGit,
-  pinnedConfigValue,
-  pinWorktreeGit,
-  recordedWorktreeGitDir,
-  WorktreePointerRefusedError,
-} from "../src/lib/worktree-git.js";
+import * as provider from "../src/lib/worker-provider.js";
 import { appendTaskTrailerToCommit, commitWorkerEdits } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+
+// The leaf is loaded in `before`, so at a base without it every subtest fails rather than the file.
+type Leaf = typeof import("../src/lib/worktree-git.js");
+let leaf: Leaf;
+const { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError, worktreeGitCapture, worktreePushExec } = gitPush as typeof gitPush;
+const openWeightWritablePath: typeof provider.openWeightWritablePath = (...a) => provider.openWeightWritablePath(...a);
+const hostWorktreeGit: Leaf["hostWorktreeGit"] = (...a) => leaf.hostWorktreeGit(...a);
+const pinnedConfigValue: Leaf["pinnedConfigValue"] = (...a) => leaf.pinnedConfigValue(...a);
+const pinWorktreeGit: Leaf["pinWorktreeGit"] = (...a) => leaf.pinWorktreeGit(...a);
+const recordedWorktreeGitDir: Leaf["recordedWorktreeGitDir"] = (...a) => leaf.recordedWorktreeGitDir(...a);
+const isPointerRefusal = (e: unknown): boolean => e instanceof leaf.WorktreePointerRefusedError;
 
 let root: string;
 let markers: string;
@@ -87,7 +91,8 @@ function plantGitDir(name: string): string {
   return join(evil, ".git");
 }
 
-before(() => {
+before(async () => {
+  leaf = await import("../src/lib/worktree-git.js");
   root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t6106-`));
   markers = join(root, "markers");
   harnessHooks = join(root, "harness-hooks");
@@ -184,7 +189,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
     const n = counter;
     writeFileSync(join(wt, "d.txt"), "d\n");
     writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("leaf")}\n`);
-    const refused = (e: unknown) => e instanceof WorktreePointerRefusedError && /no longer names the gitdir worktreeAdd recorded/.test(e.message);
+    const refused = (e: unknown) => isPointerRefusal(e) && /no longer names the gitdir worktreeAdd recorded/.test((e as Error).message);
     const rows: string[] = [];
     assert.throws(() => hostWorktreeGit(wt, ["diff", "HEAD"], { log: (step) => rows.push(step) }), refused);
     assert.deepEqual(rows, ["worktree_git.pointer_refused"], "the refusal writes its row");
@@ -206,7 +211,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
     recordWorktreeBase(wt, raw(wt, "rev-parse", "HEAD").trim());
     writeFileSync(join(wt, ".git"), `gitdir: ${join(planted, ".git")}\n`);
     assert.equal(recordedWorktreeGitDir(wt), null);
-    assert.throws(() => hostWorktreeGit(wt, ["status"], { log: () => {} }), WorktreePointerRefusedError);
+    assert.throws(() => hostWorktreeGit(wt, ["status"], { log: () => {} }), isPointerRefusal);
     assert.equal(existsSync(marker("planted-inside")), false);
   });
 
