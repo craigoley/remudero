@@ -660,6 +660,8 @@ test("same-clone async registrations wait without blocking another repository an
     const started = join(shim.dir, "held-started");
     const queued = join(shim.dir, "queued-started");
     const release = join(shim.dir, "release");
+    const alias = join(firstRepo.root, "clone-alias");
+    symlinkSync(firstRepo.clone, alias, "dir");
     const quote = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
     writeFileSync(join(shim.dir, "git"), [
       "#!/bin/sh",
@@ -667,13 +669,11 @@ test("same-clone async registrations wait without blocking another repository an
       "*'worktree add -b run-registration-held '*)",
       "  touch " + quote(started),
       "  while [ ! -f " + quote(release) + " ]; do sleep 0.01; done ;;",
-      "*'worktree add -b run-registration-queued '*) touch " + quote(queued) + " ;;",
+      "*" + quote(`-C ${alias} `) + "*) touch " + quote(queued) + " ;;",
       "esac",
       "exec " + quote(realGit) + ' "$@"',
       "",
     ].join("\n"), { mode: 0o755 });
-    const alias = join(firstRepo.root, "clone-alias");
-    symlinkSync(firstRepo.clone, alias, "dir");
     process.env.PATH = shim.dir + ":" + originalPath;
     const pending: Promise<void>[] = [];
     let results: PromiseSettledResult<void>[] = [];
@@ -687,7 +687,7 @@ test("same-clone async registrations wait without blocking another repository an
       await worktreeAddAsync(otherRepo.clone, join(otherRepo.worktreesRoot, "independent"), "run-registration-other");
       assert.ok(existsSync(join(otherRepo.worktreesRoot, "independent", ".git")), "another repository creates its real worktree while the first remains held");
       assert.ok(ticks > 0, "the daemon event loop continues during registration admission");
-      assert.equal(existsSync(queued), false, "a physical alias of the same clone cannot enter Git registration until the first child has settled");
+      assert.equal(existsSync(queued), false, "a physical alias of the same clone cannot start any Git operation until the first add has settled");
     } finally {
       writeFileSync(release, "");
       results = await Promise.allSettled(pending);

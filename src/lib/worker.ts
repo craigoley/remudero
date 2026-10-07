@@ -5445,6 +5445,18 @@ export async function worktreeAddAsync(
   base = "origin/main",
   deps: WorktreeAddDepsArg = {},
 ): Promise<void> {
+  await withWorktreeRegistration(repoDir, () => worktreeAddAsyncInRegistration(repoDir, worktreePath, branch, base, deps));
+}
+
+/** Keep config migration, fetch, registration and post-add Git writes in one clone's admission.
+ * A second add must not race those writes, even when its path is an alias of the same clone. */
+async function worktreeAddAsyncInRegistration(
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  base: string,
+  deps: WorktreeAddDepsArg,
+): Promise<void> {
   await ensureWorktreeConfigEnabledAsync((args) => worktreeGit(["-C", repoDir, ...args]));
   // W1-T5284: the sync form's ref-lock retry (#8043). Daemon lanes now add concurrently with dispatch,
   // so two fetches of one repo can race for a ref lock where the sync add serialized them.
@@ -5457,7 +5469,7 @@ export async function worktreeAddAsync(
     // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
-  await withWorktreeRegistration(repoDir, () => worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv()));
+  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv());
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
   // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
   const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
