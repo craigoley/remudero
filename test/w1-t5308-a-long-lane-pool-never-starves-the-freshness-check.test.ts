@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
+import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ciWaitFreshness, waitForCiGreen, type RunResult } from "../src/run-task.js";
@@ -45,11 +46,13 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
   let stop = false;
   let pause = false;
   let complete = false;
+  let nowMs = Date.now();
   const run = runDaemon(loadPlan(path), {
     refreshMerged: () => () => false,
     checkStop: () => stop ? "fixture cleanup" : undefined,
     checkPause: () => pause ? "operator pause" : undefined,
     checkFreshness: () => { visible = advance; return visible; },
+    now: () => new Date(nowMs),
     sleep: () => {
       if (stop) return Promise.resolve();
       const sleep = deferred<void>();
@@ -91,7 +94,10 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
     pause: () => { pause = true; },
     release: (id: string) => gates.get(id)?.resolve(),
     releaseSweep: () => sweep.resolve(),
-    tick: async () => { await flush(); sleeps.shift()?.resolve(); await flush(); await flush(); },
+    tick: async (elapsedMs = 0) => {
+      nowMs += elapsedMs;
+      await flush(); sleeps.shift()?.resolve(); await flush(); await flush();
+    },
     cleanup: async () => {
       stop = true;
       advance = ADVANCE;
@@ -108,13 +114,27 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
   };
 }
 
+async function releaseQuietWindow(h: ReturnType<typeof harness>) {
+  await h.tick();
+  const hold = h.logs.filter((row) => row.step === "daemon.freshness_coalesced").at(-1);
+  assert.equal(hold?.extra?.action, "hold");
+  assert.equal(hold?.extra?.held_ms, 0);
+  assert.equal(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"), false);
+  assert.deepEqual(h.finished, [], "the hold is observed without waiting for either lane");
+  await h.tick(FRESHNESS_COALESCE_WINDOW_MS.value);
+  const release = h.logs.filter((row) => row.step === "daemon.freshness_coalesced").at(-1);
+  assert.equal(release?.extra?.action, "restart");
+  assert.equal(release?.extra?.reason, "window_quiet");
+  assert.equal(release?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
+}
+
 test("W1-T5308: a code advance seen while lanes are in flight is acted on without waiting for the pool", async () => {
   const h = harness(false, false, 2);
   try {
     await h.ready;
     assert.deepEqual(h.started, ["A", "B"]);
     h.advance();
-    await h.tick();
+    await releaseQuietWindow(h);
     assert.deepEqual(h.finished, [], "the freshness read cannot depend on a lane settling");
     assert.ok(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart" && row.extra.busy === true));
     assert.equal(h.logs.some((row) => row.step === "install"), false, "install waits for the admitted pool");
@@ -136,7 +156,7 @@ test("W1-T5308: in-flight runs are asked to yield at their external-wait boundar
   try {
     await h.ready;
     h.advance();
-    await h.tick();
+    await releaseQuietWindow(h);
     assert.ok(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"));
     assert.deepEqual(h.finished, [], "live workers remain live until they enter their external wait");
     h.release("B");
@@ -190,7 +210,7 @@ for (const lightPass of [true, false]) test(`W1-T5308: dispatch polls freshness 
     await h.ready;
     assert.deepEqual(h.started, ["A", "B"]);
     h.advance();
-    await h.tick();
+    await releaseQuietWindow(h);
     assert.ok(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"));
     h.release("A");
     h.release("B");
