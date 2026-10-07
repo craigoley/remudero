@@ -1632,8 +1632,9 @@ interface InboxClassifyState {
   /** The last ledger read, reused while the ledger's stamp is unchanged. */
   ledger?: { stamp: string | null; lines: LedgerLines; verdictDigest: string };
   last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox; /** Epoch millis the pass that made `result` completed. */ at: number };
+  generation?: object;
   /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
-  pending?: { key: string; plan: Plan; promise: Promise<ClassifiedInbox> };
+  pending?: { key: string; plan: Plan; generation: object; promise: Promise<ClassifiedInbox> };
 }
 const inboxClassifyStates = new WeakMap<PanelGraphDeps, InboxClassifyState>();
 
@@ -1842,9 +1843,10 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const fp = inboxFingerprint(deps, state, readPlanSnapshot);
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
+  const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
-  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+  if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
 }
 
@@ -1882,7 +1884,8 @@ export async function classifyAllProposalsSliced(
   const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts);
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
-  if (state.pending !== undefined && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
+  if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
+  const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const run = async (): Promise<ClassifiedInbox> => {
     const classifications: InboxClassification[] = [];
@@ -1891,13 +1894,13 @@ export async function classifyAllProposalsSliced(
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
     const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
-    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+    if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
     return result;
   };
   const promise = run().finally(() => {
     if (state.pending?.promise === promise) state.pending = undefined;
   });
-  state.pending = { key: fp.key, plan: fp.plan, promise };
+  state.pending = { key: fp.key, plan: fp.plan, generation, promise };
   return promise;
 }
 

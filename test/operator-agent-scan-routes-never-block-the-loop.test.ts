@@ -4,7 +4,9 @@
 // serve's loop frozen for all of it (CPU profile, 2026-09-30). These tests drive the real routes over a
 // large rotated corpus and watch the event loop while they answer.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { cpSync, mkdtempSync } from "node:fs";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,7 +24,7 @@ const ARCHIVES = 80;
 const LINES_PER_ARCHIVE = 10_000;
 /** Longest the loop may go without a turn while a route answers. The old sync union read held it 500+ ms here. */
 const LOOP_STALL_BUDGET_MS = 150;
-/** A warm read after a new rotation parses that rotation and the live file, never the union. */
+/** Busy time a warm read after a new rotation may take: it parses that rotation and the live file, never the union. */
 const WARM_ANSWER_BUDGET_MS = 150;
 
 function filler(archive: number, line: number): Record<string, unknown> {
@@ -82,19 +84,31 @@ function archive(index: number, extra: Array<Record<string, unknown>> = []): Led
   return { at: new Date(Date.UTC(2026, 8, 1) + index * 3_600_000).toISOString(), rows: [...rows, ...extra], gz: true };
 }
 
-/** The longest gap between 5 ms ticks while `work` runs: how long the loop was held. */
-async function longestLoopStall<T>(work: () => Promise<T>): Promise<{ value: T; stallMs: number; elapsedMs: number }> {
-  let last = performance.now();
+/** How much CPU this thread spent between two 5 ms ticks at most (`stallMs`), and in total (`busyMs`), while `work` ran:
+ *  the longest block of work that kept the loop from turning. Wall-clock tick gaps, and event-loop utilization too, also
+ *  count time the OS took the thread away, so a CPU-starved CI runner read a healthy chunked route as a 150+ ms stall
+ *  (#9871: 158 ms; 217 ms measured under 12-way contention). Thread CPU time is what a synchronous union read inflates:
+ *  500+ ms in one block, whatever the host's load. */
+function threadCpuMs(): number {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+}
+
+async function longestLoopStall<T>(work: () => Promise<T>): Promise<{ value: T; stallMs: number; busyMs: number; elapsedMs: number }> {
+  const startCpu = threadCpuMs();
+  let lastCpu = startCpu;
   let stallMs = 0;
   const probe = setInterval(() => {
-    const now = performance.now();
-    stallMs = Math.max(stallMs, now - last);
-    last = now;
+    const now = threadCpuMs();
+    stallMs = Math.max(stallMs, now - lastCpu);
+    lastCpu = now;
   }, 5);
   const started = performance.now();
   try {
     const value = await work();
-    return { value, stallMs: Math.max(stallMs, performance.now() - last), elapsedMs: performance.now() - started };
+    const end = threadCpuMs();
+    stallMs = Math.max(stallMs, end - lastCpu);
+    return { value, stallMs, busyMs: end - startCpu, elapsedMs: performance.now() - started };
   } finally {
     clearInterval(probe);
   }
@@ -136,8 +150,16 @@ test("after a rotation lands the emergency status answers within budget and sees
     writeLedger([], { dir: ledger.dir, rotations: [archive(ARCHIVES, [stopRow("stop-rotated")])] });
     const warm = await longestLoopStall(() => read(base, "/v1/operator-agent/emergency/status"));
     assert.deepEqual((warm.value.active as Array<{ id: string }>).map((s) => s.id), ["stop-rotated"], "the new rotation's stop is active");
-    assertWallClockBound(warm.elapsedMs, WARM_ANSWER_BUDGET_MS, `the read after a rotation took ${Math.round(warm.elapsedMs)} ms`);
+    assertWallClockBound(warm.busyMs, WARM_ANSWER_BUDGET_MS, `the read after a rotation spent ${Math.round(warm.busyMs)} ms of loop CPU (${Math.round(warm.elapsedMs)} ms elapsed)`);
     assertWallClockBound(warm.stallMs, LOOP_STALL_BUDGET_MS, `the read after a rotation held the loop ${Math.round(warm.stallMs)} ms`);
   });
   await settleOperatorAgentUnionLoads();
+});
+
+test("time the OS takes the thread away is not counted as the loop being held", async () => {
+  // A deterministic stand-in for a CPU-starved runner: a child stops this whole process for 200 ms, then resumes it.
+  const paused = await longestLoopStall(() =>
+    promisify(execFile)("sh", ["-c", `kill -STOP ${process.pid}; sleep 0.2; kill -CONT ${process.pid}`]));
+  assert.ok(paused.elapsedMs >= 190, `control: the process really was stopped (${Math.round(paused.elapsedMs)} ms elapsed)`);
+  assertWallClockBound(paused.stallMs, 50, `a stopped, idle thread read as holding the loop ${Math.round(paused.stallMs)} ms`);
 });
