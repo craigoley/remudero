@@ -97,7 +97,7 @@ export function stripComments(content: string, opts: { keepLines?: boolean } = {
 
 /** Commits the base may be past the map's sha before the arm stops trusting it. Main lands a few
  *  dozen merges a day and the shard artifacts live one day, so a map this far behind is no longer
- *  the newest one obtainable. */
+ *  the newest one obtainable. PRIMARY CONTROL: it alone decides when the arm stops speaking. */
 export const IMPACT_MAP_STALENESS_BOUND = 150;
 
 /** One test file's coverage, keyed by the files it loaded. `functions` rows are
@@ -318,6 +318,7 @@ export function readImpactMap(path: string, read: (p: string) => string = (p) =>
   try {
     text = read(path);
   } catch (err) {
+    // Absent and unreadable are two named problems; the arm prints whichever it got and falls back.
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { problem: `no impact map at ${path}` };
     return { problem: `impact map ${path} unreadable: ${(err as Error).message}` };
   }
@@ -325,6 +326,7 @@ export function readImpactMap(path: string, read: (p: string) => string = (p) =>
   try {
     value = JSON.parse(text) as Partial<ImpactMap>;
   } catch (err) {
+    // A corrupt map is its own named problem, never an empty map that would select nothing.
     return { problem: `impact map ${path} is not JSON: ${(err as Error).message}` };
   }
   if (value?.format !== IMPACT_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
