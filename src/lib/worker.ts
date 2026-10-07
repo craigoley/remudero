@@ -111,6 +111,7 @@ import {
   materializeSpawnWorkerHome as materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
+  seedClaudeFleetCredentials,
   workerCredentialFilePath,
   workerClaudeCredentialDir,
   workerKeychainPaths,
@@ -552,6 +553,9 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  worker_exit?: WorkerExit["kind"];
+  worker_exit_signal?: string;
+  worker_exit_code?: number;
   provider?: WorkerProviderId;
   model: string;
   routed_model?: string;
@@ -601,6 +605,9 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+    ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+    ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
     ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
     // Omitted when every grant landed, so the common case adds no field. Present only when a grant was lost or healed, and
     // then it names which slot and why.
@@ -2842,6 +2849,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // named reason class so the failure stays queryable. It refuses only the unambiguously unusable. An EXPIRED token is
       // reported and allowed through: nothing here can re-provision, the CLI maintains its own refresh, and refusing would be
       // a bound firing on a healthy condition (recon-cloud-workers-spike stop 6).
+      // Heal an emptied .claude-fleet fork BEFORE judging it, or the refusal below fires until the container is recreated.
+      seedClaudeFleetCredentials({ realHome });
       assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
     // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent, but a target that EXISTS and
@@ -3214,6 +3223,8 @@ export function openUsageProbeSession(
   // Linux workers consume the narrowed credential grant; capacity must observe that same store.
   // Darwin continues to use its existing keychain rather than selecting a different config store.
   if ((context.platform ?? process.platform) !== "darwin") {
+    // The probe reads the same fork a spawn does, so it heals an emptied one the same way first.
+    if (runQuery === undefined) seedClaudeFleetCredentials({ realHome: context.realHome ?? homedir() });
     options.env = {
       ...process.env,
       CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),

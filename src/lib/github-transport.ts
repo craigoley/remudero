@@ -75,7 +75,15 @@ export function ghRateLimitRefusalUnknown(operation: string): GhRateLimitRefusal
   return { bucket: GH_RATE_LIMIT_BUCKET_UNKNOWN, resetsAt: GH_RATE_LIMIT_BUCKET_UNKNOWN, operation };
 }
 
-export function splitGhHeaderBlock(out: string): { headers: string; body: string } {
+export function splitGhHeaderBlock(out: string, slurp = false): { headers: string; body: string } {
+  if (slurp) {
+    // gh opens the outer slurp array BEFORE printing each included HTTP header block. Preserve
+    // every page and its separators; the LAST response carries the remaining quota after them.
+    let headers = "";
+    const body = out.replace(/(^|[\[,\r\n])(HTTP\/[0-9.]+ [0-9]{3}[^\r\n]*\r?\n(?:[A-Za-z0-9-]+:[^\r\n]*\r?\n)*\r?\n)/g,
+      (_match, prefix: string, block: string) => { headers = block.trimEnd(); return prefix; });
+    return { headers, body };
+  }
   if (!out.startsWith("HTTP/")) return { headers: "", body: out };
   const sep = out.match(/\r?\n\r?\n/);
   if (!sep || sep.index === undefined) return { headers: "", body: out };
@@ -171,7 +179,7 @@ export function ghJson(
     killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL,
   });
   if (!isApiCall) return parseGhJsonBody(args, out);
-  const { headers, body } = splitGhHeaderBlock(out);
+  const { headers, body } = splitGhHeaderBlock(out, args.includes("--slurp"));
   if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
   return parseGhJsonBody(args, body);
 }

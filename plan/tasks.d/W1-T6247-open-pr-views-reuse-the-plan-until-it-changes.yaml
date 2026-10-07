@@ -1,0 +1,37 @@
+- id: W1-T6247
+  title: "OPEN-PR VIEWS REUSE THE PLAN UNTIL IT CHANGES — buildOpenPrViews calls loadPlan(plan/tasks.yaml) on every call, re-reading and re-parsing every plan/tasks.d shard synchronously on the daemon loop; the 2026-10-07 live CPU profile caught it holding the loop 42.8 s (22.7 s in loadPlan → readMergedPlan → readWholeFile) and again 20.1 s (11.3 s in loadPlan)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the open-PR view build reads the plan once per plan generation, not once per call
+  band_meaning: span
+  origin: "operator session 2026-10-07: daemon.loop_lag 863 s in ~40 min; live CPU profile (lanes/claude/daemon-cpu.cpuprofile)"
+  plan_refs: [W1-T4773, W1-T5689, W1-T4075]
+  files: [src/run-task.ts, test/open-pr-views-reuse-the-plan-until-it-changes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 16:26–16:32Z (360 s Profiler session on the live daemon, Node 24.21.0):
+    readFileUtf8 was 52 s of self time; two of the eighteen >1 s loop blocks were buildOpenPrViews,
+    at 42.8 s (22.7 s loadPlan → readMergedPlan → readWholeFile, 20.2 s open-prs-rest) and 20.1 s
+    (11.3 s loadPlan, 3.6 s parseTasksFromYaml). READ on origin/main: buildOpenPrViews in
+    src/run-task.ts does `mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) :
+    loadPlan(join(repoRoot, "plan", "tasks.yaml"))` on every call; W1-T4773 (#8144) moved the warm
+    GitHub reads off the loop but not this plan read.
+  design: |
+    Key the parsed plan on the plan files' identity (the same planFilesIdentity the read model
+    already uses) and reuse it while the identity is unchanged; re-read only when it moves. The
+    identity check itself must be cheap (stat-level, never a content read of every shard), and an
+    unreadable identity re-reads rather than serving a plan of unknown age.
+  acceptance:
+    - claim: "two open-PR view builds over an unchanged plan parse the plan once"
+      proof: 'grep: test("W1-T6247: an unchanged plan is parsed once across open-PR view builds" in test/open-pr-views-reuse-the-plan-until-it-changes.test.ts'
+    - claim: "a changed plan shard is re-read on the next build"
+      proof: 'grep: test("W1-T6247: a changed plan shard is re-read on the next build" in test/open-pr-views-reuse-the-plan-until-it-changes.test.ts'
+  falsifier: |
+    Keep the per-call loadPlan: a counting readMainPlan seam records two parses for two builds
+    over the same plan files, and the first test fails.

@@ -340,6 +340,8 @@ export function readFollowUpHistory(ledgerPath: string, now: number = systemCloc
   return foldFollowUpHistory(readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FOLLOW_UP_STEPS] }).rows, now);
 }
 
+const memoRetentionHolder = "follow-up-policy";
+
 /**
  * W1-T4567 — {@link readFollowUpHistory} for a request path. The history is durable, so every rotation
  * still counts; but a rotation never changes after it is cut, so its follow-up rows are memoized and a
@@ -348,7 +350,7 @@ export function readFollowUpHistory(ledgerPath: string, now: number = systemCloc
  */
 export function createFollowUpHistoryReader(): (ledgerPath: string, now?: number) => Promise<FollowUpHistory[]> {
   const steps = new Set<string>(FOLLOW_UP_STEPS);
-  const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.has(row.step)));
+  const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.has(row.step)), { holder: memoRetentionHolder, writeRetention: appendLedger });
   return async (ledgerPath, now = systemClock.now()) =>
     foldFollowUpHistory((await readLedgerUnionRecordsMemoized(dirname(ledgerPath), memo, { step: [...FOLLOW_UP_STEPS] })).rows, now);
 }

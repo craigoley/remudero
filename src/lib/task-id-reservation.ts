@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isAllocatableTaskId } from "./task-id.js";
+import { isAllocatableTaskId, MAX_ALLOCATABLE_TASK_ID } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 import { systemClock, type Clock } from "./clock.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
@@ -805,8 +805,29 @@ export function idReservationFailureFields(e: TaskIdReservationError): Record<st
   return { id: e.taskId ?? null, ref: e.ref ?? null, outcome: e.outcome ?? null, error: e.message };
 }
 
-export function reservationTakeoverFields(h: RemoteReservationHandle, t: ReservationTakeover): Record<string, unknown> {
+export function reservationTakeoverFields(h: Pick<RemoteReservationHandle, "taskId" | "ref">, t: ReservationTakeover): Record<string, unknown> {
   return { task_id: h.taskId, ref: h.ref, taken_over_from: t.from, holder_pid: t.pid ?? null, holder_host: t.host ?? null, holder_started_at: t.startedAt ?? null, age_ms: t.ageMs ?? null };
+}
+
+export function gatedRemoteRefReserver(deps: RemoteReserveDeps & {
+  lane: string;
+  log?: (step: string, fields: Record<string, unknown>) => void;
+}): RemoteRefReserver {
+  const base = gitRemoteRefReserver({ ...deps, policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
+  return {
+    ...base,
+    reclaim(taskId) {
+      const outcome = base.reclaim!(taskId);
+      const takeover = base.takeoverOf!(taskId);
+      if (outcome === "created" && takeover) {
+        deps.log?.("reservation.taken_over", {
+          lane: deps.lane,
+          ...reservationTakeoverFields({ taskId, ref: taskIdReservationRef(taskId) }, takeover),
+        });
+      }
+      return outcome;
+    },
+  };
 }
 
 /**
@@ -846,11 +867,21 @@ export function reserveTaskIdRemote(
 ): RemoteReservationHandle {
   const maxScan = opts.maxScan ?? 50;
   const idFor = opts.idFor ?? ((n: number) => `W1-T${n}`);
+  // Reject before reading the remote or minting an anchor: the sentinel range is never reservable.
+  if (!isAllocatableTaskId(startId)) {
+    throw new TaskIdReservationError("task-id allocation range exhausted or invalid — refusing to reserve", { outcome: "exhausted" });
+  }
+  if (!Number.isSafeInteger(maxScan) || maxScan < 1) {
+    throw new TypeError("reserveTaskIdRemote: maxScan must be a positive safe integer");
+  }
   // Seeds from the namespace THIS function owns, invisible to the mint's own surfaces — without it
   // the loop rediscovers every prior reservation one failed push at a time (forensics: #reservetaskidremote-seeding).
   // `Math.max` only ever moves the floor UP, and only for the default id family.
   const floor = opts.idFor ? "unknown" : (reserver.reservedFloor?.() ?? "unknown");
   const from = floor === "unknown" ? startId : Math.max(startId, floor);
+  if (!isAllocatableTaskId(from)) {
+    throw new TaskIdReservationError("task-id allocation range exhausted or invalid — refusing to reserve", { outcome: "exhausted" });
+  }
   if (reserver.filingBranch?.() === "main") {
     throw new TaskIdReservationError(
       "cannot reserve a task id from main — main can never be the filing branch, so this claim would be unmatchable",
@@ -859,7 +890,8 @@ export function reserveTaskIdRemote(
   }
   const anchor = reserver.mintAnchor();
   let attempts = 0;
-  for (let n = from; n < from + maxScan; n++) {
+  const last = Math.min(MAX_ALLOCATABLE_TASK_ID, from + maxScan - 1);
+  for (let n = from; n <= last; n++) {
     attempts++;
     let outcome = reserver.attempt(idFor(n), anchor);
     if (outcome === "taken" && reserver.reclaim) outcome = reserver.reclaim(idFor(n));
@@ -902,8 +934,8 @@ export function reserveTaskIdRemote(
     }
   }
   throw new TaskIdReservationError(
-    `no free task id in ${idFor(from)}..${idFor(from + maxScan - 1)} — ` +
-      `${maxScan} consecutive ids are reserved on origin (attempted ${attempts})`,
+    `no free task id in ${idFor(from)}..${idFor(last)} — ` +
+      `${attempts} consecutive ids are reserved on origin (attempted ${attempts})`,
     { taskId: idFor(from), outcome: "exhausted" },
   );
 }
@@ -968,11 +1000,14 @@ export function prefixedTaskIdsIn(texts: readonly string[], prefix: string): num
   return texts.flatMap((t) => [...t.matchAll(re)].map((m) => Number(m[1]))).filter(isAllocatableTaskId);
 }
 
-/** The walk's start. {@link reserveTaskIdRemote} skips `reservedFloor` when `idFor` is set, so the
- *  caller folds the target's refs/rmd-id/ listing into `texts` and this stands in for that floor. */
+/** The walk starts above the target's plan and refs/rmd-id/ texts; `idFor` skips the default reservedFloor. */
 export function nextPrefixedTaskIdStart(texts: readonly string[], prefix: string): number {
   const ids = prefixedTaskIdsIn(texts, prefix);
-  return ids.length ? Math.max(...ids) + 1 : 1;
+  const next = ids.length ? Math.max(...ids) + 1 : 1;
+  if (!isAllocatableTaskId(next)) {
+    throw new TaskIdReservationError(`${prefix} task-id allocation range exhausted — refusing to mint`, { outcome: "exhausted" });
+  }
+  return next;
 }
 
 // ── COLLISION DETECTION AT REVIEW TIME (W1-T4389) ─────────────────────────────────────────────

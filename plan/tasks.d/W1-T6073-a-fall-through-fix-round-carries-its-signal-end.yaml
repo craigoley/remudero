@@ -66,3 +66,10 @@
     worker_exit, the learner scores it refused, and the test fails. Keep the fields but drop the pushed-head guard
     in endedBySignalWithNothingPushed: the pushed fixture row is excluded, signal_excluded reads 1 where 0 is
     expected, and the test fails.
+  notes: |
+    OPERATOR RULING 2026-10-07 (W1-T6074, #9898): every worker result records `worker_exit`, a clean exit
+    included (`worker_exit: "exit"`, `worker_exit_code: 0`; an unseen end is `"unobserved"`). An ABSENT
+    field means "written before W1-T6074 / unknown", never "clean". This criterion still holds as worded: a
+    normal exit carries no `worker_exit` SIGNAL. Only this task's test assertion that a normal round carries
+    no `worker_exit` field at all was changed, in #9898, on purpose. The one reader at the time,
+    src/lib/fix-routing-learner.ts, matches `=== "signal"` and infers nothing from absence.

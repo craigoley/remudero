@@ -745,6 +745,7 @@ import {
   parsePrefixedTaskId,
   parseReservationHolderLine,
   gitRemoteRefReserver,
+  gatedRemoteRefReserver,
   remoteReservedTaskIds,
   reservationFloorFrom,
   reservationPolicyCurrency,
@@ -7752,6 +7753,7 @@ async function runReview(args: {
   };
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   let reviewerSubtype: string | undefined;
+  let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
   let reviewerFindingText: string | undefined;
   if (planOnlySkip) {
@@ -7837,6 +7839,7 @@ async function runReview(args: {
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
+        reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
         evaluatorProvenance = {
           provider: reviewerFields.provider ?? null,
@@ -7906,6 +7909,7 @@ async function runReview(args: {
   const outcome = reviewerOutcome({
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
+    exit: reviewerExit,
     spawnError: reviewerSpawnFailed,
     // Reported from what ACTUALLY happened, never from the classification alone: `planOnlySkip &&
     // !attemptReviewer` is true only when the spawn was really not dispatched. Measured while
@@ -13875,6 +13879,9 @@ export interface WorkerErrorVerdict {
   budgetBreach: boolean;
   /** Spread verbatim onto the `verdict` ledger line — carries turns + cost. */
   ledger: {
+    worker_exit?: NonNullable<WorkerResult["exit"]>["kind"];
+    worker_exit_signal?: string;
+    worker_exit_code?: number;
     verdict: "blocked_budget" | "failed";
     stage: string;
     subtype: string;
@@ -13968,6 +13975,9 @@ export function workerErrorVerdict(
     verdict,
     budgetBreach,
     ledger: {
+      ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+      ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+      ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
       verdict,
       stage,
       subtype: r.subtype,
@@ -13977,7 +13987,9 @@ export function workerErrorVerdict(
       account_label: r.accountLabel,
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
-        : `worker error at ${stage}: ${r.subtype}`,
+        : r.exit?.kind === "signal"
+          ? `worker ended by signal ${r.exit.signal} at ${stage}`
+          : `worker error at ${stage}: ${r.subtype}`,
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
@@ -24832,7 +24844,8 @@ export function ciLearningCommand(
     try {
       const filing = land(result.drafts, checkoutRoot, {
         stateRoot: root,
-        mintTaskId: ciLearningTaskIdMinter(checkoutRoot),
+        mintTaskId: ciLearningTaskIdMinter(checkoutRoot, (step, fields) =>
+          appendLedger(join(root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${process.pid}`, task_id: "DAEMON", step, ...fields })),
         planOrigins,
         renderShard: ciLearningShardYaml,
         recordVerdict: ciLearningRecordVerdict,
@@ -24872,7 +24885,7 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) => string {
+export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void): (filingBranch?: string) => string {
   return (filingBranch) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -24881,7 +24894,7 @@ export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) =>
     // landing branch cannot satisfy.
     const held = reserveTaskIdRemote(
       mint.n,
-      gitRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch }),
+      gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
     );
     return held.taskId;
   };
@@ -26296,6 +26309,7 @@ export interface NextTaskIdReserveDeps {
   filingBranch?: string;
   /** W1-T6026: whether this checkout's reservation module is origin/main's; defaults to the real blob read. */
   policyCurrency?: () => ReservationPolicyCurrency;
+  log?: (step: string, fields: Record<string, unknown>) => void;
 }
 
 /** W1-T4388: a shallow, blob-less, sparse clone of `source`'s main (`owner/name` or a git URL) holding
@@ -26349,9 +26363,17 @@ function prefixedNextTaskIdCommand(rest: string[], deps: NextTaskIdReserveDeps):
       listing(["ls-remote", "--heads", "origin", `run-${prefix}-T*`]),
       listing(["ls-remote", "origin", `refs/rmd-id/${prefix}-T*`]),
     ];
-    const reserver = deps.reserver ?? gitRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown" });
+    const log = deps.log ?? ((step: string, fields: Record<string, unknown>) => {
+      try {
+        appendLedger(ledgerPathFor(loadConfig()), { run_id: `MINT-${process.pid}`, task_id: "MINT", step, ...fields });
+      } catch (error) {
+        console.error(`rmd next-task-id: takeover ledger unavailable: ${String(error)}`);
+      }
+    });
+    const reserver = deps.reserver ?? gatedRemoteRefReserver({ run: t.run, filingBranch: flagValue(rest, "--branch") ?? deps.filingBranch ?? currentBranch(process.cwd()) ?? "unknown", policyCurrency: deps.policyCurrency, lane: "next-task-id-prefix", log });
     const held = reserveTaskIdRemote(nextPrefixedTaskIdStart(texts, prefix), reserver, { idFor: (n) => `${prefix}-T${n}` });
-    console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)`);
+    const takeover = held.takenOver ? ` — ${describeReservationTakeover(held.takenOver)}` : "";
+    console.log(`RESERVED ${held.taskId} on ${repo}'s origin (${held.ref}) after ${held.attempts} attempt(s)${takeover}`);
     return 0;
   } catch (e) {
     console.error(describeReservationRefusal((e as TaskIdReservationError).outcome, `${repo}: ${(e as Error).message}`));
@@ -35598,7 +35620,8 @@ export function buildCiLearningCadenceRunner(deps: {
     let refused = 0;
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
-        const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot);
+        const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
+          appendLedger(join(deps.root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${at.getTime()}`, task_id: "DAEMON", step, ...fields }));
         const filing = deps.fileShards
           ? deps.fileShards(result.drafts, deps.checkoutRoot, {
               mintTaskId,
@@ -36485,14 +36508,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -36505,10 +36528,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
-      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot));
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     case "evidence-coverage":
       return () => {
         try {
@@ -36535,7 +36558,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
@@ -36555,7 +36578,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
-      const mintTaskId = ciLearningTaskIdMinter(repoRoot);
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log);
       const ports = {
         stateDir,
         log,
@@ -41170,6 +41193,22 @@ function readQuestionsNdjson(root: string): Array<Record<string, unknown>> {
   return out;
 }
 
+const openPrViewPlans = new WeakMap<(root: string) => Plan, { path: string; identity: string; plan: Plan }>();
+
+function openPrPlanIdentity(path: string): { kind: "readable"; identity: string } | { kind: "unreadable"; reason: string } {
+  const identity = planFilesIdentity(path);
+  if (identity.split("\n").some((line) => line === "-" || line.endsWith("=-"))) {
+    return { kind: "unreadable", reason: "plan file metadata is unavailable" };
+  }
+  try {
+    // W1-T6247: distinguish an unreadable listing from planFilesIdentity's empty-directory fallback.
+    readdirSync(join(dirname(path), "tasks.d"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "unreadable", reason: String(err) };
+  }
+  return { kind: "readable", identity };
+}
+
 /**
  * Build the observed open-PR state the sweep reconciles — the real gateway
  * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
@@ -41214,6 +41253,8 @@ export function buildOpenPrViews(
      *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
      *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
     readMainPlan?: (root: string) => Plan;
+    /** Plan-file location for identity checks and the default loader; omitted uses the checkout. */
+    mainPlanPath?: string;
     /** W1-T3585 — the SAME freshly-derived merged-task set daemon dispatch consults (the daemon's
      *  own `refreshMerged()` projection, never a second GitHub walk this producer invents), threaded
      *  through so {@link currentPlanIneligibilityReason} can resolve an unmet dependency exactly as
@@ -41258,8 +41299,19 @@ export function buildOpenPrViews(
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
   let mainPlan: Plan | undefined;
+  const mainPlanPath = deps.mainPlanPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const planReader = deps.readMainPlan ?? loadPlan;
   try {
-    mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    const observation = openPrPlanIdentity(mainPlanPath);
+    const identity = observation.kind === "readable" ? observation.identity : undefined;
+    const held = openPrViewPlans.get(planReader);
+    if (identity !== undefined && held?.path === mainPlanPath && held.identity === identity) {
+      mainPlan = held.plan;
+    } else {
+      openPrViewPlans.delete(planReader);
+      mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(mainPlanPath);
+      if (identity !== undefined) openPrViewPlans.set(planReader, { path: mainPlanPath, identity, plan: mainPlan });
+    }
   } catch {
     // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;
@@ -45316,7 +45368,7 @@ export function buildSweepHook(
     // so a reply steers this same tick. Contained like `mainHealthRung` above.
     if (escalationAnswerGateway) {
       try {
-        const answers = readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
       } catch (e) {
         log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
@@ -47065,7 +47117,7 @@ async function triageCommandLocked(
     // unreachable remote — the conflation `classifyPushFailure` exists to prevent. `worktreePath`,
     // NOT the module-level `repoRoot`: the reservation must be pushed to the SAME `origin` this
     // filing will push its branch to.
-    const triageRemoteRefReserver = gitRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)) });
+    const triageRemoteRefReserver = gatedRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)), lane: "triage", log });
     // W1-T2326: THE REMOTE HALF IS TAKEN HERE, BEFORE THE PROMPT IS BUILT — and that ORDERING is
     // the whole task. It used to be taken 100+ lines below, inside `decision.action === "propose"`,
     // and its result reached nothing but the `triage.id_minted` row: the worker was prompted from
@@ -47584,7 +47636,8 @@ export async function planCommand(
       reserveTaskIdBlockRemote(
         planReserveFrom,
         PLAN_MAX_NEW_TASKS,
-        gitRemoteRefReserver({
+        gatedRemoteRefReserver({
+          lane: "plan", log,
           // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
           // rejected push is NORMAL here (contention), so a throwing runner would make it
           // indistinguishable from an unreachable remote.
@@ -49941,7 +49994,8 @@ export async function approveCommand(
               reserveTaskIdBlockRemote(
                 approveReserveFrom,
                 count,
-                gitRemoteRefReserver({
+                gatedRemoteRefReserver({
+                  lane: "approve", log,
                   run: (args) => {
                     const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -50438,7 +50492,8 @@ async function approveBatchCommand(
                     reserveTaskIdBlockRemote(
                       reserveFrom,
                       count,
-                      gitRemoteRefReserver({
+                      gatedRemoteRefReserver({
+                        lane: "approve-batch", log,
                         run: (args) => {
                           const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
                           return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };

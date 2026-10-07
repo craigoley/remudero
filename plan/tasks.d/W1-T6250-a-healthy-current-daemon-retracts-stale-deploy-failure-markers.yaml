@@ -1,0 +1,48 @@
+- id: W1-T6250
+  title: "A HEALTHY, CURRENT DAEMON RETRACTS STALE DEPLOY FAILURE MARKERS — core's DEPLOY_FAILED, DEPLOY_LAST_FAILED and DEPLOY_REFUSAL_STREAK from a 13:59Z refusal survived a successful hand recycle at ~15:41Z, and the next tick logged `up-to-date (install HEAD == origin/main, daemon alive and running it)` without retracting them, because retraction runs only inside a deploy-run-driven verified kickstart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-07: Node 24 image rollout (core markers archived by hand)"
+  plan_refs: [W1-T1239, W1-T6062, W1-T3694]
+  files: [src/lib/deployer.ts, test/a-healthy-current-daemon-retracts-stale-deploy-failure-markers.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main d7f1f6d5:
+    - src/lib/deployer.ts:1874-1877 is the ONLY retraction: after `selection.backend.restart()` and a healthy
+      `assessBootHealth`, it calls `deps.clearFailure?.()` (unlinks DEPLOY_FAILED and DEPLOY_LAST_FAILED, :2621)
+      and `retractRefusal` (closes the streak issue and clears DEPLOY_REFUSAL_STREAK, :1521-1542).
+    - A recycle that deploy-run did not drive (an operator's `deploy/recycle-container.sh --instance core`, or
+      W1-T5688's recycle_on_verdict) never reaches those lines, and recycle-container.sh references none of the
+      three markers.
+    - The next tick's skip branch (:1699-1719) consumes an operator marker on `decision.satisfied` but never
+      retracts a failure, although `decideDeployTrigger` returns `satisfied: true` only for "up-to-date (install
+      HEAD == origin/main, daemon alive and running it)" — install current, running head current, image not
+      stale, liveness observed (:797-807).
+    OBSERVED (core watchdog journal, read-only): 13:59:25Z `deploy.restart_refused` to 5a658e69a
+    (recycle-container refused the undeclared NODE_VERSION); 15:43:54Z `deploy.skip` "up-to-date ... daemon alive
+    and running it". The markers then had to be archived by hand. Console's DEPLOY_FAILED cleared because its
+    successful recycle was deploy-run-driven. A stale DEPLOY_FAILED is not cosmetic: its `at` feeds
+    `lastFailedAtMs` (:2429-2431, read at :1696), which backs off the next automatic image recycle for an hour (:820-824).
+  design: |
+    Level-triggered retraction on the observation itself, not on who did the recycle: when runDeployCycle's skip
+    decision is `satisfied === true` (healthy and current, observed this tick), call the same `clearFailure` and
+    `retractRefusal` the verified-kickstart path calls, and log `deploy.failure_retracted` naming each marker
+    removed, the failed head it carried, and the observed-current head, so a hand recycle's success closes the
+    loop on the next tick. A skip that is not `satisfied` (liveness unobserved, stale running head, image stale,
+    STOP set) retracts nothing. No marker present: no row.
+  acceptance:
+    - claim: "an up-to-date, alive skip retracts DEPLOY_FAILED, DEPLOY_LAST_FAILED and the refusal streak, closing its issue"
+      proof: 'grep: test("W1-T6250: a healthy current skip retracts every stale deploy failure marker" in test/a-healthy-current-daemon-retracts-stale-deploy-failure-markers.test.ts'
+    - claim: "a skip whose liveness was not observed retracts nothing"
+      proof: 'grep: test("W1-T6250: an unobserved-liveness skip keeps the failure markers" in test/a-healthy-current-daemon-retracts-stale-deploy-failure-markers.test.ts'
+  falsifier: |
+    Leave retraction only on the kickstart path: the fixture with all three markers and a satisfied up-to-date
+    skip keeps them and the first test fails.

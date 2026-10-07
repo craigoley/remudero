@@ -483,6 +483,7 @@ interface FakeRetroFixture {
   fakeSpawn: (args?: SpawnWorkerArgs) => Promise<WorkerResult>;
   spawnArgs: SpawnWorkerArgs[];
   prepublishPreflight: (opts: RunRetroPrepublishPreflightOptions) => Promise<RetroPrepublishResult>;
+  publicationGateCalls: () => string[];
   /** Swaps HOME/PATH/Date.now in, runs `body`, and ALWAYS restores them after -- even on throw. */
   run<T>(body: () => Promise<T>): Promise<T>;
 }
@@ -692,6 +693,18 @@ function setupFakeRetroFixture(
   );
   chmodSync(fakeGhPath, 0o755);
 
+  // This fixture owns the marker/publication protocol, not the harness's gate checks.
+  // The hardened push leaf now runs its harness-owned hook explicitly. Give that
+  // existing fixture seam an observable hook; retain the real local Git push and
+  // all production guardrails. Gate execution/security is covered by host-push tests.
+  const harnessHooks = join(fakeBinDir, "harness-hooks");
+  mkdirSync(harnessHooks);
+  const gateCallsPath = join(fakeBinDir, "publication-gate-calls");
+  writeFileSync(join(harnessHooks, "pre-push"),
+    `#!/bin/sh\nwhile IFS= read -r push_ref; do :; done\nprintf '%s\\n' 'fixture-owned-harness-gate' >> ${JSON.stringify(gateCallsPath)}\n`, { mode: 0o755 });
+  const publicationGateCalls = () => existsSync(gateCallsPath)
+    ? readFileSync(gateCallsPath, "utf8").trim().split("\n") : [];
+
   const spawnArgs: SpawnWorkerArgs[] = [];
   const fakeSpawn = async (args?: SpawnWorkerArgs): Promise<WorkerResult> => {
     if (args) spawnArgs.push(args);
@@ -767,11 +780,13 @@ function setupFakeRetroFixture(
   async function run<T>(body: () => Promise<T>): Promise<T> {
     const savedHome = process.env.HOME;
     const savedPath = process.env.PATH;
+    const savedHarnessHooks = process.env.RMD_HARNESS_HOOKS_DIR;
     const errorSpy = t.mock.method(console, "error", () => {});
     const logSpy = t.mock.method(console, "log", () => {});
     const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
     process.env.HOME = fakeHome;
     process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    process.env.RMD_HARNESS_HOOKS_DIR = harnessHooks;
     const cfgPath = configPath();
     mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
     writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
@@ -781,13 +796,15 @@ function setupFakeRetroFixture(
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
       process.env.PATH = savedPath;
+      if (savedHarnessHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
+      else process.env.RMD_HARNESS_HOOKS_DIR = savedHarnessHooks;
       dateNowSpy.mock.restore?.();
       void errorSpy;
       void logSpy;
     }
   }
 
-  return { root, branch, fakeSpawn, spawnArgs, prepublishPreflight, run };
+  return { root, branch, fakeSpawn, spawnArgs, prepublishPreflight, publicationGateCalls, run };
 }
 
 // W1-T968 — retro's gated report answers about the PULL REQUEST, not the call. Every other variant
@@ -1082,21 +1099,28 @@ test(
       // ANY elapsed time fires via "days" -- the absent-marker case is Infinity days.
       const policy = { mergesThreshold: 999999, daysThreshold: 1 };
 
+      const triggerDecisions: RetroTriggerDecision[] = [];
+
       const checkRetroTrigger = (): RetroTriggerDecision => {
         const resolution = resolveMarkerForGather(markerPath);
         const marker = resolution.kind === "ok" ? resolution.marker : undefined;
-        return evaluateRetroTrigger(0, marker?.ts, new Date(), policy);
+        const decision = evaluateRetroTrigger(0, marker?.ts, new Date(), policy);
+        triggerDecisions.push(decision);
+        return decision;
       };
 
       let retroRuns = 0;
-      const runRetroTrigger = async (decision: Extract<RetroTriggerDecision, { fire: true }>) => {
+      let retroCompletion: Promise<void> | undefined;
+      const runRetroTrigger = (decision: Extract<RetroTriggerDecision, { fire: true }>) => {
         retroRuns++;
         // THE REAL retroCommand -- W1-T136's mergeable-PR path (Architect spawn -> push
         // -> gh pr create -> ownership assert -> pr.opened -> marker save), gated by
         // opts.automated exactly as the real daemon wiring (run-task.ts's daemonCommand
         // / retroTriggerCheck) invokes it in production. Never a stand-in.
-        await withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision,
-          startTokenRefresh: () => ({ armed: false }), github: offlineGh, prepublishPreflight: fx.prepublishPreflight }));
+        retroCompletion = withLiveWritesAllowed(() => retroCommand([], { spawn: fx.fakeSpawn, automated: decision,
+          startTokenRefresh: () => ({ armed: false }), github: offlineGh, prepublishPreflight: fx.prepublishPreflight }))
+          .then(() => undefined);
+        return retroCompletion;
       };
 
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
@@ -1110,14 +1134,21 @@ test(
           stopChecks++;
           return stopChecks > 2 ? "test bound reached" : undefined;
         },
-        sleep: async () => {},
+        // The NEXT evaluated poll must be after the real marker advance, not a
+        // second rapid tick while the detached retro is still in flight. Keep
+        // HOME/PATH owned by this fixture until its own completion, not a drain
+        // timeout that silently resumes assertions and restores them too early.
+        sleep: async () => { if (retroCompletion) await retroCompletion; },
         checkRetroTrigger,
         runRetroTrigger,
         log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
       });
 
-      await drainDetachedSweepActions({ boundMs: 20000 });
-  assert.equal(summary.stopReason, "stopped");
+      assert.deepEqual(await drainDetachedSweepActions({ boundMs: 20000 }), [], "the owned retro has really settled");
+      assert.equal(summary.stopReason, "stopped");
+      assert.equal(triggerDecisions.length, 2);
+      assert.equal(triggerDecisions[0].fire, true);
+      assert.equal(triggerDecisions[1].fire, false, "the real marker suppresses the poll after completion");
       assert.equal(retroRuns, 1, "the REAL retroCommand ran exactly once across the two evaluated ticks");
 
       const fired = lines.filter((l) => l.step === "retro_triggered");
@@ -1128,8 +1159,11 @@ test(
       const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
       assert.ok(
         ledgerLines.some((l) => l.step === "pr.opened" && l.plan_only === true),
-        "the retro reached a real, plan-only, opened PR -- W1-T136's mergeable-PR path",
+        "the retro reached a real, plan-only, opened PR -- W1-T136's mergeable-PR path; " +
+          JSON.stringify({ ledger: ledgerLines, daemon: lines }),
       );
+      assert.deepEqual(fx.publicationGateCalls(), ["fixture-owned-harness-gate", "fixture-owned-harness-gate"],
+        "both real local pushes run the fixture-owned harness gate, including the trailer amend");
       assert.ok(
         ledgerLines.some((l) => l.step === "retro.marker.advanced"),
         "the marker advance is the retro's own real saveMarker call, not asserted-away",

@@ -1,0 +1,36 @@
+- id: W1-T6261
+  title: "DOCTOR JUDGES A CONTAINER'S INFLIGHT LOCK IN THAT CONTAINER'S PID NAMESPACE — `rmd doctor` on the Azure host checks each lock's pid against the HOST process table, so every live container run reads as a dead lock and lock-vs-process WARNs permanently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-07: doctor WARN lock-vs-process on a live W1-T6248 run"
+  plan_refs: [W1-T1109, W1-T3611, W1-T978]
+  files: [src/lib/report-commands.ts, test/doctor-judges-a-container-lock-in-its-own-pid-namespace.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main and on the host (read-only):
+    - Host `rmd doctor`: `[WARN] lock-vs-process measured: 1 lock(s), 1 with no live pid`. The lock was
+      state/inflight/W1-T6248.lock {"pid":114,"host":"eb18f29958f7",...}; eb18f29958f7 is remudero-daemon's
+      container hostname and `docker exec remudero-daemon sh -c "[ -e /proc/114 ]"` reported it ALIVE.
+    - src/lib/report-commands.ts:362-370 liveInflightRuns tests `isPidAlive(info.pid)` (defaultIsPidAlive, a
+      host-namespace check) and ignores the lock's `host`. W1-T1109 fixed the id-kind mismatch in the same arm;
+      this is a different defect: the pid namespace.
+    - deploy/recycle-container.sh already does the right probe for the same lock files (W1-T3611): match the
+      lock's host to a running container's hostname, then test /proc/<pid> inside it.
+  design: |
+    A lock whose `host` equals this process's hostname is judged by pid as today. A lock whose `host` names a
+    running container (docker inspect hostname) is judged by `/proc/<pid>` inside that container. A lock whose
+    host is neither is reported as `unverifiable here (host <h>)`, never as dead: doctor reports, W1-T978 owns
+    reclamation, and a false "stale" invites deleting a live run's lock.
+  acceptance:
+    - claim: "a live run's lock written by a container host is not counted as dead, and a dead pid in that container is"
+      proof: 'grep: test("W1-T6261: a container lock is judged in its own pid namespace" in test/doctor-judges-a-container-lock-in-its-own-pid-namespace.test.ts'
+  falsifier: |
+    Keep the host-namespace pid check: the fixture lock from host "ctr1" with a pid alive only inside ctr1 is
+    counted dead and the test fails.
