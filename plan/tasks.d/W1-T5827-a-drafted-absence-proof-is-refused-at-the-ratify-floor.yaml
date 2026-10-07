@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9253 (W1-T5814) hand-fixed at a5df9dcc"
   plan_refs: [W1-T4700, W1-T5541, W1-T5660, W1-T1088]
   files: [src/lib/inbox.ts, test/a-drafted-absence-proof-is-refused-at-the-ratify-floor.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

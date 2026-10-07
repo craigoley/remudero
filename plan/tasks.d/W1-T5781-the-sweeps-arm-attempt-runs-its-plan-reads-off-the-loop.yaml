@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5748 (#9205) follow-up"
   plan_refs: [W1-T5748, W1-T5284, W1-T5741, W1-T5689, W1-T5492]
   files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/the-sweeps-arm-attempt-runs-its-plan-reads-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

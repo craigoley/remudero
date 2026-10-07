@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P3"
   plan_refs: [W1-T2865, W1-T4053, W1-T2744, W1-T4998, W1-T5723]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, test/a-freshness-drain-waits-only-for-work-the-restart-would-lose.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

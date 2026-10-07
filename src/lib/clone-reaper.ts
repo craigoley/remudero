@@ -27,11 +27,14 @@
  * requires BOTH that nothing has an open file anywhere under the directory (`lsof +D`) AND that
  * it is older than the age ceiling. Either check failing keeps the directory.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import { tmpdir as osTmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { systemClock } from "./clock.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { claudeScratchRoot, isReapableScratchTarget } from "./worker-scratch.js";
 
 /** A clone is ours iff its `origin` remote names this repo. */
@@ -58,6 +61,10 @@ export interface CloneReapDeps {
   originOf?: (dir: string) => string | null;
   /** Count of open files anywhere under `dir` — 0 means nothing holds it. */
   openFileCount?: (dir: string) => number;
+  /** {@link reapStaleClonesAsync} only, each preferred over its sync seam above. */
+  fsAsync?: CloneReapFsAsync;
+  originOfAsync?: (dir: string) => Promise<string | null | ProbeTimedOut>;
+  openFileCountAsync?: (dir: string) => Promise<OpenFileProbe>;
   now?: () => number;
   maxAgeMs?: number;
   /** Report what would be reaped and delete NOTHING. */
@@ -73,7 +80,8 @@ export type CloneDisposition =
   | "outside-root"
   | "in-use"
   | "too-recent"
-  | "remove-failed";
+  | "remove-failed"
+  | "probe-timed-out"; // awaited survey only: a probe was killed at its bound, so the dir is kept
 
 export interface CloneCandidate {
   path: string;
@@ -87,6 +95,46 @@ export interface CloneReapSummary {
   reaped: string[];
   bytesReclaimed: number;
   dryRun: boolean;
+}
+
+export type CloneReapFsAsync = Pick<typeof fsp, "lstat" | "readdir" | "rm">;
+
+/** BACKSTOP on an awaited `lsof +D` (and `origin` read). MEASURED 2026-10-06: 0.6 s over a 20,943-file
+ *  `.git`; lsof stats every file, so the 141,536-object store projects to ~4 s. ~15x that for a loaded host. */
+export const OPEN_FILE_PROBE_TIMEOUT_MS = 60_000;
+
+export const PROBE_TIMED_OUT = "timed_out" as const;
+export type ProbeTimedOut = typeof PROBE_TIMED_OUT;
+
+/** The count an awaited probe read, or the bound it was killed at — never a count it did not read. */
+export type OpenFileProbe = { count: number } | { timedOutAfterMs: number };
+
+/** `exitCode` is null when the child never ran or died by a signal. */
+interface BoundedRun {
+  stdout: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
+/** One awaited spawn: SIGTERM at `timeoutMs`, SIGKILL after the grace. Never rejects. */
+function runBounded(file: string, args: readonly string[], timeoutMs: number): Promise<BoundedRun> {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    const child = execFile(file, [...args], { encoding: "utf8" }, (err, stdout) => {
+      clearTimeout(timer);
+      const code = (err as { code?: unknown } | null)?.code;
+      resolve({ stdout, timedOut, exitCode: err === null ? 0 : typeof code === "number" ? code : null });
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killAfterGrace(child);
+    }, timeoutMs);
+  });
+}
+
+function nonEmptyLineCount(out: string): number {
+  return out.split("\n").filter((l) => l.trim().length > 0).length;
 }
 
 /** Real `origin` lookup. Never throws — a non-repo directory yields null. */
@@ -123,6 +171,21 @@ export function defaultOpenFileCount(dir: string): number {
     }
     return 1; // lsof missing or unrunnable — fail closed, treat as held
   }
+}
+
+/** {@link defaultOriginOf}, awaited; killed at its bound it answers {@link PROBE_TIMED_OUT}, never null. */
+export async function defaultOriginOfAsync(dir: string, timeoutMs = OPEN_FILE_PROBE_TIMEOUT_MS): Promise<string | null | ProbeTimedOut> {
+  const r = await runBounded("git", ["-C", dir, "remote", "get-url", "origin"], timeoutMs);
+  if (r.timedOut) return PROBE_TIMED_OUT;
+  return r.exitCode === 0 ? r.stdout.trim() : null;
+}
+
+/** {@link defaultOpenFileCount}, awaited and bounded; same answers, 1 (held) when lsof cannot run. Kept
+ *  `+D`: `+d` misses `objects/xx/` handles, and `/proc/<pid>/fd` is Linux-only and misses cwd/mmap. */
+export async function defaultOpenFileCountAsync(dir: string, timeoutMs = OPEN_FILE_PROBE_TIMEOUT_MS): Promise<OpenFileProbe> {
+  const r = await runBounded("lsof", ["+D", dir], timeoutMs);
+  if (r.timedOut) return { timedOutAfterMs: timeoutMs };
+  return { count: r.exitCode === null ? 1 : nonEmptyLineCount(r.stdout) };
 }
 
 /**
@@ -295,4 +358,139 @@ export function tallyDispositions(candidates: readonly CloneCandidate[]): Record
   const tally: Record<string, number> = {};
   for (const c of candidates) tally[c.disposition] = (tally[c.disposition] ?? 0) + 1;
   return tally;
+}
+
+/** {@link dirSizeBytes}, awaited: the same walk, never following a symlink. */
+export async function dirSizeBytesAsync(dir: string, fsa: CloneReapFsAsync = fsp): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await fsa.readdir(dir);
+  } catch {
+    return 0; // unreadable contributes 0, as the sync walk counts it
+  }
+  let total = 0;
+  for (const name of entries) {
+    const full = join(dir, name);
+    let st: fs.Stats;
+    try {
+      st = await fsa.lstat(full);
+    } catch {
+      continue; // unstattable contributes 0, as the sync walk skips it
+    }
+    if (st.isSymbolicLink()) continue;
+    total += st.isDirectory() ? await dirSizeBytesAsync(full, fsa) : st.size;
+  }
+  return total;
+}
+
+/** The awaited probes; an injected sync probe (tests) still answers, wrapped. */
+function asyncProbes(deps: CloneReapDeps): {
+  originOf: (dir: string) => Promise<string | null | ProbeTimedOut>;
+  openFileCount: (dir: string) => Promise<OpenFileProbe>;
+} {
+  const { originOf, openFileCount } = deps;
+  return {
+    originOf: deps.originOfAsync ?? (originOf ? async (d) => originOf(d) : defaultOriginOfAsync),
+    openFileCount: deps.openFileCountAsync ?? (openFileCount ? async (d) => ({ count: openFileCount(d) }) : defaultOpenFileCountAsync),
+  };
+}
+
+/** {@link isFleetReviewClone}, awaited; a timed-out `origin` read answers {@link PROBE_TIMED_OUT}. */
+export async function isFleetReviewCloneAsync(dir: string, deps: CloneReapDeps = {}): Promise<string | null | ProbeTimedOut> {
+  const fsa = deps.fsAsync ?? fsp;
+  const { originOf } = asyncProbes(deps);
+  for (const inner of [join(dir, "repo"), dir]) {
+    let gitIsDir = false;
+    try {
+      gitIsDir = (await fsa.lstat(join(inner, ".git"))).isDirectory();
+    } catch {
+      continue; // no .git at this layout, as the sync predicate skips it
+    }
+    if (!gitIsDir) continue;
+    const origin = await originOf(inner);
+    if (origin === PROBE_TIMED_OUT) return PROBE_TIMED_OUT;
+    if (origin && origin.includes(REMUDERO_ORIGIN_FRAGMENT)) return inner;
+  }
+  return null;
+}
+
+/** {@link surveyRoot} OFF THE EVENT LOOP: the same dispositions in the same order, all awaited. */
+export async function surveyRootAsync(root: string, deps: CloneReapDeps = {}): Promise<CloneCandidate[]> {
+  const fsa = deps.fsAsync ?? fsp;
+  const now = deps.now ?? systemClock.now;
+  const maxAgeMs = deps.maxAgeMs ?? DEFAULT_CLONE_REAP_MAX_AGE_MS;
+  const { openFileCount } = asyncProbes(deps);
+  const out: CloneCandidate[] = [];
+  let entries: string[];
+  try {
+    entries = await fsa.readdir(root);
+  } catch {
+    return out; // root absent or unreadable, as the sync survey answers
+  }
+  for (const name of entries) {
+    const full = resolve(root, name);
+    if (!isReapableScratchTarget(root, full)) {
+      out.push({ path: full, disposition: "outside-root", bytes: 0, ageMs: 0 });
+      continue;
+    }
+    let st: fs.Stats;
+    try {
+      st = await fsa.lstat(full);
+    } catch {
+      continue; // vanished between readdir and lstat, as the sync survey skips it
+    }
+    if (st.isSymbolicLink()) {
+      out.push({ path: full, disposition: "symlink", bytes: 0, ageMs: 0 });
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    const clone = await isFleetReviewCloneAsync(full, deps);
+    if (clone === null) {
+      out.push({ path: full, disposition: "not-a-fleet-clone", bytes: 0, ageMs: 0 });
+      continue;
+    }
+    const ageMs = now() - st.mtimeMs;
+    if (clone === PROBE_TIMED_OUT) {
+      out.push({ path: full, disposition: "probe-timed-out", bytes: 0, ageMs });
+      continue;
+    }
+    const bytes = await dirSizeBytesAsync(full, fsa);
+    const probe = await openFileCount(full);
+    if ("timedOutAfterMs" in probe) {
+      out.push({ path: full, disposition: "probe-timed-out", bytes, ageMs });
+      continue;
+    }
+    if (probe.count > 0) {
+      out.push({ path: full, disposition: "in-use", bytes, ageMs });
+      continue;
+    }
+    out.push({ path: full, disposition: ageMs <= maxAgeMs ? "too-recent" : "would-reap", bytes, ageMs });
+  }
+  return out;
+}
+
+/** {@link reapStaleClones} OFF THE EVENT LOOP: the same survey and per-entry best-effort removal. */
+export async function reapStaleClonesAsync(roots: readonly string[], deps: CloneReapDeps = {}): Promise<CloneReapSummary> {
+  const fsa = deps.fsAsync ?? fsp;
+  const dryRun = deps.dryRun === true;
+  const candidates: CloneCandidate[] = [];
+  const reaped: string[] = [];
+  let bytesReclaimed = 0;
+  for (const root of roots) {
+    for (const c of await surveyRootAsync(root, deps)) {
+      if (c.disposition !== "would-reap" || dryRun) {
+        candidates.push(c);
+        continue;
+      }
+      try {
+        await fsa.rm(c.path, { recursive: true, force: true });
+        reaped.push(c.path);
+        bytesReclaimed += c.bytes;
+        candidates.push({ ...c, disposition: "reaped" });
+      } catch {
+        candidates.push({ ...c, disposition: "remove-failed" }); // named, as the sync reap records it
+      }
+    }
+  }
+  return { candidates, reaped, bytesReclaimed, dryRun };
 }

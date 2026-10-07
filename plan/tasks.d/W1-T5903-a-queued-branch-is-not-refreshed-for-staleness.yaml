@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: throughput research (PRs restarting CI)"
   plan_refs: [W1-T528, W1-T1212, W1-T4405, W1-T5515, W1-T5522]
   files: [src/lib/sweep.ts, test/a-queued-branch-is-not-refreshed-for-staleness.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

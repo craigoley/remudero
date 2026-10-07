@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
   plan_refs: [W1-T5933, W1-T5935]
   files: [src/lib/ledger.ts, src/run-task.ts, test/the-update-branch-head-moved-and-up-to-date-rows-survive-rotation.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

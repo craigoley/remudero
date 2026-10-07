@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  priority: 2.5
+  verify: human
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # selector-shadow attribution audit 2026-10-06: withdrawn — mass — coverage run 36981405010 missed at least 44 distinct test files (one shard each), over K = 5 (W1-T5350); unattributed under #9730, not a selector edge.
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/retro-trigger-corpus.test.ts"

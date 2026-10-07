@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: found while building W1-T5955 and W1-T5935"
   plan_refs: [W1-T5935, W1-T5949, W1-T5951, W1-T5534]
   files: [src/lib/ledger.ts, test/a-spent-check-requeue-survives-ledger-rotation.test.ts, test/every-step-a-ledger-fold-reads-back-survives-rotation.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

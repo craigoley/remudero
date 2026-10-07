@@ -1,0 +1,42 @@
+- id: W1-T6089
+  title: "A SRC MODULE THAT SPAWNS OR READS A SRC PATH KEEPS ITS EDGE, WHILE ONE THAT ONLY LISTS IT AS DATA DOES NOT — the narrow-selection fix drops EVERY src-to-src path-string edge, including three real spawn sites (serve-supervisor, operator-mcp and gate-gardener run src/run-task.ts by a joined path) and a text read (measurement-cadence reads src/run-task.ts), so a change to run-task.ts no longer selects their suites through them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern — which src path strings in a src module are graph edges in the affected-suite selector
+  origin: "operator session 2026-10-06: test-cost research follow-up to the narrow-selection PR #9720"
+  plan_refs: [W1-T5701, W1-T4404, W1-T5702, W1-T6083]
+  files: [src/lib/affected-suites.ts, test/a-src-module-that-spawns-a-src-path-keeps-its-edge.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06. MEASURED (research-selection): src modules listing src paths as DATA (authority.ts,
+    config-schema.ts, worktree-sites.ts, baked-runtime-inputs.ts) make 114 false src-to-src edges through
+    `namedPaths` in src/lib/affected-suites.ts; dropping src-origin named edges cut median reach from
+    2,341 to 1,300 suites. PR #9720 (open, run-unfiled-1791326561079) adds `namedEdges`, which drops every
+    src path named inside a src module. But on origin/main three src modules SPAWN a src path:
+    src/lib/serve-supervisor.ts (`exec: join(slot.dir, "src", "run-task.ts")`), src/lib/operator-mcp.ts
+    (`join(deps.repoRoot, "src", "run-task.ts")` in the runBoundedSuite argv) and src/lib/gate-gardener.ts
+    (`join(deps.repoRoot, "src/run-task.ts")` in a spawn argv), and src/lib/measurement-cadence.ts reads
+    `join(opts.checkoutDir, "src", "run-task.ts")` as text. Those are real dependencies.
+  design: |
+    In the src-origin case, keep a named src path as an edge when it appears as a spawn or exec argument
+    (spawn/spawnSync/execFile/execFileSync/fork/runBoundedSuite argv, or an `exec:` field passed to one), or
+    inside a readFileSync/readFile call; drop it when it appears only in a table, array or object literal
+    with no such use. The classification reads the call around the literal or joined segments, not a
+    hand list of files. Report, in the PR, the reach of src/run-task.ts and the median reach before and
+    after against #9720's numbers. If #9720 has not merged when this is built, build on its head's
+    `namedEdges` or carry its src-only rule in this PR and say so.
+  acceptance:
+    - claim: "a src module that spawns src/run-task.ts by a joined path is an importer of it in the graph, and a src module that lists the same path in a data table is not; a src module reading a src path with readFileSync keeps that edge"
+      proof: "unit test: test/a-src-module-that-spawns-a-src-path-keeps-its-edge.test.ts"
+  falsifier: |
+    Drop every src-origin named edge (#9720's rule alone): the spawning fixture module has no edge to the
+    changed file and the first test fails.
+  note: |
+    DEPENDS ON AN UNFILED PR: #9720 (fix(selection): the author gate runs the narrow affected-suite
+    selection) is a hand PR with no task id, so depends_on cannot name it. Build after it merges.

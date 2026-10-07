@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 23:46Z (two boots back to back); related to restart report P5 (W1-T5722) and P7 (operator)"
   plan_refs: [W1-T341, W1-T5722, W1-T5720, W1-T4945]
   files: [src/lib/deployer.ts, test/a-deploy-recycle-never-replaces-a-boot-that-has-not-swept.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

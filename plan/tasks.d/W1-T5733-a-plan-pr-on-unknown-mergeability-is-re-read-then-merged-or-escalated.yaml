@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 19:36Z/19:41Z, follow-up audit (research/audit/followups.md) item 76"
   plan_refs: [W1-T5615, W1-T2855, W1-T5674, W1-T5726]
   files: [src/lib/arm-auto-merge.ts, test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escalated.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-ups the stall-fix builds found (operator: 'file ... any others that will improve things')"
   plan_refs: [W1-T5481, W1-T5931]
   files: [test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -1,0 +1,40 @@
+- id: W1-T6086
+  title: "A GIT FIXTURE IS COPIED FROM A BUILT TEMPLATE, NOT REBUILT PER TEST — building a seeded repository costs ~170 ms of git processes and copying a built one ~18 ms; real git fixtures are 36.8% of serial suite time, and retro-marker-atomic alone (459 s, the slowest file) builds 37 fresh bare + seed + clone fixtures"
+  repo: remudero
+  depends_on: [W1-T5902]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the shared git fixture builders copy a per-process template instead of re-running git
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, ranked item 5)"
+  plan_refs: [W1-T2903, W1-T5902, W1-T1217]
+  files: [test/helpers/git-repo.ts, test/helpers/retro-fake-fixture.ts, test/a-git-fixture-is-copied-from-a-built-template.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (research-coverage): fixture build 170 ms vs `cp -R` of the same built repository
+    18 ms; real git fixtures are 36.8% of the 8,828 s serial suite; the three slowest files are 13.4%,
+    led by test/retro-marker-atomic.test.ts at 459 s (37 tests, each a fresh bare + seed + clone fixture
+    and a real retroCommand). gitRepo() (W1-T2903) is the one shared builder, so one change reaches every
+    migrated caller. W1-T5902 (open branch) moves setupFakeRetroFixture out of retro-marker-atomic into
+    test/helpers/retro-fake-fixture.ts, which is why this depends on it.
+  design: |
+    gitRepo() builds each distinct shape (bare, seeded non-bare per branch name, a clone of a bare origin)
+    once per process into a template directory under the tmp-hygiene prefix, then returns a recursive copy
+    (fs.cpSync) of it; a clone's copy has its origin remote rewritten to the copied bare's path. Callers
+    see no API change. setupFakeRetroFixture builds its bare + seed + clone trio once per process the
+    same way. A caller that needs distinct commit identities passes `fresh: true` and gets today's build.
+    The template never escapes the tmp-hygiene sweep. Anchor the gain on retro-marker-atomic: report its
+    wall time before and after in the PR. Keep the fixture-copy census (scripts/fixture-copy-baseline.json)
+    green: no new raw `git init` site and no new helper named like a repo builder.
+  acceptance:
+    - claim: "two gitRepo() calls in one process run git init once and return independent copies whose writes do not leak into each other; a copied clone's origin points at its own copied bare, not at the template"
+      proof: "unit test: test/a-git-fixture-is-copied-from-a-built-template.test.ts"
+    - claim: "gitRepo copies a built template with fs.cpSync"
+      proof: 'grep: cpSync( in test/helpers/git-repo.ts'
+  falsifier: |
+    Return the template directory itself instead of a copy: the second fixture sees the first one's commit
+    and the first test fails.

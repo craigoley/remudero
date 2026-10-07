@@ -71,37 +71,50 @@ function unmeasurable(
   };
 }
 
-/** Adapt selected ledger rows without writing state or treating missing proof evidence as a pass. */
-export function adaptOperatorAgentProofRows(rows: readonly OperatorAgentProofLedgerRow[]): OperatorAgentProofSignal {
-  let reviewRows = 0;
-  let executedPass = 0;
-  let executedFail = 0;
-  let nonExecutable = 0;
-  let executionError = 0;
-  let otherObserved = 0;
-  const unmeasurable: OperatorAgentProofUnmeasurable[] = [];
+/** What {@link finishOperatorAgentProof} reads: counts and the first details, never the rows. */
+export interface OperatorAgentProofFold {
+  reviewRows: number;
+  executedPass: number;
+  executedFail: number;
+  nonExecutable: number;
+  executionError: number;
+  otherObserved: number;
+  unmeasurableCount: number;
+  unmeasurable: OperatorAgentProofUnmeasurable[];
+}
 
-  for (const row of rows) {
-    if (row.step !== "review.posted") continue;
-    reviewRows += 1;
-    if (!Array.isArray(row.proof_exec)) {
-      unmeasurable.push(unmeasurableRow(row, "missing-proof-exec", row.proof_exec));
-      continue;
-    }
-    if (row.proof_exec.length === 0) {
-      unmeasurable.push(unmeasurableRow(row, "empty-proof-exec"));
-      continue;
-    }
-    for (const outcome of row.proof_exec) {
-      if (outcome === "executed_pass") executedPass += 1;
-      else if (outcome === "executed_fail") executedFail += 1;
-      else if (typeof outcome === "string" && NON_EXECUTABLE.has(outcome)) nonExecutable += 1;
-      else if (typeof outcome === "string" && EXECUTION_ERROR.has(outcome)) executionError += 1;
-      else if (typeof outcome === "string" && OTHER_OBSERVED.has(outcome)) otherObserved += 1;
-      else unmeasurable.push(unmeasurableRow(row, "unknown-proof-exec", outcome));
-    }
+export function emptyOperatorAgentProofFold(): OperatorAgentProofFold {
+  return { reviewRows: 0, executedPass: 0, executedFail: 0, nonExecutable: 0, executionError: 0, otherObserved: 0, unmeasurableCount: 0, unmeasurable: [] };
+}
+
+function addUnmeasurable(fold: OperatorAgentProofFold, item: OperatorAgentProofUnmeasurable): void {
+  fold.unmeasurableCount += 1;
+  if (fold.unmeasurable.length < MAX_OPERATOR_AGENT_DETAIL_ITEMS) fold.unmeasurable.push(item);
+}
+
+export function foldOperatorAgentProofRow(fold: OperatorAgentProofFold, row: OperatorAgentProofLedgerRow): void {
+  if (row.step !== "review.posted") return;
+  fold.reviewRows += 1;
+  if (!Array.isArray(row.proof_exec)) {
+    addUnmeasurable(fold, unmeasurableRow(row, "missing-proof-exec", row.proof_exec));
+    return;
   }
+  if (row.proof_exec.length === 0) {
+    addUnmeasurable(fold, unmeasurableRow(row, "empty-proof-exec"));
+    return;
+  }
+  for (const outcome of row.proof_exec) {
+    if (outcome === "executed_pass") fold.executedPass += 1;
+    else if (outcome === "executed_fail") fold.executedFail += 1;
+    else if (typeof outcome === "string" && NON_EXECUTABLE.has(outcome)) fold.nonExecutable += 1;
+    else if (typeof outcome === "string" && EXECUTION_ERROR.has(outcome)) fold.executionError += 1;
+    else if (typeof outcome === "string" && OTHER_OBSERVED.has(outcome)) fold.otherObserved += 1;
+    else addUnmeasurable(fold, unmeasurableRow(row, "unknown-proof-exec", outcome));
+  }
+}
 
+export function finishOperatorAgentProof(fold: OperatorAgentProofFold): OperatorAgentProofSignal {
+  const { reviewRows, executedPass, executedFail, nonExecutable, executionError, otherObserved } = fold;
   const denominator = executedPass + executedFail;
   return {
     signal: OPERATOR_AGENT_PROOF_SIGNAL,
@@ -114,10 +127,17 @@ export function adaptOperatorAgentProofRows(rows: readonly OperatorAgentProofLed
     otherObserved,
     denominator: denominator > 0 ? denominator : null,
     passRate: denominator > 0 ? executedPass / denominator : null,
-    unmeasurableCount: unmeasurable.length,
-    unmeasurable: unmeasurable.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
+    unmeasurableCount: fold.unmeasurableCount,
+    unmeasurable: fold.unmeasurable.slice(0, MAX_OPERATOR_AGENT_DETAIL_ITEMS),
     ...(denominator > 0 ? {} : { unavailableReason: "no executed proof pass/fail outcome is available yet" }),
   };
+}
+
+/** Adapt selected ledger rows without writing state or treating missing proof evidence as a pass. */
+export function adaptOperatorAgentProofRows(rows: readonly OperatorAgentProofLedgerRow[]): OperatorAgentProofSignal {
+  const fold = emptyOperatorAgentProofFold();
+  for (const row of rows) foldOperatorAgentProofRow(fold, row);
+  return finishOperatorAgentProof(fold);
 }
 
 function unmeasurableRow(

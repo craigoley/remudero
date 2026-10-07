@@ -3,7 +3,9 @@
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { affectedSelectionOrFull, readAffectedSuitesInput } from '../src/lib/affected-suites.ts';
+import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, symbollessSourceFiles }
+  from '../src/lib/affected-suites.ts';
+import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, testRunArgv } from '../src/lib/test-slot.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
@@ -46,8 +48,31 @@ export function testSummary(output) {
   return fields.every((field) => summary[field] !== null) ? summary : null;
 }
 
+/** The author selection for `changed` over `range` (`<base>...<head>`): the floor, plus the NARROW
+ *  candidate (changed tests, suites naming a changed source symbol or its src/ caller, path readers,
+ *  suites naming a changed file) whenever every changed source file names a symbol. A file whose
+ *  hunks name none — an import-only edit, a deletion — leaves `narrow` absent, so the floor runs. */
+export function authorSelection(root, changed, range, spawn = spawnSync) {
+  return affectedSelectionOrFull(changed, () => {
+    const scoped = (file, args, opts = {}) => {
+      const result = spawn(file, args, { cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
+        env: authorEnvironment(process.env), ...opts });
+      return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '',
+        ...(result.error ? { error: result.error.message } : {}), ...(result.signal ? { signal: result.signal } : {}) };
+    };
+    const diff = scoped('git', ['diff', '-U0', range, '--', 'src', 'scripts', 'bin']);
+    if (diff.status !== 0) throw new Error(`git diff -U0 ${range} exited ${diff.status}: ${diff.stderr.trim().slice(0, 200)}`);
+    const readFile = (path) => readFileSync(join(root, path), 'utf8');
+    const symbolless = symbollessSourceFiles(changed, diff.stdout, readFile);
+    if (symbolless.length > 0) return readAffectedSuitesInput(root, changed);
+    const symbols = changedSymbols(diff.stdout, readFile);
+    const symbolSuites = symbols.length === 0 ? [] : callerReachableSuites(symbols, root, scoped).suites;
+    return readAffectedSuitesInput(root, changed, { symbolSuites });
+  });
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed) => affectedSelectionOrFull(changed, () => readAffectedSuitesInput(root, changed)) } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range) } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
   }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
@@ -130,13 +155,19 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (![receipt.headSha, receipt.baseSha].every((sha) => /^[a-f0-9]{40}$/.test(sha))) throw new Error('unresolved head or base SHA');
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
-    const selection = select(receipt.changedFiles);
-    receipt.selection = selection.fullRun || selection.suites.length === 0 ? 'full-fallback' : 'affected-floor';
+    const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
+    // The narrow selection runs when it was computed and names a suite; else the floor; else all.
+    const narrow = selection.fullRun ? undefined : selection.narrow;
+    receipt.floorSize = selection.fullRun ? null : selection.suites.length;
+    receipt.narrowSize = narrow === undefined ? null : narrow.length;
+    receipt.selection = selection.fullRun ? 'full-fallback' : narrow?.length ? 'affected-narrow'
+      : selection.suites.length > 0 ? 'affected-floor' : 'full-fallback';
     receipt.reasons = selection.reasons;
-    if (!selection.fullRun && selection.suites.length === 0) receipt.reasons = [...selection.reasons, 'empty affected floor: refusing a zero-test green'];
-    receipt.suites = verifiedSuites(root, receipt.selection === 'full-fallback' ? listTestFiles(root) : selection.suites);
+    if (!selection.fullRun && receipt.selection === 'full-fallback') receipt.reasons = [...selection.reasons, 'empty affected floor: refusing a zero-test green'];
+    receipt.suites = verifiedSuites(root, receipt.selection === 'full-fallback' ? listTestFiles(root)
+      : receipt.selection === 'affected-narrow' ? narrow : selection.suites);
     if (receipt.suites.length === 0) throw new Error('no verified test files in the checkout');
-    console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s); head=${receipt.headSha}, base=${receipt.baseSha}`);
+    console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusOk = census.status === 0 && !census.signal && !census.error;

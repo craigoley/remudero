@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
   plan_refs: [W1-T100, W1-T5901, W1-T254, W1-T2430, W1-T2519, W1-T1272, W1-T5403, W1-T473]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

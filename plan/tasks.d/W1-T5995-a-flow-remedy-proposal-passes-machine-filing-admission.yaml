@@ -11,8 +11,7 @@
   origin: "operator session 2026-10-06: #9505 red since 07:29Z (operator: fix 9505)"
   plan_refs: [W1-T5538, W1-T3843, W1-T5348, W1-T4435]
   files: [src/lib/plan.ts, src/lib/flow-remedy-gardener.ts, test/a-flow-remedy-proposal-passes-machine-filing-admission.test.ts]
-  status: queued
-  priority: 1
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-06: #9505 (chore(plan): draft a flow remedy for own-red-required-checks-red, files
@@ -36,3 +35,5 @@
       proof: "unit test: test/a-flow-remedy-proposal-passes-machine-filing-admission.test.ts"
   falsifier: |
     Leave the remedy arm ci-friction-only: the #9505 shard is refused by admission and the test fails.
+  note: |
+    CREDIT 2026-10-06 (hand flip): shipped as #9571 (head run-W1-T5995-1791292358798, merged 2026-10-06T14:45Z as 9a14fa6ac). rmd plan-reconcile names it WINDOW-SHORT (merged outside its credit scan windows) and asks for a hand flip in a plan-only PR, which this is.
