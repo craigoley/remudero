@@ -156,6 +156,30 @@ test("W1-T6252: provisioning writes one usage.credential_provisioned ledger row"
   }
 });
 
+test("W1-T6252: an unwritable credential ledger is reported without throwing", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t6252-ledger-failure-"));
+  try {
+    const blocker = join(root, "not-a-directory");
+    writeFileSync(blocker, "occupied");
+    const config = { claudeBin: "/bin/true", root: join(blocker, "rmd") } as Config;
+    const diagnostics: string[] = [];
+    t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+    const sink = usageCredentialSink(config);
+
+    assert.doesNotThrow(() => sink({
+      kind: "healed",
+      store: join(root, "shared", "claude"),
+      priorVerdict: "credential-file-empty",
+    }));
+    assert.equal(diagnostics.length, 1);
+    const diagnostic = JSON.parse(diagnostics[0]!) as { event: string; reason: string };
+    assert.equal(diagnostic.event, "usage.credential_ledger_failed");
+    assert.match(diagnostic.reason, /not a directory|ENOTDIR/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T6252: an unusable owner credential provisions nothing and forks nothing", () => {
   const { root, hostClaude, core } = fixture();
   try {
