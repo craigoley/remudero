@@ -56,6 +56,12 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/relint.ts", "newMonolithIdsAgainstBase"],
   ["src/lib/composition-root.ts", "realReviewWorktree"],
   ["src/lib/review-worktree-reclaim.ts", "defaultReadHeadSha"],
+  // W1-T6133: the sweep's PR-head trees and the worker's credential wiring and lane-reaper reads.
+  ["src/lib/sweep.ts", "prHeadTreeGit"],
+  ["src/lib/sweep.ts", "planRepairGitRun"],
+  ["src/lib/worker.ts", "wireCredentialHelperSocket"],
+  ["src/lib/worker.ts", "credentialHelperSocketWired"],
+  ["src/lib/worker.ts", "laneWorkKeepReason"],
 ];
 
 /**
@@ -178,10 +184,11 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/status-board.ts": { count: 4, reason: "CHECKOUT: status-board ref reads of the managed checkout (-C repoDir)" },
   "src/lib/status.ts": { count: 2, reason: "CALLER: buildGitLogSupersessionSearch/buildCommitTrailerIndex run git log in opts.cwd" },
   "src/lib/sweep.ts": {
-    count: 7,
+    count: 6,
     reason:
-      "WORKTREE (W1-T6122's file): rebaseDirtyFleetBranchViaGit and renumberPlanPrIds run(cwd…) and " +
-      "planRepairGitRun address the sweep's repair worktree; buildSweepEffects's 4 address the managed checkout",
+      "CHECKOUT (W1-T6133): buildSweepEffects's 4 address the managed checkout; renumberPlanPrIds's and " +
+      "rebaseDirtyFleetBranchViaGit's -C argv goes to their git seam, whose default prHeadTreeGit runs the " +
+      "PR-head tree through the leaf and leaves only rebaseDirtyFleetBranchViaGit's repoDir steps raw",
   },
   "src/lib/synthetic-tasks.ts": { count: 2, reason: "CHECKOUT: git/mergedCommit read the managed checkout" },
   "src/lib/task-id-reservation.ts": { count: 2, reason: "CHECKOUT: reservation reads of the harness module checkout and the managed checkout" },
@@ -196,11 +203,11 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "is codex's",
   },
   "src/lib/worker.ts": {
-    count: 28,
+    count: 23,
     reason:
-      "WORKTREE (W1-T6122's file): wireCredentialHelperSocket, credentialHelperSocketWired, " +
-      "laneWorkKeepReason's -C path, defaultLaneListGit (cwd); the rest are worktreeAdd/Remove, pruneStaleRuns " +
-      "and branch reads of the managed checkout",
+      "CHECKOUT (W1-T6133 converted the WORKTREE sites): defaultLaneListGit lists the managed checkout's " +
+      "registration (cwd: repoDir); the rest are worktreeAdd/Remove, pruneStaleRuns and branch reads of the " +
+      "managed checkout",
   },
   "src/run-task.ts": {
     count: 82,
