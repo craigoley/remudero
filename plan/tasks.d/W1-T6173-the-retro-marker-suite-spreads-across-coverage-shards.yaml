@@ -1,0 +1,45 @@
+- id: W1-T6173
+  title: "THE RETRO MARKER SUITE SPREADS ACROSS COVERAGE SHARDS — test/retro-marker-atomic.test.ts measures 852 s instrumented (38 sequential retroCommand tests), the heaviest row of scripts/test-tier-coverage-manifest.json, and no split of WHOLE files can beat one file, so coverage shard 1 still runs ~19-20 min after W1-T5923"
+  repo: remudero
+  depends_on: [W1-T5902]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the retro marker real-run suite is split so the coverage balancer can spread it
+  band_meaning: span
+  origin: "operator session 2026-10-07: coverage lane critical path after W1-T5923 (#9740)"
+  plan_refs: [W1-T5923, W1-T5902, W1-T6086, W1-T3290]
+  files: [test/retro-marker-atomic-real-run.test.ts, test/retro-marker-atomic-publish.test.ts, test/retro-marker-atomic-ownership.test.ts, test/retro-marker-atomic-integrity.test.ts, test/retro-marker-atomic-checkout.test.ts, scripts/test-tier-coverage-manifest.json, scripts/test-tier-manifest.json, test/the-retro-marker-suite-spreads-across-coverage-shards.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main after #9740: scripts/test-tier-coverage-manifest.json's heaviest
+    row is test/retro-marker-atomic.test.ts at 851971 ms; the next is 509482 ms. The coverage split
+    (scripts/test-tier-manifest.mjs balanceFilesByDuration over instrumentedManifest, ci.yml
+    `--select-all --shard N/8 --instrumented-manifest`) places whole files, so the shard holding this
+    one file cannot finish before ~14 min of it alone, and shard 1 still runs ~19-20 min. W1-T5902
+    (queued; branch run-W1-T5902-1791224659292, no PR) moves the 29 real-run retroCommand tests into
+    test/retro-marker-atomic-real-run.test.ts to get them off the PLAN_ONLY set; that leaves ONE
+    real-run file carrying nearly all the weight, so it does not move this floor. Hence the
+    dependency: this splits what W1-T5902 leaves, rather than racing it on the same file.
+  design: |
+    After W1-T5902 lands, split test/retro-marker-atomic-real-run.test.ts by concern into
+    independent files the selector can place on different shards: publish and repair (the
+    prepublish repair, acceptance-repair, trailer-stamp and terminal-failure tests), PR ownership
+    (head-ref, exact-head recovery, no-PR_URL fallback), the automated-run integrity gate, and
+    checkout handling (plan-only guard, malformed plan, real clone, stale worktree prune, offline
+    gateway, no promotion judge). The names above are the starting cut; the measured weights decide
+    the final count, and a group that still dominates splits again. Every test moves verbatim with
+    its own fixture setup through W1-T5902's shared helper; no test is dropped, merged or weakened,
+    and retroCommand and src/ are untouched. Seed both manifests' rows for the new files from one
+    measured run (instrumented for the coverage ledger), and drop the moved file's rows.
+  acceptance:
+    - claim: "every retro marker test title recorded at filing exists exactly once across test/retro-marker-atomic*.test.ts"
+      proof: 'grep: test("W1-T6173: every retro marker title survives the split" in test/the-retro-marker-suite-spreads-across-coverage-shards.test.ts'
+    - claim: "balanceFilesByDuration over the committed instrumented weights places the retro marker files on more than one coverage shard, and none outweighs the mean shard"
+      proof: 'grep: test("W1-T6173: the coverage split places the retro marker files on more than one shard" in test/the-retro-marker-suite-spreads-across-coverage-shards.test.ts'
+  falsifier: |
+    Leave every real-run test in one file: that file stays the heaviest row, the balancer gives it
+    a shard of its own with no other retro marker file beside it elsewhere, and the second test fails.

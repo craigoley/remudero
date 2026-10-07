@@ -1,0 +1,49 @@
+- id: W1-T6174
+  title: "THE TEST GARDENER ADOPTS THE COVERAGE DURATION LEDGER — #9740 (W1-T5923) added scripts/test-tier-coverage-manifest.json, seeded from ONE CI run, and CI already uploads a test-tier-coverage-manifest-proposal artifact, but src/lib/test-gardener.ts fetches and adopts only test-tier-manifest-proposal into scripts/test-tier-manifest.json, so the instrumented ledger the coverage split weighs never refreshes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-07: coverage lane critical path after W1-T5923 (#9740)"
+  plan_refs: [W1-T5923, W1-T4112, W1-T2904]
+  files: [src/lib/test-gardener.ts, test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: ci.yml's flake-retry-aggregate job runs `test-tier-manifest.mjs
+    --manifest scripts/test-tier-coverage-manifest.json --record-evidence ... --output
+    test-tier-coverage-manifest.next.json` and uploads it as `test-tier-coverage-manifest-proposal`
+    (7-day retention). In src/lib/test-gardener.ts, refreshTestManifestProposalAsync and
+    fetchRunProposalAsync download only TEST_MANIFEST_PROPOSAL_ARTIFACT
+    ("test-tier-manifest-proposal"); testGardenInventory, applyTestGardenActions and
+    testGardenCheapFingerprint all resolve probe.DEFAULT_MANIFEST_RELATIVE_PATH
+    (scripts/test-tier-manifest.json). The coverage ledger therefore stays at its one-run seed while
+    files are added, split (W1-T6173) and slowed, and the coverage split drifts out of balance with
+    no mechanism to correct it: the same gap W1-T4112's follow-up closed for the fast-lane ledger.
+  design: |
+    Make the duration ledger a parameter, not a constant: a small descriptor per ledger (committed
+    manifest path, artifact name, proposal file name, state-file prefix) with two entries, the
+    fast-lane ledger exactly as today and the coverage ledger (scripts/test-tier-coverage-manifest.json,
+    test-tier-coverage-manifest-proposal, test-tier-coverage-manifest.next.json). The refresh fetches
+    each ledger's newest proposal and keeps its own rolling history and source marker; a run that
+    uploaded no coverage proposal is recorded as absent, as today. testGardenInventory runs
+    durationCandidates per ledger, with its own adoption cadence (manifestLastCommitMs on that path)
+    and the same settle/hysteresis rules, so the coverage ledger self-heals on the cadence the fast
+    lane already uses. Each action's `file` names its ledger; applyTestGardenActions writes each
+    ledger it touched and returns both paths; the cheap fingerprint covers both. The returned TestProposalFeed gains a
+    `coverage` field carrying the coverage ledger's own feed, so the existing run-task.ts test.pass
+    log line records both with no call-site edit. The fast-lane ledger's behaviour is byte-identical.
+  acceptance:
+    - claim: "a fresh test-tier-coverage-manifest-proposal is fetched into its own state files beside the fast-lane proposal"
+      proof: 'grep: test("W1-T6174: the refresh fetches the coverage proposal beside the fast-lane one" in test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts'
+    - claim: "a material coverage proposal yields adopt-durations actions that write scripts/test-tier-coverage-manifest.json and leave scripts/test-tier-manifest.json untouched"
+      proof: 'grep: test("W1-T6174: a coverage proposal is adopted into the coverage ledger only" in test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts'
+    - claim: "a main run that uploaded no coverage proposal is recorded absent and never retried, and the fast-lane adoption still proceeds"
+      proof: 'grep: test("W1-T6174: a run with no coverage proposal is recorded absent" in test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts'
+  falsifier: |
+    Fetch only test-tier-manifest-proposal: the coverage state files are never written, no action
+    names scripts/test-tier-coverage-manifest.json, and the first two tests fail.

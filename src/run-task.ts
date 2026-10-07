@@ -957,6 +957,8 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  ratifyPrCreateRestArgs,
+  ratifyPrProbeRestArgs,
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
@@ -2719,6 +2721,7 @@ import {
   worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
+  worktreeRemoveAsync,
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
@@ -36191,9 +36194,22 @@ export function retractGardenBranch(o: {
   fetcher: GhApiFetcher;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): "deleted" | "kept_pr_exists" | "kept_unreadable" | "kept_delete_failed" {
+  return runStepsSync(retractGardenBranchSteps(o));
+}
+
+export function retractGardenBranchAsync(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => Promise<string> },
+): Promise<ReturnType<typeof retractGardenBranch>> {
+  return runStepsAsync(retractGardenBranchSteps(o));
+}
+
+function* retractGardenBranchSteps(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => string | Promise<string> },
+): Steps<ReturnType<typeof retractGardenBranch>> {
   let existing: ReturnType<typeof probeExistingPlanPr>;
   try {
-    existing = probeExistingPlanPr(o.fetcher, o.owner, o.repo, o.branch);
+    const rows = yield* step(() => o.fetcher(ratifyPrProbeRestArgs(o.owner, o.repo, o.branch)));
+    existing = probeExistingPlanPr(() => rows, o.owner, o.repo, o.branch);
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `pr probe failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_unreadable";
@@ -36203,7 +36219,7 @@ export function retractGardenBranch(o: {
     return "kept_pr_exists";
   }
   try {
-    o.git("push", "-q", "origin", "--delete", o.branch);
+    yield* step(() => o.git("push", "-q", "origin", "--delete", o.branch));
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_delete_failed";
@@ -36222,6 +36238,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const io: GardenLandIo = {
     git,
+    fetcher: opts.fetcher ?? ghJson,
     docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
     preflight: opts.preflight ?? planPrPreflight,
   };
@@ -36239,6 +36256,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
     preflight: opts.preflight ?? planPrPreflightAsync,
   };
@@ -36246,7 +36264,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     root,
     branch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
-    dispose: async () => worktreeRemove(opts.repoDir, root),
+    dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
 }
 
@@ -36265,6 +36283,7 @@ export interface GardenCheckoutOpts {
 
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
+  fetcher: GhApiFetcher;
   docsIndex: () => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
@@ -36297,12 +36316,12 @@ function* gardenLandSteps(
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
   if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
-  const fetcher = opts.fetcher ?? ghJson;
   try {
-    return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
+    const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
+    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(opts.owner, opts.repo, create)));
+    return createPlanPrRest(() => row, opts.owner, opts.repo, create).prUrl;
   } catch (e) {
-    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
+    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher: io.fetcher, log: opts.log });
     throw e;
   }
 }

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778), verified read-only on the #9778 head before filing"
   plan_refs: [W1-T6106, W1-T6091, W1-T6121, W1-T6122]
   files: [test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
