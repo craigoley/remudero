@@ -1,0 +1,47 @@
+- id: W1-T6125
+  title: "SERVE IS REPLACED WHEN ITS SCRATCH MOUNT PLAN DRIFTS — W1-T6110 (PR #9770) recycles a daemon container whose binds differ from `scratch_plan`, but remudero-serve converges only through serve-policy-convergence.ts, whose drift is the resource policy alone, so serve takes a new scratch bind (PR #9761's test-slot directory, or any later one) only at its next unrelated replace"
+  repo: remudero
+  depends_on: [W1-T6110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the serve container is replaced when its binds differ from the live mount plan, under the serve holds
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6110 (PR #9770), verified read-only on origin/main and the #9770 head before filing"
+  plan_refs: [W1-T6110, W1-T4267, W1-T6090]
+  files: [src/lib/serve-policy-convergence.ts, test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main bd232423a and the PR #9770 head (bbe12b66d, W1-T6110's build, open at filing).
+    src/lib/serve-policy-convergence.ts `realServePolicyDeps` wires `servePolicyDrift: () =>
+    readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER)` and nothing else;
+    `decideServePolicyConvergence` and `runServePolicyCycle` replace serve only on that drift, and the post-replace
+    check re-reads the same policy. deploy/serve-container.sh sources deploy/scratch-mounts.sh and calls
+    `scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"`, so serve's binds come from the same plan the daemon's do.
+    #9770 adds `mountPlanDriftFrom` and `readMountPlanDrift(exec, installPath, stateDir, container)` to
+    src/lib/deployer.ts and feeds `mountPlanDrift` into `decideDeployTrigger` for the daemon container only; serve's
+    cycle never calls it. #9761 (W1-T6090, merged ec89eb254) added the test-slot bind to that plan.
+  design: |
+    (1) `realServePolicyDeps` gains a mount reading: `readMountPlanDrift` for SERVE_POLICY_CONTAINER with the state
+    root serve launches with (serve-container.sh's RMD_STATE_DIR), reusing W1-T6110's reader rather than a second
+    parser. (2) `decideServePolicyConvergence` replaces on resource-policy drift OR mount-plan drift, under exactly
+    the holds it already has — STOP or PAUSE set or unknown, the failed-replace back-off, a supervisor handoff in
+    progress or unreadable — and names the drifted binds in its reason and ledger rows. UNKNOWN (an unreadable plan,
+    scratch off, an unreadable inspect) is never drift and never replaces. (3) The post-replace check also re-reads
+    mount drift, so a replace that did not take the bind is a recorded failure with its back-off, not a loop.
+  acceptance:
+    - claim: "the serve cycle replaces a serve container missing a bind its scratch-mount plan names under the same STOP, PAUSE, back-off and handoff holds as policy drift; an unreadable plan or inspect never replaces; a replace whose container still lacks the bind is recorded as a failed replace"
+      proof: "unit test: test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts"
+    - claim: "the serve convergence reads the shared mount-plan reader"
+      proof: "grep: readMountPlanDrift( in src/lib/serve-policy-convergence.ts"
+  falsifier: |
+    Leave serve's deps on the policy reading alone: the fixture serve container without the planned bind reads no
+    drift, `runServePolicyCycle` replaces nothing, and the replace test fails.
+  notes: |
+    Depends on W1-T6110 (#9770, open at filing): `readMountPlanDrift` arrives with it. deploy/ and the supervisor
+    are untouched. Serve is the operator's console, so the holds are the point: a replace never runs mid-handoff.
+    Verify on the host after the merge with `docker inspect remudero-serve --format '{{json .Mounts}}'`, not from
+    the merge.

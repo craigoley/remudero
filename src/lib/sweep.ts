@@ -4317,6 +4317,13 @@ function reviewDemandLooping(pr: OpenPrView): boolean {
     loop.postsSinceLastAdmission >= 1;
 }
 
+/** W1-T6047 — a DELIVERED verdict dedups a re-post only while GitHub does not contradict it. A
+ *  status still `pending` that the post-review row already judged dead or stale proves the delivery
+ *  never reached the status; deduping on it would strand the PR on "re-running" without a re-run. */
+export function deliveredVerdictDedupsPostReview(pr: Pick<OpenPrView, "reviewState">, delivered: boolean): boolean {
+  return delivered && pr.reviewState !== "pending";
+}
+
 /** One of the dispositions every open PR is reconciled into. */
 export type Disposition =
   | "mergeable"
@@ -14064,7 +14071,7 @@ export async function runSweep(
         // also suppresses UNLESS it was the stale "PR is already closed" refusal, in which case
         // reaching this check already proves the PR is open again.
         const reviewKey = reviewOutcomeKeyForPr(pr);
-        const reviewDelivered = prior.reviewDelivered.has(reviewKey);
+        const reviewDelivered = deliveredVerdictDedupsPostReview(pr, prior.reviewDelivered.has(reviewKey));
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??

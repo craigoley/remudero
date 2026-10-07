@@ -35,6 +35,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -98,6 +100,7 @@ export interface TriggerInputs {
   /** W1-T4267: expected-versus-live Docker limits read by the watchdog tick. Undefined is
    *  UNKNOWN (an unreadable inspect or policy), never drift. */
   resourcePolicyDrift?: ResourcePolicyDrift[];
+  mountPlanDrift?: MountPlanDrift[]; // W1-T6110: scratch binds read by the tick; undefined is UNKNOWN
   /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
    *  which never recycles automatically — a recycle before the build lands would pull the old one. */
   imagePublished?: boolean;
@@ -168,6 +171,75 @@ export function readResourcePolicyDrift(
     return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
   } catch {
     return undefined; // no policy file, no bash, or no such container — never a recycle trigger
+  }
+}
+
+export interface MountPlanDrift {
+  target: string; // a bind's container path, or `env <NAME>`
+  expected: string;
+  actual: string | undefined; // undefined: the container has no such bind or variable
+}
+
+export function mountPlanDriftFrom(planText: string, inspectJson: string): MountPlanDrift[] | undefined {
+  const binds: [string, string][] = [];
+  const env: [string, string][] = [];
+  for (const line of planText.split("\n")) {
+    const [kind, a, b] = line.split("\t");
+    if (kind === "bind" && a && b) binds.push([a, b]);
+    if (kind === "env" && a?.includes("=")) env.push([a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]);
+  }
+  if (binds.length === 0) return undefined; // W1-T6110: only what the plan names is compared
+  let live: { Mounts?: unknown; Env?: unknown };
+  try {
+    live = JSON.parse(inspectJson) as { Mounts?: unknown; Env?: unknown };
+  } catch {
+    return undefined; // not an inspect at all — UNKNOWN, the same no-storm rule as a failed inspect
+  }
+  if (live === null || typeof live !== "object") return undefined;
+  if (!Array.isArray(live.Mounts) || !(Array.isArray(live.Env) || live.Env === null)) return undefined;
+  const mounts = live.Mounts as { Source?: unknown; Destination?: unknown; RW?: unknown }[];
+  const vars = (live.Env ?? []) as unknown[];
+  const drift: MountPlanDrift[] = [];
+  for (const [source, destination] of binds) {
+    const m = mounts.find((x) => x?.Destination === destination);
+    const actual = m === undefined ? undefined : `${String(m.Source)}${m.RW === false ? " (read-only)" : ""}`;
+    if (actual !== source) drift.push({ target: destination, expected: source, actual });
+  }
+  for (const [name, value] of env) {
+    const entry = vars.find((v): v is string => typeof v === "string" && v.startsWith(`${name}=`));
+    const actual = entry?.slice(name.length + 1);
+    if (actual !== value) drift.push({ target: `env ${name}`, expected: value, actual });
+  }
+  return drift;
+}
+
+export function readMountPlanDrift(
+  exec: (cmd: string, args: string[]) => string,
+  installPath: string,
+  stateDir: string,
+  container: string,
+): MountPlanDrift[] | undefined {
+  try {
+    const plan = exec("bash", [
+      "-c",
+      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' + // off is UNKNOWN, never "remove binds"
+        'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
+        'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
+        "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
+        "[ -n \"$s\" ] && printf 'bind\\t%s\\t%s\\n' \"$s\" \"$t\"; done; " +
+        'i=0; while [ "$i" -lt "${#SCRATCH_ARGS[@]}" ]; do [ "${SCRATCH_ARGS[$i]}" = -e ] && ' +
+        "printf 'env\\t%s\\n' \"${SCRATCH_ARGS[$((i + 1))]}\"; i=$((i + 2)); done; exit 0",
+      "scratch-mounts",
+      join(installPath, "deploy", "scratch-mounts.sh"),
+      stateDir,
+      container,
+    ]);
+    return mountPlanDriftFrom(
+      plan,
+      exec("docker", ["inspect", container, "--format", '{"Mounts":{{json .Mounts}},"Env":{{json .Config.Env}}}']),
+    );
+  } catch {
+    return undefined; // no plan file, scratch off or unusable, no bash, or no such container
   }
 }
 
@@ -677,19 +749,29 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  if (i.imageDriftOnly === true && resourcePolicyDrift.length > 0) {
-    const details = resourcePolicyDrift
-      .map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`)
-      .join(", ");
+  const createDrift = [ // W1-T4267 limits and W1-T6110 binds apply only at create: one path, same holds
+    {
+      noun: "resource policy drift",
+      recycle: "automatic resource-policy recycle",
+      details: resourcePolicyDrift.map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`),
+    },
+    {
+      noun: "mount plan drift",
+      recycle: "automatic mount-plan recycle",
+      details: (i.mountPlanDrift ?? []).map(({ target, expected, actual }) => `${target} expected=${expected} actual=${actual ?? "absent"}`),
+    },
+  ].filter((d) => d.details.length > 0);
+  if (i.imageDriftOnly === true && createDrift.length > 0) {
+    const what = createDrift.map((d) => `${d.noun} (${d.details.join(", ")})`).join("; ");
     if (stopUnknownOrSet) {
-      return { deploy: false, reason: `resource policy drift (${details}), but STOP is set or unknown — no automatic recycle` };
+      return { deploy: false, reason: `${what}, but STOP is set or unknown — no automatic recycle` };
     }
     const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
       i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
     if (recentFailure) {
-      return { deploy: false, reason: `resource policy drift (${details}); a deploy failed under an hour ago — the automatic recycle backs off` };
+      return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
     }
-    return { deploy: true, reason: `automatic resource-policy recycle: ${details}` };
+    return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; ") };
   }
   if (!restartReasons && !imageStale) {
     // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
@@ -1182,6 +1264,7 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  mountPlanDrift?: () => MountPlanDrift[] | undefined; // W1-T6110; undefined means UNKNOWN
   // ── SERVE POLICY CONVERGENCE (serve-policy-convergence.ts) ── wired for the primary instance only.
   /** remudero-serve's live HostConfig against the serve role's policy; undefined is UNKNOWN. */
   servePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
@@ -1254,6 +1337,20 @@ export interface DeployDeps {
    *  days older than their newest `deploy.ok` (measured 2026-09-29). Optional for fake-dep callers. */
   clearFailure?: () => void;
 
+  // ── PERSISTING REFUSAL (W1-T6062) ── a backend that refuses every recycle used to leave only
+  // state/DEPLOY_FAILED and an hourly `deploy.restart_refused` row (site and console, 2026-10-04 to
+  // 10-06). All OPTIONAL: an omitting caller keeps today's single marker and row, nothing more.
+  /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
+  refusalStreak?: () => RefusalStreak | undefined;
+  /** Store the streak, or clear it with `undefined`. */
+  setRefusalStreak?: (streak: RefusalStreak | undefined) => void;
+  /** Open (or update) the one needs-human issue for this instance and reason; returns its url. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** Close that issue once a recycle is VERIFIED healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
+  /** The daemon instance this deployer serves, for naming the escalation. */
+  refusalInstance?: () => string | undefined;
+
   // ── DEFERRAL CEILING (W1-T341) ── each cycle is a fresh launchd one-shot with no in-memory
   // continuity, so the idle-gate wait needs its own persisted clock. All three OPTIONAL: an
   // omitting caller degrades to `waitedMs` always 0 (see {@link evaluateIdleGate}) — today's
@@ -1310,6 +1407,139 @@ export interface DeployResult {
    *  (the ledger row, `rmd deploy-run`'s own stdout) can render the standing state without
    *  re-parsing `reason`'s prose. */
   blocker?: StaleRunningDaemonBlocker;
+}
+
+// ── A RECYCLE THAT KEEPS REFUSING IS ESCALATED (W1-T6062) ──────────────────────────────────────
+// Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
+// row; a refusal recurring across consecutive backoff windows (same instance, same reason) logs
+// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
+// needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
+// closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
+
+/** Consecutive refused windows at which the refusal is logged as persisting. */
+export const REFUSAL_PERSISTING_AT = 2;
+/** Consecutive refused windows at which the one needs-human issue is opened. */
+export const REFUSAL_ESCALATE_AT = 3;
+
+/** The run of consecutive same-reason refusals for one instance. */
+export interface RefusalStreak {
+  /** Digest of the normalised refusal reason — the "same reason" key. */
+  key: string;
+  count: number;
+  firstAtMs: number;
+  lastAtMs: number;
+  /** The issue opened for this streak, once it has been. */
+  issueUrl?: string;
+}
+
+/** What the escalation path is told about a persisting refusal. */
+export interface PersistingRefusal {
+  instance: string;
+  key: string;
+  count: number;
+  firstAtIso: string;
+  lastAtIso: string;
+  /** Baked-path commits the running image predates; `undefined` = could not tell. */
+  lagCommits: number | undefined;
+  /** The refusal's own message, verbatim. */
+  message: string;
+  /** The refusal's own remedy line. */
+  remedy: string;
+  toHead: string;
+  backend: string;
+}
+
+/** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
+ *  count or timestamp inside the message does not read as a different reason. */
+export function refusalReasonKey(message: string): string {
+  const norm = message.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+  return createHash("sha256").update(norm).digest("hex").slice(0, 10);
+}
+
+/** The refusal's own remedy: a line it labels as one, else its last non-empty line. */
+export function refusalRemedyLine(message: string): string {
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const labelled = lines.find((l) => /^(remedy|fix|to fix|next|hint|run|re-?run|declared)\b/i.test(l));
+  return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
+}
+
+/** Record ONE refused recycle: count it, log it as persisting once it recurs, and escalate once it
+ *  has persisted long enough. Never throws — an escalation fault must not break the cycle. */
+function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: string; message: string }): void {
+  if (!deps.setRefusalStreak) return;
+  const nowMs = deps.now();
+  const key = refusalReasonKey(refusal.message);
+  const prior = deps.refusalStreak?.();
+  const streak: RefusalStreak =
+    prior && prior.key === key
+      ? { ...prior, count: prior.count + 1, lastAtMs: nowMs }
+      : { key, count: 1, firstAtMs: nowMs, lastAtMs: nowMs };
+  const instance = deps.refusalInstance?.() ?? "default";
+  const lagCommits = deps.imageBakedCommitsBehind?.();
+  if (streak.count >= REFUSAL_PERSISTING_AT) {
+    deps.log("deploy.refusal_persisting", {
+      instance,
+      count: streak.count,
+      reason_key: key,
+      baked_commits_behind: lagCommits ?? null,
+      first_refused_at: fixedClock(streak.firstAtMs).iso(),
+      to: short(refusal.toHead),
+    });
+  }
+  if (streak.count >= REFUSAL_ESCALATE_AT && deps.escalateRefusal) {
+    try {
+      const url = deps.escalateRefusal({
+        instance,
+        key,
+        count: streak.count,
+        firstAtIso: fixedClock(streak.firstAtMs).iso(),
+        lastAtIso: fixedClock(streak.lastAtMs).iso(),
+        lagCommits,
+        message: refusal.message,
+        remedy: refusalRemedyLine(refusal.message),
+        toHead: refusal.toHead,
+        backend: refusal.backend,
+      });
+      if (url) streak.issueUrl = url;
+      deps.log("deploy.refusal_escalated", { instance, count: streak.count, issue: url ?? null });
+    } catch (err) {
+      deps.log("deploy.refusal_escalation_failed", {
+        instance,
+        count: streak.count,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  try {
+    deps.setRefusalStreak(streak);
+  } catch (err) {
+    deps.log("deploy.refusal_streak_unwritable", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** A verified recycle ends the streak: close the issue it opened and forget the count. */
+function retractRefusal(deps: DeployDeps, toHead: string): void {
+  const prior = deps.refusalStreak?.();
+  if (!prior) return;
+  const instance = deps.refusalInstance?.() ?? "default";
+  let closed = false;
+  if (prior.issueUrl && deps.closeRefusalIssue) {
+    try {
+      deps.closeRefusalIssue(
+        prior.issueUrl,
+        `A recycle of ${instance} to ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`,
+      );
+      closed = true;
+    } catch (err) {
+      deps.log("deploy.refusal_close_failed", {
+        instance,
+        issue: prior.issueUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  deps.setRefusalStreak?.(undefined);
+  deps.log("deploy.refusal_cleared", { instance, count: prior.count, issue: prior.issueUrl ?? null, issue_closed: closed });
 }
 
 /**
@@ -1425,6 +1655,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
   const imageBakedCommitsBehind = deps.imageBakedCommitsBehind?.();
   const resourcePolicyDrift = opts.imageDriftOnly === true ? deps.resourcePolicyDrift?.() : undefined;
+  const mountPlanDrift = opts.imageDriftOnly === true ? deps.mountPlanDrift?.() : undefined;
   const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
   const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
   const imagePublished = newestBakedSha ? deps.imagePublished?.(newestBakedSha) : undefined;
@@ -1458,6 +1689,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // here, which reads UNKNOWN and changes nothing.
     imageBakedCommitsBehind,
     resourcePolicyDrift,
+    mountPlanDrift,
     imageDriftOnly: opts.imageDriftOnly,
     ...(newestBakedSha ? { newestBakedSha, imagePublished } : {}),
     imageRecycleManual: deps.imageRecycleManual?.(),
@@ -1630,6 +1862,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     const message = err instanceof Error ? err.message : String(err);
     deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
     deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
+    recordRefusal(deps, { toHead, backend: selection.backend.name, message });
     return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
   }
   deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
@@ -1641,6 +1874,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (health.healthy) {
     deps.clearMarker();
     deps.clearFailure?.();
+    retractRefusal(deps, toHead);
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
@@ -1723,6 +1957,11 @@ export function deployRestartPressurePath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_RESTART_PRESSURE");
 }
 
+/** W1-T6062: the persisted run of consecutive same-reason refused recycles. */
+export function deployRefusalStreakPath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_REFUSAL_STREAK");
+}
+
 /** `rmd deploy` — request a deploy at the next idle gap. */
 export function requestDeploy(stateRoot: string, reason: string | undefined): void {
   const p = deployMarkerPath(stateRoot);
@@ -1760,6 +1999,12 @@ export interface RealDeployOpts {
    *  against each declared `state_dir` ({@link instanceForStateRoot}); still undefined ⇒ the script
    *  is invoked exactly as before this field existed, and refuses exactly as it does today. */
   instance?: string;
+  /** W1-T6062 — open or update the one needs-human issue for a persisting refusal; returns its url.
+   *  INJECTED, because importing escalate.ts here closes ten import cycles. OMITTED ⇒ the streak is
+   *  still counted and logged, but no issue is opened. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** W1-T6062 — close that issue with a citation once a recycle is verified healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -2060,6 +2305,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
         process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
       ),
+    mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
+      readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
     newestBakedSha: () => {
       let newestBaked: string | undefined;
       try {
@@ -2348,6 +2595,29 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         /* already gone */
       }
     },
+    refusalInstance: () => recycleInstance,
+    refusalStreak: () => {
+      try {
+        const parsed = JSON.parse(readFileSync(deployRefusalStreakPath(o.stateRoot), "utf8")) as Partial<RefusalStreak>;
+        if (typeof parsed.key !== "string" || typeof parsed.count !== "number") return undefined;
+        return parsed as RefusalStreak;
+      } catch {
+        return undefined; // absent or unreadable reads as no streak — the count restarts, never invents one
+      }
+    },
+    setRefusalStreak: (streak) => {
+      if (streak === undefined) {
+        try {
+          unlinkSync(deployRefusalStreakPath(o.stateRoot));
+        } catch {
+          /* already gone */
+        }
+        return;
+      }
+      writeAtomic(deployRefusalStreakPath(o.stateRoot), JSON.stringify(streak, null, 2));
+    },
+    ...(o.escalateRefusal ? { escalateRefusal: o.escalateRefusal } : {}),
+    ...(o.closeRefusalIssue ? { closeRefusalIssue: o.closeRefusalIssue } : {}),
     clearFailure: () => {
       for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
         try {
