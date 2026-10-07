@@ -197,6 +197,28 @@ export function balanceFilesByDuration(testFiles, manifest, shardCount) {
   return shards.map((shard) => shard.files);
 }
 
+/** W1-T5923 — THE COVERAGE LANE IS WEIGHED ON ITS OWN, INSTRUMENTED, CLOCK. `instrumented` holds
+ *  per-file durations the coverage shards measured under `--experimental-test-coverage`; a file it
+ *  has not measured yet is weighed at its uninstrumented duration scaled by the median
+ *  instrumented/uninstrumented ratio over files both ledgers measured (1 when none overlap), so a
+ *  partial instrumented ledger never weighs an unmeasured file as cheaper than a measured one. */
+export function instrumentedManifest(uninstrumented, instrumented) {
+  const measured = (value) => typeof value === "number" && value > 0;
+  const ratios = Object.entries(instrumented.files ?? {})
+    .filter(([file, duration]) => measured(duration) && measured(uninstrumented.files[file]))
+    .map(([file, duration]) => duration / uninstrumented.files[file])
+    .sort((a, b) => a - b);
+  const mid = Math.floor(ratios.length / 2);
+  const ratio = ratios.length === 0 ? 1 : ratios.length % 2 === 0 ? (ratios[mid - 1] + ratios[mid]) / 2 : ratios[mid];
+  const files = {};
+  for (const file of new Set([...Object.keys(uninstrumented.files), ...Object.keys(instrumented.files ?? {})])) {
+    const own = instrumented.files?.[file];
+    const fallback = uninstrumented.files[file];
+    files[file] = measured(own) ? own : measured(fallback) ? Math.ceil(fallback * ratio) : (fallback ?? own ?? 0);
+  }
+  return { thresholdMs: uninstrumented.thresholdMs, files, ratio, instrumentedCount: ratios.length };
+}
+
 function splitFilesByCount(testFiles, shardCount) {
   if (!Number.isInteger(shardCount) || shardCount < 1) throw new RangeError("shardCount must be a positive integer");
   const ordered = [...testFiles].sort();
@@ -647,15 +669,22 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       );
       return 1;
     }
-    const balanced = balanceFilesByDuration(testFiles, manifest, shard.count);
+    // W1-T5923: the coverage lane passes its instrumented ledger; without the flag this is
+    // byte-for-byte the former uninstrumented split.
+    const instrumentedPath = getFlagValue(argv, "--instrumented-manifest");
+    const weighed = instrumentedPath === undefined ? manifest : instrumentedManifest(manifest, loadManifest(resolve(root, instrumentedPath)));
+    const balanced = balanceFilesByDuration(testFiles, weighed, shard.count);
     const files = balanced[shard.index - 1];
-    const balance = summarizeShardBalance(testFiles, manifest, shard.count, balanced);
+    const balance = summarizeShardBalance(testFiles, weighed, shard.count, balanced);
     console.error(
       "test-tier-manifest: coverage shard summary " +
-        `assigned_count=${files.length} predicted_duration_ms=${files.reduce((sum, file) => sum + weightedDurationMs(file, manifest), 0)} ` +
+        `assigned_count=${files.length} predicted_duration_ms=${files.reduce((sum, file) => sum + weightedDurationMs(file, weighed), 0)} ` +
         `selected_total_duration_ms=${balance.selectedDurationMs} selected_mean_duration_ms=${balance.selectedMeanDurationMs} ` +
         `slowest_shard_excess_ms=${balance.slowestShardExcessMs} binding_floor_file=${balance.bindingFloor?.file ?? "none"} ` +
-        `binding_floor_duration_ms=${balance.bindingFloor?.durationMs ?? 0} shard=${shard.index}/${shard.count}`,
+        `binding_floor_duration_ms=${balance.bindingFloor?.durationMs ?? 0} shard=${shard.index}/${shard.count}` +
+        (instrumentedPath === undefined
+          ? ""
+          : ` instrumented_files=${weighed.instrumentedCount} instrumented_ratio=${weighed.ratio.toFixed(3)}`),
     );
     console.log(files.join("\n"));
     return 0;

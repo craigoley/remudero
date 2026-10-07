@@ -302,7 +302,7 @@ test("W1-T6083: compaction records which suite each process ran, and the impact-
   await assert.rejects(ratchet.writeImpactMap(["compact"], "out.json", {}), /requires --sha/);
   const both = spawnSync(process.execPath, [MERGER, "--output", "a", "--impact-map", "b", "raw"], { cwd: fixture.dir, encoding: "utf8", env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(both.status, 1);
-  assert.match(both.stderr, /exactly one of --output or --compact-output is required, or --impact-map alone/);
+  assert.match(both.stderr, /exactly one of --output, --compact-output or --premap-output is required, or --impact-map alone/);
   // In process: the CLI's impact-map mode over the compact corpus equals the spawned build; a
   // source root missing the file places nothing for it; one that cannot be read fails the build.
   const out = join(fixture.dir, "map-nosrc.json");
