@@ -19,6 +19,7 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
   COMPANION_PATH_CLASSES,
@@ -1590,8 +1591,24 @@ export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.P
  *  rather than an implicit inherit of `process.env` (W1-T499), which once let a proof inherit the orchestrator's whole
  *  environment. Exported (W1-T387) so `checkProofCommand` can wrap it for diagnostics, never for the verdict. TRAP:
  *  `NODE_V8_COVERAGE: undefined` closes a side channel the allowlist cannot, Node force-injecting that var regardless. */
-export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileSync(command, args as string[], {
+/** A `node --test` proof's child, re-spelled to start niced with an explicit `--test-concurrency` (test-slot.ts); every
+ *  other proof (grep, vitest) runs as given. NO HOST-WIDE SLOT, deliberately: a proof is one file (or a narrowed
+ *  name-filtered set), the review it gates is what the slot exists to protect, and a proof waiting behind a 40-minute
+ *  coverage run would be the starvation, not its cure. Bounded to one slot's share, so it never outruns a slotted run. */
+export function proofChildCommand(
+  command: string,
+  args: readonly string[],
+  load: HostLoad = readHostLoad(),
+  exists?: BinaryProbe,
+): { file: string; args: string[] } {
+  if (!args.includes("--test")) return { file: command, args: [...args] };
+  const concurrency = testRunConcurrency(load, defaultTestSlots(load.cores));
+  return lowPriorityCommand(command, testRunArgv(args, concurrency), exists);
+}
+
+export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) => {
+  const child = proofChildCommand(command, args);
+  return execFileSync(child.file, child.args, {
     cwd,
     env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
@@ -1607,6 +1624,7 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     killSignal: "SIGKILL",
     encoding: "utf8",
   });
+};
 
 /** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
 function execFileAsync(
@@ -1632,13 +1650,15 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileAsync(command, args, {
+export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) => {
+  const child = proofChildCommand(command, args);
+  return execFileAsync(child.file, child.args, {
     cwd,
     env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
     timeout: timeoutMs,
     killSignal: "SIGKILL",
   });
+};
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
@@ -7358,8 +7378,15 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/test-tier-manifest.json":
     "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
+  "scripts/test-tier-coverage-manifest.json":
+    "the coverage lane's instrumented per-file duration ledger (W1-T5923) — DATA the coverage shard split " +
+    "weighs, not rule logic, same shape as scripts/test-tier-manifest.json above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/test-duration-reporter.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
+    "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +
+    "it cannot turn a failing suite green. Its numbers reach the split only through a reviewed ledger.",
   "scripts/diff-coverage-local.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T4084) — a local convenience exposed only as the " +
     "`diff-coverage:local` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +

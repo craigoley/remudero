@@ -1,0 +1,43 @@
+- id: W1-T6111
+  title: "THE RETRO PREFLIGHT TAKES THE HOST-WIDE TEST SLOT, NICED AND BOUNDED — src/lib/retro-preflight.ts runs a multi-suite `node --test` over its enumerated suites at default priority and node's default concurrency, outside the host-wide slot PR #9723 added, so a retro run competes at full width with every slotted test run on the host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the retro preflight's suite run shares the host-wide test slot
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up named out of scope in PR #9761 (W1-T6090)"
+  plan_refs: [W1-T6090, W1-T2993, W1-T2803]
+  files: [src/lib/retro-preflight.ts, test/the-retro-preflight-takes-the-test-slot.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main 23c0e7dfe. src/lib/retro-preflight.ts `runAttempt` spawns
+    `process.execPath scripts/test-with-retry.mjs process.execPath --test --test-reporter=tap --import tsx
+    --import ./test/setup/tmp-hygiene.ts ...enumeration.suites` through the injected runner, with no
+    --test-concurrency and no nice. src/lib/test-slot.ts (PR #9723, merged) exports `acquireTestSlot`,
+    `lowPriorityCommand`, `testRunConcurrency` and `testRunArgv`; only src/lib/ci-parity.ts and
+    scripts/preflight-author.mjs use them. W1-T6090 (PR #9761) covers the single-file spawners and
+    lists the retro preflight as outside its files:.
+  design: |
+    The retro preflight's suite run starts through `lowPriorityCommand`, with `testRunArgv` setting an
+    explicit concurrency from `testRunConcurrency`, and holds a host-wide slot for the run's duration,
+    released on every exit path (pass, fail, timeout, spawn error). TRAP: `acquireTestSlot` waits with a
+    synchronous Atomics.wait for up to TEST_SLOT_WAIT_BOUND_MS. `runRetroPrepublishPreflight` is awaited
+    from src/run-task.ts; if that caller shares an event loop with anything else (the daemon tick), the
+    wait must not block it: acquire without the synchronous wait (poll asynchronously, or acquire inside
+    the spawned child) and say which in the PR. The slot outcome (`acquired`, `wait_bound_exceeded`,
+    `slot_unavailable`) is logged on the existing retro preflight attempt row.
+  acceptance:
+    - claim: "the retro preflight's suite run is spawned under nice with an explicit test concurrency, holds a host-wide test slot that is released when the run passes, fails or cannot spawn, and records the slot outcome on its attempt row"
+      proof: "unit test: test/the-retro-preflight-takes-the-test-slot.test.ts"
+  falsifier: |
+    Spawn the run with the original argv: the fixture runner sees no --test-concurrency and no nice
+    wrapper, and the first test fails.
+  note: |
+    Independent of W1-T6090; both use src/lib/test-slot.ts as merged by #9723. The slot directory is
+    shared only once W1-T6090 binds it into containers; until then the slot is container-local, which is
+    still a bound.

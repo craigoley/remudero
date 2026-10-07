@@ -1,0 +1,56 @@
+- id: W1-T6108
+  title: "A SPAWNED CHILD CREDITS THE TEST THAT SPAWNED IT — W1-T6083's impact map credits a child process's coverage to nobody, so the impact arm must select every suite that spawns children whenever the floor reaches it: 709 of 2,759 suites count as spawners and at least 475 of them ride along on every src PR, many of them only spawning git"
+  repo: remudero
+  depends_on: [W1-T6083]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a child process's coverage is attributed to the test that spawned it
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760); the spawner counts are that builder's measurement"
+  plan_refs: [W1-T6083, W1-T2292, W1-T5923]
+  files: [test/setup/tmp-hygiene.ts, src/lib/test-impact-map.ts, src/lib/affected-suites.ts, scripts/coverage-merge-ratchet.mjs, scripts/coverage-session-blanking-check.mjs, test/a-spawned-child-credits-the-test-that-spawned-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9760 head (1225b4c5d). src/lib/test-impact-map.ts `buildImpactMap` treats a
+    process report naming no suite as a spawned child's and counts it in `orphanReports`, credited to
+    nobody; `impactArmSelection` therefore picks every suite in `spawningSuites` the floor reaches ("spawns
+    children the map cannot credit"). `spawningSuites` counts a suite as a spawner when it imports
+    child_process or worker_threads at all (SPAWN_IMPORT), so a suite that only shells `git` is
+    force-selected too; only the HELPER path checks CODE_SPAWN. The #9760 builder measured 709 of 2,759
+    suites as spawners and at least 475 selected per src PR. On origin/main test/setup/tmp-hygiene.ts (the
+    preload every test process imports) already branches on NODE_V8_COVERAGE but leaves it unchanged, so
+    a child writes its report into the same flat directory as every other process. W1-T6083's shard
+    design named a per-test NODE_V8_COVERAGE subdirectory; #9760 left it out.
+  design: |
+    (1) test/setup/tmp-hygiene.ts, when NODE_V8_COVERAGE is set, points the variable children inherit at a
+    per-suite subdirectory of it (keyed by the test file's repo-relative path), leaving the test process's
+    own report where it is. PROVE FIRST, in a throwaway run, that a mid-process change to
+    process.env.NODE_V8_COVERAGE redirects children and not the parent; if it does not, say so in the PR
+    and stop. (2) `buildImpactMap` credits each report under a suite's subdirectory to that suite;
+    `spawningSuites` counts only suites whose children run repo code (the CODE_SPAWN rule, for the suite
+    itself as well as its helpers), so a git-only suite is no longer force-selected. Suites whose
+    children still blank NODE_V8_COVERAGE (nested `node --test` runners, which the coverage-session-
+    blanking census requires) stay force-selected. (3) THE LCOV MUST NOT LOSE THE CHILDREN: today their
+    reports sit flat in coverage/raw and count toward the coverage ratchet, so the premap and merge in
+    scripts/coverage-merge-ratchet.mjs read the subdirectories too. A merge that does not recurse would
+    silently drop that coverage and redden the ratchet on every PR. (4) scripts/coverage-session-blanking-
+    check.mjs keeps its rule for nested test runners and names the new redirect in its BLIND_SPOTS text.
+  acceptance:
+    - claim: "a child spawned by a test writes its coverage under that test's subdirectory and the impact map credits the child's executed blocks to the spawning suite; a suite that only spawns git is not force-selected as a spawner; the merged lcov still counts the child's coverage"
+      proof: "unit test: test/a-spawned-child-credits-the-test-that-spawned-it.test.ts"
+    - claim: "the selector still computes the impact arm through the impact map module"
+      proof: 'grep: impactArmSelection( in src/lib/affected-suites.ts'
+  falsifier: |
+    Leave NODE_V8_COVERAGE unchanged in the setup: the fixture child's report lands outside the suite's
+    subdirectory, is an orphan, and the crediting test fails.
+  note: |
+    Depends on W1-T6083 (#9760, open at filing): build after it merges. Coordinate with the coverage-
+    session-blanking census (W1-T2292): children that blank NODE_V8_COVERAGE today keep doing so, and stay
+    force-selected. W1-T5923 owns the coverage critical path; this changes where child reports land, not
+    how long the shards take. src/lib/test-impact-map.ts is new only relative to origin/main at filing (it
+    arrives with #9760), so the call-site lint asks for the grep proof; once W1-T6083 merges that proof
+    matches at base too and is stale by construction, and the unit test is the discriminating proof.

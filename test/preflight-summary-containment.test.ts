@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { preflightSummaryPath, type PreflightSummary } from "../src/lib/ci-parity.js";
-import { preflightCommand } from "../src/run-task.js";
+import { preflightCommand, preflightSummaryTarget } from "../src/run-task.js";
 
 /**
  * W1-T455 — THE FORGED-SUMMARY DEFECT, AND THE CONTAINMENT THAT CLOSES IT.
@@ -120,30 +120,48 @@ test(
   }),
 );
 
+// The third invariant — a run with NO injected spawn writes where the orchestrator reads — used
+// to be proven by running the REAL preflight (real commitlint, tsc, the whole fast gate and a
+// scoped diff-coverage) against this checkout: 320 s, a suite nested inside the suite. It splits
+// into two halves that need no real gate at all:
+//   (1) WHERE: `preflightSummaryTarget` — the exact function `preflightCommand` resolves its
+//       write path through — returns the default path for a non-injected call, at the real
+//       repoRoot this process resolves to;
+//   (2) WHAT: the summary `preflightCommand` writes names the real HEAD, carries its real steps
+//       and agrees with the exit code. That write is the same code on either path, so it is
+//       driven here through an explicit `--summary-file` with the forged spawn.
+
+test("preflightSummaryTarget resolves the default summary path when no spawn is injected", () => {
+  const defaultPath = preflightSummaryPath(realRepoRoot());
+  assert.equal(preflightSummaryTarget([], {}), defaultPath, "a non-injected run must write the orchestrator's path");
+  assert.equal(preflightSummaryTarget(["--fast", "--ci-parity"], {}), defaultPath, "mode flags never move it");
+  // The two containment arms, so the default arm above is not the only answer the function gives.
+  assert.equal(preflightSummaryTarget([], { spawn: forgedSpawn }), undefined, "an injected spawn writes nothing");
+  assert.equal(preflightSummaryTarget(["--summary-file", "/x/s.json"], { spawn: forgedSpawn }), "/x/s.json");
+  assert.equal(preflightSummaryTarget(["--summary-file", "/x/s.json"], {}), "/x/s.json", "explicit wins either way");
+});
+
 test(
-  "a real preflight with no injected spawn still writes its summary where the orchestrator reads it",
+  "the summary preflightCommand writes names the real HEAD, its real steps, and agrees with the exit code",
   withSavedDefaultSummary(async (defaultPath) => {
-    // No `deps.spawn` at all — this drives the REAL `defaultPreflightSpawn` leaf (real
-    // commitlint, real `tsc --noEmit`, real `git log`) against the real repoRoot, exactly the
-    // shape a worker's own `rmd preflight` invocation takes. The write must land at the
-    // default path with no `--summary-file` needed, regardless of whether the run itself
-    // passes — `buildPreflightSummary`'s doc is explicit that the write is unconditional on
-    // `ok`, and this test would be vacuous if it only proved that for a passing run.
     rmSync(defaultPath, { force: true });
+    const out = join(mkdtempSync(join(tmpdir(), "rmd-preflight-containment-")), "summary.json");
     const restoreLog = console.log;
     console.log = () => {};
     let code: number;
     try {
-      code = await preflightCommand([]);
+      code = await preflightCommand(["--summary-file", out], { spawn: forgedSpawn });
     } finally {
       console.log = restoreLog;
     }
-    assert.ok(existsSync(defaultPath), "a real, non-injected preflight run must write the default summary path");
-    const summary = JSON.parse(readFileSync(defaultPath, "utf8")) as PreflightSummary;
+    assert.ok(existsSync(out), "the run must write its summary");
+    const summary = JSON.parse(readFileSync(out, "utf8")) as PreflightSummary;
     const realHeadSha = execFileSync("git", ["-C", realRepoRoot(), "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    assert.equal(summary.headSha, realHeadSha, "the summary must name the real HEAD this real run measured");
-    assert.ok(summary.steps.length > 0, "the real run must record its real steps, not an empty shell");
+    assert.equal(summary.headSha, realHeadSha, "the summary must name the real HEAD this run measured");
+    assert.ok(summary.steps.length > 0, "the run must record its steps, not an empty shell");
     assert.equal(summary.ok, code === 0, "the persisted verdict must agree with the exit code this same run returned");
-    assert.ok(statSync(defaultPath).isFile());
+    assert.equal(code, 1, "the forged commitlint failure is reached, so the agreement above is tested on a FAILING run");
+    assert.ok(statSync(out).isFile());
+    assert.equal(existsSync(defaultPath), false, "and the default path is still untouched");
   }),
 );
