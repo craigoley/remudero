@@ -169,6 +169,7 @@ interface HeadGreenCandidate {
   checkId: number; suiteId: number; runId: number; jobId: number;
   checkCompletedAt: string; firstReadAt: string;
   producer?: { workflowId: number; path: string };
+  commitAssociationPending?: true;
 }
 export interface HeadGreenEvidence extends HeadGreenCandidate {
   completedAt: string; validatedAt: string;
@@ -176,6 +177,7 @@ export interface HeadGreenEvidence extends HeadGreenCandidate {
 }
 export interface HeadGreenObservation {
   version: 1;
+  commitAssociationPolicy?: 1;
   headSha: string;
   state: "pending" | "observed" | "unavailable";
   readAt: string | null;
@@ -190,7 +192,7 @@ const positiveId = (value: unknown): value is number => Number.isSafeInteger(val
 const shaIdentity = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
 const gateWorkflow = (value: unknown): value is string => value === ".github/workflows/ci.yml" || value === ".github/workflows/ci-gate.yml";
 function freshHeadGreen(headSha: string): HeadGreenObservation {
-  return { version: 1, headSha, state: "pending", readAt: null,
+  return { version: 1, commitAssociationPolicy: 1, headSha, state: "pending", readAt: null,
     history: { state: "pending", nextPage: 1, pagesRead: 0, reason: null }, pending: [], seenCheckIds: [], firstObserved: null,
     firstEver: "unavailable-retention-uncertified" };
 }
@@ -198,6 +200,7 @@ function validCandidate(value: unknown): value is HeadGreenCandidate {
   const row = record(value); const producer = record(row?.producer);
   return row !== undefined && [row.checkId, row.suiteId, row.runId, row.jobId].every(positiveId)
     && iso(row.checkCompletedAt) !== null && iso(row.firstReadAt) !== null
+    && (row.commitAssociationPending === undefined || (row.commitAssociationPending === true && producer !== undefined))
     && (row.producer === undefined || (positiveId(producer?.workflowId) && gateWorkflow(producer?.path)));
 }
 function headObservation(pull: GithubPull): HeadGreenObservation | null {
@@ -207,7 +210,12 @@ function headObservation(pull: GithubPull): HeadGreenObservation | null {
     && positiveId(prior.history?.nextPage) && prior.history.nextPage <= HEAD_GREEN_MAX_PAGES + 1
     && Array.isArray(prior.pending) && prior.pending.length <= HEAD_GREEN_MAX_CANDIDATES && prior.pending.every(validCandidate)
     && Array.isArray(prior.seenCheckIds) && prior.seenCheckIds.length <= HEAD_GREEN_MAX_PAGES * GITHUB_PAGE_SIZE
-    && prior.seenCheckIds.every(positiveId)) return prior;
+    && prior.seenCheckIds.every(positiveId)) {
+    if (prior.commitAssociationPolicy !== 1 && prior.firstObserved === null
+      && prior.history.reason === "head-gate-producer-identity-mismatch") return pull.headGreen = freshHeadGreen(pull.headSha);
+    prior.commitAssociationPolicy = 1;
+    return prior;
+  }
   return pull.headGreen = freshHeadGreen(pull.headSha);
 }
 
@@ -216,7 +224,7 @@ export function observedCurrentHeadGreen(pull: GithubPull, asOf: string): HeadGr
   const observation = pull.headGreen; const found = observation?.firstObserved;
   if (iso(asOf) === null || observation?.version !== 1 || observation.headSha !== pull.headSha || observation.state !== "observed"
     || observation.firstEver !== "unavailable-retention-uncertified" || !validCandidate(found)
-    || !found.producer || iso(found.completedAt) === null || iso(found.validatedAt) === null
+    || !found.producer || found.commitAssociationPending || iso(found.completedAt) === null || iso(found.validatedAt) === null
     || pull.createdAt === null || Date.parse(found.completedAt) < Date.parse(pull.createdAt)
     || [found.completedAt, found.checkCompletedAt, found.firstReadAt, found.validatedAt].some((at) => Date.parse(at) > Date.parse(asOf))) return null;
   return found;
@@ -248,18 +256,31 @@ async function readHeadGreen(fetch: GithubPageFetch, repo: string, pull: GithubP
   const candidate = observation.pending[0];
   const read = async (path: string) => { budget.left -= 1; observation.readAt = asOf; return fetch(path); };
   if (candidate) {
-    const path = candidate.producer ? `repos/${repo}/actions/jobs/${candidate.jobId}` : `repos/${repo}/actions/runs/${candidate.runId}`;
+    const path = candidate.commitAssociationPending ? `repos/${repo}/commits/${pull.headSha}/pulls?per_page=${GITHUB_PAGE_SIZE}&page=1`
+      : candidate.producer ? `repos/${repo}/actions/jobs/${candidate.jobId}` : `repos/${repo}/actions/runs/${candidate.runId}`;
     const response = await read(path);
     if (!response.ok) { observation.history.reason = response.reason; return false; }
+    if (candidate.commitAssociationPending) {
+      const associated = response.items.some((item) => {
+        const pr = record(item);
+        return pr?.number === pull.number && record(pr.head)?.sha === pull.headSha
+          && record(record(pr.base)?.repo)?.full_name === repo;
+      });
+      if (associated) delete candidate.commitAssociationPending;
+      else { observation.history.reason = "head-gate-commit-pr-association-missing"; observation.pending.shift(); }
+      return true;
+    }
     const row = record(response.items[0]);
     if (!candidate.producer) {
       const related = Array.isArray(row?.pull_requests) && row.pull_requests.some((item) => {
         const pr = record(item); return pr?.number === pull.number && record(pr.head)?.sha === pull.headSha;
       });
+      const emptyAssociation = Array.isArray(row?.pull_requests) && row.pull_requests.length === 0;
       if (row?.id === candidate.runId && row.head_sha === pull.headSha && row.check_suite_id === candidate.suiteId
-        && record(row.repository)?.full_name === repo && row.event === "pull_request" && related
+        && record(row.repository)?.full_name === repo && row.event === "pull_request" && (related || emptyAssociation)
         && positiveId(row.workflow_id) && gateWorkflow(row.path)) {
         candidate.producer = { workflowId: row.workflow_id, path: row.path };
+        if (emptyAssociation) candidate.commitAssociationPending = true;
         return true;
       }
       observation.history.reason = "head-gate-producer-identity-mismatch";
