@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runSuiteShifted } from "../src/lib/gate-gardener.js";
-import { defaultAsyncProofSpawner, defaultProofSpawner, proofChildCommand } from "../src/lib/review.js";
+// A NAMESPACE import, so a tree without proofChildCommand fails the tests below rather than the load.
+import * as review from "../src/lib/review.js";
 import { resolveTestSlotDir, TEST_RUN_NICENESS } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -131,10 +132,10 @@ function priorityProbe(t: { after: (fn: () => void) => void }): { dir: string; f
 test("the review, gate-gardener and census-precheck test spawns start under nice with an explicit test concurrency", async (t) => {
   const { dir, file } = priorityProbe(t);
   const proofArgs = ["--test", "--test-reporter=tap", file];
-  const sync = defaultProofSpawner(process.execPath, proofArgs, dir, 60_000);
+  const sync = review.defaultProofSpawner(process.execPath, proofArgs, dir, 60_000);
   assert.match(sync, /# pass 1/, sync);
   assert.match(sync, /PROBE priority=\d+ runner=\S*node --test --test-concurrency=\d+/, sync);
-  const asyncOut = await defaultAsyncProofSpawner(process.execPath, proofArgs, dir, 60_000);
+  const asyncOut = await review.defaultAsyncProofSpawner(process.execPath, proofArgs, dir, 60_000);
   assert.match(asyncOut, /# pass 1/, asyncOut);
 
   // The defuse run uses the repo's own setup imports; it passes only when the probe saw nice and a bound.
@@ -146,9 +147,9 @@ test("the review, gate-gardener and census-precheck test spawns start under nice
 
 test("a proof that is not a node --test run is spawned as given, and a census priority that cannot load says so", async () => {
   const load = { cores: 8, load1: 0 };
-  assert.deepEqual(proofChildCommand("grep", ["-arn", "--", "x", "f"], load), { file: "grep", args: ["-arn", "--", "x", "f"] });
-  assert.deepEqual(proofChildCommand("node", ["vitest.mjs", "run", "a.test.ts"], load), { file: "node", args: ["vitest.mjs", "run", "a.test.ts"] });
-  const bare = proofChildCommand("node", ["--test", "a.test.ts"], load, () => false);
+  assert.deepEqual(review.proofChildCommand("grep", ["-arn", "--", "x", "f"], load), { file: "grep", args: ["-arn", "--", "x", "f"] });
+  assert.deepEqual(review.proofChildCommand("node", ["vitest.mjs", "run", "a.test.ts"], load), { file: "node", args: ["vitest.mjs", "run", "a.test.ts"] });
+  const bare = review.proofChildCommand("node", ["--test", "a.test.ts"], load, () => false);
   assert.deepEqual(bare, { file: "node", args: ["--test", "--test-concurrency=3", "a.test.ts"], priority: "none" }, "no nice binary: bounded, and named");
 
   const unloadable = await precheck.loadTestPriority(async () => {
