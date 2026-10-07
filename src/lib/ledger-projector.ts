@@ -116,7 +116,10 @@ const activityRingInserts = new WeakMap<ReadModelDb, ReadModelStatement>();
 /**
  * The newest {@link ACTIVITY_RING_ROWS} rows of ANY step: operator activity ranks the newest rows of
  * every step, which `fact` cannot answer. Each transaction inserts its rows and then trims the ring
- * back to the newest by `(ts_ms, seq)`, so any read order leaves the same rows.
+ * back to the newest by `(ts_ms, h)`, a function of the row set alone, so any read order leaves the
+ * same rows. Trimming by `seq` kept a same-millisecond edge row by applied order, which the oracle's
+ * re-application cannot reproduce: it re-ranked a trimmed twin newest, and the heal ping-ponged
+ * (READ-MODEL-CONSOLE #9387, READ-MODEL-SITE #9511).
  *
  * `seq` is the order the projector applied the rows: within a file, the file's order. Operator
  * activity numbers and truncates same-millisecond rows in the order it is handed them, and the route
@@ -145,7 +148,7 @@ export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
     insert.run(Number.isFinite(parsed) ? parsed : id.tsMs, id.h, line);
   },
   settle(db) {
-    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, seq) < (SELECT ts_ms, seq FROM activity_ring ORDER BY ts_ms DESC, seq DESC
+    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, h) < (SELECT ts_ms, h FROM activity_ring ORDER BY ts_ms DESC, h DESC
       LIMIT 1 OFFSET ${ACTIVITY_RING_ROWS - 1})`).run();
   },
 };
