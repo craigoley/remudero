@@ -19,6 +19,7 @@ import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 
 import { runDaemon, type DaemonDeps, type DaemonFreshness } from "../src/lib/daemon.js";
+import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
 import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "../src/lib/git-fetch-retry.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { checkServiceFreshnessAsync, daemonFreshnessFromService } from "../src/lib/self-sync.js";
@@ -296,9 +297,11 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
   let advance: DaemonFreshness = { stale: false };
   let stop = false;
   let reads = 0;
+  let nowMs = Date.now();
   const run = runDaemon(plan(["A", "B", "C"], "lane-pool-await"), {
     refreshMerged: () => () => false,
     checkStop: () => (stop ? "fixture cleanup" : undefined),
+    now: () => new Date(nowMs),
     checkFreshness: () => {
       reads += 1;
       const reading = advance;
@@ -331,6 +334,7 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
     },
     release: (id: string) => gates.get(id)?.resolve(),
     wake: () => sleeps.shift()?.resolve(),
+    advanceClock: (ms: number) => { nowMs += ms; },
     finish: async () => {
       stop = true;
       for (const gate of gates.values()) gate.resolve();
@@ -349,6 +353,17 @@ async function lanePoolRestart(awaited: boolean) {
   h.advance();
   h.wake();
   for (let i = 0; i < 6; i++) await flush();
+  const hold = h.steps.find((row) => row.step === "daemon.freshness_coalesced");
+  assert.equal(hold?.extra?.action, "hold");
+  assert.equal(hold?.extra?.held_ms, 0);
+  assert.equal(h.steps.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"), false);
+  h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value);
+  h.wake();
+  for (let i = 0; i < 6; i++) await flush();
+  const release = h.steps.filter((row) => row.step === "daemon.freshness_coalesced").at(-1);
+  assert.equal(release?.extra?.action, "restart");
+  assert.equal(release?.extra?.reason, "window_quiet");
+  assert.equal(release?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
   const decidedWhileInFlight = h.steps.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart");
   h.release("B");
   for (let i = 0; i < 3; i++) await flush();

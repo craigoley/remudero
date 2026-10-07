@@ -4,18 +4,19 @@
 // `run-*` worktree only for `pruneGraceMs` after its mtime, and an approve runs in its OWN pid, so a
 // prune in another process could reach an add slower than the grace and force-remove it.
 //
-// THE MID-ADD PRUNE IS A REAL ONE, IN A REAL OTHER PROCESS. The managed checkout carries a
-// `post-checkout` hook, which `git worktree add` runs once the new worktree is registered and checked
-// out but before the add returns. The hook spawns `node`, which calls the real `pruneStaleRuns` with its
-// clock ten minutes past the directory's mtime (past the grace, the only thing guarding a lockless
-// path) and records what it saw. The run lock names THIS test process's pid, which is alive.
+// THE MID-ADD PRUNE IS A REAL ONE, IN A REAL OTHER PROCESS. A `git` shim first on PATH runs the real
+// `git worktree add`, so the new worktree is registered and checked out, and before the add returns to
+// the lane it spawns `node`, which calls the real `pruneStaleRuns` with its clock ten minutes past the
+// directory's mtime (past the grace, the only thing guarding a lockless path) and records what it saw.
+// The run lock names THIS test process's pid, which is alive. (It was a managed-checkout post-checkout
+// hook until W1-T6147 made the cut run no hook from the clone, so the seam moved to PATH.)
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -29,14 +30,14 @@ const RUN_TASK_SRC = join(REPO_ROOT, "src", "run-task.ts");
 type Row = Record<string, unknown>;
 type Log = (step: string, extra?: Record<string, unknown>) => void;
 
-/** What the other process's prune saw, written by the hook. */
+/** What the other process's prune saw, written by the shim. */
 interface MidAdd {
   registered: string[];
   lockPresent: boolean;
   summary: { worktrees: string[]; skipped: string[] };
 }
 
-/** The hook's node half: one prune, recorded once, from a process that is not the test's. */
+/** The shim's node half: one prune, recorded once, from a process that is not the test's. */
 const PRUNE_SCRIPT = `
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync, writeFileSync } from "node:fs";
@@ -56,34 +57,41 @@ if (!existsSync(out)) {
 
 const sq = (s: string): string => `'${s.replaceAll("'", `'"'"'`)}'`;
 
-/** Install the post-checkout hook on `repoDir`. `exit` is the hook's status: 1 fails the add after the
- *  worktree exists, so a test can watch a failed add's lock handling. */
+const ORIGINAL_PATH = process.env.PATH;
+afterEach(() => { process.env.PATH = ORIGINAL_PATH; });
+
+/** Put the mid-add `git` shim first on this process's PATH (restored after each test). `exit` is the
+ *  status a successful `worktree add` then returns: 1 fails the add after the worktree exists, so a
+ *  test can watch a failed add's lock handling. */
 function installMidAddPrune(repoDir: string, worktreesRoot: string, scratch: string, exit = 0): string {
   const out = join(scratch, "mid-add.json");
   const script = join(scratch, "mid-add-prune.mjs");
   writeFileSync(script, PRUNE_SCRIPT);
-  const hooks = join(scratch, "hooks");
-  mkdirSync(hooks, { recursive: true });
+  const bin = join(scratch, "bin");
+  mkdirSync(bin, { recursive: true });
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const tsx = import.meta.resolve("tsx");
   const worker = new URL("../src/lib/worker.ts", import.meta.url).href;
   // NODE_V8_COVERAGE is dropped: a child's profile of the tmp script outlives the dir and empties the suite's lcov.
   writeFileSync(
-    join(hooks, "post-checkout"),
+    join(bin, "git"),
     [
       "#!/bin/sh",
-      `env -u NODE_TEST_CONTEXT -u NODE_OPTIONS -u NODE_V8_COVERAGE node --import ${sq(tsx)} ${sq(script)} ${sq(repoDir)} ${sq(worktreesRoot)} ${sq(worker)} ${sq(out)} >> ${sq(join(scratch, "hook.log"))} 2>&1`,
+      `${sq(realGit)} "$@" || exit $?`,
+      'case " $* " in *" worktree add "*) ;; *) exit 0 ;; esac',
+      `env -u NODE_TEST_CONTEXT -u NODE_OPTIONS -u NODE_V8_COVERAGE node --import ${sq(tsx)} ${sq(script)} ${sq(repoDir)} ${sq(worktreesRoot)} ${sq(worker)} ${sq(out)} >> ${sq(join(scratch, "shim.log"))} 2>&1`,
       `exit ${exit}`,
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
-  execFileSync("git", ["-C", repoDir, "config", "core.hooksPath", hooks]);
+  process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
   return out;
 }
 
 function readMidAdd(out: string, scratch: string): MidAdd {
-  const log = join(scratch, "hook.log");
-  assert.ok(existsSync(out), `the mid-add prune fired; hook log: ${existsSync(log) ? readFileSync(log, "utf8") : "(none)"}`);
+  const log = join(scratch, "shim.log");
+  assert.ok(existsSync(out), `the mid-add prune fired; shim log: ${existsSync(log) ? readFileSync(log, "utf8") : "(none)"}`);
   return JSON.parse(readFileSync(out, "utf8")) as MidAdd;
 }
 
@@ -159,7 +167,7 @@ const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/5356";
 
 /** `rmd approve <ids>` through the REAL gateway (one id: the single lane; two: the batch lane), offline:
  *  a fixture origin, a `gh` shim, and READY drafted proposals. What happens after the add is not under
- *  test; the hook's record is. */
+ *  test; the shim's record is. */
 async function driveRealApprove(ids: string[], resumeRunId?: string): Promise<{ mid: MidAdd; worktreesRoot: string }> {
   const fx = managedFixture(`t5356-approve-${ids.length}`, (dir) => {
     mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
