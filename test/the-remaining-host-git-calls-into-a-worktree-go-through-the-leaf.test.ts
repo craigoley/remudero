@@ -143,7 +143,11 @@ describe("W1-T6122: every raw git -C <worktree> left outside run-task.ts is a re
       const entry = new RegExp(`"${file.replace(/[./]/g, "\\$&")}": \\{\\s*count: ${count},\\s*reason:\\s*"HARNESS \\(W1-T6122\\)`);
       assert.match(census, entry, `${file} carries count ${count} and a HARNESS reason`);
     }
-    for (const file of EIGHT.slice(2)) assert.equal(census.includes(`"${file}": {`), false, `${file} has no exception left`);
+    // Only the RAW table (W1-T6106) is this task's: W1-T6123 lists a converted file's other sites in its own table.
+    const rawStart = census.indexOf("const RAW_SITE_EXCEPTIONS");
+    assert.ok(rawStart >= 0, "positive control: the census names its raw exception table");
+    const raw = census.slice(rawStart, census.indexOf("\n};", rawStart));
+    for (const file of EIGHT.slice(2)) assert.equal(raw.includes(`"${file}": {`), false, `${file} has no exception left`);
   });
 });
 
