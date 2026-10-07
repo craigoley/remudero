@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: follow-up from W1-T6123's widened census (PR #9792), whose CALLER class defers the decision to the call; verified read-only on origin/main and the #9792 head before filing"
   plan_refs: [W1-T6106, W1-T6123, W1-T6135]
   files: [src/lib/affected-suites.ts, src/lib/containment.ts, src/lib/disk-artifact-reclaim.ts, src/lib/inbox.ts, src/lib/paired-trial.ts, src/lib/plan-architect.ts, src/lib/plan-pr-merge-safety.ts, src/lib/proof-base-stale.ts, src/lib/status.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

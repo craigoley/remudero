@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: security follow-up batch 3; premise verified read-only on origin/main 44513355a before filing"
   plan_refs: [W1-T5658, W1-T6124, W1-T6120, W1-T6138, W1-T6106]
   files: [src/lib/merge-probe.ts, test/the-fix-round-merge-probe-typechecks-with-the-harness-s-own-tsc.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

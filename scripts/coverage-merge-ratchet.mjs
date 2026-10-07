@@ -288,6 +288,28 @@ function* corpusReports(file, manifest, bytes) {
   if (count !== manifest.reportCount) throw new Error(`${file} has a process-report count mismatch`);
 }
 
+/**
+ * A process that loads one `.ts` file through BOTH tsx loaders (an ESM import and a CJS require)
+ * reports two scripts under one URL, but `source-map-cache` is keyed by URL and holds ONE map. Node
+ * maps both instances with it, so the other instance's offsets land on unrelated lines and its
+ * zero-count ranges erase real hits from every other process at the range merge (#9835: a pre-push
+ * fixture's children zeroed src/lib/worker-home.ts across all eight shards). A repeated URL keeps
+ * only the instances whose generated length the cached map describes; a URL that is not repeated,
+ * or has no cached map, is untouched.
+ */
+export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
+  const seen = new Map();
+  for (const script of result) seen.set(script?.url, (seen.get(script?.url) ?? 0) + 1);
+  if (![...seen.values()].some((n) => n > 1)) return result;
+  return result.filter((script) => {
+    const lineLengths = sourceMapCache?.[script.url]?.lineLengths;
+    if (seen.get(script.url) === 1 || !Array.isArray(lineLengths)) return true;
+    const generated = lineLengths.reduce((sum, n) => sum + n, 0) + lineLengths.length - 1;
+    const extent = Math.max(...script.functions.flatMap((fn) => fn.ranges.filter((r) => r.startOffset === 0).map((r) => r.endOffset)));
+    return extent === generated;
+  });
+}
+
 function* coverageReports(directories, bytes) {
   const childSuites = childSuiteCache();
   for (const directory of directories) {
@@ -304,6 +326,7 @@ function* coverageReports(directories, bytes) {
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
         const spawnedBy = Array.isArray(parsed?.result) ? rawReportIdentity(file, parsed.result, childSuites) : {};
+        if (Array.isArray(parsed?.result)) parsed.result = scriptsTheSourceMapDescribes(parsed.result, parsed['source-map-cache']);
         yield spawnedBy.child ? { ...parsed, ...spawnedBy } : parsed;
         continue;
       }
@@ -342,7 +365,7 @@ function collectCompactReports(directories, onMap, onReport) {
       rawFileCount += 1;
       if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
       const identity = rawReportIdentity(file, raw.result, childSuites);
-      const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
+      const result = scriptsTheSourceMapDescribes(raw.result, raw['source-map-cache']).filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
       for (const script of result) {
