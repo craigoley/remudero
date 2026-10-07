@@ -16,6 +16,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as retro from "../src/lib/retro.js";
 import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 // After #9708 the daemon's retro trigger awaited its ledger read and its throttle probe, but
@@ -102,15 +103,23 @@ function logged(log: string): string[] {
 }
 
 test("the awaited shipped-since read keeps a timer firing while its gh page walk is pending", async () => {
-  const slow = fakeGh({ sleep: 0.3 });
+  const slow = fakeGh({ sleep: 0.4 });
   let ticks = 0;
-  const timer = setInterval(() => (ticks += 1), 20);
+  let last = performance.now();
+  let longestGapMs = 0;
+  const timer = setInterval(() => {
+    ticks += 1;
+    longestGapMs = Math.max(longestGapMs, performance.now() - last);
+    last = performance.now();
+  }, 20);
   try {
     const github = await runTask.retroShippedGithubGatewayAsync({ ownerRepo: OWNER_REPO, execAsync: slow.execAsync });
     const { shipped } = await retro.shippedSinceAsync([run(2, "failed")], undefined, github);
     assert.deepEqual(shipped.map((s) => s.taskId), ["W1-T2"], "the walk was read: PR #2's trailer credits W1-T2");
     assert.equal(logged(slow.log).length, 2, "one open page and one closed page");
     assert.ok(ticks >= 10, `the loop must keep servicing timers during the two gh pages (ticked ${ticks})`);
+    // Each page's gh sleeps 400 ms: a page read on the loop holds the timer at least that long.
+    assertWallClockBound(longestGapMs, 250, `no gh page may hold the loop (longest timer gap ${Math.round(longestGapMs)}ms)`);
   } finally {
     clearInterval(timer);
     rmSync(slow.dir, { recursive: true, force: true });
