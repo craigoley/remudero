@@ -359,7 +359,12 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
-  const pathReaders = input.pathReaders;
+  // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
+  const errorCensus = "test/error-subclass-census.test.ts";
+  const pathReaders = [...input.pathReaders];
+  if (input.files.has(errorCensus) && files.some((f) => /^src\/.*\.ts$/.test(f))) {
+    pathReaders.push(errorCensus);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
