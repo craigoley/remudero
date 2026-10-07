@@ -3,11 +3,18 @@
 // in core. These tests drive the real ticker over real SQLite stores, the real refresh over a real ledger, and
 // the real worker with its slow lane and view threads.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { deriveAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import {
+  createAnalyticsSnapshotCache,
+  deriveAnalyticsSnapshot,
+  deriveAnalyticsSnapshotFromCheckpointedLedger,
+  writeAnalyticsCheckpoint,
+  type AnalyticsSnapshot,
+  type AnalyticsTimer,
+} from "../src/lib/analytics-route.js";
 import {
   ANALYTICS_SOURCE_CONSOLE_V1,
   ANALYTICS_SOURCE_NAMES,
@@ -451,4 +458,50 @@ test("an analytics overview diff over the same snapshots of every instance stays
     runs.value = Number(runs.value) + 1;
   });
   assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [["overview[key=runs.completed].value", "real"]]);
+});
+
+// Host reading 2026-10-06 20:25-21:07Z: all 42 analytics samples diffed overview cache.reuse, legacy
+// `{ value: null, instances: 0, notCollectedReason: "an instance's snapshot carries no cache token terms; ..." }`
+// vs the view's `{ value: 0.8349751415071711, instances: 3 }`. Legacy's core snapshot stayed as of 20:06:30.548Z
+// across three serves (20:21, 20:36, 20:52Z): each booted onto core's checkpoint, and each core refresh timed out
+// at 120 s. The terms are non-enumerable, so JSON left them out of the checkpoint's snapshot.
+const noTimers = (): AnalyticsTimer => ({ unref: () => {}, cancel: () => {} });
+
+/** Core's checkpoint as a refresh writes it, and the snapshot that refresh built. */
+async function checkpointed(t: TestCtx, lines: ReadonlyArray<Record<string, unknown>>): Promise<{ stateDir: string; built: AnalyticsSnapshot }> {
+  const stateDir = scratch(t, "analytics-checkpoint");
+  writeFileSync(join(stateDir, "ledger.ndjson"), lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+  const { snapshot, checkpoint } = await deriveAnalyticsSnapshotFromCheckpointedLedger(stateDir, handClock(T0 - MINUTE).clock);
+  writeAnalyticsCheckpoint(stateDir, checkpoint);
+  return { stateDir, built: snapshot };
+}
+
+test("a serve booted onto its analytics checkpoint merges cache reuse from the checkpoint's own token terms", async (t) => {
+  const { stateDir, built } = await checkpointed(t, CORE_LINES);
+  assert.equal((JSON.parse(readFileSync(join(stateDir, ".analytics-console-v1.checkpoint.json"), "utf8")) as { snapshot: AnalyticsSnapshot }).snapshot.cacheReuseTokens,
+    undefined, "control: the checkpoint's own snapshot carries no terms");
+  // Never started: a boot serves the checkpoint until its first refresh completes.
+  const restored = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers }).current();
+  assert.equal(restored.asOf, built.asOf, "positive control: legacy serves the restored checkpoint, not a cold cache");
+  assert.deepEqual(restored.cacheReuseTokens, built.cacheReuseTokens);
+  const site = snapshotOf(SITE_LINES, T0 - MINUTE);
+  const compared = compareAnalytics([["core", restored], ["site", site]], [["core", built], ["site", site]]);
+  assert.deepEqual(compared.diffs, [], "legacy over the restored snapshot merges what the view merges over the refresh's rows");
+});
+
+test("a checkpoint carrying no token terms restores none, and its cache reuse diff stays real", async (t) => {
+  const { stateDir, built } = await checkpointed(t, CORE_LINES);
+  const path = join(stateDir, ".analytics-console-v1.checkpoint.json");
+  const file = JSON.parse(readFileSync(path, "utf8")) as { state: Record<string, unknown>; snapshotHidden?: unknown };
+  delete file.state.tokensTotal;
+  delete file.snapshotHidden; // a checkpoint written before hidden fields round-tripped
+  writeFileSync(path, JSON.stringify(file));
+  const restored = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers }).current();
+  assert.equal(restored.asOf, built.asOf, "positive control: the checkpoint was restored");
+  assert.equal(restored.cacheReuseTokens, undefined, "no terms are invented");
+  const site = snapshotOf(SITE_LINES, T0 - MINUTE);
+  const compared = compareAnalytics([["core", restored], ["site", site]], [["core", built], ["site", site]]);
+  assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [
+    ["overview[key=cache.reuse].instances", "real"], ["overview[key=cache.reuse].notCollectedReason", "real"], ["overview[key=cache.reuse].value", "real"],
+  ]);
 });

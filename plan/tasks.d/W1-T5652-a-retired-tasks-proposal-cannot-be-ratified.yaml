@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, #9099 (closed) ratified proposals on retired tasks"
   plan_refs: [W1-T3385, W1-T4700, W1-T111]
   files: [src/lib/inbox.ts, src/run-task.ts, test/a-retired-tasks-proposal-cannot-be-ratified.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

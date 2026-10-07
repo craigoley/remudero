@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9277 (knowledge-garden-1791190143932) needed the hand commit e978c5ea to pass prompt-surface-gate"
   plan_refs: [W1-T4095, W1-T3077, W1-T423, W1-T4240]
   files: [src/lib/knowledge-gardener.ts, test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

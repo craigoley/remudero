@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log, the fleet's push lands a head that fails tsc (#9085)"
   plan_refs: [W1-T4797, W1-T4693, W1-T2671, W1-T5457, W1-T5227]
   files: [src/run-task.ts, src/lib/merge-probe.ts, src/lib/sweep.ts, test/a-fix-round-typechecks-its-head-merged-with-main.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

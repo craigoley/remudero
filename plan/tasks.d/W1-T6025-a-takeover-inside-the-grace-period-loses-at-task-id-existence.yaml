@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: refs/rmd-id/W1-T5997 taken over 15s after codex reserved it; #9556 renumbered to W1-T6003, #9557 to W1-T6002"
   plan_refs: [W1-T5279, W1-T3674, W1-T3100, W1-T3742, W1-T6026]
   files: [scripts/task-id-existence-check.mjs, test/a-takeover-inside-the-grace-period-loses-at-task-id-existence.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

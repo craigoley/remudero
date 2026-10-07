@@ -65,7 +65,7 @@ const quietDeps = {
 
 // ── claim 1: the rung loads the DAEMON's policy, so it runs at all ─────────────────────────────
 
-test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
+test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", async () => {
   // config.root deliberately carries NO plan/policy.yaml — mirrors exactly the daemon checkout
   // the amended note measured: `loadPolicy(policyPath(config.root))` threw here on every tick.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-policy-`));
@@ -73,7 +73,7 @@ test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
 
   let reached = false;
   let sawDryRun: boolean | undefined;
-  const out = logDiskReclaimRung({ root } as never, () => {}, {
+  const out = await logDiskReclaimRung({ root } as never, () => {}, {
     ...noSweeps,
     objectRepoDir: () => "/unused-repo",
     objectInflightDir: () => "/unused-inflight",
@@ -94,9 +94,9 @@ test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", () => {
   assert.equal(out.objectsPruned, 0);
 });
 
-test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", () => {
+test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", async () => {
   const rows: Array<[string, Record<string, unknown>]> = [];
-  logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
+  await logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
     ...noSweeps,
     objectPolicy: () => {
       throw new Error("policy.yaml is not valid YAML");
@@ -112,9 +112,9 @@ test("W1-T4022: a policy load failure is logged, not silently folded into the ge
 
 // ── claim 2: the open-file refusal reads a REAL count, not the fail-closed constant ────────────
 
-test("W1-T4022: the open-file refusal reads a real count", () => {
+test("W1-T4022: the open-file refusal reads a real count", async () => {
   let captured: { openFileCount?: (dir: string) => number } | undefined;
-  logDiskReclaimRung({ root: scratch() } as never, () => {}, {
+  await logDiskReclaimRung({ root: scratch() } as never, () => {}, {
     ...noSweeps,
     objectPolicy: () => ({ enabled: false }),
     reapObjects: ((_r: string, _i: string, d: { openFileCount?: (dir: string) => number }) => {

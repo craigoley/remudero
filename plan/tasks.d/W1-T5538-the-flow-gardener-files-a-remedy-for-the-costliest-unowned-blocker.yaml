@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: a self-improving board doctor modelled on the ci-friction gardener (W1-T4435), ranking blockers by PR-hours lost and filing the top unowned one"
   plan_refs: [W1-T5537, W1-T4435, W1-T5536]
   files: [src/lib/flow-gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

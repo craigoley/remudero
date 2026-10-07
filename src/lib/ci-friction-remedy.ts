@@ -41,6 +41,8 @@ export const CI_FRICTION_ESCALATE_RUNG = 3;
 
 /** One plan task whose `origin:` names a ci-friction cause. */
 export interface CiFrictionRemedyTask {
+  /** Exact changed owning-file blob from a credited source build, never a status flip. */
+  preventionSource?: import("./prevention-source-evidence.js").PreventionSourceRegistration | { state: "unavailable"; reason: string };
   id: string;
   origin: string;
   status: string;

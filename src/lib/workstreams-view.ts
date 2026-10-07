@@ -20,6 +20,7 @@
  * Each stage's ms rides the worker's `read_model.slow_view` row.
  * Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
  */
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -28,7 +29,7 @@ import { gitPlanBehind, nowPlanPath, planSource, planStamp, snapshotGeneration, 
 import { buildOperatorActivityProjection, OPERATOR_ACTIVITY_CONTRACT_VERSION, operatorActivityCandidates, type OperatorActivityEnvelope } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
-import { projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerLines, type StatusProjection } from "./status.js";
+import { projectPlan, readLedgerLines, readLedgerUnionBounded, SERVE_KEEPS_CREDITS_IN_MEMORY, type LedgerFsDeps, type LedgerLines, type StatusProjection } from "./status.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { judgeSource } from "./view-freshness.js";
 import type { ShadowLegacy } from "./view-shadow.js";
@@ -71,6 +72,60 @@ interface Built {
   githubFailureReason?: string;
   /** The ring's newest row: legacy reads the union up to it, so a row the projector had not applied is not a diff. */
   ringNewestMs: number;
+  /** The live file's bytes the projector had applied when the ring was read ({@link readLiveApplied}). */
+  liveApplied?: LiveApplied;
+}
+
+/**
+ * The live file as far as the projector had applied it: its inode and the byte offset it stopped at. A writer
+ * appends a row whose `ts` it stamped earlier (a `pr.stuck` lands 14 to 60 s after its `ts`), so a row at or
+ * before the ring's newest `ts` can still sit past the projector's offset: the ring has not seen it yet.
+ */
+interface LiveApplied {
+  ino: string;
+  off: number;
+}
+
+function readLiveApplied(db: ReadModelDb): LiveApplied | undefined {
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'source_file'").get() === undefined) return undefined;
+  const row = db.prepare("SELECT ino, off FROM source_file WHERE name = ?").get(LEDGER_FILENAME);
+  return row ? { ino: String(row.ino), off: Number(row.off) } : undefined;
+}
+
+/** The ring and the live offset it was applied to, read in one snapshot so a commit between them cannot split them. */
+function readRingWithOffset(db: ReadModelDb): { ring: Row[]; applied?: LiveApplied } {
+  const own = !db.inTransaction();
+  if (own) db.exec("BEGIN");
+  try {
+    const ring = readActivityRing(db);
+    const applied = readLiveApplied(db);
+    return { ring, ...(applied ? { applied } : {}) };
+  } finally {
+    if (own) db.exec("COMMIT");
+  }
+}
+
+/**
+ * Reads the live ledger only up to the bytes the projector had applied, while it is still the same file; a
+ * rotation since (another inode) reads it whole, bounded by the ring's newest `ts` alone as before.
+ */
+function appliedLedgerFs(livePath: string, applied: LiveApplied): LedgerFsDeps {
+  return {
+    existsSync: (path) => existsSync(path),
+    readFileSync: (path, encoding) => {
+      if (path !== livePath) return readFileSync(path, encoding);
+      const fd = openSync(path, "r");
+      try {
+        const st = fstatSync(fd, { bigint: true });
+        if (String(st.ino) !== applied.ino) return readFileSync(fd, encoding);
+        const buf = Buffer.alloc(Math.min(applied.off, Number(st.size)));
+        readSync(fd, buf, 0, buf.length, 0);
+        return buf.toString(encoding);
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
 }
 
 interface Slot<S> {
@@ -82,6 +137,7 @@ interface Slot<S> {
 /** One instance's values as its stages read them. */
 interface Work {
   ring?: Row[];
+  applied?: LiveApplied;
   plan?: Plan;
   gateway?: Gateway;
   live?: LedgerLines;
@@ -202,7 +258,11 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
    * after, so a cold plan parse or a projection holds the views thread for that stage alone, not the build.
    */
   const STAGES: ReadonlyArray<[string, (instance: NowInstance, w: Work, b: Pending, db: ReadModelDb | undefined) => void]> = [
-    ["ring", (_instance, w, _b, db) => void (w.ring = db ? readActivityRing(db) : [])],
+    ["ring", (_instance, w, _b, db) => {
+      const read = db ? readRingWithOffset(db) : { ring: [] };
+      w.ring = read.ring;
+      if (read.applied) w.applied = read.applied;
+    }],
     ["plan", (instance, w) => void (w.plan = readPlan(instance))],
     ["github", (instance, w) => {
       w.gateway = github(instance);
@@ -222,8 +282,10 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     }],
     ["assemble", (instance, w, b) => {
       const { ring, plan, projection, live, githubReadFailed, githubFailureReason } = w as Required<Work>;
+      const liveApplied = w.applied;
       const ringNewestMs = Math.max(Number.NEGATIVE_INFINITY, ...ring.map((row) => Date.parse(String(row.ts))).filter(Number.isFinite));
-      b.entries.set(instance.name, { instance, plan, projection, live, githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), ringNewestMs });
+      b.entries.set(instance.name, { instance, plan, projection, live, githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), ringNewestMs,
+        ...(liveApplied ? { liveApplied } : {}) });
       b.activities.push(buildOperatorActivityProjection({
         plan, projection, ledgerLines: withMeta(ring, live.present !== false), frontierLedgerLines: live,
         githubReadFailed, ...(githubFailureReason ? { githubFailureReason } : {}), now: () => b.now,
@@ -315,7 +377,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     stages: () => (Object.keys(ran).length > 0 ? { ...ran } : undefined),
     /**
      * The shadow side: what GET /v1/operator-activity answers over the same build's plan half, with its
-     * activity read the route's way (the memoized ledger union) up to the ring's newest row.
+     * activity read the route's way (the memoized ledger union) up to the ring's newest row, and of the live
+     * file only the bytes the projector had applied when the ring was read.
      */
     legacy: (_key, _now, data) => {
       const view = data as WorkstreamsData;
@@ -327,7 +390,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         const memo = legacyMemos.get(instance) ?? createLedgerRotationMemo(operatorActivityCandidates);
         legacyMemos.set(instance, memo);
         const pass = memo.pass({ parseMissing: true });
-        const union = readLedgerUnionBounded(join(b.instance.ledgerDir, LEDGER_FILENAME), { rotationRecords: pass.rotationRecords });
+        const livePath = join(b.instance.ledgerDir, LEDGER_FILENAME);
+        const union = readLedgerUnionBounded(livePath, { rotationRecords: pass.rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });
         pass.complete();
         const rows = operatorActivityCandidates(union.filter((row) => !(Date.parse(String(row.ts)) > b.ringNewestMs)));
         return { instance, activity: buildOperatorActivityProjection({

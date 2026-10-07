@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
   plan_refs: [W1-T312, W1-T1223, W1-T2671, W1-T2789, W1-T5654, W1-T5694, W1-T5864, W1-T5920]
   files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-ci-gate-timed-out-on-a-never-started-check-gets-a-new-head.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
