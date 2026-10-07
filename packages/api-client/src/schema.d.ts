@@ -2413,6 +2413,45 @@ export interface components {
       feedbackId: string | null;
       pr: number | null;
     };
+    GardenerRuntimeEntry: {
+      name: string;
+      enabled: boolean;
+      scope: "repository" | "host" | "fleet";
+      cadenceMs: number;
+      phase: "scheduled" | "queued" | "running" | "completed" | "failed" | "cancelled" | "idle";
+      observedAt: string;
+      passId: string | null;
+      nextDueAt: string | null;
+      queueMs: number | null;
+      executionMs: number | null;
+      exit: number | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | null | null;
+      attempts: number;
+      completions: number;
+      failures: number;
+      lastCompletedAt: string | null;
+      lastSuccessAt: string | null;
+      lastFailureAt: string | null;
+    };
+    /** Bounded registered off-loop gardener receipts. Counters cover this daemon run only. Completed means process exit zero, not a measured improvement. Host/fleet scope is not attributed to a repository. Missing cost or outcome attribution is never zero. */
+    GardenersResult: {
+      version: 1;
+      repository: string;
+      daemonRunId: string;
+      codeSha: string | null;
+      configuredAt: string;
+      observedAt: string;
+      generatedAt: string;
+      gardens: (GardenerRuntimeEntry)[];
+      coverage: "registered-off-loop";
+      counterWindow: "daemon-run";
+      outcomeAssessment: "not_collected";
+      spend: null;
+    };
+    GardenersUnavailable: {
+      error: "gardeners_unavailable";
+      reason: "not_collected" | "unreadable" | "repository_mismatch" | "clock_skew";
+    };
     /** GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first. */
     IncidentsResult: {
       incidents: (IncidentRecord)[];
@@ -5617,6 +5656,16 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/gardeners": {
+    get: {
+      responses: {
+          "200": GardenersResult;
+          "401": Error;
+          "403": Error;
+          "503": GardenersUnavailable;
         };
     };
   };

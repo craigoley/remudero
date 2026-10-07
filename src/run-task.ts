@@ -182,6 +182,8 @@ import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace }
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenSchedule } from "./lib/garden-registry.js";
+import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -37149,8 +37151,13 @@ export async function daemonCommand(
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
+    daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
+    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: target.isSelf,
+      cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
+      scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -37722,6 +37729,8 @@ export async function daemonCommand(
   });
   const loopTelemetry = startReadPlaneTelemetry();
   try {
+    // Publish only after boot guards admit a real daemon; dry-run must not replace its inventory.
+    try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
       plan,
       {
