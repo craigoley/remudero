@@ -542,12 +542,24 @@ function withGateHome<T>(gate: PrePushGate, run: (env: NodeJS.ProcessEnv) => T):
   }
 }
 
+export function gateHookRefused(res: { error?: Error; status: number | null }): boolean {
+  if (res.error !== undefined && (res.error as NodeJS.ErrnoException).code !== "EPIPE") return true;
+  return res.status !== 0;
+}
+
+function gateFailureDetail(err: unknown): string {
+  const failed = err as { status?: unknown; signal?: unknown; code?: unknown; error?: { code?: unknown } } | null;
+  const spawned = failed?.error?.code ?? (typeof failed?.code === "string" ? failed.code : undefined);
+  if (spawned !== undefined && spawned !== "EPIPE") return `spawn ${String(spawned)}`;
+  return typeof failed?.signal === "string" ? `signal ${failed.signal}` : `exit ${String(failed?.status ?? failed?.code)}`;
+}
+
 /** A refused gate, in the shape a refused `git push` had: `runErrorCause` and `censusPushRefusal` read it. */
 function gateRefusal(worktreePath: string, pushArgs: string[], err: unknown): PushFailedError {
   const text = String((err as { stderr?: unknown } | null)?.stderr ?? "");
   return new PushFailedError(
     `Command failed: git -C ${worktreePath} ${pushArgs.join(" ")}\n` +
-      `the harness's pre-push gate (${harnessHooksDir()}/pre-push) refused this push; nothing was pushed\n${text}`.trimEnd(),
+      `the harness's pre-push gate (${harnessHooksDir()}/pre-push) refused this push (${gateFailureDetail(err)}); nothing was pushed\n${text}`.trimEnd(),
     text,
     err,
   );
@@ -576,7 +588,7 @@ export function worktreePushExec(worktreePath: string): PushExec {
         cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
       }));
       if (opts.stdio !== "ignore") writeThrough(res); // on a pass too: a skipped check says so on stderr
-      if (res.error !== undefined || res.status !== 0) throw gateRefusal(worktreePath, pushArgs, res.error ?? res);
+      if (gateHookRefused(res)) throw gateRefusal(worktreePath, pushArgs, res);
     }
     try {
       hostWorktreeGit(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
@@ -597,6 +609,7 @@ export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {
           const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
             (err, stdout, stderr) => (err ? reject(Object.assign(err, { stdout, stderr })) : resolveGate({ stdout, stderr })));
+          child.stdin?.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") reject(err); });
           child.stdin?.end(gate.input);
         }));
         if (opts.stdio !== "ignore") writeThrough(out);

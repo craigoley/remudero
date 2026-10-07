@@ -132,21 +132,25 @@ fi
 # addressed to the wrong machine. The host also EXECUTED a backtick pair from that same comment.
 # test/verify-image-probes.test.ts now enforces delivery, since reading for this has failed twice.
 # THE DECLARED PIN, read HOST-SIDE so the probe stays one clean single-quoted argument.
-# deploy/Dockerfile is the single place this repo declares which CLI its workers run, and
-# src/lib/env.ts parseDeclaredClaudeVersion reads THE SAME LINE at runtime - one declaration, two
-# consumers, nothing to keep in sync. Empty when the file is absent (this script is documented to
-# run on a host with no checkout), and empty means the probe reports UNKNOWN rather than a verdict.
-EXPECT_CLAUDE_VERSION="$(sed -n 's/^[[:space:]]*ARG[[:space:]]\{1,\}CLAUDE_CODE_VERSION[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]#]\{1,\}\).*/\1/p' "$(dirname "$0")/Dockerfile" 2>/dev/null | head -1)"
-EXPECT_CODEX_VERSION="$(sed -n 's/^[[:space:]]*ARG[[:space:]]\{1,\}CODEX_VERSION[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]#]\{1,\}\).*/\1/p' "$(dirname "$0")/Dockerfile" 2>/dev/null | head -1)"
+# deploy/package.json is the single place this repo declares which CLIs its workers run (dependabot
+# bumps it with its lock), and src/lib/env.ts parseDeclaredClaudeVersion reads THE SAME FILE at
+# runtime - one declaration, two consumers, nothing to keep in sync. sed, not node: the host may
+# have no node. Empty when the file is absent (this script is documented to run on a host with no
+# checkout), and empty means the probe reports UNKNOWN rather than a verdict.
+declared_pin() {
+  sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\([0-9][0-9.]*[0-9]\)\".*/\1/p" "$(dirname "$0")/package.json" 2>/dev/null | head -1
+}
+EXPECT_CLAUDE_VERSION="$(declared_pin "@anthropic-ai\/claude-code")"
+EXPECT_CODEX_VERSION="$(declared_pin "@openai\/codex")"
 if [ -n "${EXPECT_CLAUDE_VERSION}" ]; then
-  echo "verify-image: deploy/Dockerfile declares claude ${EXPECT_CLAUDE_VERSION}"
+  echo "verify-image: deploy/package.json declares claude ${EXPECT_CLAUDE_VERSION}"
 else
-  echo "verify-image: no CLAUDE_CODE_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
+  echo "verify-image: no exact @anthropic-ai/claude-code pin in deploy/package.json - version VALUE will not be compared"
 fi
 if [ -n "${EXPECT_CODEX_VERSION}" ]; then
-  echo "verify-image: deploy/Dockerfile declares codex ${EXPECT_CODEX_VERSION}"
+  echo "verify-image: deploy/package.json declares codex ${EXPECT_CODEX_VERSION}"
 else
-  echo "verify-image: no CODEX_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
+  echo "verify-image: no exact @openai/codex pin in deploy/package.json - version VALUE will not be compared"
 fi
 
 # THE BUILD SHA, read HOST-SIDE from the image LABEL so the in-image probe below can compare it
@@ -157,7 +161,7 @@ fi
 #
 # `docker inspect` renders an absent label as the literal `<no value>`, and an image built before
 # REQ 15 landed has no label at all. Both normalise to EMPTY here, and empty means the probe
-# reports UNKNOWN rather than a verdict - the same rule the CLAUDE_CODE_VERSION read above follows.
+# reports UNKNOWN rather than a verdict - the same rule the declared-pin read above follows.
 LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
 [ "${LABEL_BUILD_SHA}" = "<no value>" ] && LABEL_BUILD_SHA=""
 if [ -n "${LABEL_BUILD_SHA}" ]; then
@@ -231,7 +235,7 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CO
   # NOTHING about which one. That is the vacuous shape this file has been corrected for six times,
   # and a binary of the wrong version is exactly the failure it would certify green - the image
   # pins the CLI against the SDK version in package-lock.json, and an unpaired combination is
-  # untested. So compare the VALUE against the pin the Dockerfile declares.
+  # untested. So compare the VALUE against the pin deploy/package.json declares.
   # THREE STATES. An absent expectation is UNKNOWN and prints WARN without failing, because a read
   # that did not happen must never render as a match - the same rule src/lib/env.ts readBinaryPin
   # follows. Only a REAL disagreement fails.
@@ -241,7 +245,7 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CO
   elif [ "${got_claude}" = "${EXPECT_CLAUDE_VERSION}" ]; then
     printf "  PASS  %-22s %s matches the declared pin\n" "claude version" "${got_claude}"
   else
-    printf "  FAIL  %-22s image has %s but deploy/Dockerfile declares %s\n" "claude version" "${got_claude}" "${EXPECT_CLAUDE_VERSION}"
+    printf "  FAIL  %-22s image has %s but deploy/package.json declares %s\n" "claude version" "${got_claude}" "${EXPECT_CLAUDE_VERSION}"
     fail=1
   fi
   # END claude-version-value
@@ -252,7 +256,7 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_CO
   elif [ "${got_codex}" = "${EXPECT_CODEX_VERSION}" ]; then
     printf "  PASS  %-22s %s matches the declared pin\n" "codex version" "${got_codex}"
   else
-    printf "  FAIL  %-22s image has %s but deploy/Dockerfile declares %s\n" "codex version" "${got_codex}" "${EXPECT_CODEX_VERSION}"
+    printf "  FAIL  %-22s image has %s but deploy/package.json declares %s\n" "codex version" "${got_codex}" "${EXPECT_CODEX_VERSION}"
     fail=1
   fi
   # END codex-version-value

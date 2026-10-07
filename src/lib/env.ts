@@ -292,22 +292,19 @@ export function checkBinaryPin(recordedVersion: string, actualVersion: string): 
   };
 }
 
-// Why: why the Dockerfile ARG is the source of truth and why "unknown" is a required third state
+// Why: why one declaration is the source of truth and why "unknown" is a required third state
 // — docs/forensics/env.md#declared_cli_pin_arg-section.
-// ── The declared pin: deploy/Dockerfile's `ARG CLAUDE_CODE_VERSION` is the one declaration both
-// this reading and deploy/verify-image.sh read. A read failure degrades to `unknown`, never `match`.
+// ── The declared pin: deploy/package.json's exact dependency, which the image build and verify-image.sh
+// read too (dependabot bumps it with its lock). A read failure degrades to `unknown`, never `match`.
 
-/** The Dockerfile ARG that declares which CLI this repo intends its workers to run. */
-export const DECLARED_CLI_PIN_ARG = "CLAUDE_CODE_VERSION";
+/** The deploy/package.json dependency that declares which CLI this repo intends its workers to run. */
+export const DECLARED_CLI_PIN_PACKAGE = "@anthropic-ai/claude-code";
 
-/**
- * The declared CLI pin, parsed out of deploy/Dockerfile text. Returns `undefined` when the ARG is
- * absent — never a guess. Tolerates the optional-default form (`ARG X=1.2.3`) that the Dockerfile
- * actually uses, and quoting, because a future edit may add either.
- */
-export function parseDeclaredClaudeVersion(dockerfileText: string): string | undefined {
-  const m = new RegExp(`^\\s*ARG\\s+${DECLARED_CLI_PIN_ARG}\\s*=\\s*["\']?([^"\'\\s#]+)`, "m").exec(dockerfileText);
-  return m ? m[1] : undefined;
+/** The declared CLI pin from deploy/package.json text: `undefined` for an absent pin or a range (never
+ *  a guess); malformed JSON throws, which {@link readBinaryPin} reads as `unknown`. */
+export function parseDeclaredClaudeVersion(manifestText: string): string | undefined {
+  const pin = (JSON.parse(manifestText) as { dependencies?: Record<string, unknown> })?.dependencies?.[DECLARED_CLI_PIN_PACKAGE];
+  return typeof pin === "string" && /^\d+\.\d+\.\d+$/.test(pin) ? pin : undefined;
 }
 
 /**
@@ -332,22 +329,22 @@ export interface BinaryPinReading {
 /**
  * Read the declared pin and the installed binary and compare them through {@link checkBinaryPin}.
  *
- * Both reads are injected and both may throw — a missing Dockerfile, a binary that will not run.
+ * Both reads are injected and both may throw — a missing manifest, a binary that will not run.
  * Each failure yields `status: "unknown"` with the cause named, so a caller can ledger "we could
  * not tell" as its own outcome rather than reporting a match it never observed.
  */
 export function readBinaryPin(deps: {
-  readDockerfile: () => string;
+  readCliManifest: () => string;
   runClaudeVersion: () => string;
 }): BinaryPinReading {
   let declaredVersion: string | undefined;
   try {
-    declaredVersion = parseDeclaredClaudeVersion(deps.readDockerfile());
+    declaredVersion = parseDeclaredClaudeVersion(deps.readCliManifest());
   } catch (e) {
     return { status: "unknown", reason: `could not read the declared pin: ${String(e)}` };
   }
   if (!declaredVersion) {
-    return { status: "unknown", reason: `deploy/Dockerfile declares no ${DECLARED_CLI_PIN_ARG}` };
+    return { status: "unknown", reason: `deploy/package.json declares no exact ${DECLARED_CLI_PIN_PACKAGE} pin` };
   }
 
   let observedVersion: string | undefined;
@@ -367,7 +364,7 @@ export function readBinaryPin(deps: {
         declaredVersion,
         observedVersion,
         reason:
-          `this host runs claude ${observedVersion} but deploy/Dockerfile declares ${declaredVersion} — ` +
+          `this host runs claude ${observedVersion} but deploy/package.json declares ${declaredVersion} — ` +
           `the SDK in package-lock.json is paired with the declared one, so this combination is untested`,
       }
     : { status: "match", declaredVersion, observedVersion, reason: `claude ${observedVersion} matches the declared pin` };

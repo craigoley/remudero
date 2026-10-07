@@ -58,7 +58,7 @@ test("runTaskBody can drive the containment rung from an explicit minimal contex
       openTaskIds: new Set([task.id]),
       opts: {
         binaryPinDeps: {
-          readDockerfile: () => "ARG CLAUDE_CODE_VERSION=1.2.3\n",
+          readCliManifest: () => JSON.stringify({ dependencies: { "@anthropic-ai/claude-code": "1.2.3" } }),
           runClaudeVersion: () => "1.2.3 (Claude Code)\n",
         },
         containmentExec: async () => ({

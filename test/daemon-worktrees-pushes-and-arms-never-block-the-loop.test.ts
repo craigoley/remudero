@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -47,6 +47,7 @@ import {
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { addLaneWorktree, createDaemonLaneWorktree, createFixRungWorktree, pushFixRound } from "../src/run-task.js";
+import { worktreeAddAsync } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
@@ -646,4 +647,57 @@ test("W1-T5284: the async at-open arm and disarm keep their sync outcomes", asyn
     );
   }
   await assert.rejects(disarmAutoMergeAsync(PR), ArmSeamRequiredError);
+});
+
+
+test("same-clone async registrations wait without blocking another repository and release after a real Git refusal", async () => {
+  for (const refuse of [false, true]) {
+    const firstRepo = slowOriginFixture("registration-first");
+    const otherRepo = slowOriginFixture("registration-other");
+    const shim = ghShim([], { kind: "registration-git", command: "git" });
+    const originalPath = process.env.PATH;
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const started = join(shim.dir, "held-started");
+    const queued = join(shim.dir, "queued-started");
+    const release = join(shim.dir, "release");
+    const quote = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
+    writeFileSync(join(shim.dir, "git"), [
+      "#!/bin/sh",
+      'case "$*" in',
+      "*'worktree add -b run-registration-held '*)",
+      "  touch " + quote(started),
+      "  while [ ! -f " + quote(release) + " ]; do sleep 0.01; done ;;",
+      "*'worktree add -b run-registration-queued '*) touch " + quote(queued) + " ;;",
+      "esac",
+      "exec " + quote(realGit) + ' "$@"',
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const alias = join(firstRepo.root, "clone-alias");
+    symlinkSync(firstRepo.clone, alias, "dir");
+    process.env.PATH = shim.dir + ":" + originalPath;
+    const pending: Promise<void>[] = [];
+    let results: PromiseSettledResult<void>[] = [];
+    let ticks = 0;
+    const timer = setInterval(() => { ticks += 1; }, 5);
+    try {
+      pending.push(worktreeAddAsync(firstRepo.clone, join(firstRepo.worktreesRoot, "held"), "run-registration-held", refuse ? "origin/missing" : "origin/main"));
+      for (let i = 0; i < 2000 && !existsSync(started); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.ok(existsSync(started), "the real first registration subprocess must reach its barrier");
+      pending.push(worktreeAddAsync(alias, join(firstRepo.worktreesRoot, "queued"), "run-registration-queued"));
+      await worktreeAddAsync(otherRepo.clone, join(otherRepo.worktreesRoot, "independent"), "run-registration-other");
+      assert.ok(existsSync(join(otherRepo.worktreesRoot, "independent", ".git")), "another repository creates its real worktree while the first remains held");
+      assert.ok(ticks > 0, "the daemon event loop continues during registration admission");
+      assert.equal(existsSync(queued), false, "a physical alias of the same clone cannot enter Git registration until the first child has settled");
+    } finally {
+      writeFileSync(release, "");
+      results = await Promise.allSettled(pending);
+      clearInterval(timer);
+      process.env.PATH = originalPath;
+      otherRepo.cleanup();
+      firstRepo.cleanup();
+    }
+    assert.equal(results[0]!.status, refuse ? "rejected" : "fulfilled", "a real Git refusal is retained and never converted into success");
+    assert.equal(results[1]!.status, "fulfilled", "both a successful and a refused first child release the waiting registration");
+    if (refuse) assert.match(String((results[0] as PromiseRejectedResult).reason), /origin\/missing|invalid reference/);
+  }
 });
