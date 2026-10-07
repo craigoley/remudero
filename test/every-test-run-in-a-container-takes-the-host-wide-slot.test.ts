@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { getPriority, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -99,17 +99,11 @@ test("the launch creates the shared slot dir open to every uid, a wipe restores 
   assert.equal(restored.status, 0, restored.stderr);
   assert.equal(statSync(hostSlots).mode & 0o7777, 0o777, "a deallocate's restore re-opens it");
 
-  // A slot dir this uid cannot write (another uid's, simulated by a chmod that does nothing) keeps every other bind.
-  const stubs = join(h.root, "stubs");
-  mkdirSync(stubs);
-  writeFileSync(join(stubs, "chmod"), "#!/bin/sh\nexit 0\n");
-  chmodSync(join(stubs, "chmod"), 0o755);
-  chmodSync(hostSlots, 0o555);
-  const degraded = plan({ ...env, PATH: `${stubs}:${process.env.PATH ?? ""}` }, state, "remudero-daemon", true);
-  if (process.getuid?.() !== 0) {
-    assert.match(degraded.note, /test-slots is not writable, so test runs here go unslotted/);
-  }
-  chmodSync(hostSlots, 0o755);
+  // A slot path this launch cannot use (a FILE there: uid-independent) keeps every other bind.
+  rmSync(hostSlots, { recursive: true, force: true });
+  writeFileSync(hostSlots, "");
+  const degraded = plan(env, state, "remudero-daemon", true);
+  assert.match(degraded.note, /test-slots is not a writable directory, so test runs here go unslotted/);
   assert.ok(degraded.args.includes(`${join(h.scratchRoot, "rmd", "rmd-state2")}/worktrees:/home/node/Remudero/worktrees`), "the other binds stand");
 });
 

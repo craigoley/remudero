@@ -132,7 +132,7 @@ scratch_prepare() {
       # slot_unavailable), never the launch's other binds.
       mkdir -p "${dir}" 2>/dev/null || true
       scratch_open_test_slots "${dir}"
-      [ -w "${dir}" ] || SCRATCH_NOTE="${SCRATCH_NOTE}; WARNING: ${dir} is not writable, so test runs here go unslotted"
+      { [ -d "${dir}" ] && [ -w "${dir}" ]; } || SCRATCH_NOTE="${SCRATCH_NOTE}; WARNING: ${dir} is not a writable directory, so test runs here go unslotted"
       continue
     fi
     if ! mkdir -p "${dir}" 2>/dev/null || [ ! -w "${dir}" ]; then
