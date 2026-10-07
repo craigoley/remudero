@@ -123,7 +123,12 @@ export function createGardenerRuntimeWriter(input: {
         await write(join(input.stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(parseGardenerRuntime(snapshot)) + "\n");
         written = target;
       }
-    })().finally(() => { running = undefined; });
+    })().then(() => {
+      running = undefined;
+      // A terminal event can arrive between the final drain check and this reaction.
+      // Join its write before resolving existing callers, without retrying failures.
+      if (written < revision) return flush();
+    }, (error: unknown) => { running = undefined; throw error; });
     return running;
   };
   return {

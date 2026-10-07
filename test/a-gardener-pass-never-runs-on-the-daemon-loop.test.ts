@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -154,6 +154,60 @@ test("gardener completion rows retain the runtime pass id and separate admission
   const rejected = saved.gardens.find((garden) => garden.name === "export")!;
   assert.equal(rejected.queueMs, null); assert.equal(rejected.executionMs, null);
   assert.equal(rejected.reason, "spawn-failed");
+});
+
+test("gardener persistence drains a terminal receipt arriving as an atomic write settles", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-final-drain-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z"));
+  let lastWrite: Promise<void> | undefined, writes = 0;
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "final-drain-control", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {},
+    write: (path, text) => { writes++; lastWrite = writeAtomicAsync(path, text); return lastWrite; } });
+  await writer.flush();
+  assert.equal((await readGardenerRuntime(stateDir)).gardens[0]!.phase, "scheduled", "real atomic persistence positive control");
+  const queued: GardenerRuntimeEvent = { name: "plan", phase: "queued", observedAt: clock.iso(),
+    passId: "controlled-final-drain-pass", nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null };
+  writer.record(queued); assert.ok(lastWrite);
+  // The writer awaits this physical write before this later reaction is registered.
+  const terminal = lastWrite.then(() => writer.record({ ...queued, phase: "completed", queueMs: 0,
+    executionMs: 10, exit: 0, reason: "process-completed" }));
+  await writer.flush(); await terminal; await wait(0);
+  const saved = await readGardenerRuntime(stateDir);
+  assert.equal(saved.gardens[0]!.phase, "completed", "no later pass or periodic retry is needed to persist completion");
+  assert.equal(saved.gardens[0]!.passId, queued.passId);
+  assert.equal(saved.gardens[0]!.completions, 1);
+  assert.equal(writes, 3, "only the initial inventory, queued pass and terminal receipt are written");
+});
+
+test("gardener persistence reports a real write refusal without retrying and recovers on the next observation", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, GARDENER_RUNTIME_FILE } = await import("../src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-write-recovery-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z")), logged = rows();
+  let writes = 0;
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "write-refusal-control", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: logged.log,
+    write: (path, text) => { writes++; return writeAtomicAsync(path, text); } });
+  await writer.flush();
+  const file = join(stateDir, GARDENER_RUNTIME_FILE);
+  renameSync(file, `${file}.previous`); mkdirSync(file);
+  const queued: GardenerRuntimeEvent = { name: "plan", phase: "queued", observedAt: clock.iso(),
+    passId: "controlled-refusal-pass", nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null };
+  writer.record(queued);
+  await assert.rejects(writer.flush()); await wait(0);
+  assert.equal(writes, 2, "a failed physical write must not start an unbounded automatic retry");
+  assert.equal(logged.out.filter((row) => row.step === "garden.telemetry_failed").length, 1);
+  assert.equal(JSON.parse(readFileSync(`${file}.previous`, "utf8")).gardens[0].phase, "scheduled", "prior evidence is retained");
+  rmdirSync(file);
+  writer.record({ ...queued, phase: "completed", queueMs: 0, executionMs: 10, exit: 0, reason: "process-completed" });
+  await writer.flush();
+  const saved = await readGardenerRuntime(stateDir);
+  assert.equal(saved.gardens[0]!.phase, "completed"); assert.equal(saved.gardens[0]!.completions, 1);
+  assert.equal(writes, 3, "one new observation admits exactly one recovered write");
 });
 
 test("gardener lifecycle reports idle and spawn failures while an observer cannot break a pass", async (t) => {
