@@ -63,7 +63,7 @@ function enabledSandboxSettingsFile(): string {
   writeFileSync(
     path,
     JSON.stringify({
-      sandbox: { enabled: true, failIfUnavailable: true },
+      sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
       permissions: { deny: [], allow: [], ask: [] },
     }),
   );

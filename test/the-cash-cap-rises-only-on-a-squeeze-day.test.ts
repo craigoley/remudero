@@ -72,7 +72,7 @@ test("the squeeze ceiling is claimed in exactly ONE place", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-squeeze-claim-"));
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const config = {
       claudeBin: "/bin/true", root, dailyCapUsd: { normal: 10, squeezed: 25 },
       workerProviders: { enabled: ["claude", "codex", "cash"], cashFallbackWhenBlocked: true, cashEndpoint: "https://example.test/" },

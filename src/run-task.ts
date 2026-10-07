@@ -1447,7 +1447,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -17129,7 +17129,34 @@ const realCoverageChangedFiles = (wt: string): string[] =>
  * timeout/spawn-error mapping are the ones `spawnSync` gave.
  */
 const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
-const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
+const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
+const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
+      resolve(error ? String(stderr).trim().split("\n")[0] || error.message : undefined));
+  });
+const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
+  const home = makeTempDir("proof-home");
+  try {
+    const env: NodeJS.ProcessEnv = { ...proofChildEnv(home), TMPDIR: "/tmp", NODE_V8_COVERAGE: "" };
+    let sandbox: string[];
+    try {
+      sandbox = proofSandboxArgv({ cwd: wt, home });
+    } catch (error) {
+      return { status: null, output: "", timedOut: false, spawnError: coverageSandboxText(error) };
+    }
+    const startFailure = await coverageSandboxStart(status.binary, sandbox, wt, env);
+    if (startFailure !== undefined) return coverageSandboxRefusal(startFailure);
+    const argv = [...sandbox, process.execPath, join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites];
+    return await spawnCoverageChild(status.binary, argv, wt, env, timeoutMs, maxOutputBytes);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+};
+const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -17146,8 +17173,9 @@ const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOut
     // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
     // the environment synchronously, so clearing it around the call is enough.
     const child = withoutNodeTestContextEnv(() =>
-      spawn(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
+      spawn(file, args, {
         cwd: wt,
+        env,
         stdio: ["ignore", "pipe", "pipe"],
       }),
     );

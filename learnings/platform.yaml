@@ -304,7 +304,8 @@
   cited: "2026-09-06"
 - id: canonical-checkout-lags-by-design
   subsystem: worktrees
-  lifecycle: active
+  # knowledge gardener: retire canonical-checkout-lags-by-design
+  lifecycle: superseded
   files: [ src/lib/worker.ts ]
   fact: >-
     The fleet host's canonical checkout (`~/Remudero/repos/remudero`) has a

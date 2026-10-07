@@ -5,6 +5,9 @@ import { test } from "node:test";
 import { coveragePrecheck, FixRoundPushError, pushFixRoundPrechecked, type CoveragePrecheckPorts } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+
+usePassThroughProofSandbox();
 
 // Exercise the shipped runner, CI flags, source-mapped LCOV, committed diff and local push.
 // Only the tiny fixture's selector/manifest are supplied; no coverage result is injected.

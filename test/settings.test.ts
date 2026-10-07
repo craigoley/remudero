@@ -20,6 +20,7 @@ const GOOD = {
   sandbox: {
     enabled: true,
     failIfUnavailable: true,
+    allowUnsandboxedCommands: false,
     autoAllowBashIfSandboxed: true,
     filesystem: { denyRead: ["~/.ssh/**"] },
     network: { allowedDomains: ["github.com"] },
