@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: security finding raised by the W1-T6091 builder, verified read-only on origin/main before filing"
   plan_refs: [W1-T4614, W1-T5016, W1-T2699, W1-T3224, W1-T499, W1-T6091]
   files: [src/lib/worktree-git.ts, src/lib/git-push.ts, src/lib/worker.ts, src/run-task.ts, src/lib/worker-provider.ts, test/a-host-git-call-into-a-worker-worktree-runs-no-worker-code.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

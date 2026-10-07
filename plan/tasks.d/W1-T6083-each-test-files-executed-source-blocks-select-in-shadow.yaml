@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: test-cost research (research-selection REPORT draft C, TIA prototype)"
   plan_refs: [W1-T4404, W1-T5705, W1-T5923, W1-T6084, W1-T6089]
   files: [src/lib/test-impact-map.ts, src/lib/affected-suites.ts, scripts/coverage-merge-ratchet.mjs, scripts/select-affected-suites.mjs, test/each-test-files-executed-source-blocks-select-in-shadow.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
