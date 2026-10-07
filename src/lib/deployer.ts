@@ -100,6 +100,7 @@ export interface TriggerInputs {
   /** W1-T4267: expected-versus-live Docker limits read by the watchdog tick. Undefined is
    *  UNKNOWN (an unreadable inspect or policy), never drift. */
   resourcePolicyDrift?: ResourcePolicyDrift[];
+  mountPlanDrift?: MountPlanDrift[]; // W1-T6110: scratch binds read by the tick; undefined is UNKNOWN
   /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
    *  which never recycles automatically — a recycle before the build lands would pull the old one. */
   imagePublished?: boolean;
@@ -170,6 +171,75 @@ export function readResourcePolicyDrift(
     return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
   } catch {
     return undefined; // no policy file, no bash, or no such container — never a recycle trigger
+  }
+}
+
+export interface MountPlanDrift {
+  target: string; // a bind's container path, or `env <NAME>`
+  expected: string;
+  actual: string | undefined; // undefined: the container has no such bind or variable
+}
+
+export function mountPlanDriftFrom(planText: string, inspectJson: string): MountPlanDrift[] | undefined {
+  const binds: [string, string][] = [];
+  const env: [string, string][] = [];
+  for (const line of planText.split("\n")) {
+    const [kind, a, b] = line.split("\t");
+    if (kind === "bind" && a && b) binds.push([a, b]);
+    if (kind === "env" && a?.includes("=")) env.push([a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]);
+  }
+  if (binds.length === 0) return undefined; // W1-T6110: only what the plan names is compared
+  let live: { Mounts?: unknown; Env?: unknown };
+  try {
+    live = JSON.parse(inspectJson) as { Mounts?: unknown; Env?: unknown };
+  } catch {
+    return undefined; // not an inspect at all — UNKNOWN, the same no-storm rule as a failed inspect
+  }
+  if (live === null || typeof live !== "object") return undefined;
+  if (!Array.isArray(live.Mounts) || !(Array.isArray(live.Env) || live.Env === null)) return undefined;
+  const mounts = live.Mounts as { Source?: unknown; Destination?: unknown; RW?: unknown }[];
+  const vars = (live.Env ?? []) as unknown[];
+  const drift: MountPlanDrift[] = [];
+  for (const [source, destination] of binds) {
+    const m = mounts.find((x) => x?.Destination === destination);
+    const actual = m === undefined ? undefined : `${String(m.Source)}${m.RW === false ? " (read-only)" : ""}`;
+    if (actual !== source) drift.push({ target: destination, expected: source, actual });
+  }
+  for (const [name, value] of env) {
+    const entry = vars.find((v): v is string => typeof v === "string" && v.startsWith(`${name}=`));
+    const actual = entry?.slice(name.length + 1);
+    if (actual !== value) drift.push({ target: `env ${name}`, expected: value, actual });
+  }
+  return drift;
+}
+
+export function readMountPlanDrift(
+  exec: (cmd: string, args: string[]) => string,
+  installPath: string,
+  stateDir: string,
+  container: string,
+): MountPlanDrift[] | undefined {
+  try {
+    const plan = exec("bash", [
+      "-c",
+      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' + // off is UNKNOWN, never "remove binds"
+        'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
+        'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
+        "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
+        "[ -n \"$s\" ] && printf 'bind\\t%s\\t%s\\n' \"$s\" \"$t\"; done; " +
+        'i=0; while [ "$i" -lt "${#SCRATCH_ARGS[@]}" ]; do [ "${SCRATCH_ARGS[$i]}" = -e ] && ' +
+        "printf 'env\\t%s\\n' \"${SCRATCH_ARGS[$((i + 1))]}\"; i=$((i + 2)); done; exit 0",
+      "scratch-mounts",
+      join(installPath, "deploy", "scratch-mounts.sh"),
+      stateDir,
+      container,
+    ]);
+    return mountPlanDriftFrom(
+      plan,
+      exec("docker", ["inspect", container, "--format", '{"Mounts":{{json .Mounts}},"Env":{{json .Config.Env}}}']),
+    );
+  } catch {
+    return undefined; // no plan file, scratch off or unusable, no bash, or no such container
   }
 }
 
@@ -679,19 +749,29 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  if (i.imageDriftOnly === true && resourcePolicyDrift.length > 0) {
-    const details = resourcePolicyDrift
-      .map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`)
-      .join(", ");
+  const createDrift = [ // W1-T4267 limits and W1-T6110 binds apply only at create: one path, same holds
+    {
+      noun: "resource policy drift",
+      recycle: "automatic resource-policy recycle",
+      details: resourcePolicyDrift.map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`),
+    },
+    {
+      noun: "mount plan drift",
+      recycle: "automatic mount-plan recycle",
+      details: (i.mountPlanDrift ?? []).map(({ target, expected, actual }) => `${target} expected=${expected} actual=${actual ?? "absent"}`),
+    },
+  ].filter((d) => d.details.length > 0);
+  if (i.imageDriftOnly === true && createDrift.length > 0) {
+    const what = createDrift.map((d) => `${d.noun} (${d.details.join(", ")})`).join("; ");
     if (stopUnknownOrSet) {
-      return { deploy: false, reason: `resource policy drift (${details}), but STOP is set or unknown — no automatic recycle` };
+      return { deploy: false, reason: `${what}, but STOP is set or unknown — no automatic recycle` };
     }
     const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
       i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
     if (recentFailure) {
-      return { deploy: false, reason: `resource policy drift (${details}); a deploy failed under an hour ago — the automatic recycle backs off` };
+      return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
     }
-    return { deploy: true, reason: `automatic resource-policy recycle: ${details}` };
+    return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; ") };
   }
   if (!restartReasons && !imageStale) {
     // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
@@ -1184,6 +1264,7 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  mountPlanDrift?: () => MountPlanDrift[] | undefined; // W1-T6110; undefined means UNKNOWN
   // ── SERVE POLICY CONVERGENCE (serve-policy-convergence.ts) ── wired for the primary instance only.
   /** remudero-serve's live HostConfig against the serve role's policy; undefined is UNKNOWN. */
   servePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
@@ -1574,6 +1655,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
   const imageBakedCommitsBehind = deps.imageBakedCommitsBehind?.();
   const resourcePolicyDrift = opts.imageDriftOnly === true ? deps.resourcePolicyDrift?.() : undefined;
+  const mountPlanDrift = opts.imageDriftOnly === true ? deps.mountPlanDrift?.() : undefined;
   const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
   const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
   const imagePublished = newestBakedSha ? deps.imagePublished?.(newestBakedSha) : undefined;
@@ -1607,6 +1689,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // here, which reads UNKNOWN and changes nothing.
     imageBakedCommitsBehind,
     resourcePolicyDrift,
+    mountPlanDrift,
     imageDriftOnly: opts.imageDriftOnly,
     ...(newestBakedSha ? { newestBakedSha, imagePublished } : {}),
     imageRecycleManual: deps.imageRecycleManual?.(),
@@ -2222,6 +2305,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
         process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
       ),
+    mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
+      readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
     newestBakedSha: () => {
       let newestBaked: string | undefined;
       try {
