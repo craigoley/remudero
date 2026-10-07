@@ -1,0 +1,45 @@
+- id: W1-T6171
+  title: "A FAILED WORKER SMOKE NAMES DOCKER'S OWN ERROR — recycle-container.sh captures the smoke's whole output in SMOKE_OUTPUT and on failure prints only the WORKER-SMOKE verdict line or 'no WORKER-SMOKE verdict line was printed', so site's 2026-10-07T01:32:52Z refusal 'the real worker smoke FAILED (exit 125)' left docker's own error unrecoverable from the journal and the ledger"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a refused smoke carries its own output; the deployer keys the refusal without it
+  band_meaning: span
+  origin: "operator session 2026-10-07: site and console recycle refusals (exit 125) with no cause on record"
+  plan_refs: [W1-T5017, W1-T6062, W1-T5706]
+  files: [deploy/recycle-container.sh, src/lib/deployer.ts, test/a-failed-worker-smoke-names-dockers-own-error.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: section 5.5 of deploy/recycle-container.sh runs the smoke as
+    SMOKE_OUTPUT="$(... docker container run "${SMOKE_ARGS[@]}" 2>&1)", keeps only SMOKE_LINE (the last
+    `^WORKER-SMOKE ` line) and, when SMOKE_RC is non-zero, echoes that line or the fallback "no
+    WORKER-SMOKE verdict line was printed (hang, crash or timeout)". Exit 125 is docker's OWN failure
+    (the container never started), so no verdict line exists and the only explanation (docker's
+    stderr, already captured in SMOKE_OUTPUT) is discarded. site refused at 2026-10-07T01:32:52Z with
+    "the real worker smoke FAILED (exit 125)" and the cause could not be recovered from journald or
+    the ledger; console's identical refusals 10-04..10-07 were a name conflict found only by hand.
+  design: |
+    Tiered by what the smoke printed, never a single cut: a verdict line is printed as today; with
+    or without one, the failure path ALSO prints the last lines of SMOKE_OUTPUT, each prefixed
+    `  smoke-output| `, bounded in lines and bytes (defaults overridable by
+    RMD_RECYCLE_SMOKE_TAIL_LINES, the same env-override convention as RMD_RECYCLE_SMOKE_TIMEOUT_S),
+    with a `(N earlier lines omitted)` note when it truncates and `(the smoke printed nothing)` when
+    it is empty. These go to stderr with the refusal, so they reach the thrown exec error and the
+    deploy.restart_refused `message` with no deployer plumbing. In src/lib/deployer.ts,
+    refusalReasonKey drops `smoke-output|` lines before hashing, so a container id or timestamp in
+    docker's text never splits W1-T6062's per-reason refusal streak; refusalRemedyLine skips them too.
+  acceptance:
+    - claim: "a smoke that docker itself fails (exit 125, no verdict line) prints docker's error under smoke-output| in the refusal"
+      proof: 'grep: test("W1-T6171: a docker-refused smoke prints docker''s own error with the refusal" in test/a-failed-worker-smoke-names-dockers-own-error.test.ts'
+    - claim: "the smoke-output tail is bounded and says how many earlier lines it omitted"
+      proof: 'grep: test("W1-T6171: a long smoke output is cut to its tail and says so" in test/a-failed-worker-smoke-names-dockers-own-error.test.ts'
+    - claim: "two refusals whose smoke-output lines differ (a different container id) share one refusalReasonKey"
+      proof: 'grep: test("W1-T6171: smoke output never splits the refusal reason key" in test/a-failed-worker-smoke-names-dockers-own-error.test.ts'
+  falsifier: |
+    Keep printing only SMOKE_LINE: a fake docker that exits 125 with "Conflict. The container name
+    ... is already in use" yields a refusal without that text, and the first test fails.

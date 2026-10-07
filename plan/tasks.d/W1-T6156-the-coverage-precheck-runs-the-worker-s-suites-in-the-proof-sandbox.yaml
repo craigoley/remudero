@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: security follow-up batch 3; premise verified read-only on origin/main 44513355a and the open #9819 head 9b4da145e before filing"
   plan_refs: [W1-T4797, W1-T5074, W1-T6124, W1-T6138, W1-T6120]
   files: [src/run-task.ts, test/the-coverage-precheck-runs-the-worker-s-suites-in-the-proof-sandbox.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
