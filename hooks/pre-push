@@ -196,6 +196,8 @@ if has census-precheck.mjs; then
   else
     # The counts run from the gate root over this tree as data, against the GATE ROOT's admission table; a census
     # suite to run is this tree's own test file, so it runs in the proof sandbox (W1-T6138) or reads NOT MEASURED.
+    # The sandbox mounts no gate root, so treeImportArgs points the child's --import loader and setup file at the
+    # tree's own copies, as CI's run of the tree's suite loads them; a value the tree lacks fails, unmeasured.
     node ${tsx_loader:+--import "$tsx_loader"} -e '
       const { pathToFileURL } = require("node:url");
       const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
