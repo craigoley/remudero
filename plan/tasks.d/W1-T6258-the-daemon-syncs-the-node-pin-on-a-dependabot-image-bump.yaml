@@ -1,0 +1,51 @@
+- id: W1-T6258
+  title: "THE DAEMON SYNCS THE NODE PIN ON A DEPENDABOT IMAGE BUMP — W1-T6064 synced .nvmrc from a GitHub Actions workflow, which can only push with a fleet App key stored as a Dependabot secret; the daemon already reviews every Dependabot PR and already holds the App token, so it syncs the pin itself and the workflow and its secrets go away"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  origin: "operator session 2026-10-07: 'You and the daemon already have all the GitHub access you need'"
+  plan_refs: [W1-T6064, W1-T6063, W1-T54]
+  files: [src/lib/dep-review.ts, src/run-task.ts, test/the-daemon-syncs-the-node-pin-on-a-dependabot-image-bump.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main f9499d2b:
+    - W1-T6064 (#9873) added scripts/node-pin-follows-the-image.mjs (planNodePin: in-sync | rewrite | major |
+      unreadable) and .github/workflows/node-pin-follows-the-image.yml, which pushes the .nvmrc sync with a
+      remudero-fleet App token minted from the Dependabot secrets RMD_FLEET_APP_CLIENT_ID and
+      RMD_FLEET_APP_PRIVATE_KEY. Those secrets do not exist, and the operator ruled they should not be needed.
+      The workflow's secret and push steps are removed by an operator PR (a .github/workflows path).
+    - The dep-review lane (src/run-task.ts:21954 decideDepReview, src/lib/dep-review.ts:552) already reads every
+      Dependabot PR's diff and checks, and on a red check returns `hold` (dep-review.ts:610) with no remedy. A
+      Node patch bump's .nvmrc drift reds the image-pin tests (test/the-fleet-runs-node-24.test.ts,
+      test/merge-lcov-node-drift-cluster-and-image-pin.test.ts), so that PR sits held forever.
+    - The daemon pushes with the App installation token, and a push made with an App token starts new workflow
+      runs, unlike a GITHUB_TOKEN push. git-push.ts (gitPushRunBranch) is the existing push seam.
+  design: |
+    In the dep-review pass, before the red-check `hold`: when the Dependabot PR's diff touches deploy/Dockerfile,
+    run planNodePin on the PR head's Dockerfile and .nvmrc (read via `git show <headSha>:<path>`, no checkout).
+    - rewrite: commit `.nvmrc` = the image's version on the PR head ref in a scratch worktree, subject
+      `chore(deps): .nvmrc follows the image's Node <x.y.z>`, push with the daemon's App-token credential, ledger
+      `dep-review.node_pin_synced` {pr_url, from, to, head_sha}, and return without arming. CI re-runs on the new
+      head and the next pass judges it as usual.
+    - in-sync: no action; continue to the existing decision.
+    - major: ledger `dep-review.node_pin_refused` and fall through to the existing decision (W1-T6063 keeps majors
+      out of Dependabot; one arriving here is a plan change, never a sync).
+    - unreadable: ledger and fall through.
+    Idempotent: a second pass on the synced head reads in-sync. The synced head stays a dependency-only head
+    (.nvmrc is in DEPLOY_DEPENDENCY_DECLARATIONS since W1-T6064), so dep-review and the identity gate still admit it.
+  acceptance:
+    - claim: "a Dependabot Dockerfile bump whose .nvmrc drifted within the major gets one .nvmrc commit pushed by the daemon, and a synced head is left alone"
+      proof: 'grep: test("W1-T6258: the dep-review pass pushes the node pin sync once and leaves a synced head alone" in test/the-daemon-syncs-the-node-pin-on-a-dependabot-image-bump.test.ts'
+  falsifier: |
+    Skip the sync: the fixture's Dependabot PR at Dockerfile 24.22.0 / .nvmrc 24.21.0 records no push and the
+    pass returns hold on its red image-pin check, so the test fails.
+  note: |
+    Replaces the push half of W1-T6064's workflow. The operator PR that strips the workflow's secret and push
+    steps lands independently; until this task merges, a drifting Node patch bump is held red exactly as before
+    W1-T6064.
