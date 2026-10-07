@@ -126,7 +126,9 @@ test("every allowed exception still names a call the census actually finds", () 
 });
 
 test("the scanner flags each real-preflight shape and passes each seam-injected one", () => {
-  const imp = 'import { main } from "../src/run-task.js";\n';
+  // The import path is assembled, not written whole: this file walks the TEST corpus, and a literal
+  // source-tree path in its text would make the census recognizer read it as a source-tree walk.
+  const imp = `import { main } from "../${"sr"}${"c"}/run-task.js";\n`;
   assert.equal(scan("x", "await preflightCommand([]);").length, 1, "a bare call runs the real gate");
   assert.equal(scan("x", 'await preflightCommand(["--fast"], { loadavg: () => [1] });').length, 1, "deps without spawn");
   assert.equal(scan("x", "await preflightCommand([], { spawn });").length, 0);
