@@ -221,6 +221,10 @@ export const BLIND_SPOTS = [
   "    the call site itself.",
   "  - a spawn routed through a wrapper, where the env is built one layer away from the call.",
   "  - anything outside test/.",
+  "Not a finding, by design (W1-T6108): test/setup/tmp-hygiene.ts ASSIGNS the NODE_V8_COVERAGE a",
+  "  test file's children inherit to a per-suite directory and moves their reports back at exit, so",
+  "  an inherited child is credited to its suite. That redirect never un-blanks a child env: a",
+  "  blanked child still collects nothing, and every rule above is unchanged by it.",
 ].join("\n");
 
 /** The CLI's whole behaviour, injectable like tracked-source-write-check.mjs's own `main`: every

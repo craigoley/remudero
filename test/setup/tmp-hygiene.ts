@@ -26,7 +26,7 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
@@ -271,6 +271,112 @@ function installGhRefusalStub(): void {
 // already puts the parent's stub first on PATH (and the stub logs to the parent's refusals.log, so the
 // parent's exit check counts a worker's refusal). A dir minted here would outlive `worker.terminate()`.
 if (isMainThread) installGhRefusalStub();
+
+/**
+ * W1-T6108 — A SPAWNED CHILD'S COVERAGE CREDITS THE TEST THAT SPAWNED IT.
+ *
+ * A child inherits NODE_V8_COVERAGE and wrote its report into the same flat directory as every test
+ * process, so the impact map (src/lib/test-impact-map.ts) could credit it to nobody. Here, in a test
+ * process under coverage, the value CHILDREN inherit points at a per-suite directory
+ * `<prefix><owner>-<random>/<repo-relative suite path>/`. The test process's own report is
+ * unaffected: Node fixes a process's coverage directory at startup, and child_process copies
+ * `process.env.NODE_V8_COVERAGE` into a child's env at spawn time (W1-T6108's PR records the proof).
+ *
+ * WHY THE DIRECTORY IS OUTSIDE NODE_V8_COVERAGE: under `--experimental-test-coverage` the runner
+ * hands each test file a temp directory and, at its end, copies that directory's entries FLAT into
+ * the caller's NODE_V8_COVERAGE with `copyFileSync` — one subdirectory aborts the copy and every
+ * report after it is lost (MEASURED on Node 22.22.3: "Could not clean up code coverage ... ENOTSUP").
+ * So at exit the children's reports MOVE back into this process's NODE_V8_COVERAGE, under their
+ * own names, beside a `rmd-v8-children-*.json` record naming the suite; coverage-merge-ratchet's
+ * compaction reads that record. The flat directory therefore holds every report it held before,
+ * and the lcov counts the children exactly as it did.
+ *
+ * Untouched, by design: a child env that BLANKS NODE_V8_COVERAGE (the coverage-session-blanking
+ * census) still blanks it; a process already inside a children directory (a grandchild that loads
+ * this setup) keeps its parent's; a worker thread inherits the redirected value and is credited too.
+ * A SIGKILLed suite skips the move: its children's reports are lost with it, and the next test
+ * process reaps the directory (`reapDeadOwnerDirs`).
+ */
+export const CHILD_COVERAGE_DIR_PREFIX = "rmd-test-v8-children-";
+export const CHILD_COVERAGE_RECORD_FORMAT = "rmd-v8-child-suites-v1";
+const V8_REPORT = /^coverage-\d+-\d{13}-\d+\.json$/;
+const SUITE_PATH = /^test\/.*\.test\.ts$/;
+
+export interface ChildCoverageRedirect {
+  suite: string;
+  /** Where this process's own report goes, and where the children's move to at exit. */
+  coverageDir: string;
+  /** The minted directory, and its per-suite subdirectory children write into. */
+  root: string;
+  childDir: string;
+}
+
+/** Point the NODE_V8_COVERAGE children inherit at a per-suite directory, or return undefined when
+ *  this process is not a test file under coverage (or is already some suite's child). */
+export function redirectChildCoverage(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { script?: string; cwd?: string; mainThread?: boolean } = {},
+): ChildCoverageRedirect | undefined {
+  const coverageDir = env.NODE_V8_COVERAGE;
+  if (!(opts.mainThread ?? isMainThread) || !coverageDir) return undefined;
+  if (coverageDir.split(/[\\/]/).some((part) => part.startsWith(CHILD_COVERAGE_DIR_PREFIX))) return undefined;
+  const script = opts.script ?? process.argv[1];
+  if (script === undefined) return undefined;
+  const suite = relative(opts.cwd ?? process.cwd(), resolve(script)).split(sep).join("/");
+  if (!SUITE_PATH.test(suite)) return undefined;
+  reapDeadOwnerDirs(CHILD_COVERAGE_DIR_PREFIX);
+  // NOT the wrapped mkdtempSync: the exit sweep must leave the dir, whose suite path becomes a link
+  // for late writers (see flattenChildCoverage); a later test process reaps it (reapDeadOwnerDirs).
+  const root = originalMkdtempSync(join(tmpdir(), `rmd-test-v8-children-${setupDirOwnerTag()}`)) as string;
+  const childDir = join(root, ...suite.split("/"));
+  fs.mkdirSync(childDir, { recursive: true });
+  env.NODE_V8_COVERAGE = childDir;
+  return { suite, coverageDir: resolve(coverageDir), root, childDir };
+}
+
+/** Move the children's reports into `coverageDir` under their own names and record which suite
+ *  spawned them, then leave the suite's directory a LINK to `coverageDir`: a thread that copied the
+ *  redirected value (tsx's module-hooks thread) writes its report after every exit handler, and it
+ *  must land flat, as it did before (MEASURED: without the link, one report per suite was lost).
+ *  Returns the moved names; a report that cannot be moved throws, naming it. */
+export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () => number = Date.now): string[] {
+  const moved: string[] = [];
+  for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
+    const from = join(redirect.childDir, name);
+    const to = join(redirect.coverageDir, name);
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      // Another filesystem: copy, then remove. Any other failure is the caller's to report.
+      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+      fs.copyFileSync(from, to);
+      fs.rmSync(from);
+    }
+    moved.push(name);
+  }
+  fs.rmSync(redirect.childDir, { recursive: true, force: true });
+  fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
+  if (moved.length > 0) {
+    const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);
+    fs.writeFileSync(`${record}.part`, JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: redirect.suite, reports: moved }));
+    fs.renameSync(`${record}.part`, record);
+  }
+  return moved;
+}
+
+const childCoverage = redirectChildCoverage();
+if (childCoverage !== undefined) {
+  // A thread sharing this env writes its own report after every exit handler: back to the flat dir.
+  process.on("exit", () => {
+    process.env.NODE_V8_COVERAGE = childCoverage.coverageDir;
+    try {
+      flattenChildCoverage(childCoverage);
+    } catch (error) {
+      console.error(`test setup: could not move this suite's child coverage reports into ${childCoverage.coverageDir}: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+}
 
 process.on("exit", () => {
   // W1-T4226: read BEFORE the tmp-dir sweep below removes the stub's own dir (and the log
