@@ -7006,7 +7006,7 @@ export function missingTaskTrailerRepairDecision(
       reason: "missing trailer repair refused: head branch does not match run-<taskId>-<epoch>, so no task id is derivable",
     };
   }
-  if (pr.taskExistsOnMain !== true) {
+  if (taskId !== "unfiled" && pr.taskExistsOnMain !== true) {
     return {
       action: "stand-down",
       reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
