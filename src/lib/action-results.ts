@@ -305,11 +305,12 @@ function parseFilter(url: URL): { filter: ActionResultsFilter } | { error: strin
 }
 
 const memoRetentionHolder = "action-results";
+const memoReducerVersion = "1";
 
 /** GET /v1/action-results — bounded, read-only projection of redacted external-effect receipts. */
 export function buildActionResultsRoute(ledgerPath: string): Route {
   // Only reconciled rows reach the projection; the memo keeps each rotation's torn count for `ledger-partial`.
-  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"), { holder: memoRetentionHolder, writeRetention: appendLedger });
+  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"), { holder: memoRetentionHolder, durableDigest: { reducerVersion: memoReducerVersion }, writeRetention: appendLedger });
   return {
     method: "GET",
     path: "/v1/action-results",
