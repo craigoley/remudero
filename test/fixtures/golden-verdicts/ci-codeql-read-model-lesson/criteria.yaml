@@ -1,0 +1,2 @@
+- claim: the CodeQL read-model lesson is present in a matched learning
+  proof: "grep: ci-learning:8075:CodeQL in learnings/ci.yaml"
