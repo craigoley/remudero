@@ -38,6 +38,8 @@ type Row = { step: string; task_id: string } & Record<string, unknown>;
 async function signalEndedFixRound(t: TestContext, left: { edits?: boolean; ahead?: number }) {
   t.mock.method(childProcess, "execFileSync", (_command: string, args: string[]) => {
     if (args.includes("rev-parse")) return HEAD;
+    // W1-T6148: the host git leaf vets the pinned config first; an empty listing admits the call.
+    if (args.includes("--show-scope")) return "";
     throw new Error("test: subprocess reads unavailable");
   });
   syncBuiltinESMExports();

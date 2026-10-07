@@ -1,0 +1,55 @@
+- id: W1-T6156
+  title: "THE COVERAGE PRECHECK RUNS THE WORKER'S SUITES IN THE PROOF SANDBOX — run-task.ts realCoverageRun spawns the worktree's own scripts/diff-coverage-local.mjs over the worker's selected suites as the daemon's uid on the host filesystem; even with #9819's proofChildEnv and throwaway HOME the worker's code can read and write anything the daemon can, so it runs inside W1-T6124's proof sandbox or is skipped by name"
+  repo: remudero
+  depends_on: [W1-T6124]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where the coverage precheck executes worker-written code
+  band_meaning: span
+  origin: "operator session 2026-10-07: security follow-up batch 3; premise verified read-only on origin/main 44513355a and the open #9819 head 9b4da145e before filing"
+  plan_refs: [W1-T4797, W1-T5074, W1-T6124, W1-T6138, W1-T6120]
+  files: [src/run-task.ts, test/the-coverage-precheck-runs-the-worker-s-suites-in-the-proof-sandbox.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 44513355a and #9819 (run-unfiled-1791356814000, open, head 9b4da145e). Static
+    reading only.
+    THE CALL. src/run-task.ts `coveragePrecheck` (W1-T4797) runs before a push through `ports.run ?? realCoverageRun`.
+    `realCoverageRun` spawns `process.execPath` on `join(wt, "scripts", "diff-coverage-local.mjs")` with
+    `--base origin/main --lcov coverage/precheck-lcov.info ...suites`, `cwd: wt`. That script and every suite it runs
+    are WORKER code: the worker's own copies, chosen by the worker's own diff.
+    ON MAIN the spawn has no `env` option: the daemon's whole env and HOME. ON #9819 it gains `env:
+    proofChildEnv(home)` and a `makeTempDir("proof-home")` HOME (comment: "The worktree's own runner and suites are
+    WORKER code: they get W1-T6124's proof env and HOME, never the daemon's") — but no sandbox: same uid, the host
+    filesystem, the daemon's network. So worker code can still read the daemon's files by absolute path (the app key
+    file the env no longer names, config.root state, other workers' trees) and write anything the daemon can.
+    THE PATTERN TO REUSE. W1-T6124 (#9784, merged) built `proofSandboxArgv` / `probeProofSandbox` /
+    `ProofSandboxUnavailableError` in src/lib/review.ts; W1-T6138 (#9815, merged) applied it to the pre-push gate in
+    src/lib/git-push.ts `createPrePushSandboxRunner` (persistent binds read-only except HOME, a start probe, a named
+    skip when the sandbox cannot start). The coverage precheck is the remaining host path that executes a worker's suites.
+  design: |
+    The builder owns the mechanism; constraints:
+    (1) `realCoverageRun` runs diff-coverage-local.mjs and its suites under `proofSandboxArgv` with `proofChildEnv` and a
+    throwaway HOME. The worktree must stay writable inside the sandbox (the run writes coverage/precheck-lcov.info and
+    the suites write their own tmp files); everything else the daemon owns is unbound or read-only.
+    (2) When `probeProofSandbox` reports unavailable or the start probe fails, the precheck returns `unavailable` with a
+    reason naming the sandbox, never an unsandboxed run. `unavailable` already lets the push proceed (CI runs coverage).
+    (3) The run stays ASYNC (W1-T5074: a spawnSync here froze the daemon loop for 42 minutes); the output cap, timeout
+    and spawn-error mapping are unchanged. `createPrePushSandboxRunner` is spawnSync, so reuse its argv shape, not its runner.
+    (4) The `CoveragePrecheck` arms and `ports.run` seam are unchanged.
+  acceptance:
+    - claim: "with the proof sandbox available the coverage precheck's real runner spawns the sandbox binary with proofSandboxArgv's argv ahead of the worktree's diff-coverage-local.mjs, a child env holding no GH_TOKEN or GH_APP name and a throwaway HOME, and with the sandbox unavailable or failing its start probe the precheck returns unavailable naming the sandbox and never spawns the worktree script"
+      proof: "unit test: test/the-coverage-precheck-runs-the-worker-s-suites-in-the-proof-sandbox.test.ts"
+  falsifier: |
+    At origin/main 44513355a (and at #9819's head 9b4da145e), `realCoverageRun` spawns `process.execPath` directly on the
+    worktree's diff-coverage-local.mjs with no sandbox argv, and with the sandbox reported unavailable it still spawns
+    the script, so the test fails.
+  notes: |
+    FIXTURES ONLY: a gitRepo() fixture worktree with a stub scripts/diff-coverage-local.mjs that records its argv and env
+    to a marker, the sandbox probe and binary injected or a recording stub; nothing runs a real worktree's suites or the
+    host's bwrap against a real path. ORDER: #9819 (unfiled, open at filing) edits the same `realCoverageRun` spawn and
+    src/lib/affected-suites.ts; build on its merged head if it lands first, and keep its proofChildEnv/HOME. One
+    test must reach the real default runner (doctrine coverage-traps: injected fakes leave the default unreachable).

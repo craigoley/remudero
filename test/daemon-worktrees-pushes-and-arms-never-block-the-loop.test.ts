@@ -85,6 +85,12 @@ function slowOriginFixture(kind: string, extra: string[] = []) {
   git(clone, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
   git(clone, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   const transportLog = join(root, "transport.log");
+  // W1-T6148: the host git leaf refuses a repo-local receivepack/uploadpack, so the slow transport is
+  // daemon-owned (global) config here, restored by cleanup().
+  const globalConfig = join(root, "global.gitconfig");
+  const savedGlobal = process.env.GIT_CONFIG_GLOBAL;
+  writeFileSync(globalConfig, "");
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
   for (const [service, key] of [["upload-pack", "uploadpack"], ["receive-pack", "receivepack"]] as const) {
     const script = join(root, `slow-${service}.sh`);
     writeFileSync(
@@ -92,7 +98,7 @@ function slowOriginFixture(kind: string, extra: string[] = []) {
       `#!/bin/sh\necho "start ${service}" >> '${transportLog}'\nsleep 0.3\ngit ${service} "$@"\nrc=$?\necho "end ${service}" >> '${transportLog}'\nexit $rc\n`,
       { mode: 0o755 },
     );
-    git(clone, "config", `remote.origin.${key}`, script);
+    execFileSync("git", ["config", "--file", globalConfig, `remote.origin.${key}`, script]);
   }
   const lines = (): string[] => (existsSync(transportLog) ? readFileSync(transportLog, "utf8").split("\n").filter(Boolean) : []);
   return {
@@ -107,6 +113,8 @@ function slowOriginFixture(kind: string, extra: string[] = []) {
     },
     reset: () => rmSync(transportLog, { force: true }),
     cleanup: () => {
+      if (savedGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = savedGlobal;
       for (const dir of [root, origin, seed.dir]) rmSync(dir, { recursive: true, force: true });
     },
   };

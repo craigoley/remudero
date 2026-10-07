@@ -368,6 +368,7 @@ export interface GithubRepoStore {
   cursors: { pulls: GithubCursor; commits: GithubCursor; deployments: GithubCursor };
   /** Rotate historical pages so a large resource cannot starve its siblings. */
   backfillResourceIndex?: number;
+  evidenceLane?: "head-green" | "legacy-detail";
 }
 
 export function emptyRepoStore(): GithubRepoStore {
@@ -474,10 +475,17 @@ export interface FieldTrialsGithubRepoPass {
   statusesUnavailable?: number;
   headGreensPending?: number;
   headGreensUnavailable?: number;
+  workAllocation?: {
+    mode: "all-available" | "head-green" | "legacy-detail";
+    reserved: { details: number; statuses: number; headGreens: number };
+    requests: { fresh: number; backfill: number; statuses: number; details: number; headGreens: number };
+  };
 }
 
 async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRepoStore, budget: Budget,
   asOf: string): Promise<FieldTrialsGithubRepoPass> {
+  const requests = { fresh: 0, backfill: 0, statuses: 0, details: 0, headGreens: 0 };
+  const initialBudget = budget.left;
   const resources: Array<{ key: keyof GithubRepoStore["cursors"]; path: string;
     timeOf: (item: unknown) => string | null; upsert: (item: unknown) => void }> = [
     { key: "pulls", path: `repos/${repo}/pulls?state=all&sort=updated&direction=desc`,
@@ -520,10 +528,11 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     }
     if (head.head?.state === "unavailable" && head.head.asOf === asOf) blocked.add(resource.key);
   }
+  requests.fresh = initialBudget - budget.left;
   const detailCandidates = () => Object.values(store.pulls).filter(needsDetail)
     .sort((a, b) => Number(a.detail.state === "observed") - Number(b.detail.state === "observed")
       || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || b.number - a.number);
-  const detailReserve = detailCandidates().length > 0 && budget.left >= 3 ? 3 : 0;
+  let detailReserve = detailCandidates().length > 0 && budget.left >= 3 ? 3 : 0;
   const statusCandidates = () => Object.values(store.deployments).filter((deployment) => !TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state))
     .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || b.id - a.id);
   const pendingStatuses = statusCandidates();
@@ -540,7 +549,15 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
       || (pull.state === "open" && observation.firstObserved === null));
   }).sort((a, b) => Number((a.headGreen?.pending.length ?? 0) === 0) - Number((b.headGreen?.pending.length ?? 0) === 0)
     || (a.headGreen?.readAt ?? "").localeCompare(b.headGreen?.readAt ?? "") || b.number - a.number);
-  const headReserve = headCandidates().length > 0 ? Math.min(3, Math.max(0, budget.left - detailReserve - statusReserve)) : 0;
+  const hasHeadWork = headCandidates().length > 0;
+  // A fresh head needs check/run/job reads, plus a commit association when the run's PR list is empty.
+  const headUnit = hasHeadWork ? Math.min(4, budget.left - statusReserve) : 0;
+  const scarce = detailReserve > 0 && hasHeadWork && budget.left < detailReserve + statusReserve + headUnit;
+  const mode = scarce ? (store.evidenceLane === "legacy-detail" ? "legacy-detail" : "head-green") : "all-available";
+  if (mode === "head-green") detailReserve = 0;
+  const headReserve = !hasHeadWork || mode === "legacy-detail" ? 0 : Math.min(4, Math.max(0, budget.left - detailReserve - statusReserve));
+  if (scarce) store.evidenceLane = mode === "head-green" ? "legacy-detail" : "head-green";
+  const backfillStart = budget.left;
   let next = Number.isInteger(store.backfillResourceIndex) ? (store.backfillResourceIndex ?? 0) % resources.length : 0;
   if (next < 0) next = 0;
   while (budget.left > detailReserve + statusReserve + headReserve) {
@@ -558,6 +575,8 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     next = (chosen + 1) % resources.length;
     store.backfillResourceIndex = next;
   }
+  requests.backfill = backfillStart - budget.left;
+  const statusesStart = budget.left;
   for (const deployment of statusCandidates()) {
     if (budget.left <= detailReserve + headReserve) break;
     budget.left -= 1;
@@ -566,12 +585,16 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     deployment.status = !statuses.ok ? { state: "unavailable", reason: statuses.reason }
       : newest === undefined ? { state: "no-status", at: null } : { state: String(newest.state), at: iso(newest.created_at) };
   }
+  requests.statuses = statusesStart - budget.left;
+  const detailsStart = budget.left;
   const legacyBudget = { left: budget.left - headReserve };
   for (const pull of detailCandidates()) {
     const detail = await readDetail(fetch, repo, pull, legacyBudget, asOf);
     if (detail !== null) pull.detail = detail;
   }
   budget.left = legacyBudget.left + headReserve;
+  requests.details = detailsStart - budget.left;
+  const headsStart = budget.left;
   for (let reads = 0; reads < headReserve && budget.left > 0; reads++) {
     const pull = headCandidates()[0];
     if (!pull) break;
@@ -584,6 +607,7 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     if (observation.pending.length === 0 && observation.firstObserved === null && observation.history.state === "complete") blockedHeads.add(pull.nodeId);
     if (before === budget.left) break;
   }
+  requests.headGreens = headsStart - budget.left;
   const pulls = Object.values(store.pulls);
   return { pulls: { ...store.cursors.pulls }, commits: { ...store.cursors.commits }, deployments: { ...store.cursors.deployments },
     detailsPending: pulls.filter((pull) => pull.detail.state === "pending").length,
@@ -591,7 +615,8 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     statusesPending: Object.values(store.deployments).filter((item) => item.status.state === "pending-read").length,
     statusesUnavailable: Object.values(store.deployments).filter((item) => item.status.state === "unavailable").length,
     headGreensPending: pulls.filter((pull) => pull.headGreen?.state === "pending" || (pull.headGreen?.pending.length ?? 0) > 0).length,
-    headGreensUnavailable: pulls.filter((pull) => pull.headGreen?.state === "unavailable").length };
+    headGreensUnavailable: pulls.filter((pull) => pull.headGreen?.state === "unavailable").length,
+    workAllocation: { mode, reserved: { details: detailReserve, statuses: statusReserve, headGreens: headReserve }, requests } };
 }
 
 export interface FieldTrialsGithubPass {

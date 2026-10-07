@@ -44,7 +44,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { decideFreshnessRestart, FRESHNESS_DECISION_STEP, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { coalesceFreshnessRestart, decideFreshnessRestart, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -2657,6 +2657,10 @@ export async function runDaemon(
   // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
   let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
   let staleSinceMs: number | undefined;
+  let lastAdvanceSha: string | undefined;
+  let lastAdvanceAtMs: number | undefined;
+  let advancesCoalesced = 0;
+  let freshnessHeld = false;
   const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
   let latestSweepOutcome: SweepCycleOutcome | undefined;
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
@@ -3021,18 +3025,27 @@ export async function runDaemon(
     });
   };
 
-  // W1-T4945 — WHEN, not WHETHER: an idle daemon restarts at once, a busy one only once change plus
-  // staleness pressure justifies the drain (deploy-judge's `decideFreshnessRestart`). Busy means a full
-  // pass, a detached action or a review is still in flight — exactly what the drain below would wait on.
+  // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
+  const observeFreshnessAdvance = (newSha: string, nowMs: number): void => {
+    staleSinceMs ??= nowMs;
+    if (newSha !== lastAdvanceSha) {
+      lastAdvanceSha = newSha;
+      lastAdvanceAtMs = nowMs;
+      advancesCoalesced++;
+    }
+  };
+
+  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
     const nowMs = daemonClock.now();
-    staleSinceMs ??= nowMs;
+    observeFreshnessAdvance(freshness.newSha, nowMs);
+    const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
       backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
     // W1-T5476: a review withheld for stale reviewer code is the lag itself stalling the review lane. An
     // unreadable ledger is named on the row and leaves the count absent: unknown, never a zero.
-    const withheld = deps.readLedgerLines ? withheldReviewsSince(deps.readLedgerLines, staleSinceMs) : undefined;
+    const withheld = deps.readLedgerLines ? withheldReviewsSince(deps.readLedgerLines, staleAtMs) : undefined;
     const withheldReviews = withheld?.kind === "counted" ? withheld.withheld : undefined;
     const withheldEvidence =
       withheld === undefined
@@ -3045,20 +3058,39 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
-    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure, withheldReviews });
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
+    const coalesced = coalesceFreshnessRestart({
+      decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
+      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS,
+    });
+    const action = coalesced.action === "hold" ? "defer" : coalesced.action;
+    if (coalesced.action === "hold" || freshnessHeld || coalesced.reason === "window_quiet" || coalesced.reason === "upper_age") {
+      log("daemon.freshness_coalesced", {
+        action: coalesced.action,
+        new_sha: freshness.newSha,
+        held_ms: Math.max(0, nowMs - staleAtMs),
+        advances_coalesced: advancesCoalesced,
+        window_ms: FRESHNESS_COALESCE_WINDOW_MS.value,
+        window_reason: FRESHNESS_COALESCE_WINDOW_MS.reason,
+        window_ends_at_ms: coalesced.windowEndsAtMs,
+        reason: coalesced.reason,
+      });
+    }
+    freshnessHeld = coalesced.action === "hold";
     log(FRESHNESS_DECISION_STEP, {
-      action: decision.action,
+      action,
       busy,
       weight: decision.weight,
       age_pressure: decision.agePressure,
       pressure: decision.pressure,
-      reason: decision.reason,
+      reason: coalesced.action === "hold" || coalesced.reason === "window_quiet" || coalesced.reason === "upper_age"
+        ? coalesced.reason : decision.reason,
       old_sha: freshness.oldSha,
       new_sha: freshness.newSha,
       ...withheldEvidence,
     });
-    return decision.action;
+    return action;
   };
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
@@ -3551,7 +3583,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        staleSinceMs ??= daemonClock.now();
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now());
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,

@@ -32,6 +32,7 @@ import {
   type ImpactArmInput,
 } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 export { stripComments };
 
@@ -504,7 +505,9 @@ export function readAffectedSuitesInput(
     return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   };
   const files = new Map<string, string>();
-  for (const path of run("git", ["ls-files", "--", "src", "scripts", "bin", "test"])) {
+  // W1-T6136: coveragePrecheck (run-task.ts) passes a WORKER worktree, so the listing goes through the leaf.
+  const tracked = hostWorktreeGit(repoRoot, ["ls-files", "--", "src", "scripts", "bin", "test"], { maxBuffer: 1 << 26 });
+  for (const path of tracked.split("\n").map((l) => l.trim()).filter(Boolean)) {
     if (!CODE_FILE.test(path)) continue;
     try {
       files.set(path, readFileSync(join(repoRoot, path), "utf8"));
