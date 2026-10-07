@@ -979,8 +979,7 @@ export function prefixedTaskIdsIn(texts: readonly string[], prefix: string): num
   return texts.flatMap((t) => [...t.matchAll(re)].map((m) => Number(m[1]))).filter(isAllocatableTaskId);
 }
 
-/** The walk's start. {@link reserveTaskIdRemote} skips `reservedFloor` when `idFor` is set, so the
- *  caller folds the target's refs/rmd-id/ listing into `texts` and this stands in for that floor. */
+/** The walk starts above the target's plan and refs/rmd-id/ texts; `idFor` skips the default reservedFloor. */
 export function nextPrefixedTaskIdStart(texts: readonly string[], prefix: string): number {
   const ids = prefixedTaskIdsIn(texts, prefix);
   const next = ids.length ? Math.max(...ids) + 1 : 1;
