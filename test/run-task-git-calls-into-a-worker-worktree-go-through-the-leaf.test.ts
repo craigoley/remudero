@@ -88,7 +88,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   runShardRepairPass: { count: 2, reason: CLONE },
   gardenCheckout: { count: 2, reason: GARDEN },
   gardenCheckoutAsync: { count: 2, reason: GARDEN },
-  gardenLandSteps: { count: 2, reason: GARDEN },
   refreshKnowledgeAssertions: { count: 2, reason: GARDEN },
   buildRegisteredGarden: { count: 2, reason: OWN },
   gardenReplayCommand: { count: 2, reason: OWN },
