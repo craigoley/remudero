@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createLedgerRotationMemo } from "./ledger-union.js";
+import { appendLedger } from "./ledger.js";
+import { dirname } from "node:path";
 import { readLedgerUnionMemoized, type LedgerLines } from "./status.js";
 import type { ExternalEffectResult, ExternalEffectState } from "./action-reconciliation.js";
 import type { Route } from "./service.js";
@@ -302,10 +304,12 @@ function parseFilter(url: URL): { filter: ActionResultsFilter } | { error: strin
   return { filter: { ...(taskId ? { taskId } : {}), ...(actionId ? { actionId } : {}), ...(changedSince ? { changedSince } : {}), ...(rawLimit ? { limit: Number(rawLimit) } : {}) } };
 }
 
+const memoRetentionHolder = "action-results";
+
 /** GET /v1/action-results — bounded, read-only projection of redacted external-effect receipts. */
 export function buildActionResultsRoute(ledgerPath: string): Route {
   // Only reconciled rows reach the projection; the memo keeps each rotation's torn count for `ledger-partial`.
-  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"));
+  const rotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "external_effect.reconciled"), { holder: memoRetentionHolder, writeRetention: appendLedger });
   return {
     method: "GET",
     path: "/v1/action-results",
@@ -323,6 +327,7 @@ export function buildActionResultsRoute(ledgerPath: string): Route {
           if (tornRowCouldBeExternalEffect(raw)) tornExternal += 1;
         };
         const lines = await readLedgerUnionMemoized(ledgerPath, rotations, onTorn);
+        rotations.reportRetention(dirname(ledgerPath));
         sendJson(res, 200, buildActionResultsProjection(lines, parsed.filter, undefined, tornExternal));
       } catch (error) {
         // Reason: a ledger read failure is an explicit unavailable result, never an empty success.

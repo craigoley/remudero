@@ -553,6 +553,9 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  worker_exit?: WorkerExit["kind"];
+  worker_exit_signal?: string;
+  worker_exit_code?: number;
   provider?: WorkerProviderId;
   model: string;
   routed_model?: string;
@@ -602,6 +605,9 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+    ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+    ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
     ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
     // Omitted when every grant landed, so the common case adds no field. Present only when a grant was lost or healed, and
     // then it names which slot and why.

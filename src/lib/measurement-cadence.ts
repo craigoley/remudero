@@ -16,6 +16,7 @@ import {
 } from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
@@ -2832,6 +2833,8 @@ function measurementEntriesFrom(rows: ReadonlyArray<Record<string, unknown>>, n:
   return entries.slice(0, Math.max(0, n));
 }
 
+const memoRetentionHolder = "measurement-cadence";
+
 /**
  * The request-path reader: the newest `n` rows, each verb SUMMARIZED, read through a rotation memo
  * so a repeated request parses only the live file. Same `unreadable` contract as
@@ -2841,6 +2844,7 @@ function measurementEntriesFrom(rows: ReadonlyArray<Record<string, unknown>>, n:
 export function createLatestMeasurementReader(): (stateDir: string, n: number) => Promise<LatestMeasurementRowsResult> {
   const memo = createLedgerRotationMemo((rows) =>
     rows.filter((row) => row.step === "measurement_cadence.ran").map((row) => summarizeMeasurementRow(row)),
+    { holder: memoRetentionHolder, writeRetention: appendLedger },
   );
   return async (stateDir, n) => {
     const read = await readLedgerUnionRecordsMemoized(stateDir, memo, {

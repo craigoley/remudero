@@ -1217,7 +1217,10 @@ export function createNowView(opts: NowViewOptions): {
       if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
       const probeMs = Date.parse(built.probe.sampledAt);
-      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, { rows: createLedgerRotationMemo((r) => r), costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number")) }).get(name)!;
+      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, {
+        rows: createLedgerRotationMemo((r) => r, { holder: "now.legacy.rows" }),
+        costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number"), { holder: "now.legacy.costs" }),
+      }).get(name)!;
       const [rowsPass, costsPass] = [memo.rows.pass({ parseMissing: true }), memo.costs.pass({ parseMissing: true })];
       const live = readLedgerLines(ledgerPath);
       // Each computation reads the rows the live file held over the window it evaluates, up to the body's build.
@@ -1230,6 +1233,8 @@ export function createNowView(opts: NowViewOptions): {
       const spent = ledgerRowsOver(instance.ledgerDir, { fromMs: utcDayWindowMs(built.builtMs)[0], toMs: built.builtMs }, live, costsPass);
       rowsPass.complete();
       costsPass.complete();
+      memo.rows.reportRetention(instance.ledgerDir, name, log);
+      memo.costs.reportRetention(instance.ledgerDir, name, log);
       const retention = { rows: memo.rows.retention(), costs: memo.costs.retention() };
       const retentionKey = JSON.stringify(retention);
       if (retentionReported.get(name) !== retentionKey) {
