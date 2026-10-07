@@ -22,7 +22,7 @@ test("Haiku 5.5 image pins the CLI declared by its actual locked SDK", () => {
 });
 
 test("Haiku 5.5 installed SDK ships its named native CLI without authenticating", () => {
-  const platform = process.platform === "linux" && process.report.getReport().header.glibcVersionRuntime === undefined
+  const platform = process.platform === "linux" && (process.report.getReport() as { header: { glibcVersionRuntime?: string } }).header.glibcVersionRuntime === undefined
     ? "linux-" + process.arch + "-musl" : process.platform + "-" + process.arch;
   const native = join(root, "node_modules/@anthropic-ai/claude-agent-sdk-" + platform, process.platform === "win32" ? "claude.exe" : "claude");
   assert.ok(existsSync(native), "the native platform package must really be installed");
