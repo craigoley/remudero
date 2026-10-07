@@ -9,13 +9,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  WIDENED_SITE_EXCEPTIONS,
-  functionBody,
-  readAll,
-  widenedGitSites,
-  widenedLeafSiteViolations,
-} from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
+
+// Read as a namespace, not named imports: a base without the widened census still LOADS this file,
+// so each case below fails as a real subtest rather than as a module-load error.
+const census: Partial<typeof import("./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js")> =
+  await import("./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js");
+const { WIDENED_SITE_EXCEPTIONS = {}, functionBody, readAll } = census;
+const widenedGitSites: NonNullable<typeof census.widenedGitSites> = (text) => census.widenedGitSites!(text);
+const widenedLeafSiteViolations: NonNullable<typeof census.widenedLeafSiteViolations> = (texts) =>
+  census.widenedLeafSiteViolations!(texts);
 
 const kinds = (source: string) => widenedGitSites(source).map((site) => `${site.kind}@${site.fn ?? "-"}`);
 
@@ -71,11 +73,11 @@ const KNOWN_WIDENED_SITES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 test("W1-T6123: the cwd-option git spawns in worker-provider.ts and the known missed worktree sites are counted while unconverted", () => {
-  const texts = readAll();
+  const texts = readAll!();
   const missed: string[] = [];
   for (const [file, name] of KNOWN_WIDENED_SITES) {
     const text = texts.get(file) ?? "";
-    const body = functionBody(text, name);
+    const body = functionBody!(text, name);
     assert.ok(body !== undefined, `${name} not found in ${file}`);
     if (!/["'](?:git|-C)["']/.test(body)) continue; // converted: nothing raw left to see
     if (!widenedGitSites(text).some((site) => site.fn === name)) missed.push(`${file}: ${name}`);
@@ -84,7 +86,7 @@ test("W1-T6123: the cwd-option git spawns in worker-provider.ts and the known mi
 });
 
 test("W1-T6123: a cwd-option git spawn into a worktree added to a src file fails the census naming that file", () => {
-  const texts = readAll();
+  const texts = readAll!();
   const spawn = '\nspawnSync("git", ["status"], { cwd: worktreePath });\n';
   const grown = new Map(texts);
   grown.set("src/lib/worker-provider.ts", `${texts.get("src/lib/worker-provider.ts")}${spawn}`);
@@ -97,7 +99,7 @@ test("W1-T6123: a cwd-option git spawn into a worktree added to a src file fails
 });
 
 test("W1-T6123: a -C argv under a name W1-T6106 never listed fails the census naming its file", () => {
-  const grown = new Map(readAll());
+  const grown = new Map(readAll!());
   grown.set("src/lib/a-new-file.ts", '\nexecFileSync("git", ["-C", opts.cwd, "commit", "-m", message]);\n');
   assert.deepEqual(widenedLeafSiteViolations(grown), [
     "src/lib/a-new-file.ts: 1 raw git -C/cwd site(s) > 0 — route each through hostWorktreeGit (src/lib/worktree-git.ts) or reason it in WIDENED_SITE_EXCEPTIONS",
