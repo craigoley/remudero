@@ -859,6 +859,7 @@ export function createNowView(opts: NowViewOptions): {
   const shown = new WeakMap<NowViewData, Shown>();
   /** Per instance, the rotations legacy's windows read, each parsed once: a sample reads only the live file and any new cut. */
   const legacyMemos = new Map<string, { rows: LedgerRotationMemo; costs: LedgerRotationMemo }>();
+  const retentionReported = new Map<string, string>();
   const planCache = new Map<string, { key: string; plan: Plan }>();
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
@@ -1229,6 +1230,12 @@ export function createNowView(opts: NowViewOptions): {
       const spent = ledgerRowsOver(instance.ledgerDir, { fromMs: utcDayWindowMs(built.builtMs)[0], toMs: built.builtMs }, live, costsPass);
       rowsPass.complete();
       costsPass.complete();
+      const retention = { rows: memo.rows.retention(), costs: memo.costs.retention() };
+      const retentionKey = JSON.stringify(retention);
+      if (retentionReported.get(name) !== retentionKey) {
+        retentionReported.set(name, retentionKey);
+        log("read_model.now_legacy_retention", { instance: name, ...retention });
+      }
       const rows = board.rows;
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
         readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };

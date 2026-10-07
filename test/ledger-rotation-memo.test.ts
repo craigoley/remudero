@@ -10,6 +10,60 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const identity = (rows: Array<Record<string, unknown>>) => rows;
 
+test("streamed real rotation loads match buffered rows and torn evidence for gzip and plain", async () => {
+  const fx = writeLedger([], { rotations: [] });
+  try {
+    const content = '\n \r\n' + JSON.stringify({ ts: "2000-01-01T00:00:00Z", step: "fixture", value: "🚀\u2028\u2029" }) + '\r\nnull\n[]\nbroken\n' + JSON.stringify({ step: "last", value: "no final newline" });
+    for (const form of ["plain", "gzip"] as const) {
+      const path = join(fx.dir, `ledger.2026-09-20T01-00-00-000Z.ndjson${form === "gzip" ? ".gz" : ""}`);
+      writeFileSync(path, form === "gzip" ? gzipSync(content) : content);
+      for (const pattern of [undefined, /fixture|broken/]) {
+        const streamed = createLedgerRotationMemo(identity, { pattern });
+        const buffered = createLedgerRotationMemo(identity, { pattern, readFile });
+        await streamed.load([{ path, form }]);
+        await buffered.load([{ path, form }]);
+        const fallback = () => { throw new Error("successful load must be memoized"); };
+        const actual = streamed.pass().rotationRecords({ path, form }, fallback);
+        assert.deepEqual(actual, buffered.pass().rotationRecords({ path, form }, fallback));
+        assert.equal(actual.torn, 1);
+        assert.deepEqual(actual.tornLines, ["broken"]);
+      }
+    }
+    const missing = join(fx.dir, "missing.gz");
+    const failed = createLedgerRotationMemo(identity, { statKey: () => "fixed" });
+    await failed.load([{ path: missing, form: "gzip" }]);
+    assert.equal(failed.retention().failedArchives, 1);
+    const fallback = { rows: [{ recovered: true }], torn: 0, tornLines: [] };
+    assert.deepEqual(failed.pass().rotationRecords({ path: missing, form: "gzip" }, () => fallback), fallback);
+    const corrupt = join(fx.dir, "corrupt.gz");
+    writeFileSync(corrupt, "not gzip");
+    const damaged = createLedgerRotationMemo(identity);
+    await damaged.load([{ path: corrupt, form: "gzip" }]);
+    assert.equal(damaged.retention().failedArchives, 1, "decompressor failure must not install a partial memo");
+    const rejected = createLedgerRotationMemo(identity, { yieldTurn: async () => { throw new Error("fixture yield failure"); } });
+    const plain = join(fx.dir, "ledger.2026-09-20T01-00-00-000Z.ndjson");
+    await rejected.load([{ path: plain, form: "plain" }]);
+    assert.equal(rejected.retention().failedArchives, 1, "consumer failure must not install a partial memo");
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("rotation memo retention counts reduced rows and pruning without rereading or exposing bodies", () => {
+  const memo = createLedgerRotationMemo((r) => r.filter((row) => row.keep), { statKey: () => "fixed" });
+  const a = { path: "synthetic-a", form: "plain" as const };
+  const b = { path: "synthetic-b", form: "gzip" as const };
+  let pass = memo.pass({ parseMissing: true });
+  pass.rotationRecords(a, () => ({ rows: [{ keep: true, payload: "private" }, { keep: false }], torn: 1, tornLines: ["private broken row"] }));
+  pass.rotationRecords(b, () => ({ rows: [{ keep: true }, { keep: true }], torn: 0, tornLines: [] }));
+  assert.equal(pass.complete(), true);
+  assert.deepEqual(memo.retention(), { archives: 2, rows: 3, tornRows: 1, failedArchives: 0 });
+  pass = memo.pass();
+  pass.rotationRecords(b, () => { throw new Error("must not reparse"); });
+  assert.equal(pass.complete(), true);
+  assert.deepEqual(memo.retention(), { archives: 1, rows: 2, tornRows: 0, failedArchives: 0 });
+});
+
 function rows(prefix: string, count: number): Array<Record<string, unknown>> {
   return Array.from({ length: count }, (_, i) => ({ step: "run.start", task_id: `${prefix}-${i}`, ts: new Date(Date.UTC(2026, 8, 20, 0, 0, i)).toISOString() }));
 }
