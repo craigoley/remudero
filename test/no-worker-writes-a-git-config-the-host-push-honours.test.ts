@@ -345,6 +345,22 @@ describe("W1-T6148: the codex lane has no gitdir grant and the harness commits f
     assert.equal(landed(bare, branch), raw(wt, ["rev-parse", "HEAD"]).trim(), "and the run branch pushes as before");
   });
 
+  it("no COMMIT_MESSAGE takes the harness subject; a refused config or an unrecorded tree commits nothing", async () => {
+    const { wt } = cutLane();
+    await runCodex(wt, codexChild(() => writeFileSync(join(wt, "plain.txt"), "edit\n"), "done, no subject"));
+    assert.match(raw(wt, ["log", "-1", "--format=%s"]), /harness commit, W1-T6148/);
+    raw(wt, ["config", "--worktree", "include.path", join(root, "nowhere")]);
+    const head = raw(wt, ["rev-parse", "HEAD"]).trim();
+    const refused = await runCodex(wt, codexChild(() => writeFileSync(join(wt, "kept.txt"), "edit\n"), "COMMIT_MESSAGE: feat: kept"));
+    assert.equal((refused.result.harnessCommit as { outcome?: string })?.outcome, "refused");
+    assert.match((refused.result.harnessCommit as { reason?: string }).reason ?? "", /include\.path/);
+    assert.equal(raw(wt, ["rev-parse", "HEAD"]).trim(), head, "a refused tree is never committed in");
+    const plain = gitRepo({ kind: "t6148-plain" });
+    const unrecorded = await runCodex(plain.dir, codexChild(() => writeFileSync(join(plain.dir, "x.txt"), "x\n"), "COMMIT_MESSAGE: feat: x"));
+    assert.equal((unrecorded.result.harnessCommit as { outcome?: string })?.outcome, "not-a-harness-worktree");
+    assert.equal(leaf.originUrlAtCut(join(root, "not-a-gitdir")), undefined, "no repository: nothing to record");
+  });
+
   it("a caller that owns git (a declared cash surface) commits itself; the codex spawn leaves the edits", async () => {
     const { wt } = cutLane();
     const head = raw(wt, ["rev-parse", "HEAD"]).trim();
