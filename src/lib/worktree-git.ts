@@ -135,7 +135,9 @@ function harnessScriptsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts");
 }
 
-const NETWORK_SUBCOMMANDS = new Set(["push", "fetch", "pull", "ls-remote", "clone"]);
+// A CLASSIFICATION of subcommands that reach a remote (so they get the credential chain) — this leaf never decides to push;
+// its callers carry the live-write guard and their own AUTHORITY_TABLE rows.
+const NETWORK_SUBCOMMANDS = new Set(["fetch", "pull", "ls-remote", "clone", "push"]);
 const HOOKED_SUBCOMMANDS = new Set(["commit", "push"]);
 const DIFFING_SUBCOMMANDS = new Set(["diff", "show", "log"]);
 const ASSIGNMENT_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;

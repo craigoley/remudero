@@ -56,7 +56,7 @@ export interface RawWorktreeGitSpawn {
 }
 
 /** Every raw host git spawn into a worktree-shaped repository in `sources` (path -> text). */
-export function findRawWorktreeGitSpawns(sources: ReadonlyMap<string, string>): RawWorktreeGitSpawn[] {
+export function findRawGitSpawns(sources: ReadonlyMap<string, string>): RawWorktreeGitSpawn[] {
   const found: RawWorktreeGitSpawn[] = [];
   for (const [file, text] of sources) {
     if (file === LEAF) continue;
@@ -86,7 +86,7 @@ function srcSources(): Map<string, string> {
 }
 
 test("every host git spawn in src whose repository is a worker worktree goes through the hardened leaf", () => {
-  const raw = findRawWorktreeGitSpawns(srcSources());
+  const raw = findRawGitSpawns(srcSources());
   assert.deepEqual(
     raw.map((r) => `${r.file}: raw git ${r.shape} ${r.expr}`),
     [],
@@ -97,19 +97,19 @@ test("every host git spawn in src whose repository is a worker worktree goes thr
 test("a raw git -C spawn into a worktree added to src fails the census naming its file", () => {
   const sources = new Map(srcSources());
   sources.set(
-    "src/lib/a-new-host-commit.ts",
+    "src/lib/a-new-host-status.ts",
     'import { execFileSync } from "node:child_process";\n' +
-      'export const commit = (worktreePath: string) => execFileSync("git", ["-C", worktreePath, "commit", "-m", "x"]);\n',
+      'export const status = (worktreePath: string) => execFileSync("git", ["-C", worktreePath, "status", "--porcelain"]);\n',
   );
   sources.set(
     "src/lib/a-new-host-diff.ts",
     'import { spawnSync } from "node:child_process";\n' +
       'export const diff = (wt: string) => spawnSync("git", ["diff", "HEAD"], { cwd: wt, encoding: "utf8" });\n',
   );
-  const raw = findRawWorktreeGitSpawns(sources);
+  const raw = findRawGitSpawns(sources);
   assert.deepEqual(
     raw.map((r) => r.file).sort(),
-    ["src/lib/a-new-host-commit.ts", "src/lib/a-new-host-diff.ts"],
+    ["src/lib/a-new-host-diff.ts", "src/lib/a-new-host-status.ts"],
     "both spawn shapes fail, each naming its own file, and nothing else in src does",
   );
 });
@@ -121,7 +121,7 @@ test("a spawn into a repository that is not worktree-shaped, and a non-git -C, a
     ["src/lib/c.ts", 'execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot });\n'],
     ["src/lib/d.ts", 'hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]);\nworktreeGitInvocation(wt, ["push"]);\n'],
   ]);
-  assert.deepEqual(findRawWorktreeGitSpawns(sources), []);
+  assert.deepEqual(findRawGitSpawns(sources), []);
 });
 
 test("the push leaf and the run loop call the hardened leaf", () => {
