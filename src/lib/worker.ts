@@ -27,7 +27,7 @@ import {
 // (W1-T208).
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { performance } from "node:perf_hooks";
@@ -179,6 +179,15 @@ import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, typ
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import {
+  GITDIR_RECORD_PREFIX,
+  hostWorktreeGit,
+  pinnedConfigValue,
+  pinWorktreeGit,
+  WorktreePointerRefusedError,
+  worktreeRecordPath,
+  type PinnedWorktreeGit,
+} from "./worktree-git.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -5034,21 +5043,23 @@ export function recordCanonicalCheckoutDrift(
  * runLockPath}'s liveness token — so it is never committed and a later refusal can name the base without re-deriving it via
  * `git merge-base`. */
 export function worktreeBasePath(worktreePath: string): string {
-  return `${worktreePath}.base`;
+  return worktreeRecordPath(worktreePath);
 }
 
 /** Record the base a worktree was just created from. `worktreeAdd` calls this for every worktree it creates, BEFORE the
  * currency check can throw, so a stale-base refusal still leaves an attributable sibling file even though the worktree is
  * about to be abandoned (W1-T405). */
-export function recordWorktreeBase(worktreePath: string, base: string): void {
-  writeFileSync(worktreeBasePath(worktreePath), `${base}\n`);
+export function recordWorktreeBase(worktreePath: string, base: string, gitDir?: string): void {
+  // W1-T6106: the gitdir this worktree was cut with rides on the same record, the anchor the host git leaf
+  // pins every call to; the base sha stays the first line, which is all readWorktreeBase reads.
+  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}`);
 }
 
 /** Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or unreadable, never a throw, so a
  * missing record degrades to "unknown" rather than blocking whatever wanted to attribute a refusal. */
 export function readWorktreeBase(worktreePath: string): string | null {
   try {
-    return readFileSync(worktreeBasePath(worktreePath), "utf8").trim();
+    return readFileSync(worktreeBasePath(worktreePath), "utf8").split("\n")[0]!.trim();
   } catch {
     return null;
   }
@@ -5114,11 +5125,23 @@ function shellQuote(value: string): string {
  * worktree's previous hooks. Re-stamping changes only the id; an id that is not a plain token installs nothing (false). */
 export function stampRunWorktreeAssignment(worktreePath: string, assignmentId: string): boolean {
   if (!ASSIGNMENT_ID_RE.test(assignmentId)) return false;
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  if (realpathSync(git("rev-parse", "--show-toplevel")) !== realpathSync(worktreePath)) return false;
-  const hooksDir = join(git("rev-parse", "--path-format=absolute", "--git-dir"), ASSIGNMENT_HOOKS_DIRNAME);
-  const current = git("rev-parse", "--path-format=absolute", "--git-path", "hooks");
+  // W1-T6106: the gitdir comes from the host git leaf's pin, never from `rev-parse --git-dir` through the
+  // worktree's own `.git` pointer — a rewritten pointer would aim these hook writes at a worker's directory.
+  let pin: PinnedWorktreeGit;
+  try {
+    pin = pinWorktreeGit(worktreePath);
+  } catch (error) {
+    // A subdirectory, a missing entry or a refused pointer: nothing here is a worktree this run may stamp.
+    if (error instanceof WorktreePointerRefusedError) return false;
+    throw error;
+  }
+  const git = (...args: string[]) => hostWorktreeGit(worktreePath, args).trim();
+  const hooksDir = join(pin.gitDir, ASSIGNMENT_HOOKS_DIRNAME);
+  // The worker's OWN hooks path, read from the pinned config's files (the leaf's override is the host's).
+  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  const commonFile = join(pin.gitDir, "commondir");
+  const common = existsSync(commonFile) ? resolve(pin.gitDir, readFileSync(commonFile, "utf8").trim()) : pin.gitDir;
+  const current = configured === undefined ? join(common, "hooks") : resolve(pin.worktree, configured);
   const priorFile = join(hooksDir, ASSIGNMENT_PRIOR_HOOKS_FILE);
   const prior = current === hooksDir ? readFileSync(priorFile, "utf8").trim() : current;
   mkdirSync(hooksDir, { recursive: true });
@@ -5272,7 +5295,11 @@ export function worktreeAdd(
   const createdBase = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
-  recordWorktreeBase(worktreePath, createdBase);
+  // W1-T6106: read the gitdir NOW, the one moment the `.git` pointer is known to be git's own.
+  const gitDir = execFileSync("git", ["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"], {
+    encoding: "utf8",
+  }).trim();
+  recordWorktreeBase(worktreePath, createdBase, gitDir);
   const currency = assertWorktreeBaseCurrent(createdBase, ref, {
     readRemoteHead: () => (deps.readRemoteHead ?? defaultReadRemoteHead)(repoDir, ref),
     warn: deps.warn,
@@ -5383,7 +5410,9 @@ export async function worktreeAddAsync(
   }
   await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
-  recordWorktreeBase(worktreePath, createdBase);
+  // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
+  const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
+  recordWorktreeBase(worktreePath, createdBase, gitDir);
 
   let remoteHead: string | undefined;
   let remoteError: unknown;
@@ -5412,7 +5441,7 @@ export async function worktreeAddAsync(
       break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
     }
     createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
-    recordWorktreeBase(worktreePath, createdBase);
+    recordWorktreeBase(worktreePath, createdBase, gitDir);
     deps.log?.("worktree.base_caught_up", { from, to: createdBase, attempt });
     await readRemote();
   }
