@@ -91,6 +91,7 @@ test("every other sandbox key the committed policy declares is unchanged", () =>
         "~/../../.ssh/**",
         "~/../../.aws/**",
         "~/../../.config/remudero/**",
+        "~/../../.config/gh/**",
         "~/../state/service-tokens.json",
       ],
       denyWrite: [
@@ -106,7 +107,6 @@ test("every other sandbox key the committed policy declares is unchanged", () =>
     network: {
       allowedDomains: ["github.com", "api.github.com", "codeload.github.com", "registry.npmjs.org"],
     },
-    excludedCommands: ["gh *"],
   });
 });
 

@@ -1767,7 +1767,7 @@ export interface ProofSandboxArgvInput {
 
 /** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
  *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
- *  masked by /dev/null), the node_modules link targets and the browser cache. NOT mounted: the daemon's HOME, its
+ *  masked by an empty file), the node_modules link targets and the browser cache. NOT mounted: the daemon's HOME, its
  *  checkout and state, and the App key — masked by /dev/null too if some bind happens to contain it. */
 export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   const env = input.env ?? process.env;
@@ -1793,10 +1793,20 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   if (home !== cwd) binds.push({ path: home, writable: true });
   // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
   binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
-  const masks: string[] = [];
-  if (git.common !== undefined && existsSync(join(git.common, "config"))) masks.push(join(git.common, "config"));
+  // bwrap mounts binds nodev, so a /dev/null bound over a file reads as EACCES: right for the App key, fatal
+  // for git, which refuses an unreadable config. The config is masked by an EMPTY file in the throwaway HOME.
+  const masks: { from: string; path: string }[] = [];
+  if (git.common !== undefined && existsSync(join(git.common, "config"))) {
+    const empty = join(home, ".rmd-masked-git-config");
+    try {
+      writeFileSync(empty, "", { mode: 0o444, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; // this HOME's earlier argv already made it
+    }
+    masks.push({ from: empty, path: join(git.common, "config") });
+  }
   const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
-  if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push(key);
+  if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });
   const dirs = new Set<string>();
   for (const { path } of binds) {
     for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
@@ -1815,7 +1825,7 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
     "--tmpfs", "/tmp",
     ...createDirs.flatMap((path) => ["--dir", path]),
     ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
-    ...masks.flatMap((path) => ["--ro-bind", "/dev/null", path]),
+    ...masks.flatMap(({ from, path }) => ["--ro-bind", from, path]),
     "--chdir", cwd,
     "--",
   ];

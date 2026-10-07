@@ -69,7 +69,7 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
 /** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
  *  symlinked rather than copied so it is always current. */
 export interface WorkerHomeSymlink {
-  /** Path relative to HOME, e.g. `.claude` or `.config/gh`. */
+  /** Path relative to HOME, e.g. `.claude` or `.gitconfig`. */
   relPath: string;
   /** Why this one path is granted back — never a wholesale HOME copy. */
   reason: string;
@@ -170,7 +170,6 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "(transcripts, history, settings, skills), falling back to today's wholesale grant only when that " +
       "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
   },
-  { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open and update its PR" },
   {
     relPath: playwrightCacheRelPath(),
     reason:
@@ -179,7 +178,7 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "and every run downloads its own — MEASURED on the container at the great majority of a completed " +
       "worker home. READ-ONLY IN PRACTICE: on a populated cache every browser directory's mtime is its " +
       "INSTALL date and nothing under the tree is modified across repeated launches, so this grant adds " +
-      "no writable path and no bind — it is a symlink inside the worker home, exactly like the four " +
+      "no writable path and no bind — it is a symlink inside the worker home, exactly like the others " +
       "beside it. AN ABSENT CACHE IS A SKIPPED GRANT, inherited from materializeWorkerHome's existing " +
       "contract: a target that does not exist is recorded `absent` and skipped silently, so a host " +
       "that never populated one still materializes a working home and the worker falls back to its own " +
@@ -199,6 +198,12 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "macOS login keychain holds the Claude Code OAuth token ('Claude Code-credentials'); the keychain is HOME-relative ($HOME/Library/Keychains/login.keychain-db), so a redirected HOME hides it and Claude Code exits 'Not logged in' at $0 before any turn (W1-T18 spawn deadlock, verified live). ONLY this single DB file is granted — not the whole ~/Library — and securityd still gates per-item access by code identity.",
   },
 ];
+
+/** Slots that USED to be granted and are now refused. `.config/gh` linked the operator's real gh
+ *  config into every worker HOME: a worker could read its hosts.yml and, through the then-unsandboxed
+ *  `gh`, write aliases, `pager` or `http_unix_socket` into the config the operator's own gh reads. A
+ *  container worker authenticates with `GH_TOKEN` and needs no config dir at all. */
+export const REVOKED_WORKER_HOME_GRANTS: readonly string[] = [join(".config", "gh")];
 
 /** PURE plan of what {@link materializeWorkerHome} will do, so the redirection logic is unit-testable
  *  without touching the filesystem. INVARIANT: every `from` is under the redirected `workerHome` and
@@ -516,6 +521,22 @@ export function materializeWorkerHome(opts: {
     }
   }
 
+  // A link in a REVOKED slot is cleared even when an earlier materialization made it, so a reused home
+  // stops reaching the operator's gh config the moment this module stops granting it. A slot that
+  // cannot even be inspected throws: a revocation nobody could confirm is not one.
+  for (const rel of REVOKED_WORKER_HOME_GRANTS) {
+    const slot = join(plan.workerHome, rel);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(slot);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue; // nothing can sit in the slot
+      throw e;
+    }
+    if (st.isSymbolicLink()) unlinkSync(slot);
+  }
+
   // W1-T981: bound the CLI's own `.claude.json` backups at the SAME resolved grant target this call
   // just symlinked `.claude` toward, so the sweep tracks W1-T505's narrowing automatically.
   const claudeConfigBackupSweep = sweepClaudeConfigBackups(plan.claudeGrantTarget!);
@@ -525,7 +546,7 @@ export function materializeWorkerHome(opts: {
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──
 // INVARIANT: every concurrent worker gets its own home, with its own empty rc files and its own
-// keychain/.claude/.config/gh symlinks. TRAP: two overlapping spawns truncating and symlinking the
+// keychain/.claude/.gitconfig symlinks. TRAP: two overlapping spawns truncating and symlinking the
 // SAME rc files and keychain slot turn #100's deterministic, already-fixed HOME-relative keychain miss
 // into an intermittent one. // Why: docs/forensics/worker-home.md#per-run-worker-homes (W1-T170).
 

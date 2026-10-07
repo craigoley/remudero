@@ -1312,6 +1312,7 @@ export function credentialReachTargets(a: CredentialReachAnchors): CredentialRea
     { id: "deny:ssh-key", kind: "file", subject: join(a.realHome, ".ssh", "id_ed25519"), why: "an ssh private key" },
     { id: "deny:aws-credentials", kind: "file", subject: join(a.realHome, ".aws", "credentials"), why: "cloud credentials" },
     { id: "deny:instance-config", kind: "file", subject: join(a.realHome, ".config", "remudero", "config.json"), why: "the mode-600 instance config loadConfig reads (W1-T2213)" },
+    { id: "deny:operator-gh-config", kind: "file", subject: join(a.realHome, ".config", "gh", "hosts.yml"), why: "the operator's gh config, whose hosts.yml can hold an oauth token" },
     { id: "deny:console-write-token", kind: "file", subject: join(a.configRoot, "state", "service-tokens.json"), why: "the console's write token (W1-T2211)" },
     { id: "ungoverned:operator-claude-json", kind: "file", subject: join(a.realHome, ".claude.json"), why: "the operator's CLI config, carrying oauthAccount — in no deny rule and no grant" },
     { id: "ungoverned:operator-credentials", kind: "file", subject: join(a.realHome, ".claude", ".credentials.json"), why: "the operator's real credentials file — in no deny rule and no grant" },
