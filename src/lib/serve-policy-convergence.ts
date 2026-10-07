@@ -68,9 +68,6 @@ export interface ServePolicyOutcome {
   mountDrift?: MountPlanDrift[];
 }
 
-/** The serve cycle's seams: the deployer's, plus the two that live beside them here. */
-type ServeSeams = DeployDeps & { escalate?: (e: Escalation) => void; serveMountPlanDrift?: () => MountPlanDrift[] | undefined };
-
 export function describeDrift(drift: ResourcePolicyDrift[]): string {
   return drift.map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`).join(", ");
 }
@@ -142,7 +139,9 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
 
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
-export function runServePolicyCycle(deps: ServeSeams, opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
+export function runServePolicyCycle(
+  deps: DeployDeps & { escalate?: (e: Escalation) => void; serveMountPlanDrift?: () => MountPlanDrift[] | undefined },
+  opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
     return { replaced: false, reason: "serve policy is converged only by the primary instance's watchdog tick" };
   }
@@ -198,7 +197,7 @@ export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
-): Partial<ServeSeams> {
+): Partial<DeployDeps> & { escalate?: (e: Escalation) => void; serveMountPlanDrift?: () => MountPlanDrift[] | undefined } {
   let registryText: string;
   try {
     registryText = readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");

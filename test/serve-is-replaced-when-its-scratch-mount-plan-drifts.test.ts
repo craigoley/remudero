@@ -29,10 +29,10 @@ const SLOT_DRIFT: MountPlanDrift[] = [
   { target: "env RMD_TEST_SLOT_DIR", expected: SLOT, actual: undefined },
 ];
 
-type Seams = DeployDeps & { serveMountPlanDrift?: () => MountPlanDrift[] | undefined; escalate?: (e: Escalation) => void };
+type ServeTick = DeployDeps & { serveMountPlanDrift?: () => MountPlanDrift[] | undefined; escalate?: (e: Escalation) => void };
 
 interface Harness {
-  deps: Seams;
+  deps: ServeTick;
   rows: { step: string; data?: Record<string, unknown> }[];
   replaces: number;
   escalations: Escalation[];
@@ -40,8 +40,8 @@ interface Harness {
 }
 
 /** A tick whose seams all read "go": limits on policy, and the mount reader returns `mounts` in turn. */
-function harness(over: Partial<Seams> = {}, mounts: (MountPlanDrift[] | undefined)[] = [SLOT_DRIFT, []], limits: ResourcePolicyDrift[] | undefined = []): Harness {
-  const h: Harness = { deps: undefined as unknown as Seams, rows: [], replaces: 0, escalations: [], failures: [] };
+function harness(over: Partial<ServeTick> = {}, mounts: (MountPlanDrift[] | undefined)[] = [SLOT_DRIFT, []], limits: ResourcePolicyDrift[] | undefined = []): Harness {
+  const h: Harness = { deps: undefined as unknown as ServeTick, rows: [], replaces: 0, escalations: [], failures: [] };
   let read = 0;
   h.deps = {
     log: (step: string, data?: Record<string, unknown>) => h.rows.push({ step, data }),
@@ -60,7 +60,7 @@ function harness(over: Partial<Seams> = {}, mounts: (MountPlanDrift[] | undefine
     clearServePolicyFailure: () => {},
     escalate: (e: Escalation) => h.escalations.push(e),
     ...over,
-  } as unknown as Seams;
+  } as unknown as ServeTick;
   return h;
 }
 
@@ -99,7 +99,7 @@ test("serve whose binds match its plan, or whose plan is UNKNOWN, is never repla
 });
 
 test("a mount-drift replace is held by STOP, PAUSE, the back-off, a handoff and an unhealthy serve", () => {
-  const cases: [string, Partial<Seams>, RegExp][] = [
+  const cases: [string, Partial<ServeTick>, RegExp][] = [
     ["STOP", { stopPresent: () => true }, /STOP is set or unknown/],
     ["PAUSE", { pausePresent: () => undefined }, /PAUSE is set or unknown/],
     ["recent failure", { servePolicyLastFailedAtMs: () => NOW - 60_000 }, /backing off/],
