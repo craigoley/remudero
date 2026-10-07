@@ -179,26 +179,26 @@ test("a sandbox that cannot start reads as not_executable, never a pass or a fai
 });
 
 test("the probe degrades off Linux and on a Linux host whose bwrap cannot start, and names why", () => {
-  assert.match((probeProofSandbox({ platform: "darwin" }) as { reason: string }).reason, /Linux-only.*darwin/);
+  assert.match((probeProofSandbox("darwin") as { reason: string }).reason, /Linux-only.*darwin/);
   const absent = (() => {
     throw Object.assign(new Error("spawn bwrap ENOENT"), { code: "ENOENT" });
   }) as unknown as typeof execFileSync;
-  assert.deepEqual(probeProofSandbox({ platform: "linux", exec: absent }).mode, "unsandboxed");
-  assert.match((probeProofSandbox({ platform: "linux", exec: absent }) as { reason: string }).reason, /not installed/);
+  assert.deepEqual(probeProofSandbox("linux", absent).mode, "unsandboxed");
+  assert.match((probeProofSandbox("linux", absent) as { reason: string }).reason, /not installed/);
   const denied = (() => {
     throw Object.assign(new Error("Command failed"), { status: 1, stderr: "\nbwrap: No permissions to create new namespace\n" });
   }) as unknown as typeof execFileSync;
-  assert.match((probeProofSandbox({ platform: "linux", exec: denied }) as { reason: string }).reason, /No permissions/);
+  assert.match((probeProofSandbox("linux", denied) as { reason: string }).reason, /No permissions/);
   const quiet = (() => {
     throw new Error("killed");
   }) as unknown as typeof execFileSync;
-  assert.match((probeProofSandbox({ platform: "linux", exec: quiet }) as { reason: string }).reason, /killed/);
+  assert.match((probeProofSandbox("linux", quiet) as { reason: string }).reason, /killed/);
   let argv: readonly string[] = [];
   const starts = ((_file: string, args: readonly string[]) => {
     argv = args;
     return "";
   }) as unknown as typeof execFileSync;
-  assert.deepEqual(probeProofSandbox({ platform: "linux", exec: starts }), { mode: "bwrap", binary: "bwrap" });
+  assert.deepEqual(probeProofSandbox("linux", starts), { mode: "bwrap", binary: "bwrap" });
   assert.ok(argv.includes("--unshare-net") && argv.includes(process.execPath), "the probe starts node inside the real argv");
 });
 
@@ -218,7 +218,7 @@ test("a review whose proof ran unsandboxed records the degraded sandbox on its v
   }
 });
 
-function postinstallCheckout(): string {
+function postinstallFixture(): string {
   const cwd = makeTempDir("t6124-install");
   const dep = join(cwd, "dep");
   mkdirSync(dep);
@@ -253,7 +253,7 @@ test("ensureDeps' npm ci passes --ignore-scripts and carries no credential", asy
       calls.push({ args, env: opts.env });
       return "";
     }) as unknown as typeof execFileSync;
-    ensureDeps(postinstallCheckout(), recorder);
+    ensureDeps(postinstallFixture(), recorder);
     assert.equal(calls.length, 1, "control: the install was attempted");
     assert.ok(calls[0]!.args.includes("--ignore-scripts"));
     assert.deepEqual(Object.keys(calls[0]!.env ?? {}).filter((k) => CREDENTIAL_SHAPED.test(k)), [],
@@ -261,11 +261,11 @@ test("ensureDeps' npm ci passes --ignore-scripts and carries no credential", asy
     assert.deepEqual(Object.keys(proofInstallEnv()).filter((k) => CREDENTIAL_SHAPED.test(k)), []);
     assert.ok(PROOF_INSTALL_ARGS.includes("--ignore-scripts"));
 
-    const sync = postinstallCheckout();
+    const sync = postinstallFixture();
     ensureDeps(sync);
     assert.ok(existsSync(join(sync, "node_modules", "dep", "package.json")), "control: npm ci really installed");
     assert.equal(existsSync(join(sync, "postinstall-ran")), false, "the PR's postinstall must not run");
-    const viaAsync = postinstallCheckout();
+    const viaAsync = postinstallFixture();
     await ensureDepsAsync(viaAsync);
     assert.ok(existsSync(join(viaAsync, "node_modules", "dep", "package.json")), "control: the async install ran");
     assert.equal(existsSync(join(viaAsync, "postinstall-ran")), false, "the async path runs no lifecycle script");

@@ -1652,23 +1652,19 @@ function spawnFailureText(error: unknown): string {
   return line.trim().slice(0, 160);
 }
 
-export interface ProofSandboxProbeDeps {
-  platform?: NodeJS.Platform;
-  exec?: typeof execFileSync;
-}
-
 /** Decide, once per process, whether proof children can run under bwrap. Off Linux there is no bwrap and the review
  *  still runs (an operator's darwin review must not be refused), recorded as degraded. On Linux the probe starts the
  *  REAL sandbox argv around node itself, so a pass also proves the runtime is visible inside it. */
-export function probeProofSandbox(deps: ProofSandboxProbeDeps = {}): ProofSandboxStatus {
-  const platform = deps.platform ?? process.platform;
+export function probeProofSandbox(
+  platform: NodeJS.Platform = process.platform,
+  exec: typeof execFileSync = execFileSync,
+): ProofSandboxStatus {
   if (platform !== "linux") {
     return {
       mode: "unsandboxed",
       reason: `bwrap is Linux-only; this ${platform} host ran the proof with a throwaway HOME and the env allowlist only`,
     };
   }
-  const exec = deps.exec ?? execFileSync;
   const dir = makeTempDir("proof-sandbox-probe");
   try {
     exec(PROOF_SANDBOX_BINARY, [...proofSandboxArgv({ cwd: dir, home: dir }), process.execPath, "-e", ""], {
