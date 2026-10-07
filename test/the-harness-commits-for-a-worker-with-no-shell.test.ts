@@ -224,7 +224,7 @@ test("the diverted spawn really receives the cash surface, through spawnWorker's
   const unreadable = { readable: false, windows: [], detail: "exhausted" };
   const settings = gitRepo({ kind: "divert" });
   const settingsFile = join(settings.dir, "settings.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
   const config = {
     claudeBin: "/bin/true",
     root: "/tmp",

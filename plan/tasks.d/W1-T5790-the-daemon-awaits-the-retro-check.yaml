@@ -11,6 +11,9 @@
   origin: "operator session 2026-10-05: W1-T5649 (#9216) follow-up"
   plan_refs: [W1-T5649, W1-T3104, W1-T2981, W1-T2265]
   files: [src/lib/daemon.ts, src/run-task.ts, test/the-daemon-awaits-the-retro-check.test.ts]
+  # refusal-amendment (W1-T5790, run W1-T5790-1791358744153, 2026-10-07T08:06:29.688Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Current HEAD and origin/main already await `checkRetroTrigger` and contain no `retroCheckOffLoop`, so the defect this task specifies is absent.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 2
   attempts: 0

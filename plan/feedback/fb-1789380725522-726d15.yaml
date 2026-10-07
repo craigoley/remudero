@@ -16,10 +16,11 @@ raw: "OBSERVED 2026-09-14: the core daemon can classify a PR as blocked-fixable
   library unit seam; it must exercise the production adapter path."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
