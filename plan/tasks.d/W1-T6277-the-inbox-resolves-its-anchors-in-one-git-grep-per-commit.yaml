@@ -1,0 +1,36 @@
+- id: W1-T6277
+  title: "THE INBOX RESOLVES ITS ANCHORS IN ONE GIT GREP PER COMMIT — gitGrepAnchorTrueAsync is asynchronous per child, but the inbox launches one `git grep` per uncached anchor in a burst and each spawn's fork runs on the daemon thread; the 2026-10-07 steady-state CPU profile caught the burst as an unbroken 25.9 s block"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — an inbox pass answers its uncached anchors with a bounded number of git children
+  band_meaning: span
+  origin: "operator session 2026-10-07: steady-state daemon CPU profile (lanes/claude/daemon-cpu-steady.cpuprofile)"
+  plan_refs: [W1-T4261, W1-T5689]
+  files: [src/lib/inbox.ts, test/the-inbox-resolves-its-anchors-in-one-git-grep-per-commit.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 21:42–21:48Z (360 s Profiler session on the live daemon): a 25.9 s busy run was
+    inbox → gitGrepAnchorTrueAsync (13.8 s); synchronous spawn was 103.9 s of self time across the
+    window. READ on origin/main: gitGrepAnchorTrueAsync (src/lib/inbox.ts) runs `git grep -I -q -e
+    <pattern> <ref> [-- <path>]` once per anchor; W1-T4261 caches each answer per (main commit, anchor),
+    so a new main commit re-spawns one child per anchor in the pass (693 proposals measured 2026-09-23).
+  design: |
+    On a cache miss, answer all of a pass's anchors for one commit with as few children as possible:
+    group anchors by path (or none) and run one `git grep -I -l` (or `-c`) per group with every pattern
+    as a separate `-e`, attributing each hit back to its pattern by a second, cheap in-memory match on the
+    returned paths; bound concurrency. The exit-code contract (0 true, 1 false, anything else a named
+    rejection, a timeout an AnchorGrepTimeoutError) and W1-T4261's per-commit cache are unchanged.
+  acceptance:
+    - claim: "an inbox pass over N uncached anchors on one commit spawns a bounded number of git children, not N"
+      proof: 'grep: test("W1-T6277: uncached anchors on one commit are answered by a bounded number of git greps" in test/the-inbox-resolves-its-anchors-in-one-git-grep-per-commit.test.ts'
+    - claim: "each anchor's true or false answer is unchanged by the batching"
+      proof: 'grep: test("W1-T6277: batched anchor answers match the one-grep-per-anchor answers" in test/the-inbox-resolves-its-anchors-in-one-git-grep-per-commit.test.ts'
+  falsifier: |
+    Keep one child per anchor: a counting execFile seam records N spawns for N anchors and the first test
+    fails.
