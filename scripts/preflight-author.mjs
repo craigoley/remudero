@@ -153,6 +153,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.headSha = git(['rev-parse', 'HEAD']).trim();
     receipt.baseSha = git(['rev-parse', 'origin/main']).trim();
     if (![receipt.headSha, receipt.baseSha].every((sha) => /^[a-f0-9]{40}$/.test(sha))) throw new Error('unresolved head or base SHA');
+    // A boundary can hide historical controls or make git show render the whole tree.
+    // A successful ordinary fetch does not prove it removed that boundary.
+    receipt.gitHistory = { state: 'unknown' };
+    const shallow = git(['rev-parse', '--is-shallow-repository']).trim();
+    if (shallow === 'true') {
+      receipt.gitHistory.state = 'shallow';
+      throw new Error('complete Git history required before author selection or validation; inspect the owned checkout and run git fetch --unshallow before a distinct admitted run');
+    }
+    if (shallow !== 'false') throw new Error('Git history completeness is unavailable; author selection and expensive validation were not started');
+    receipt.gitHistory.state = 'complete';
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
     const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
