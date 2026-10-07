@@ -21,6 +21,7 @@ type Fixture = {
   reviews?: Record<number, unknown[]>; prCommits?: Record<number, unknown[]>;
   checkRuns?: Record<string, unknown[]>; statuses?: Record<number, unknown[]>;
   workflowRuns?: Record<number, unknown[]>; jobs?: Record<number, unknown[]>;
+  associatedPulls?: Record<string, unknown[]>;
 };
 
 /** A fake page seam over per-repo fixture lists, paged exactly like the REST API. */
@@ -38,6 +39,7 @@ function githubFake(fixtures: Record<string, Fixture>, failing: (path: string) =
     if (rest[0] === "pulls" && rest[2] === "commits") return slice(fixture.prCommits?.[Number(rest[1])]);
     if (rest[0] === "commits" && rest.length === 1) return slice(fixture.commits);
     if (rest[0] === "commits" && rest[2] === "check-runs") return slice(fixture.checkRuns?.[rest[1]!]);
+    if (rest[0] === "commits" && rest[2] === "pulls") return slice(fixture.associatedPulls?.[rest[1]!]);
     if (rest[0] === "deployments" && rest.length === 1) return slice(fixture.deployments);
     if (rest[0] === "deployments" && rest[2] === "statuses") return slice(fixture.statuses?.[Number(rest[1])]);
     if (rest[0] === "actions" && rest[1] === "runs") return slice(fixture.workflowRuns?.[Number(rest[2])]);
@@ -477,4 +479,102 @@ test('a complete first-commit all-attempt response is reused when that commit is
   assert.equal(fake.calls.filter((path) => path.includes('/check-runs?')).length, 1, 'one actual all-attempt response serves both distinct signals');
   assert.ok(fake.calls.some((path) => path.endsWith('/check-runs?filter=all&per_page=100')));
   assert.equal(fake.calls.some((path) => path.includes('check_name=ci-gate')), false);
+});
+
+test('a merged current-head green with an empty run PR list requires the real commit PR association', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 3; pass++) {
+    const before = fake.calls.length;
+    const result = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    assert.ok(fake.calls.length - before <= 8);
+    assert.equal(result.requestsMade, fake.calls.length - before);
+    if (pass === 0) assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(10)), null);
+  }
+  const found = observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(12));
+  assert.ok(found); assert.equal(found.completedAt, at(4));
+  assert.deepEqual([found.checkId, found.suiteId, found.runId, found.jobId], [11, 22, 33, 44]);
+  assert.equal(found.commitAssociationPending, undefined);
+  assert.equal(fake.calls.filter(path => path === `repos/o/r/commits/${f.sha}/pulls?per_page=100&page=1`).length, 1);
+  assert.equal(store.repos['o/r']!.pulls.PR_1!.headGreen!.firstEver, 'unavailable-retention-uncertified');
+});
+
+test('an empty run PR list cannot borrow another PR head or repository association', async () => {
+  for (const associated of [[], [{ number: 2, head: { sha: 'a'.repeat(40) }, base: { repo: { full_name: 'o/r' } } }],
+    [{ number: 1, head: { sha: 'b'.repeat(40) }, base: { repo: { full_name: 'o/r' } } }],
+    [{ number: 1, head: { sha: 'a'.repeat(40) }, base: { repo: { full_name: 'other/repo' } } }]]) {
+    const f = headGateFixture(); f.run.pull_requests = []; f.fixture.associatedPulls = { [f.sha]: associated };
+    const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    const pull = store.repos['o/r']!.pulls.PR_1!;
+    assert.equal(observedCurrentHeadGreen(pull, at(12)), null);
+    assert.equal(pull.headGreen!.history.reason, 'head-gate-commit-pr-association-missing');
+    assert.ok(!fake.calls.includes('repos/o/r/actions/jobs/44'));
+  }
+});
+
+test('a failed commit association read stays pending and resumes within the unchanged request budget', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  let unavailable = true;
+  const fake = githubFake({ 'o/r': f.fixture }, path => unavailable && path.includes(`/commits/${f.sha}/pulls?`));
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 2; pass++) {
+    const before = fake.calls.length;
+    await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    assert.ok(fake.calls.length - before <= 8);
+    assert.ok(fake.calls.slice(before).filter(path => path.includes(`/commits/${f.sha}/pulls?`)).length <= 1);
+  }
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.equal(observedCurrentHeadGreen(pull, at(11)), null);
+  assert.equal(pull.headGreen!.pending[0]!.commitAssociationPending, true);
+  assert.equal(pull.headGreen!.history.reason, 'github-read-failed');
+  unavailable = false;
+  for (let pass = 0; pass < 2; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(12 + pass), 8);
+  assert.ok(observedCurrentHeadGreen(pull, at(13)));
+});
+
+test('a contradictory or missing run PR list cannot request the empty-list fallback', async () => {
+  for (const association of [undefined, [{ number: 2, head: { sha: 'a'.repeat(40) } }]]) {
+    const f = headGateFixture(); Object.assign(f.run, { pull_requests: association });
+    const fake = githubFake({ 'o/r': f.fixture });
+    const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+    for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(12)), null);
+    assert.ok(!fake.calls.some(path => path.includes(`/commits/${f.sha}/pulls?`)));
+  }
+});
+
+test('pending commit association cannot masquerade as a successful cached head green', async () => {
+  const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  for (let pass = 0; pass < 2; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.ok(observedCurrentHeadGreen(pull, at(11)));
+  pull.headGreen!.firstObserved!.commitAssociationPending = true;
+  assert.equal(observedCurrentHeadGreen(pull, at(11)), null);
+});
+
+test('the changed association policy revisits a historical empty-list refusal and preserves genuine cached green', async () => {
+  const f = headGateFixture(); f.run.pull_requests = [];
+  f.fixture.associatedPulls = { [f.sha]: [{ number: 1, head: { sha: f.sha }, base: { repo: { full_name: 'o/r' } } }] };
+  const fake = githubFake({ 'o/r': f.fixture });
+  const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  const old = store.repos['o/r']!.pulls.PR_1!;
+  delete old.headGreen!.commitAssociationPolicy;
+  old.headGreen!.pending = []; old.headGreen!.firstObserved = null;
+  old.headGreen!.history = { state: 'complete', nextPage: 2, pagesRead: 1, reason: 'head-gate-producer-identity-mismatch' };
+  for (let pass = 0; pass < 3; pass++) await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11 + pass), 8);
+  const pull = store.repos['o/r']!.pulls.PR_1!;
+  assert.ok(observedCurrentHeadGreen(pull, at(13)));
+  const receipt = pull.headGreen!.firstObserved;
+  delete pull.headGreen!.commitAssociationPolicy;
+  const before = fake.calls.length;
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(14), 8);
+  assert.equal(store.repos['o/r']!.pulls.PR_1!.headGreen!.firstObserved, receipt);
+  assert.equal(fake.calls.slice(before).filter(path => path.includes('/actions/') || path.includes('check_name=ci-gate')).length, 0);
 });
