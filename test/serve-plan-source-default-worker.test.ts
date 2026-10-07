@@ -82,8 +82,17 @@ test("real default worker and Plan-view agree on the adopted generation after an
   assert.ok(lines.some((line) => line.includes(`127.0.0.1:${port}`)), "the configured interface bound");
   const token = (JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string }).read;
   const get = async (path: string) => {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` } });
-    return { status: response.status, body: await response.json() as Record<string, any> };
+    const started = Date.now();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` } });
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    } catch (error) {
+      // CI saw a bare "fetch failed" ~22 s into a poll that had already answered once; name the socket-level cause
+      // and what serve last logged, so the next red says why.
+      const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+      throw new Error(`GET ${path} failed after ${Date.now() - started} ms: ${String((error as Error).message)}` +
+        ` (cause: ${cause?.code ?? "?"} ${cause?.message ?? ""}); serve's last log lines:\n${lines.slice(-30).join("\n")}`, { cause: error });
+    }
   };
 
   const adoptedBy = Date.now() + 150_000;
