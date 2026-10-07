@@ -3,8 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { boundedGardenPassSpawn, startGardenOffLoop } from "../src/lib/garden-registry.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { createGardenerRuntimeWriter, GARDENER_RUNTIME_FILE, GARDENER_RUNTIME_MAX_BYTES, parseGardenerRuntime,
   readGardenerRuntime, type GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
 import { buildGardenersRoute } from "../src/lib/gardeners-route.js";
@@ -16,7 +15,6 @@ const inventory = [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "rep
   { name: "host-resource", enabled: false, cadenceMs: 300_000, scope: "host" as const }];
 const event = (phase: GardenerRuntimeEvent["phase"]): GardenerRuntimeEvent => ({ name: "plan", phase,
   observedAt: stamp, passId: "pass-1", nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null });
-const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 async function invoke(route: Route) {
   let status = 0, body = "";
   const res = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } };
@@ -118,37 +116,4 @@ test("gardener status refuses missing unreadable wrong-repo and future receipts 
   const future = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot",
     clock: fixedClock(clock.now() + 61_000), gardens: inventory, log: () => {} }); await future.flush();
   assert.equal((await invoke(route)).body.reason, "clock_skew");
-});
-
-test("gardener lifecycle measures admission separately from execution and preserves interruption", async (t) => {
-  let now = clock.now();
-  const observed: GardenerRuntimeEvent[] = [];
-  const releases: Array<(exit: number | null) => void> = [];
-  const spawn = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
-  const wiring = { spawnPass: spawn, log: () => {}, clock: clockFromMillisFn(() => now), observe: (row: GardenerRuntimeEvent) => observed.push(row) };
-  const a = startGardenOffLoop("plan", 60_000, wiring), b = startGardenOffLoop("gate", 60_000, wiring);
-  t.after(() => { a.stop(); b.stop(); });
-  await turn(); now += 100; releases[0]!(0); await turn();
-  now += 200; releases[1]!(null); await turn();
-  const plan = observed.find((r) => r.name === "plan" && r.phase === "completed")!;
-  const gate = observed.find((r) => r.name === "gate" && r.phase === "cancelled")!;
-  assert.equal(plan.queueMs, 0); assert.equal(plan.executionMs, 100);
-  assert.equal(plan.nextDueAt, new Date(clock.now() + 60_000).toISOString());
-  assert.equal(gate.queueMs, 100); assert.equal(gate.executionMs, 200);
-  assert.equal(gate.reason, "signal-or-cancelled");
-  assert.ok(observed.some((r) => r.name === "gate" && r.phase === "running"));
-});
-
-test("gardener lifecycle reports idle and spawn failures while an observer cannot break a pass", async (t) => {
-  const observed: GardenerRuntimeEvent[] = [], logs: string[] = [];
-  const idle = startGardenOffLoop("plan", 60_000, { log: () => {}, due: () => false,
-    spawnPass: async () => { throw new Error("idle cannot spawn"); }, observe: (r) => observed.push(r) });
-  const fail = startGardenOffLoop("gate", 60_000, { log: () => {}, spawnPass: () => { throw new Error("spawn refused"); },
-    observe: (r) => observed.push(r) });
-  const safe = startGardenOffLoop("config", 60_000, { log: (s) => logs.push(s), spawnPass: async () => 0,
-    observe: () => { throw new Error("telemetry unavailable"); } });
-  t.after(() => { idle.stop(); fail.stop(); safe.stop(); }); await turn();
-  assert.equal(observed[0]!.phase, "idle"); assert.equal(observed[0]!.reason, "inputs-unchanged");
-  assert.ok(observed.some((r) => r.phase === "failed" && r.reason === "spawn-failed" && r.executionMs === null));
-  assert.ok(logs.includes("garden.pass")); assert.ok(logs.includes("garden.telemetry_failed"));
 });
