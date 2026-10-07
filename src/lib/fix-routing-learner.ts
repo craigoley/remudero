@@ -59,14 +59,13 @@ const text = (value: unknown): string | undefined => (typeof value === "string" 
 /**
  * W1-T6028: A SIGNAL-ENDED ROUND THAT PUSHED NOTHING TEACHES THE LEARNER NOTHING. A process ended from outside
  * (orphan sweep, deploy, OOM) says nothing about whether its arm's rounds commit. W1-T5999 writes it as
- * `worker_exit: "signal"`. The `error_exit_null` arm reads the same round from rows without that field: every
- * pre-W1-T5999 row (the newest leaves FIX_ROUTING_READ_WINDOW_MS on 2026-10-20, when that population is gone),
- * and W1-T6032's fall-through row, which a round that LEFT work still writes with the worker's own subtype.
- * The arm can go after 2026-10-20 only once that fall-through row also carries `worker_exit`. A round
- * whose leftover work was committed and pushed made a commit, so it is scored like any pushed round.
+ * `worker_exit: "signal"`, as does W1-T6073's fall-through row for a round that LEFT work. The
+ * `error_exit_null` arm reads older rows without that field; remove it once the newest pre-change row
+ * leaves FIX_ROUTING_READ_WINDOW_MS, 14 days after W1-T6073 merges. A round whose leftover work was
+ * committed and pushed made a commit, so it is scored like any pushed round.
  */
 function endedBySignalWithNothingPushed(row: Row): boolean {
-  if (row.worker_exit === "signal") return true;
+  if (row.worker_exit === "signal") return !text(row.pushed_head_sha);
   return (row.subtype === "error_exit_null" || row.worker_subtype === "error_exit_null") && !text(row.pushed_head_sha);
 }
 
