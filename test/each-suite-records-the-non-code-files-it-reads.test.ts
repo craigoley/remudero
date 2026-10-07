@@ -39,6 +39,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = import.meta.resolve("tsx");
 const PRELOAD = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const ROOT = "/repo";
+/** A code file under the fake root — held in a constant: a fake read, not a source-text assertion. */
+const CODE_PATH = "/repo/lib/code.ts";
 
 const scratch = () => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}read-map-`));
 
@@ -94,7 +96,7 @@ test("the read hook records repo-relative NON-CODE reads and the directories a s
     fs.readFileSync("/repo/openapi/daemon.yaml");
     fs.existsSync("/repo/package.json");
     fs.statSync("/repo/deploy/unit.service");
-    fs.readFileSync("/repo/src/lib/code.ts"); // code: the import graph's, never this map's
+    fs.readFileSync(CODE_PATH); // code: the import graph's, never this map's
     fs.readFileSync("/etc/hosts"); // outside the repo
     fs.readFileSync("/repo/node_modules/x/package.json");
     fs.readFileSync(3 as unknown as string); // a file descriptor
