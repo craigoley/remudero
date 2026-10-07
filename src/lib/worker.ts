@@ -5421,6 +5421,23 @@ async function worktreeGit(args: string[], forwardOutput = false, env?: NodeJS.P
 /** W1-T5120: catch-ups of a freshly cut worktree to a still-moving remote head before the stale-base refusal stands. */
 export const WORKTREE_CATCH_UP_ATTEMPTS = 3;
 
+const worktreeRegistrationTails = new Map<string, Promise<void>>();
+
+async function withWorktreeRegistration<T>(repoDir: string, add: () => Promise<T>): Promise<T> {
+  const key = realpathSync(repoDir);
+  const previous = worktreeRegistrationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  worktreeRegistrationTails.set(key, held);
+  await previous;
+  try {
+    return await add();
+  } finally {
+    release();
+    if (worktreeRegistrationTails.get(key) === held) worktreeRegistrationTails.delete(key);
+  }
+}
+
 export async function worktreeAddAsync(
   repoDir: string,
   worktreePath: string,
@@ -5440,7 +5457,7 @@ export async function worktreeAddAsync(
     // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
-  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv());
+  await withWorktreeRegistration(repoDir, () => worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv()));
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
   // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
   const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
