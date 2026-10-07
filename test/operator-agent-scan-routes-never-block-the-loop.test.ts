@@ -5,7 +5,7 @@
 // large rotated corpus and watch the event loop while they answer.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { cpSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
 import { DELEGATION_PROFILE_LEDGER_STEP } from "../src/lib/delegation-profile.js";
 import { OPERATOR_AGENT_EXPERIMENT_STEP, settleOperatorAgentUnionLoads } from "../src/lib/operator-agent.js";
 import { builtProfile, READ_TOKEN, withDelegationService } from "./helpers/delegation-profile-fixture.js";
-import { writeLedger, type LedgerRotationFixture } from "./helpers/ledger-fixture.js";
+import { writeLedger, type LedgerFixture, type LedgerRotationFixture } from "./helpers/ledger-fixture.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -84,6 +84,43 @@ function archive(index: number, extra: Array<Record<string, unknown>> = []): Led
   return { at: new Date(Date.UTC(2026, 8, 1) + index * 3_600_000).toISOString(), rows: [...rows, ...extra], gz: true };
 }
 
+function writeArchives(count: number, make: (index: number) => LedgerRotationFixture = archive, write: typeof writeLedger = writeLedger): LedgerFixture {
+  const ledger = write();
+  // Release each archive's input rows before constructing the next; the on-disk corpus is unchanged.
+  for (let i = 0; i < count; i++) write([], { dir: ledger.dir, rotations: [make(i)] });
+  return ledger;
+}
+
+test("rotated scan fixtures write each archive before generating the next archive's rows", () => {
+  const order: string[] = [];
+  const ledger: LedgerFixture = { dir: "/fixture-only/owned", path: "/fixture-only/owned/ledger.ndjson", append() {} };
+  const result = writeArchives(3, (i) => {
+    order.push(`make:${i}`);
+    return { at: new Date(Date.UTC(2026, 8, 1) + i * 3_600_000).toISOString(), rows: [{ archive: i }], gz: true };
+  }, (rows = [], opts = {}) => {
+    assert.deepEqual(rows, []);
+    if (opts.rotations === undefined) order.push("init");
+    else {
+      assert.equal(opts.dir, ledger.dir);
+      assert.equal(opts.rotations.length, 1, "only one archive's input rows may be live at the writer");
+      order.push(`write:${opts.rotations[0]!.rows[0]!.archive}`);
+    }
+    return ledger;
+  });
+  assert.equal(result, ledger);
+  assert.deepEqual(order, ["init", "make:0", "write:0", "make:1", "write:1", "make:2", "write:2"]);
+});
+
+test("incremental scan fixtures preserve every native gzip archive and live-ledger byte", () => {
+  const make = (i: number): LedgerRotationFixture => archive(i, i === 1 ? [stopRow("fixture-byte-control")] : []);
+  const bulk = writeLedger([], { rotations: Array.from({ length: 3 }, (_, i) => make(i)) });
+  const incremental = writeArchives(3, make);
+  const names = readdirSync(bulk.dir).sort();
+  assert.equal(names.filter((name) => name.endsWith(".ndjson.gz")).length, 3, "positive control: all three rotations exist");
+  assert.deepEqual(readdirSync(incremental.dir).sort(), names);
+  for (const name of names) assert.deepEqual(readFileSync(join(incremental.dir, name)), readFileSync(join(bulk.dir, name)), name);
+});
+
 /** How much CPU this thread spent between two 5 ms ticks at most (`stallMs`), and in total (`busyMs`), while `work` ran:
  *  the longest block of work that kept the loop from turning. Wall-clock tick gaps, and event-loop utilization too, also
  *  count time the OS took the thread away, so a CPU-starved CI runner read a healthy chunked route as a 150+ ms stall
@@ -127,9 +164,9 @@ const COLD_ROUTES: Array<{ path: string; answered: (body: Record<string, unknown
 ];
 
 test("each operator-agent scan route answers a cold large corpus without holding the event loop", async () => {
-  const rotations = Array.from({ length: ARCHIVES }, (_, i) => archive(i, i === 3 ? [experimentRow(), stopRow("stop-archived")] : []));
-  rotations[7] = archive(7, [{ ts: "2026-09-20T10:00:00.000Z", step: DELEGATION_PROFILE_LEDGER_STEP, profile: builtProfile() }]);
-  const template = writeLedger([], { rotations });
+  const template = writeArchives(ARCHIVES, (i) => archive(i, i === 3 ? [experimentRow(), stopRow("stop-archived")] :
+    i === 7 ? [{ ts: "2026-09-20T10:00:00.000Z", step: DELEGATION_PROFILE_LEDGER_STEP, profile: builtProfile() }] : []));
+  assert.equal(readdirSync(template.dir).filter((name) => name.endsWith(".ndjson.gz")).length, ARCHIVES, "every real rotation remains in the cold corpus");
   for (const route of COLD_ROUTES) {
     // A state dir of its own, so every route meets the corpus cold.
     const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}oa-scan-`));
@@ -144,7 +181,7 @@ test("each operator-agent scan route answers a cold large corpus without holding
 });
 
 test("after a rotation lands the emergency status answers within budget and sees the new stop", async () => {
-  const ledger = writeLedger([], { rotations: Array.from({ length: ARCHIVES }, (_, i) => archive(i)) });
+  const ledger = writeArchives(ARCHIVES);
   await withDelegationService(ledger.path, async (base) => {
     await read(base, "/v1/operator-agent/emergency/status");
     writeLedger([], { dir: ledger.dir, rotations: [archive(ARCHIVES, [stopRow("stop-rotated")])] });
