@@ -12,6 +12,7 @@ import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -410,9 +411,10 @@ function probeShardYaml(): string {
 /** W1-T4226: lint-plan reads GitHub through its `LintPlanStatusDeps` seam, not the refused `gh` —
  *  offline, with a recording fake gateway so the caller can assert none was ever built (mirrors
  *  test/policy.test.ts's `offlineLintDeps`). Every check this file wires is checkout-local. */
-function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
+function offlineLintDeps(gatewaysBuilt: string[], checkoutRoot = REPO_ROOT): LintPlanStatusDeps {
   const github = fakeGitHub();
   return {
+    repoRoot: checkoutRoot,
     offline: true,
     ghGateway: (owner, repo) => {
       gatewaysBuilt.push(`${owner}/${repo}`);
@@ -424,7 +426,7 @@ function offlineLintDeps(gatewaysBuilt: string[]): LintPlanStatusDeps {
 /** Captures console.log/error/warn during a `lintPlanCommand` call into ONE combined stream —
  *  the warning this task cares about is printed via console.warn (the soft-violation branch),
  *  distinct from test/lint-plan-open-only.test.ts's own helper, which discards warn entirely. */
-async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCode: number; combined: string }> {
+async function runLintPlanCapturingEverything(args: string[], checkoutRoot = REPO_ROOT): Promise<{ exitCode: number; combined: string }> {
   const origLog = console.log;
   const origError = console.error;
   const origWarn = console.warn;
@@ -434,7 +436,7 @@ async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCod
   console.warn = (m?: unknown) => void lines.push(String(m));
   try {
     const gatewaysBuilt: string[] = [];
-    const exitCode = await lintPlanCommand(args, offlineLintDeps(gatewaysBuilt));
+    const exitCode = await lintPlanCommand(args, offlineLintDeps(gatewaysBuilt, checkoutRoot));
     assert.deepEqual(gatewaysBuilt, [], "lint-plan must not build a GitHub gateway from this test");
     return { exitCode, combined: lines.join("\n") };
   } finally {
@@ -444,29 +446,33 @@ async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCod
   }
 }
 
-test("W1-T497 ACCEPTANCE 1+3: the --base changed-tasks pass WARNS on a zero-resolving name-filtered proof, and the warning stays advisory (no block, exit 0)", async () => {
-  // Placed as a NEW, untracked shard under the REAL plan/tasks.d/: absent from `git show
-  // HEAD:...`, so `changedTaskIds` counts it as new-in-scope without editing any tracked file.
-  // W1-T515: THE FIXTURE PLAN, NOT THE LIVE ONE. This probe used to land under the real
-  // `plan/tasks.d/`. It never dirtied TRACKED state — `checkServiceFreshness` reads
-  // `--porcelain -uno`, so untracked litter can never pin the daemon — but `checkCliFreshness`
-  // reads a BARE `--porcelain`, so a crash between the write and the cleanup made every `rmd`
-  // verb in this checkout refuse with `reason: "dirty"`. It also raced every other reader of that
-  // directory under a parallel runner, which is the ENOENT crash #1873/#1874 guards the symptom of.
-  // The probe still has to be ABSENT AT THE BASE REF for `changedTaskIds` to count it new-in-scope,
-  // and an untracked file under the COMMITTED fixture satisfies that exactly as it did before.
-  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
-  const shardPath = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
+function wiringCheckout() {
+  const repo = gitRepo({ kind: "lint-wiring-isolated" });
+  const fixtureDir = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring");
+  mkdirSync(fixtureDir, { recursive: true });
+  writeFileSync(join(fixtureDir, "tasks.yaml"), readFileSync(join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml")));
+  writeFileSync(join(repo.dir, "test", "task-linter-wiring.test.ts"), readFileSync(fileURLToPath(import.meta.url)));
+  repo.git("add", ".");
+  repo.git("commit", "-qm", "seed the real committed lint fixture and test corpus");
+  return repo;
+}
+
+test("W1-T497 ACCEPTANCE 1+3: the isolated --base probe leaves the shared checkout clean while warning on a zero-resolving proof", async (t) => {
+  const repo = wiringCheckout();
+  t.after(() => repo.cleanup());
+  const fixturePlan = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
+  const shardPath = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
   mkdirSync(dirname(shardPath), { recursive: true }); // the fixture ships no tasks.d until a probe needs one
-  const livePlanBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
+  const livePlanBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
   writeFileSync(shardPath, probeShardYaml(), "utf8");
   try {
     // DURING, not only after: the dirty window IS the race, so the live tree is checked while the
     // probe is on disk rather than once it has been cleaned up.
-    const livePlanDuring = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
-    assert.equal(livePlanDuring, livePlanBefore, "the LIVE plan/ tree must be untouched WHILE the probe shard exists");
-    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"]);
+    const livePlanDuring = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
+    assert.equal(livePlanDuring, livePlanBefore, "the entire shared checkout must be untouched WHILE the probe shard exists");
+    assert.ok(repo.git("status", "--porcelain").includes("tasks.d/"), "the real new shard is visible in its own Git checkout");
+    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"], repo.dir);
     assert.match(
       combined,
       new RegExp(`⚠ ${PROBE_ID}: \\[proof-name-resolution\\]`),
@@ -539,10 +545,12 @@ function grepProbeShardYaml(caseFileRel: string, dirAsFileRel: string): string {
   ].join("\n");
 }
 
-test("W1-T1225 ACCEPTANCE: the --base changed-tasks pass WARNS proof-grep-unmatchable on a case-only grep proof, AND a directory named where a file was expected degrades to silence rather than crashing", async () => {
-  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
+test("W1-T1225 ACCEPTANCE: the isolated --base probe warns on case-only grep and preserves the real directory read refusal", async (t) => {
+  const repo = wiringCheckout();
+  t.after(() => repo.cleanup());
+  const fixturePlan = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
   const shardPath = join(
-    REPO_ROOT,
+    repo.dir,
     "test",
     "fixtures",
     "live-plan-writers",
@@ -550,22 +558,24 @@ test("W1-T1225 ACCEPTANCE: the --base changed-tasks pass WARNS proof-grep-unmatc
     "tasks.d",
     "zzz-w1-t1225-wiring-probe.yaml",
   );
-  const tmpDir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1225-wiring-"));
+  const tmpDir = mkdtempSync(join(repo.dir, "test", ".tmp-w1-t1225-wiring-"));
   const caseFileAbs = join(tmpDir, "case-fixture.md");
   // Named WITH an extension on purpose (R-12): parseDialectGrep and proof-grep-safety now refuse a
   // directory-SHAPED target (no extension on the final segment) before anything opens it, so an
   // extensionless name would BLOCK here and never reach the unmatchable check's own EISDIR branch —
   // the branch this test exists to drive. A dotted directory passes the shape rule.
   const dirAsFileAbs = join(tmpDir, "dir-as-file.md");
-  const caseFileRel = relative(REPO_ROOT, caseFileAbs);
-  const dirAsFileRel = relative(REPO_ROOT, dirAsFileAbs);
+  const caseFileRel = relative(repo.dir, caseFileAbs);
+  const dirAsFileRel = relative(repo.dir, dirAsFileAbs);
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
   mkdirSync(dirname(shardPath), { recursive: true });
+  const sharedBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim();
   mkdirSync(dirAsFileAbs, { recursive: true }); // a REAL directory: existsSync true, readFileSync throws EISDIR
   writeFileSync(caseFileAbs, GREP_CASE_FILE_TEXT, "utf8");
   writeFileSync(shardPath, grepProbeShardYaml(caseFileRel, dirAsFileRel), "utf8");
   try {
-    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"]);
+    assert.equal(execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain"], { encoding: "utf8" }).trim(), sharedBefore, "case file, directory and shard must not mutate the shared checkout");
+    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"], repo.dir);
     assert.match(
       combined,
       new RegExp(`⚠ ${GREP_PROBE_ID}: \\[proof-grep-unmatchable\\]`),
