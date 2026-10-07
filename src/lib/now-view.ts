@@ -1217,7 +1217,7 @@ export function createNowView(opts: NowViewOptions): {
       if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
       const probeMs = Date.parse(built.probe.sampledAt);
-      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, { rows: createLedgerRotationMemo((r) => r, { storage: "compressed" }), costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number")) }).get(name)!;
+      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, { rows: createLedgerRotationMemo((r) => r), costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number")) }).get(name)!;
       const [rowsPass, costsPass] = [memo.rows.pass({ parseMissing: true }), memo.costs.pass({ parseMissing: true })];
       const live = readLedgerLines(ledgerPath);
       // Each computation reads the rows the live file held over the window it evaluates, up to the body's build.

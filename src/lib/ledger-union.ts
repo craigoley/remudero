@@ -5,8 +5,7 @@ import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { readFile as nodeReadFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync, deflateRawSync, inflateRawSync } from "node:zlib";
-import { serialize, deserialize } from "node:v8";
+import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
 import {
   LEDGER_CARRIED_PREFIX_SUFFIX,
   LEDGER_FILENAME,
@@ -918,40 +917,13 @@ export interface LedgerRotationMemo {
   pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
-  retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number; compressedBytes?: number };
+  retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number };
 }
 
 /** Lines one turn of the event loop parses while {@link createLedgerRotationMemo} loads a rotation. */
 export const LEDGER_ROTATION_LOAD_LINES_PER_TURN = 10_000;
 
-type MemoEntry = { key: string; read?: LedgerRotationRecords; packed?: { chunks: Buffer[]; rows: number; torn: number } };
-
-const MEMO_PACK_ROWS = 1000;
-function packedMemoEntry(key: string, read: LedgerRotationRecords): MemoEntry {
-  try {
-    const chunks: Buffer[] = [];
-    for (let at = 0; at < Math.max(1, read.rows.length); at += MEMO_PACK_ROWS) {
-      chunks.push(deflateRawSync(serialize({ rows: read.rows.slice(at, at + MEMO_PACK_ROWS),
-        torn: at === 0 ? read.torn : 0, tornLines: at === 0 ? read.tornLines : [] })));
-    }
-    return { key, packed: { chunks, rows: read.rows.length, torn: read.torn } };
-  } catch {
-    // Unserializable injected values retain the ordinary cache; compression never loses a readable row.
-    return { key, read };
-  }
-}
-
-function unpackMemoEntry(entry: MemoEntry): LedgerRotationRecords {
-  if (entry.read) return entry.read;
-  const read: LedgerRotationRecords = { rows: [], torn: 0, tornLines: [] };
-  for (const chunk of entry.packed!.chunks) {
-    const part = deserialize(inflateRawSync(chunk)) as LedgerRotationRecords;
-    read.rows.push(...part.rows);
-    read.torn += part.torn;
-    read.tornLines.push(...part.tornLines);
-  }
-  return read;
-}
+type MemoEntry = { key: string; read?: LedgerRotationRecords };
 
 /**
  * Memoizes each rotation's `reduce`d records by path, size and mtime. A rotation is written once, so a
@@ -969,7 +941,6 @@ export function createLedgerRotationMemo(
     yieldTurn?: () => Promise<void>;
     /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
     pattern?: RegExp;
-    storage?: "compressed";
   } = {},
 ): LedgerRotationMemo {
   const statKey = io.statKey ?? ((path: string) => {
@@ -979,7 +950,6 @@ export function createLedgerRotationMemo(
   const readFile = io.readFile ?? ((path: string) => nodeReadFile(path));
   const yieldTurn = io.yieldTurn ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
   let memo = new Map<string, MemoEntry>();
-  const keep = (key: string, read: LedgerRotationRecords): MemoEntry => io.storage === "compressed" ? packedMemoEntry(key, read) : { key, read };
   const loading = new Map<string, Promise<void>>();
 
   const loadOne = async (entry: LedgerCorpusEntry): Promise<void> => {
@@ -999,7 +969,7 @@ export function createLedgerRotationMemo(
         rows = reduce([...rows, ...slice]);
         await yieldTurn();
       }
-      memo.set(entry.path, keep(key, { rows, torn, tornLines }));
+      memo.set(entry.path, { key, read: { rows, torn, tornLines } });
     } catch {
       // deliberate: a failed load leaves a keyed marker, so the next pass parses this rotation inline and a
       // corrupt archive still lands in the union's `unread` exactly as it would without a memo.
@@ -1010,19 +980,13 @@ export function createLedgerRotationMemo(
   return {
     size: () => memo.size,
     retention: () => {
-      let rows = 0, tornRows = 0, failedArchives = 0, compressedBytes = 0;
+      let rows = 0, tornRows = 0, failedArchives = 0;
       for (const entry of memo.values()) {
-        if (entry.packed) {
-          rows += entry.packed.rows;
-          tornRows += entry.packed.torn;
-          for (const chunk of entry.packed.chunks) compressedBytes += chunk.byteLength;
-          continue;
-        }
         if (!entry.read) { failedArchives++; continue; }
         rows += entry.read.rows.length;
         tornRows += entry.read.torn;
       }
-      return { archives: memo.size, rows, tornRows, failedArchives, ...(compressedBytes ? { compressedBytes } : {}) };
+      return { archives: memo.size, rows, tornRows, failedArchives };
     },
     load: async (entries) => {
       for (const entry of entries) {
@@ -1033,7 +997,6 @@ export function createLedgerRotationMemo(
     },
     pass: (passOpts = {}) => {
       const touched = new Map<string, MemoEntry>();
-      const decoded = new Map<MemoEntry, LedgerRotationRecords>();
       const missing: LedgerCorpusEntry[] = [];
       const rotationRecords: LedgerRotationHook = (entry, parse) => {
         let key: string;
@@ -1044,29 +1007,24 @@ export function createLedgerRotationMemo(
           return parse();
         }
         const hit = memo.get(entry.path);
-        if (hit?.key === key && (hit.read || hit.packed)) {
+        if (hit?.key === key && hit.read) {
           touched.set(entry.path, hit);
-          let read = decoded.get(hit);
-          if (!read) { read = unpackMemoEntry(hit); decoded.set(hit, read); }
-          return read;
+          return hit.read;
         }
         if (hit?.key !== key && !passOpts.parseMissing) {
           missing.push(entry);
           return { rows: [], torn: 0, tornLines: [] };
         }
         const parsed = parse();
-        const read = { rows: reduce(parsed.rows), torn: parsed.torn, tornLines: parsed.tornLines };
-        const fresh = keep(key, read);
+        const fresh = { key, read: { rows: reduce(parsed.rows), torn: parsed.torn, tornLines: parsed.tornLines } };
         memo.set(entry.path, fresh);
         touched.set(entry.path, fresh);
-        decoded.set(fresh, read);
-        return read;
+        return fresh.read;
       };
       return {
         rotationRecords,
         missing: () => [...missing],
         complete: () => {
-          decoded.clear();
           if (missing.length === 0) memo = touched;
           return missing.length === 0;
         },

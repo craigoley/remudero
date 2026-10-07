@@ -1113,12 +1113,7 @@ test("now legacy retention is named without dropping old rows from a recent arch
   view.legacy("instance=core", T0 + 30_000, body.data);
   const reports = logged.filter((row) => row.step === "read_model.now_legacy_retention");
   assert.equal(reports.length, 1);
-  const retention = reports[0]?.rows as { archives: number; rows: number; tornRows: number; failedArchives: number; compressedBytes: number };
-  assert.equal(retention.archives, 1);
-  assert.equal(retention.rows, 1);
-  assert.equal(retention.tornRows, 0);
-  assert.equal(retention.failedArchives, 0);
-  assert.ok(retention.compressedBytes > 0, "production comparator uses lossless compact memo storage");
+  assert.deepEqual(reports[0]?.rows, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
   assert.deepEqual(reports[0]?.costs, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
   assert.deepEqual(Object.keys(reports[0]!).sort(), ["costs", "instance", "rows", "step"]);
 });
