@@ -1,0 +1,52 @@
+- id: W1-T6123
+  title: "THE GIT-LEAF CHECK SEES A cwd-OPTION SPAWN — W1-T6106's census counts only `\"-C\", <name>` argv whose name is one of seven worktree spellings, so a git spawn that addresses a worktree through a `cwd:` option (selectOpenWeightUnitTestSuites, isGitWorktree, codexGitWritableRoots in worker-provider.ts) or through `-C opts.cwd` (commitGeneratorOutputViaGit) is invisible to it, and a new one can land without failing anything"
+  repo: remudero
+  depends_on: [W1-T6106]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the host-git leaf census counts as a raw spawn into a worktree
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778), verified read-only on the #9778 head before filing"
+  plan_refs: [W1-T6106, W1-T6091, W1-T6121, W1-T6122]
+  files: [test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9778 head (bfcd880b4, W1-T6106's build, open at filing).
+    test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts counts `WORKTREE_TARGET`, a regex over
+    `"-C",\s*(?:wt|worktreePath|<x>.worktreePath|worktreeRoot|batchWorktree|ownerPath)`. Two shapes escape it:
+      1. THE cwd OPTION. src/lib/worker-provider.ts `selectOpenWeightUnitTestSuites` (#9753, W1-T6091) runs
+         `git merge-base`, `git diff --name-only` and `git ls-files --others` as `spawn(file, args, { cwd: at })` with
+         `at` the worker worktree, through `defaultPreflightSpawn`; `isGitWorktree` and `codexGitWritableRoots` spawn
+         `git rev-parse` with `{ cwd }`. With no `-C` in the argv, none is counted.
+      2. AN UNLISTED NAME. Across src/ at that head, `"-C", cwd` appears 22 times, `"-C", root` 19, `"-C", dir` 18,
+         `"-C", path` 11 and `"-C", opts.cwd` 6, none of them counted; src/run-task.ts commitGeneratorOutputViaGit,
+         which the census's own reason names as unconverted, is all `-C opts.cwd`.
+    So the exception table's "only ever shrinks" holds only for spellings it already knows.
+  design: |
+    The builder owns the detector; constraints: (1) count a raw git spawn whose `cwd` option names the addressed
+    tree, including shorthand `{ cwd }` and an injected spawn helper called with "git" (the `run("git", …)` shape), and
+    count `-C` argv by position, not by a list of variable names, in a detector the census file names
+    `CWD_OPTION_GIT_SPAWN` (the one name this shard fixes, so a grep proof can discriminate); (2) every counted site that is NOT a worktree
+    (the daemon's own checkout, a fixture-free repoDir the harness made) is admitted through a per-file reasoned
+    exception, the same ratchet W1-T6106 built, so the population is a list, not a guess; (3) a positive control
+    asserts the detector finds the known cwd-option sites above, so a detector that matches nothing fails loudly; (4)
+    this task converts nothing: W1-T6121 and W1-T6122 own the conversions in their files, and the exceptions recorded
+    here are theirs to lower. Files neither owns (src/lib/worker-provider.ts above all) are recorded with their sites,
+    and the PR names them as the follow-up conversion they now need.
+  acceptance:
+    - claim: "the leaf census counts a git spawn that addresses a tree through a cwd option or a -C argv under any variable name, finds the cwd-option git spawns in src/lib/worker-provider.ts among the counted sites while they are unconverted, and a cwd-option git spawn into a worktree added to a src file fails the census naming that file"
+      proof: "unit test: test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts"
+      kind: guard
+    - claim: "the leaf census itself carries the cwd-option detector, named CWD_OPTION_GIT_SPAWN"
+      proof: "grep: CWD_OPTION_GIT_SPAWN in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+  falsifier: |
+    At the W1-T6106 head, add `spawnSync("git", ["status"], { cwd: worktreePath })` to a src file: the census passes,
+    so the new test's injected-site case fails.
+  notes: |
+    The test slug avoids the word census so the shard is not read as a CI rule suite (as W1-T6112's did). Depends on
+    W1-T6106 (#9778, open at filing): the census this widens arrives with it. If W1-T6121 or W1-T6122 merges first,
+    the counts move; the detector, not the numbers, is this task.

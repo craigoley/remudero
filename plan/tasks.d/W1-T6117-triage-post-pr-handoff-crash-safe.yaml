@@ -1,0 +1,33 @@
+- id: W1-T6117
+  title: "Triage post-PR handoff is not crash-safe — a holder that dies right after remote PR creation leaves state/triage.lock wedged and pr.opened/run.awaiting_external unrecorded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OBSERVED: triage of fb-1789349833277-20ca42 committed its proposal and feedback-link commits, pushed
+    run-TRIAGE-fb-1789349833277-20ca42-1789365003724 and opened core PR #5494, then its holder PID vanished before
+    the ledger steps pr.opened / run.awaiting_external and claim release. state/triage.lock stayed wedged until a
+    manual recovery proved the PID absent and released only the lock."
+  # Rule 19 merits: one interruption/restart integration test requires both the run-task lock lifecycle and auto-triage PR handoff to preserve a single recovery transaction; neither subsystem can satisfy it alone.
+  design: |
+    1. WRITE-AHEAD HANDOFF. Persist a handoff record (run id, branch, feedback id) BEFORE the remote PR operation,
+       and complete it (PR number, pr.opened, run.awaiting_external) immediately after. A restart that finds a
+       handoff record with a pushed branch/open PR finishes the ledger steps idempotently (look the PR up by branch;
+       never open a second one).
+    2. DEAD-LOCK RECOVERY. A triage lock whose holder PID is provably absent (same host) is reclaimed by the next
+       triage start. Reclaim must be atomic (rename/compare-and-swap on the lock content) so two recoverers cannot
+       both win, and so no concurrent ID minting is permitted.
+    3. REMOTE CLAIM OWNERSHIP IS KEPT while the PR is genuinely awaiting CI: recovery releases only the LOCAL lock;
+       the remote triage claim is released only through decideTriageClaimRelease once the outcome is observed.
+    4. TEST a process interruption immediately after remote PR creation (kill/throw between PR create and ledger write).
+  acceptance:
+    - claim: "one process-interruption integration test spanning auto-triage and the run-task triage entry point proves that, after remote PR creation and holder death, two concurrent restarts yield exactly one local-lock recovery, record pr.opened and run.awaiting_external idempotently, open no second PR, and retain the remote claim while CI is pending"
+      proof: "unit test: test/triage-post-pr-handoff-crash-safe.test.ts"
+  risk: high
+  origin: feedback#fb-1789365327024-d9c74b
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/auto-triage.ts, test/triage-post-pr-handoff-crash-safe.test.ts]
+  status: queued
+  attempts: 0
