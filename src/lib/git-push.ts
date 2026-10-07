@@ -1,10 +1,13 @@
-import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 import {
+  HOST_GIT_CONFIG,
   harnessHooksDir,
   hostWorktreeGit,
   hostWorktreeGitAsync,
@@ -472,12 +475,37 @@ function* prePushGateSteps(
   const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
-  // The daemon's env as git gave it to the hook — no pin, no overrides; the hook scrubs GIT_DIR (W1-T3224).
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(k)) delete env[k];
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env: prePushGateEnv() };
+}
+
+const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
+
+/** W1-T6120 — the gate's env is an ALLOWLIST: GH_TOKEN, GH_APP_* and provider keys stay with the push. Its git calls
+ *  carry {@link HOST_GIT_CONFIG}, and {@link withGateHome} gives it a throwaway HOME. */
+export function prePushGateEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of GATE_ENV_ALLOWLIST) if (typeof base[key] === "string") env[key] = base[key];
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_CONFIG_COUNT = String(HOST_GIT_CONFIG.length);
+  HOST_GIT_CONFIG.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
+/** Runs `run` with `gate.env.HOME` a fresh empty directory, removed once `run` (or the promise it returns) settles. */
+function withGateHome<T>(gate: PrePushGate, run: (env: NodeJS.ProcessEnv) => T): T {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prepush-home-`));
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  let settlesLater = false;
+  try {
+    const result = run({ ...gate.env, HOME: home });
+    settlesLater = result instanceof Promise;
+    return settlesLater ? ((result as Promise<unknown>).finally(cleanup) as T) : result;
+  } finally {
+    if (!settlesLater) cleanup();
   }
-  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 /** A refused gate, in the shape a refused `git push` had: `runErrorCause` and `censusPushRefusal` read it. */
@@ -510,15 +538,11 @@ export function worktreePushExec(worktreePath: string): PushExec {
     const pushArgs = leafArgs(worktreePath, args);
     const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
     if (gate) {
-      try {
-        const out = execFileSync(gate.hook, gate.args, {
-          cwd: worktreePath, input: gate.input, env: gate.env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER, stdio: ["pipe", "pipe", "pipe"],
-        });
-        if (opts.stdio !== "ignore") process.stdout.write(out);
-      } catch (err) {
-        if (opts.stdio !== "ignore") writeThrough(err);
-        throw gateRefusal(worktreePath, pushArgs, err);
-      }
+      const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
+        cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
+      }));
+      if (opts.stdio !== "ignore") writeThrough(res); // on a pass too: a skipped check says so on stderr
+      if (res.error !== undefined || res.status !== 0) throw gateRefusal(worktreePath, pushArgs, res.error ?? res);
     }
     try {
       hostWorktreeGit(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
@@ -536,12 +560,12 @@ export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
     const gate = await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a)));
     if (gate) {
       try {
-        const out = await new Promise<string>((resolveGate, reject) => {
-          const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env: gate.env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
-            (err, stdout, stderr) => (err ? reject(Object.assign(err, { stdout, stderr })) : resolveGate(stdout)));
+        const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {
+          const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
+            (err, stdout, stderr) => (err ? reject(Object.assign(err, { stdout, stderr })) : resolveGate({ stdout, stderr })));
           child.stdin?.end(gate.input);
-        });
-        if (opts.stdio !== "ignore") process.stdout.write(out);
+        }));
+        if (opts.stdio !== "ignore") writeThrough(out);
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);
         throw gateRefusal(worktreePath, pushArgs, err);

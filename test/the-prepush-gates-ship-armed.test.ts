@@ -16,7 +16,7 @@
  * cover a hook that has already unset git's per-invocation environment before reaching them.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -25,6 +25,13 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
+/** W1-T6120: the hook runs its checks from its OWN code root, so a fixture runs it as the tree's own hook. */
+function ownHook(tree: string): string {
+  mkdirSync(join(tree, "hooks"), { recursive: true });
+  copyFileSync(HOOK, join(tree, "hooks", "pre-push"));
+  return join(tree, "hooks", "pre-push");
+}
+
 
 function scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-prepush-"));
@@ -36,7 +43,7 @@ function runHook(cwd: string, env: Record<string, string>): { status: number; st
   // spawnSync, NOT execFileSync: the latter RETURNS stdout and surfaces stderr only by throwing, so
   // a hook that exits 0 while naming a skip on stderr would read here as having said nothing — the
   // exact case two of these tests exist to pin.
-  const res = spawnSync("sh", [HOOK], {
+  const res = spawnSync("sh", [ownHook(cwd)], {
     cwd,
     encoding: "utf8",
     env: { PATH: process.env.PATH ?? "", HOME: cwd, ...env },

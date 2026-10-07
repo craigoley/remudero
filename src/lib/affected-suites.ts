@@ -18,11 +18,19 @@
  * selects the FULL suite and says which file forced it.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 
-import { impactArmSelection, maskLiterals, stripComments, type ImpactArmInput } from "./test-impact-map.js";
+import {
+  IMPACT_MAP_STALENESS_BOUND,
+  impactArmSelection,
+  impactDrift,
+  maskLiterals,
+  spawningSuites,
+  stripComments,
+  type ImpactArmInput,
+} from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 
 export { stripComments };
@@ -53,6 +61,10 @@ export interface AffectedSelection {
    *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
   impact?: string[];
   impactFallback?: string;
+  /** W1-T6084 — set when a read map was asked for and cannot speak for this change (missing, stale,
+   *  not an ancestor of the base): census membership and the non-code full-run triggers then follow
+   *  today's rules, and this says why. */
+  readMapFallback?: string;
 }
 
 /** Everything the selector decides from, as plain DATA — the selector itself reads nothing. */
@@ -67,6 +79,8 @@ export interface AffectedSuitesInput {
   symbolSuites?: readonly string[];
   /** W1-T6083: main's impact map and the change's place against it — enables `impact`. */
   impact?: ImpactArmInput;
+  /** W1-T6084: main's read map — which suites READ or LISTED each non-code path — and its drift. */
+  readMap?: ReadMapInput;
 }
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
@@ -76,9 +90,142 @@ const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
 const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 
-/** The file that forces a full run, or undefined when every change is modelled. */
-export function fullRunTrigger(changed: readonly string[]): string | undefined {
-  return changed.find((f) => !MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
+/** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
+const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
+
+/** The file that forces a full run, or undefined when every change is modelled. A file the read map
+ *  speaks for ({@link READ_MAPPED}) forces one only when `readMapUsable` is false. */
+export function fullRunTrigger(changed: readonly string[], readMapUsable = false): string | undefined {
+  return changed.find((f) => !(readMapUsable && READ_MAPPED.test(f)) &&
+    (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f))));
+}
+
+export const READ_MAP_FORMAT = "rmd-read-map-v1";
+
+/** One test file's record, as test/setup/read-map.ts writes it. */
+export interface ReadMapRecord {
+  suite: string;
+  reads: readonly string[];
+  listed: readonly string[];
+}
+
+/** Main's merged read map: for each non-code path, the suites that read it (indices into `suites`),
+ *  and for each directory, the suites that listed it — `dir/**` when the listing was recursive. */
+export interface ReadMap {
+  format: typeof READ_MAP_FORMAT;
+  /** The main sha whose full run recorded this map. */
+  sha: string;
+  suites: string[];
+  reads: Record<string, number[]>;
+  listed: Record<string, number[]>;
+}
+
+/** What the selector decides from beside the map: why it is absent, and its drift against the base. */
+export interface ReadMapInput {
+  map?: ReadMap;
+  mapProblem?: string;
+  drift: ImpactArmInput["drift"];
+  stalenessBound?: number;
+}
+
+/** Merges per-suite records into one map keyed by `sha`. A suite named twice (a retry) is unioned. */
+export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: string }): ReadMap {
+  const merged = new Map<string, { reads: Set<string>; listed: Set<string> }>();
+  for (const r of records) {
+    const into = merged.get(r.suite) ?? { reads: new Set<string>(), listed: new Set<string>() };
+    for (const p of r.reads) into.reads.add(p);
+    for (const p of r.listed) into.listed.add(p);
+    merged.set(r.suite, into);
+  }
+  const suites = [...merged.keys()].sort();
+  const reads: Record<string, number[]> = {};
+  const listed: Record<string, number[]> = {};
+  suites.forEach((suite, i) => {
+    const entry = merged.get(suite)!;
+    for (const p of [...entry.reads].sort()) (reads[p] ??= []).push(i);
+    for (const p of [...entry.listed].sort()) (listed[p] ??= []).push(i);
+  });
+  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed };
+}
+
+/** The records one full run left in `dir` (test/setup/read-map.ts's files). A file that is not a
+ *  record is reported in `problems`, never silently read as an empty one. */
+export function readReadRecords(dir: string): { records: ReadMapRecord[]; problems: string[] } {
+  const records: ReadMapRecord[] = [];
+  const problems: string[] = [];
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
+    const value = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<ReadMapRecord> & { format?: string };
+    if (value.format !== "rmd-read-record-v1" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed)) {
+      problems.push(`${name} is not a read record`);
+      continue;
+    }
+    records.push({ suite: value.suite, reads: value.reads, listed: value.listed });
+  }
+  return { records, problems };
+}
+
+/** Parses the merged map at `path`; a missing or malformed file is a NAMED problem, never an empty map. */
+export function readReadMap(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf8")): { map?: ReadMap; problem?: string } {
+  let value: Partial<ReadMap> | undefined;
+  try {
+    value = JSON.parse(read(path)) as Partial<ReadMap>;
+  } catch (err) {
+    return { problem: `read map ${path} unreadable: ${(err as Error).message}` };
+  }
+  const object = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (value?.format !== READ_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
+      !object(value.reads) || !object(value.listed)) {
+    return { problem: `read map ${path} is not a ${READ_MAP_FORMAT} file` };
+  }
+  return { map: value as ReadMap };
+}
+
+/** The read map for a checkout: the map at `mapPath` and its drift against `base`. */
+export function readReadMapInput(
+  root: string, mapPath: string, base: string, run?: Parameters<typeof impactDrift>[3],
+): ReadMapInput {
+  const { map, problem } = readReadMap(mapPath);
+  return map ? { map, drift: impactDrift(root, map.sha, base, run) } : { mapProblem: problem, drift: { changedSinceMap: [] } };
+}
+
+/** Why the read map cannot speak for a change, or undefined when it can. */
+export function readMapProblem(input: ReadMapInput | undefined): string | undefined {
+  if (!input) return "no read map supplied";
+  const map = input.map;
+  if (!map) return `no read map (${input.mapProblem ?? "none supplied"})`;
+  if (input.drift.distance === undefined) {
+    return `read map ${map.sha.slice(0, 12)} is not an ancestor of the base (${input.drift.problem ?? "unknown"})`;
+  }
+  const bound = input.stalenessBound ?? IMPACT_MAP_STALENESS_BOUND;
+  if (input.drift.distance > bound) {
+    return `read map ${map.sha.slice(0, 12)} is stale: ${input.drift.distance} commits behind the base, past its bound of ${bound}`;
+  }
+  return undefined;
+}
+
+/** `dir`'s ancestors, nearest first, ending at the repo root (""): `a/b` → `a/b`, `a`, `""`. */
+function ancestors(dir: string): string[] {
+  const out: string[] = [];
+  for (let d = dir === "." ? "" : dir; ; d = d.slice(0, Math.max(d.lastIndexOf("/"), 0))) {
+    out.push(d);
+    if (d === "") return out;
+  }
+}
+
+/** The suites the map says READ `file`, and those that LISTED a directory it sits in: exactly that
+ *  directory, or an ancestor listed recursively — the census reader of the file's population. */
+export function readMapReaders(map: ReadMap, file: string): { readers: string[]; listers: Array<{ suite: string; dir: string }> } {
+  const name = (i: number) => map.suites[i]!;
+  const readers = Object.hasOwn(map.reads, file) ? map.reads[file]!.map(name) : [];
+  const listers: Array<{ suite: string; dir: string }> = [];
+  const slash = file.lastIndexOf("/");
+  const own = slash < 0 ? "." : file.slice(0, slash);
+  const keys = [own, ...ancestors(own).map((a) => (a === "" ? "**" : `${a}/**`))];
+  for (const key of keys) {
+    if (!Object.hasOwn(map.listed, key)) continue;
+    for (const i of map.listed[key]!) listers.push({ suite: name(i), dir: key });
+  }
+  return { readers, listers };
 }
 
 /** Every module specifier a file names: static and dynamic imports, re-exports and requires. */
@@ -166,9 +313,14 @@ function resolve(from: string, spec: string, known: ReadonlySet<string>): string
 /** THE SELECTOR — see the file header. Pure: it decides from `input` alone. */
 export function selectAffectedSuites(changed: readonly string[], input: AffectedSuitesInput): AffectedSelection {
   const files = changed.filter((f) => f.length > 0);
-  const trigger = fullRunTrigger(files);
+  const mapProblem = readMapProblem(input.readMap);
+  const trigger = fullRunTrigger(files, mapProblem === undefined);
   if (trigger !== undefined) {
-    return { suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models`], recentOnly: { floor: [] } };
+    const why = READ_MAPPED.test(trigger) ? ` (the read map cannot speak for it: ${mapProblem})` : "";
+    return {
+      suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models${why}`], recentOnly: { floor: [] },
+      ...(why === "" ? {} : { readMapFallback: mapProblem! }),
+    };
   }
 
   const reasons = new Map<string, string>();
@@ -208,6 +360,48 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const pathReaders = input.pathReaders;
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
+  // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
+  // run: a suite whose reads happen in a spawned child, or through `git ls-files`, leaves no record).
+  const observed = new Set<string>();
+  const notes: string[] = [];
+  if (mapProblem === undefined) {
+    const map = input.readMap!.map!;
+    const spawners = files.some((f) => READ_MAPPED.test(f)) ? spawningSuites(input.files) : new Set<string>();
+    const since = new Set(input.readMap!.drift.changedSinceMap);
+    const known = new Set(map.suites);
+    for (const f of files) {
+      if (SUITE.test(f)) continue;
+      const { readers, listers } = readMapReaders(map, f);
+      for (const s of readers) {
+        observed.add(s);
+        pick(s, `read ${f} (read map)`);
+      }
+      for (const { suite, dir } of listers) {
+        observed.add(suite);
+        pick(suite, `listed ${dir} (read map: a census reader of ${f})`);
+      }
+      if (!READ_MAPPED.test(f)) continue;
+      // What the record cannot see: a suite spawning children that read the file, and suites newer than
+      // the map or edited since it was taken. Each is selected when it names the file, or is unseen.
+      const slash = f.lastIndexOf("/");
+      const names = slash < 0 ? [f] : [f, `${f.slice(0, slash)}/`];
+      for (const s of spawners) {
+        const text = input.files.get(s) ?? "";
+        if (names.some((n) => text.includes(n))) {
+          observed.add(s);
+          pick(s, `spawns children and names ${f}; the read map cannot credit their reads`);
+        }
+      }
+      for (const s of input.files.keys()) {
+        if (!SUITE.test(s)) continue;
+        if (!known.has(s)) pick(s, "absent from the read map");
+        else if (since.has(s)) pick(s, "changed after the read map's sha");
+        else continue;
+        observed.add(s);
+      }
+      if (readers.length === 0 && listers.length === 0) notes.push(`${f}: read by no suite on the read map`);
+    }
+  }
   for (const s of recent) pick(s, "failed recently");
 
   const suites = [...reasons.keys()].filter((s) => SUITE.test(s)).sort();
@@ -217,19 +411,20 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const selection: AffectedSelection = {
     suites,
     fullRun: false,
-    reasons: suites.map((s) => `${s}: ${reasons.get(s)}`),
+    reasons: [...suites.map((s) => `${s}: ${reasons.get(s)}`), ...notes],
     recentOnly: { floor: recentOnlyFloor },
+    ...(input.readMap !== undefined && mapProblem !== undefined ? { readMapFallback: mapProblem } : {}),
   };
   if (input.symbolSuites) {
     const changedTests = files.filter((f) => SUITE.test(f));
-    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...pathNamers]);
+    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...pathNamers, ...observed]);
     const narrow = new Set([...narrowStructural, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
     selection.recentOnly.narrow = selection.narrow.filter((s) => !narrowStructural.has(s));
   }
   if (input.impact) {
     const arm = impactArmSelection(input.impact, {
-      changed: files, files: input.files, floor: suites, pathReaders, pathNamers: [...pathNamers], recent,
+      changed: files, files: input.files, floor: suites, pathReaders: [...pathReaders, ...observed], pathNamers: [...pathNamers], recent,
       fallback: selection.narrow ?? suites,
     });
     selection.impact = arm.suites;

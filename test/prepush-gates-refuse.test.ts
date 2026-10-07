@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,13 @@ import type { PreflightSpawn } from "../src/lib/commit-message.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
+/** W1-T6120: the hook runs its checks from its OWN code root, so a fixture runs it as the tree's own hook. */
+function ownHook(tree: string): string {
+  mkdirSync(join(tree, "hooks"), { recursive: true });
+  copyFileSync(HOOK, join(tree, "hooks", "pre-push"));
+  return join(tree, "hooks", "pre-push");
+}
+
 
 /**
  * test/prepush-gates-refuse.test.ts — W1-T3059.
@@ -130,7 +137,7 @@ function runHook(
   // spawnSync, NOT execFileSync: the latter RETURNS stdout and surfaces stderr only by throwing, so
   // a hook that exits 0 while naming a skip on stderr would read here as having said nothing — the
   // exact case two of these tests exist to pin.
-  const res = spawnSync("sh", [HOOK], {
+  const res = spawnSync("sh", [ownHook(cwd)], {
     cwd,
     encoding: "utf8",
     input: stdin,
@@ -206,14 +213,14 @@ test("rule15-precheck is invoked through the tsx loader, or its exit code means 
   const hook = readFileSync(HOOK, "utf8");
   const invocation = /node [^\n]*rule15-precheck\.mjs/.exec(hook);
   assert.ok(invocation, "the hook must run the precheck");
-  assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
+  assert.match(invocation[0], /--import "\$tsx_loader"/, `bare node cannot load it: ${invocation[0]}`);
 });
 
 test("rule25-precheck is wired into the hook, with the same loader and exit-2 discipline", () => {
   const hook = readFileSync(HOOK, "utf8");
   const invocation = /node [^\n]*rule25-precheck\.mjs/.exec(hook);
   assert.ok(invocation, "the hook must run the rule-25 precheck");
-  assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
+  assert.match(invocation[0], /--import "\$tsx_loader"/, `bare node cannot load it: ${invocation[0]}`);
   assert.match(hook, /rule25-precheck could not read the diff/, "exit 2 must be named, not counted as a violation");
   assert.match(hook, /rule25-precheck\.mjs absent — skipped, NOT passed/, "a missing check is skipped, never cleared");
 });

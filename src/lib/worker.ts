@@ -4826,11 +4826,8 @@ export function excludeNodeModulesFromGit(
   try {
     const commonDir =
       deps.commonDir ??
-      ((wt: string) =>
-        execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim());
+      // W1-T6122: through the leaf, so a rewritten `.git` pointer cannot aim this write elsewhere.
+      ((wt: string) => hostWorktreeGit(wt, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
     const infoDir = join(commonDir(worktreePath), "info");
     const excludeFile = join(infoDir, "exclude");
     let body = "";
