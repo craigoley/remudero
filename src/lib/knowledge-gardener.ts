@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -184,7 +185,39 @@ export function retireCandidates(usage: LearningUsage, activeIds: string[], rng:
  *  A test that requires a learning (`test/learnings-injection-w1t6.test.ts` requires
  *  `sdk-result-envelope` to be injected) goes red when it is superseded, so the gardener never
  *  retires or folds one away: passes #7101 and #7205 both tried. `test/fixtures` is data, skipped. */
-export function testPinnedLearnings(root: string, ids: string[]): Record<string, string> {
+export function testPinnedLearnings(
+  root: string,
+  ids: string[],
+  opts: { treeId?: (root: string) => string | undefined; readFile?: (path: string) => string } = {},
+): Record<string, string> {
+  // W1-T6276: the walk read every test file on every garden pass (a 39.9 s loop block); its answer moves only with the tree.
+  const tree = opts.treeId ? opts.treeId(root) : treeIdOrUndefined(testTreeId(root));
+  const key = tree === undefined ? undefined : `${root}\0${tree}\0${[...new Set(ids)].sort().join("\0")}`;
+  if (key !== undefined && testPinCache.has(key)) return { ...testPinCache.get(key)! };
+  const pins = scanTestPinnedLearnings(root, ids, opts.readFile ?? ((path) => readFileSync(path, "utf8")));
+  if (key !== undefined) {
+    testPinCache.clear();
+    testPinCache.set(key, pins);
+  }
+  return { ...pins };
+}
+
+const testPinCache = new Map<string, Record<string, string>>();
+
+/** The git tree id of `test/` at HEAD, or why it could not be read; an unreadable id forces a full scan. */
+export function testTreeId(root: string): { id: string } | { unreadable: string } {
+  try {
+    const id = execFileSync("git", ["rev-parse", "HEAD:test"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return id ? { id } : { unreadable: "git printed no tree id for test/" };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    return { unreadable: reason };
+  }
+}
+
+const treeIdOrUndefined = (read: { id: string } | { unreadable: string }): string | undefined => ("id" in read ? read.id : undefined);
+
+function scanTestPinnedLearnings(root: string, ids: string[], readFile: (path: string) => string): Record<string, string> {
   const wanted = new Set(ids);
   const pins: Record<string, string> = {};
   const walk = (dir: string): void => {
@@ -193,7 +226,7 @@ export function testPinnedLearnings(root: string, ids: string[]): Record<string,
       if (ent.isDirectory()) {
         if (ent.name !== "fixtures") walk(path);
       } else if (/\.[cm]?[jt]s$/.test(ent.name)) {
-        for (const m of readFileSync(path, "utf8").matchAll(/(["'`])([\w.-]+)\1/g)) {
+        for (const m of readFile(path).matchAll(/(["'`])([\w.-]+)\1/g)) {
           if (wanted.has(m[2]!) && !(m[2]! in pins)) pins[m[2]!] = relative(root, path).split("\\").join("/");
         }
       }
