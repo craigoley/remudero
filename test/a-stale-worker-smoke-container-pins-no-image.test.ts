@@ -213,11 +213,14 @@ test("with a fake docker, a Created worker-smoke container from an earlier recyc
 
 test("W1-T5706: a RUNNING worker-smoke container is never removed, and its image is not reported as a stopped pin", () => {
   const out = recycle(hostRows("running"));
-  assert.equal(out.status, 0, out.stderr);
+  assert.equal(out.status, 1, "a live smoke blocks the recycle before another smoke can start");
+  assert.match(out.stderr, new RegExp(`REFUSING.*${SMOKE} \\(running\\).*blocks the smoke`));
+  assert.match(out.stderr, new RegExp(`docker rm ${SMOKE}`), "the refusal names the manual remedy");
   assert.deepEqual(removals(out), [], "a running smoke is someone's live probe, not a leftover");
   assert.ok(out.containers.includes(SMOKE));
   assert.ok(out.images.includes("sha256:SMOKEIMAGE"));
-  assert.match(out.stdout, /reclaimed 0B/, out.stdout);
+  assert.ok(!out.calls.some((c) => c[0] === "container" && c[1] === "run"), "no competing smoke starts");
+  assert.ok(!out.calls.some((c) => c[0] === "image" && c[1] === "prune"), "refusal never reaches reclaim");
   assert.equal(pinLines(out).filter((l) => l.includes("sha256:SMOKEIMAGE")).length, 0, "a running container's image is not a stopped pin");
   assert.equal(pinLines(out).filter((l) => l.includes("sha256:PULLEDID")).length, 0, "nor is the tenant's own image");
 });
@@ -230,10 +233,17 @@ test("W1-T5706: only the EXACT smoke name is removed — a name that merely cont
   assert.ok(out.images.includes("sha256:NEARIMAGE"));
 });
 
-test("W1-T5706: a skipped reclaim removes no smoke container either", () => {
+test("W1-T5706: a skipped reclaim still clears a stale smoke before the worker probe", () => {
   const out = recycle(hostRows("created"), { RMD_RECYCLE_SKIP_RECLAIM: "1" });
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, /reclaim SKIPPED/, out.stdout);
-  assert.deepEqual(removals(out), []);
-  assert.ok(out.containers.includes(SMOKE));
+  assert.match(out.stdout, new RegExp(`removed leftover ${SMOKE} \\(created\\) before the smoke`));
+  assert.match(out.stdout, /worker smoke PASSED/, "the freed name is usable by the probe");
+  assert.deepEqual(removals(out).map((c) => c[c.length - 1]), ["c-smoke"]);
+  const removalAt = out.calls.findIndex((c) => c[0] === "container" && c[1] === "rm" && c.includes("c-smoke"));
+  const smokeAt = out.calls.findIndex((c) => c[0] === "container" && c[1] === "run");
+  assert.ok(removalAt >= 0 && smokeAt > removalAt, "the leftover is removed before the probe runs");
+  assert.ok(!out.calls.some((c) => c[0] === "image" && c[1] === "prune"), "reclaim stays skipped");
+  assert.ok(!out.containers.includes(SMOKE));
+  assert.ok(out.containers.includes(`${SMOKE}-old`), "a name containing the smoke name remains");
 });

@@ -1,0 +1,58 @@
+- id: W1-T6191
+  title: "A RETENTION ROW NAMES THE WORKER AND THE CACHE THAT HOLDS THE ROWS — read_model.now_legacy_retention carries instance and counts but no thread or lane, so the fast and heavy view workers' rows are indistinguishable, and the async rotation-memo holders (action-results, cost-anomaly, follow-up-policy, measurement-cadence) emit no retention row at all, so duplicate archive retention across workers cannot be established from telemetry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which worker and which cache a payload-free retention row names; it touches the serve read-model worker and several memo holders
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve memory investigation after PR 9863 (b218e749) was adopted at 13:36:35Z; its retention rows cannot tell two workers apart"
+  plan_refs: [W1-T5885, W1-T5062, W1-T4567]
+  files: [src/lib/read-model-worker.ts, src/lib/now-view.ts, src/lib/ledger-union.ts, src/lib/action-results.ts, src/lib/cost-anomaly.ts, src/lib/follow-up-policy.ts, src/lib/measurement-cadence.ts, test/a-retention-row-names-its-worker-and-holder.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 on the production ledger, with serve on b2d5f728, which contains PR 9863 (b218e749):
+    every read_model.now_legacy_retention row carries exactly ts, host, actor_pid, run_id, task_id, step,
+    lane ("serve"), instance, rows, costs and actor. It has no thread and no worker lane. now-view.ts logs it as
+    `log("read_model.now_legacy_retention", { instance: name, ...retention })`.
+    The worker already knows its identity:
+    - read-model-worker.ts tags read_model.slow_view with `thread: viewsOnly ? "views" : "projector"`;
+    - its view workers run as lanes `"fast" | "heavy"` (W1-T5885);
+    - each lane builds its own createNowView over a shared `log`.
+    So two lanes holding one instance's legacy memo would emit rows that differ only by actor timing.
+    Seven rows from two serve processes showed one core row per process. That argues against duplication
+    but cannot establish it.
+    The other createLedgerRotationMemo holders reached through the async load() path emit no retention
+    telemetry at all: action-results, cost-anomaly, follow-up-policy and measurement-cadence. A cache
+    retained by two workers is therefore invisible today.
+    Measured context: serve RSS is 4.4-5.8 GB per process, with view-worker isolate heaps of about 1.0-1.5 GB
+    each. An isolated replay of the PR 9863 change found only a 15-20 MiB cold-load effect, so the remaining
+    question is which caches each worker retains. This task answers that with payload-free counts.
+  design: |
+    (1) read-model-worker.ts: the view-worker entry wraps the `log` it hands to its views, adding the worker's
+    existing identity `{ thread, lane }`. thread is "views" or "projector", as slow_view already reports;
+    lane is "fast" or "heavy" when set. Neither is re-derived inside a view.
+    (2) ledger-union.ts: createLedgerRotationMemo accepts an optional stable holder name. A small helper
+    emits one payload-free row per (thread, lane, holder, instance), only when that holder's retention()
+    counts change. The counts are archives, rows, tornRows and failedArchives. The deduplication state is
+    keyed by the full identity, so one worker's reported state can never suppress another worker's row.
+    (3) now-view.ts names its two legacy memos with holders now.legacy.rows and now.legacy.costs. The four
+    async holders each declare a module constant `memoRetentionHolder`, set to the module's name
+    (action-results, cost-anomaly, follow-up-policy, measurement-cadence), and pass it to their memo.
+    (4) No row bodies, ledger text, paths beyond the instance name, or credentials ever enter a row. A test
+    pins each row's exact key set.
+  acceptance:
+    - claim: "two view workers that hold the same instance's legacy memo emit two retention rows differing only in thread or lane, and one worker's already-reported counts never suppress the other worker's row"
+      proof: "unit test: test/a-retention-row-names-its-worker-and-holder.test.ts"
+    - claim: "the now view names its legacy memos with stable holder identities"
+      proof: "grep: now\\.legacy\\.rows in src/lib/now-view.ts"
+    - claim: "an async rotation-memo holder names itself in its retention row"
+      proof: "grep: memoRetentionHolder in src/lib/action-results.ts"
+  falsifier: |
+    Drop the thread and lane identity from the wrapped log: the two-worker case emits rows that cannot be told
+    apart, and the first criterion's test fails. Key the change-only dedupe by instance alone: the second
+    worker's row is suppressed, and the same test fails.

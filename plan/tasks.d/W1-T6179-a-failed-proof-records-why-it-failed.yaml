@@ -11,6 +11,9 @@
   origin: "operator session 2026-10-07: #9834/#9838 review-only FAILs undiagnosable from GitHub or the ledger (fixed by #9861)"
   plan_refs: [W1-T6124, W1-T387]
   files: [src/lib/review.ts, src/run-task.ts, test/a-failed-proof-records-why-it-failed.test.ts]
+  # refusal-amendment (W1-T6179, run W1-T6179-1791385983759, 2026-10-07T15:50:12.021Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The task record file origin/main:plan/tasks.d/W1-T6179-a-failed-proof-records-why-it-failed.yaml cannot be located in the current workspace; therefore acceptance criteria cannot be verified.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1
   attempts: 0
