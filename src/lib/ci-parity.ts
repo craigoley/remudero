@@ -854,7 +854,12 @@ function chooseCoverageScratch(
   const tmpBase = dirname(tmpDir);
   let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
   if (root !== undefined) {
-    try { root = realpathSync(root); } catch { root = undefined; }
+    try {
+      root = realpathSync(root);
+    } catch {
+      // Deliberate: a scratch root that does not resolve is not a candidate; TMPDIR's own check decides.
+      root = undefined;
+    }
   }
   const tmpNote = `scratch=${tmpBase} (TMPDIR volume)`;
   if (root === undefined || (policy.sameVolume ?? sameDevice)(root, tmpBase)) return { ok: true, dir: tmpDir, note: tmpNote };
