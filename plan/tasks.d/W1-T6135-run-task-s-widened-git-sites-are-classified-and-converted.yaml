@@ -1,0 +1,55 @@
+- id: W1-T6135
+  title: "RUN-TASK'S WIDENED GIT SITES ARE CLASSIFIED AND CONVERTED — after W1-T6121, W1-T6123's widened census still counts 82 raw git sites in src/run-task.ts (a `-C` argv under any name, a cwd option or a git helper) under one lump reason; among them planCriteriaAtHeadForRepair, materializeReviewerSnapshot and readDispatchFilingSnapshot address a PR-head or worker tree, and the fix-owner, base-proof and approve paths have no recorded class"
+  repo: remudero
+  depends_on: [W1-T6121, W1-T6123]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which repository each remaining host git call in run-task.ts may treat as its own
+  band_meaning: span
+  origin: "operator session 2026-10-07: follow-up from W1-T6123's widened census (PR #9792) measured over W1-T6121's head; verified read-only before filing"
+  plan_refs: [W1-T6106, W1-T6121, W1-T6123, W1-T4614]
+  files: [src/run-task.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on the open heads of W1-T6121 (run-W1-T6121-1791347058000, d813fa7a8) and W1-T6123
+    (run-W1-T6123-1791348460000, 0ebe8b64d). Static reading only. W1-T6123's `WIDENED_SITE_EXCEPTIONS` gives
+    src/run-task.ts `count: 118` with ONE reason: "WORKTREE (W1-T6121's file): commitGeneratorOutputViaGit (-C opts.cwd
+    x6), planCriteriaAtHeadForRepair, materializeReviewerSnapshot, assertReviewerSnapshotIntegrity,
+    repairCensusRefusedPush, buildBaseProofDir, lintPlanForReview, readDispatchFilingSnapshot (-C cwd); the rest
+    address the managed checkout, a fix-owner repoDir, a base-proof or reviewer snapshot dir, or a clone".
+    Running that head's own `widenedGitSites` over W1-T6121's src/run-task.ts gives 82: W1-T6121 removed
+    commitGeneratorOutputViaGit, assertReviewerSnapshotIntegrity, repairCensusRefusedPush, buildBaseProofDir,
+    lintPlanForReview, captureRegisteredFixOwnerSnapshot, preserveTrackedDirtyPatch, checkoutFixHeadRef and others,
+    but its own census edit lowers only `RAW_SITE_EXCEPTIONS` (75 to 13), so the widened 118 must also move. Of the
+    82, by function: still named WORKTREE by the reason, planCriteriaAtHeadForRepair 2, materializeReviewerSnapshot
+    2 and readDispatchFilingSnapshot 1; with no recorded class, approveCommand 6, buildBaseReproductionProbe 3,
+    preserveFixHead 3, refCommitMatchesDirtyRecovery 3, dedicatedTargetPlanReloader 3, daemonCommand 3,
+    defaultCreditedAmendmentEvidence 3, registeredFixWorktreeOwner 1, removeAbandonedFixWorktreeOwner 1,
+    publishAbandonedFixOwnerAhead 1, removeBaseProofWorktree 1, runPreflightProofs 1, runShardRepairPass 1, and 47
+    more in plan reloaders, gardens, merge-evidence and id-minting reads, whose targets were not classed per site.
+    THE COUNT IS A SNAPSHOT: it moves as W1-T6121 lands; the classification, not the number, is this task.
+  design: |
+    (1) At the merged W1-T6121 + W1-T6123 head, class every widened site in src/run-task.ts by what wrote the tree it
+    addresses: WORKTREE (a worker or fix worktree), REVIEWER (a PR-head checkout or snapshot), or CHECKOUT (a tree only
+    the harness writes: the managed checkout, a clone, a base-proof dir cut from main). (2) Convert every WORKTREE and
+    REVIEWER site to `hostWorktreeGit` / `hostWorktreeGitAsync`; a snapshot dir with no recorded pointer gets the
+    leaf's config overrides even where it cannot get the pin, and the PR says which. (3) Replace the lump reason with
+    a per-class record: `WIDENED_SITE_EXCEPTIONS["src/run-task.ts"]` counts exactly the CHECKOUT sites left, and a
+    table in the new test names each remaining function with its class, so a site moving class fails a test, not a
+    review. (4) No behaviour change beyond the pin: argv, outputs and error shapes stay the same.
+  acceptance:
+    - claim: "every widened git site left in src/run-task.ts is named with a CHECKOUT class and reason in a per-function table the census count agrees with, none is in a function that addresses a worker or PR-head tree, and planCriteriaAtHeadForRepair and materializeReviewerSnapshot on a fixture PR-head tree whose .git pointer names a planted gitdir with a core.fsmonitor marker never write the marker"
+      proof: "unit test: test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts"
+  falsifier: |
+    At the W1-T6121 head, planCriteriaAtHeadForRepair spawns a raw `git -C` into the fixture tree: git follows the
+    planted pointer, the marker is written, and the test fails; the widened entry for src/run-task.ts carries one lump
+    reason and no per-function class.
+  notes: |
+    FIXTURES ONLY, as W1-T6121. Split from W1-T6136 for Rule 19 sizing and because only this half waits on W1-T6121:
+    this task is src/run-task.ts alone. Depends on W1-T6121 (open run-W1-T6121-* branch at filing; its conversions set
+    the starting population) and W1-T6123 (#9792, merged 2026-10-07 while this was filed; the widened table arrives with it). Re-count at the
+    merged heads before building.

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: W1-T4842 fix worker's report (2026-10-03) — the predecessor transcript read was refused"
   plan_refs: [W1-T3079, W1-T5016, W1-T5354, W1-T4842]
   files: [src/run-task.ts, hooks/deny-floor.sh, test/a-fix-worker-can-read-its-predecessors-transcript.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

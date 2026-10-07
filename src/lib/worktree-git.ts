@@ -397,6 +397,8 @@ export interface HostWorktreeGitOptions {
   stdio?: "pipe" | "inherit-stdout" | "ignore";
   maxBuffer?: number;
   input?: string;
+  /** Kills the call past this many milliseconds, as `execFileSync`'s own `timeout` does. */
+  timeout?: number;
   log?: WorktreeGitLog;
 }
 
@@ -410,6 +412,7 @@ function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, over
     stdio,
     ...(opts.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }),
     ...(opts.input === undefined ? {} : { input: opts.input }),
+    ...(opts.timeout === undefined ? {} : { timeout: opts.timeout }),
   };
 }
 

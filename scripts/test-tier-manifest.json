@@ -1413,7 +1413,7 @@
     "test/host-units-install.test.ts": 5300,
     "test/host-update-reclaim.test.ts": 3883,
     "test/host-update-tmp-paths.test.ts": 766,
-    "test/host-view.test.ts": 2000,
+    "test/host-view.test.ts": 5000,
     "test/host-worker-budget-is-sized-to-the-host.test.ts": 1200,
     "test/hot-file-gardener.test.ts": 1300,
     "test/html-comments-are-not-changeset-claims.test.ts": 470,

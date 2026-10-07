@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
@@ -7,11 +7,12 @@ import { test } from "node:test";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { coverageScratchDir, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { acquireTestSlot, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "../src/lib/test-slot.js";
 
 const GIB = 1024 ** 3;
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-interface Fixture { repo: string; state: string; scratch: string; seen: string[] }
+interface Fixture { repo: string; state: string; scratch: string; seen: string[]; slotWaits: number }
 
 /** Two directories standing in for the state volume (TMPDIR) and the scratch root; free space and
  *  device identity are injected, so no expectation depends on the host's real disks. */
@@ -22,7 +23,7 @@ function withFixture(body: (f: Fixture) => void): void {
   const state = join(base, "st");
   const scratch = join(base, "sc");
   for (const dir of [repo, state, scratch]) mkdirSync(dir, { recursive: true });
-  const fixture: Fixture = { repo, state: realpathSync(state), scratch: realpathSync(scratch), seen: [] };
+  const fixture: Fixture = { repo, state: realpathSync(state), scratch: realpathSync(scratch), seen: [], slotWaits: 0 };
   process.env.TMPDIR = state;
   try {
     body(fixture);
@@ -45,11 +46,20 @@ function recordingSpawn(seen: string[]): PreflightSpawn {
   };
 }
 
+function fixtureSlot(f: Fixture) {
+  return {
+    dir: join(f.scratch, "slots"), slots: 1,
+    load: () => ({ cores: 2, load1: 0 }),
+    sleep: () => { f.slotWaits += 1; throw new Error("fixture tried to wait on another suite's slot"); },
+    log: () => {},
+  };
+}
+
 function run(f: Fixture, free: Record<string, number>, sameVolume: (a: string, b: string) => boolean) {
   return testWithCoverageLeaf(
     f.repo, recordingSpawn(f.seen), join(f.repo, "coverage", "lcov.info"),
     (path) => free[realpathSync(path)] ?? 0,
-    undefined, {}, { root: f.scratch, sameVolume },
+    undefined, fixtureSlot(f), { root: f.scratch, sameVolume },
   );
 }
 
@@ -90,7 +100,7 @@ function runPolicy(f: Fixture, free: Record<string, number>, policy: Policy) {
   return testWithCoverageLeaf(
     f.repo, recordingSpawn(f.seen), join(f.repo, "coverage", "lcov.info"),
     (path) => free[realpathSync(path)] ?? 0,
-    undefined, {}, policy,
+    undefined, fixtureSlot(f), policy,
   );
 }
 
@@ -111,20 +121,36 @@ test("a TMPDIR volume that cannot be stat'ed is not assumed to share the scratch
   });
 });
 
-test("RMD_SCRATCH_ROOT names the scratch root when the run is not inside a test process", () => {
+test("RMD_SCRATCH_ROOT names the scratch root without waiting on a parent coverage slot", () => {
   withFixture((f) => {
-    const previous = { context: process.env.NODE_TEST_CONTEXT, root: process.env.RMD_SCRATCH_ROOT };
+    const previous = { context: process.env.NODE_TEST_CONTEXT, root: process.env.RMD_SCRATCH_ROOT,
+      slotDir: process.env[TEST_SLOT_DIR_ENV], slots: process.env[TEST_SLOTS_ENV] };
+    const outerDir = join(dirname(f.repo), "outer-slots");
+    const outer = acquireTestSlot("fixture parent coverage", { dir: outerDir, slots: 1, load: () => ({ cores: 2, load1: 0 }) });
+    assert.equal(outer.outcome, "acquired", "the real parent-slot positive control is held");
+    const outerPath = join(outerDir, "slot-1.json");
+    const held = readFileSync(outerPath, "utf8");
     delete process.env.NODE_TEST_CONTEXT;
     process.env.RMD_SCRATCH_ROOT = f.scratch;
+    process.env[TEST_SLOT_DIR_ENV] = outerDir;
+    process.env[TEST_SLOTS_ENV] = "1";
     try {
       const result = runPolicy(f, { [f.state]: 12 * GIB, [f.scratch]: 300 * GIB }, { sameVolume: () => false });
       assert.equal(f.seen.length, 1, `the run reached a coverage shard: ${result.detail}`);
       assert.equal(dirname(f.seen[0]!), f.scratch, "the configured root is used");
+      assert.equal(f.slotWaits, 0, "the fixture uses its own real slot instead of entering the parent's 45-minute wait");
+      assert.equal(readFileSync(outerPath, "utf8"), held, "the parent lease is neither reclaimed nor rewritten");
+      assert.equal(existsSync(join(f.scratch, "slots", "slot-1.json")), false, "the fixture releases its own slot");
     } finally {
+      outer.release();
       if (previous.context === undefined) delete process.env.NODE_TEST_CONTEXT;
       else process.env.NODE_TEST_CONTEXT = previous.context;
       if (previous.root === undefined) delete process.env.RMD_SCRATCH_ROOT;
       else process.env.RMD_SCRATCH_ROOT = previous.root;
+      if (previous.slotDir === undefined) delete process.env[TEST_SLOT_DIR_ENV];
+      else process.env[TEST_SLOT_DIR_ENV] = previous.slotDir;
+      if (previous.slots === undefined) delete process.env[TEST_SLOTS_ENV];
+      else process.env[TEST_SLOTS_ENV] = previous.slots;
     }
   });
 });
