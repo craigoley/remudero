@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -22,11 +22,12 @@ function scratch(t: TestContext): string {
   return directory;
 }
 
-function child(directory: string, args: string[], code: string, options = ""): string {
+function child(directory: string, args: string[], code: string, options = "", collectInSuiteCoverage = false): string {
   const { NODE_TEST_CONTEXT: _context, NODE_V8_COVERAGE: _coverage, NODE_OPTIONS: _options, ...env } = process.env;
   mkdirSync(directory, { recursive: true });
+  const coverageDirectory = collectInSuiteCoverage ? (process.env.NODE_V8_COVERAGE ?? directory) : directory;
   return execFileSync(process.execPath, ["--enable-source-maps", ...args, "--input-type=module", "-e", code], {
-    cwd: ROOT, encoding: "utf8", env: { ...env, NODE_OPTIONS: options, NODE_V8_COVERAGE: directory },
+    cwd: ROOT, encoding: "utf8", env: { ...env, NODE_OPTIONS: options, NODE_V8_COVERAGE: coverageDirectory },
   });
 }
 
@@ -34,6 +35,18 @@ function reports(directory: string): Report[] {
   const files = readdirSync(directory).filter((name) => /^coverage-\d+-\d{13}-\d+\.json$/.test(name));
   assert.ok(files.length > 0, "the child must produce real V8 reports");
   return files.map((name) => JSON.parse(readFileSync(join(directory, name), "utf8")));
+}
+
+function normalizedFileUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "file:") return url.href;
+  url.search = "";
+  url.hash = "";
+  try {
+    return pathToFileURL(realpathSync(fileURLToPath(url))).href;
+  } catch {
+    return url.href; // V8 also reports synthetic file URLs such as [eval1].
+  }
 }
 
 const PRECHECK_PROBE = `
@@ -57,14 +70,12 @@ test("W1-T6180: a precheck child under tsx compiles each source file once", (t) 
       `${mode.prefix} await import(${JSON.stringify(SLOT)}); ${PRECHECK_PROBE}`, mode.options);
     assert.ok(JSON.parse(output).args.some((arg: string) => arg.startsWith("--test-concurrency=")), output);
     const sourceReports = reports(directory).map((report) => report.result.filter((script) => script.url.startsWith(pathToFileURL(join(ROOT, "src") + "/").href)));
-    const relevant = sourceReports.filter((scripts) => scripts.some((script) => script.url === SLOT));
+    const relevant = sourceReports.filter((scripts) => scripts.some((script) => normalizedFileUrl(script.url) === normalizedFileUrl(SLOT)));
     assert.equal(relevant.length, 1, `${mode.name}: the main child must report test-slot.ts`);
     const counts = new Map<string, number>();
     for (const script of relevant[0]!) {
-      const url = new URL(script.url);
-      url.search = "";
-      url.hash = "";
-      counts.set(url.href, (counts.get(url.href) ?? 0) + 1);
+      const url = normalizedFileUrl(script.url);
+      counts.set(url, (counts.get(url) ?? 0) + 1);
     }
     assert.ok([...counts.keys()].some((url) => url.endsWith("/drain-lock.ts")), "the imported graph is measured too");
     for (const [url, count] of counts) assert.equal(count, 1, `${mode.name}: ${url} compiled ${count} times`);
@@ -72,7 +83,7 @@ test("W1-T6180: a precheck child under tsx compiles each source file once", (t) 
 });
 
 test("W1-T6180: a plain node precheck still loads test-slot through tsImport", (t) => {
-  const output = child(join(scratch(t), "plain"), [], PRECHECK_PROBE);
+  const output = child(join(scratch(t), "plain"), [], PRECHECK_PROBE, "", true);
   const command = JSON.parse(output) as { args: string[] };
   assert.ok(command.args.some((arg) => arg.startsWith("--test-concurrency=")), output);
 });
@@ -87,8 +98,9 @@ test("W1-T6180: the merge summary counts the repeated instances it dropped", (t)
   writeFileSync(probe, "export const value: number = 42;\nconsole.log(value);\n");
   const original = join(root, "original");
   child(original, ["--import", TSX], `await import(${JSON.stringify(pathToFileURL(probe).href)});`);
-  const report = reports(original).find((r) => r.result.some((s) => s.url === pathToFileURL(probe).href))!;
-  const script = report.result.find((s) => s.url === pathToFileURL(probe).href)!;
+  const probeUrl = normalizedFileUrl(pathToFileURL(probe).href);
+  const report = reports(original).find((r) => r.result.some((s) => normalizedFileUrl(s.url) === probeUrl))!;
+  const script = report.result.find((s) => normalizedFileUrl(s.url) === probeUrl)!;
   assert.ok(report["source-map-cache"][script.url], "the retained instance has a real source map");
   const rawDirectories = [0, 1, 2].map((drops) => {
     const directory = join(root, `raw-${drops}`);
@@ -118,6 +130,8 @@ test("W1-T6180: the merge summary counts the repeated instances it dropped", (t)
   assert.equal(readFileSync(replayed, "utf8"), readFileSync(rawOutput, "utf8"));
   const compact = join(root, "compact");
   assert.match(merger("--compact-output", compact, ...rawDirectories.slice(1)), /droppedRepeatInstances=3\b/);
+  const premappedCompact = join(root, "premapped-compact");
+  assert.match(merger("--premap-output", premappedCompact, compact), /droppedRepeatInstances=3\b/);
   const compactOutput = join(root, "compact.info");
   assert.match(merger("--output", compactOutput, compact), /droppedRepeatInstances=3\b/);
   assert.equal(readFileSync(compactOutput, "utf8"), readFileSync(rawOutput, "utf8"));
