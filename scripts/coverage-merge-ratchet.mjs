@@ -421,7 +421,7 @@ export async function writeImpactMap(directories, output, { sha, sourceRoot } = 
   return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports };
 }
 
-async function main(argv) {
+export async function main(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,

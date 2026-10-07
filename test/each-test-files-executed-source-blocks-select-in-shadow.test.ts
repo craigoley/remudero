@@ -303,14 +303,27 @@ test("W1-T6083: compaction records which suite each process ran, and the impact-
   const both = spawnSync(process.execPath, [MERGER, "--output", "a", "--impact-map", "b", "raw"], { cwd: fixture.dir, encoding: "utf8", env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(both.status, 1);
   assert.match(both.stderr, /exactly one of --output or --compact-output is required, or --impact-map alone/);
-  // A source root missing the file places nothing for it rather than failing the build.
+  // In process: the CLI's impact-map mode over the compact corpus equals the spawned build; a
+  // source root missing the file places nothing for it; one that cannot be read fails the build.
   const out = join(fixture.dir, "map-nosrc.json");
   const cwd = process.cwd();
+  const logs: string[] = [];
+  const log = console.log;
+  mkdirSync(join(fixture.dir, "weird", "src", "tool.mjs"), { recursive: true });
   process.chdir(fixture.dir);
+  console.log = (line: string) => logs.push(line);
   try {
+    await ratchet.main(["--impact-map", "map-inproc.json", "--sha", "f".repeat(40), "--source-root", fixture.dir, "compact"]);
+    assert.match(logs.join("\n"), /impact map of \d+ process report\(s\): 2 suite\(s\), 2 source file\(s\), \d+ orphan report\(s\) -> map-inproc\.json/);
+    await assert.rejects(ratchet.main(["--compact-output", "x", "--impact-map", "y", "raw"]), /or --impact-map alone/);
     const r = await ratchet.writeImpactMap([fixture.raw], out, { sha: "s", sourceRoot: join(fixture.dir, "nowhere") });
     assert.equal(r.suites, 2);
-  } finally { process.chdir(cwd); }
+    await assert.rejects(ratchet.writeImpactMap([fixture.raw], out, { sha: "s", sourceRoot: join(fixture.dir, "weird") }), /EISDIR/);
+  } finally {
+    console.log = log;
+    process.chdir(cwd);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(fixture.dir, "map-inproc.json"), "utf8")), fixture.map);
   assert.deepEqual((JSON.parse(readFileSync(out, "utf8")) as ImpactMap).files["src/tool.mjs"]!.functions, []);
 });
 
