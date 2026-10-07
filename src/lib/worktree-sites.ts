@@ -238,6 +238,19 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/run-task.ts",
+    site: "defaultNodePinSyncIo",
+    creates: "a throwaway scratch worktree at a Dependabot PR's own head, to commit the synced .nvmrc from (W1-T6258)",
+    disposition: {
+      kind: "exempt",
+      because:
+        "it materializes at the PR's own already-existing head sha (`-B <headRef> <headSha>`), not a fresh " +
+        "branch cut off origin/main, so worktreeAdd's origin/main currency assert is not the applicable check; " +
+        "the push is guarded instead by gitPushRunBranch's expectedHeadSha, and the scratch tree is removed " +
+        "in a finally block.",
+    },
+  },
+  {
     file: "src/lib/serve-slots.ts",
     site: "createSlotPreparer",
     creates: "a DETACHED serve generation slot at origin/main's newest sha, reused for every later handoff",
