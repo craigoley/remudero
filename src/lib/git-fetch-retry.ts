@@ -28,6 +28,10 @@ export const LATE_TIMER_SLACK_MS = 1_000;
 /** W1-T5964: how long a late bound waits for a fetch whose exit may already be queued behind it. */
 export const LATE_TIMER_GRACE_MS = 2_000;
 
+/** {@link boundGitCall}'s rejection when the call outran its bound — typed so a caller can name the timeout
+ *  apart from git's own failure. The message and `name` ("Error") are unchanged, so every rendering of it is too. */
+export class GitCallBoundExceededError extends Error {}
+
 /** One awaited git call ended at `timeoutMs` (W1-T5282): the signal aborts, and the call rejects whether or
  *  not the runner honours it, so a hung fetch reads as a failed one and never holds its awaiter forever.
  *  W1-T5964: a timer that fires late first waits `lateGraceMs`, since timers run before the poll phase
@@ -42,7 +46,7 @@ export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutM
     return await new Promise<string>((resolve, reject) => {
       const fail = (lateMs: number): void => {
         const trace = readTrace(tracePath);
-        reject(new Error(`git ${args.join(" ")} exceeded its ${timeoutMs}ms bound and was killed; ` +
+        reject(new GitCallBoundExceededError(`git ${args.join(" ")} exceeded its ${timeoutMs}ms bound and was killed; ` +
           `last trace2 region: ${trace.region}; ` +
           `elapsed ${Math.round(performance.now() - started)}ms` +
           (trace.running ? `; still running: ${trace.running}` : "") +

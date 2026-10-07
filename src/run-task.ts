@@ -26,7 +26,7 @@ import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeRea
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -547,6 +547,7 @@ import {
   type PlanFilingFileObservation,
   type RestPullRow,
   type RestRollupEntry,
+  fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
 import { buildMainHealthRung } from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
@@ -895,12 +896,16 @@ import {
   runlessMergesSince,
   saveMarker,
   shippedSince,
+  shippedSinceAsync,
+  ShippedReadPending,
+  ShippedReadTimeoutError,
   stampCitationsAndCommit,
   type GitLogCommit,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
   type ShippedGithub,
+  type ShippedRecord,
   defaultRetroBackoffPolicy,
   evaluateRetroBackoff,
   loadRetroAttemptRecord,
@@ -2890,8 +2895,8 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
-import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, GitCallBoundExceededError, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
 let composedRealGraph: ComposedRealGraph | undefined;
@@ -29186,9 +29191,14 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
  * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
-function retroShippedGithubGateway(): ShippedGithub {
-  const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = buildBatchedGithub(owner, repo);
+export function retroShippedGithubGateway(
+  opts: { ownerRepo?: { owner: string; repo: string }; exec?: (args: string[]) => string; commitCwd?: string } = {},
+): ShippedGithub {
+  const { owner, repo } = opts.ownerRepo ?? resolveOwnerRepo();
+  // `opts` is a test seam: production passes none, so `exec` is the gateway's own `gh` and the commit index reads
+  // the process cwd, exactly as the bare construction did.
+  const commitTrailerIndex = buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: opts.commitCwd });
+  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex });
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
@@ -29205,6 +29215,101 @@ function retroShippedGithubGateway(): ShippedGithub {
           maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** BACKSTOP per awaited `gh` page of the retro's shipped-since walk: the sync gateway's own per-call bound, so it
+ *  fires only on a hung `gh`, never on a slow but healthy walk (the cadence wait before a call is not counted). */
+export const RETRO_SHIPPED_PAGE_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
+
+/** A pacer that never waits: the replayed gateway below reads memory, and the real calls are paced by `ghTextAsync`. */
+const REPLAY_PACER: GhCallPacer = { wait() {}, recordResult() {} };
+
+/**
+ * {@link retroShippedGithubGateway} with every read awaited, for the daemon's trigger. The SAME gateway code answers:
+ * it runs over a replay of `gh` and `git` answers read earlier, and a read not yet held throws
+ * {@link ShippedReadPending} so {@link shippedSinceAsync} awaits it and walks again. So the reads are the sync
+ * gateway's own, in its order and only when it would make them: a missed board page loads its whole half with
+ * `fetchBoardPrsRestAsync` (each page through `ghTextAsync`, SIGTERM then SIGKILL past `pageTimeoutMs`), and a
+ * missed commit-trailer `git` read runs bounded. A failed read is replayed as the failure, where the sync read
+ * failed; a read killed at its bound rejects with {@link ShippedReadTimeoutError} instead, naming it.
+ */
+export async function retroShippedGithubGatewayAsync(
+  opts: {
+    ownerRepo?: { owner: string; repo: string };
+    execAsync?: GhAsyncExecutor;
+    pageTimeoutMs?: number;
+    commitCwd?: string;
+    commitTimeoutMs?: number;
+  } = {},
+): Promise<ShippedGithub> {
+  const { owner, repo } = opts.ownerRepo ?? (await resolveOwnerRepoAtAsync(repoRoot));
+  const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
+  const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
+  const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
+  const answers = new Map<string, { out: string } | { error: unknown }>();
+  const keyOf = (tool: "gh" | "git", args: string[]): string => `${tool}\u0000${args.join("\u0000")}`;
+  let missed: { tool: "gh" | "git"; args: string[] } | undefined;
+  const replay = (tool: "gh" | "git", args: string[]): string => {
+    const answer = answers.get(keyOf(tool, args));
+    if (answer === undefined) {
+      missed ??= { tool, args };
+      // A gh miss reads as an empty page, so the walk ends without a logged "fetch failed"; the pass is discarded.
+      if (tool === "gh") return "[]";
+      throw new Error(`git ${args.join(" ")} is not read yet`);
+    }
+    if ("error" in answer) throw answer.error;
+    return answer.out;
+  };
+  const ghPage = async (args: string[]): Promise<string> => {
+    try {
+      const out = await ghTextAsync(args, { timeout: pageTimeoutMs, maxBuffer: 1 << 26 }, opts.execAsync);
+      answers.set(keyOf("gh", args), { out });
+      return out;
+    } catch (e) {
+      const err = e as { killed?: boolean; code?: unknown; stderr?: unknown; message?: string };
+      if (err.killed) throw new ShippedReadTimeoutError(`retro shipped-since read: gh ${args.slice(0, 2).join(" ")} timed out after ${pageTimeoutMs}ms and was killed`);
+      // The sync gateway classifies `status` and `stderr`; an async exec carries the exit status as `code`.
+      const failure = Object.assign(new Error(err.message ?? String(e)), { status: typeof err.code === "number" ? err.code : null, stderr: String(err.stderr ?? "") });
+      answers.set(keyOf("gh", args), { error: failure });
+      throw failure;
+    }
+  };
+  const load = async (miss: { tool: "gh" | "git"; args: string[] }): Promise<void> => {
+    const before = answers.size;
+    try {
+      if (miss.tool === "gh") {
+        const half = miss.args[1]?.includes("state=open&") ? "open" : "closed";
+        await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), undefined, half);
+      } else {
+        answers.set(keyOf("git", miss.args), { out: await boundGitCall(commitGit, miss.args, commitTimeoutMs) });
+      }
+    } catch (e) {
+      if (e instanceof ShippedReadTimeoutError) throw e;
+      if (e instanceof GitCallBoundExceededError) throw new ShippedReadTimeoutError(`retro shipped-since read: ${e.message}`);
+      // Held, not erased: the replay throws it where the sync read threw. A failed gh page is already held.
+      if (miss.tool === "git") answers.set(keyOf("git", miss.args), { error: e });
+    }
+    if (answers.size === before) throw new Error(`retro shipped-since read made no progress on ${miss.tool} ${miss.args.join(" ")}`);
+  };
+  let replayed: GitHub | undefined;
+  const read = <T>(query: (github: GitHub) => T): T => {
+    replayed ??= buildBatchedGithub(owner, repo, {
+      exec: (args) => replay("gh", args),
+      commitTrailerIndex: buildCommitTrailerIndex({ slug: `${owner}/${repo}`, exec: (args) => replay("git", args) }),
+      pacer: REPLAY_PACER,
+    });
+    const answer = query(replayed);
+    const miss = missed;
+    if (miss === undefined) return answer;
+    // The pass read a placeholder, so it is discarded with the gateway that read it, and walked again once loaded.
+    missed = undefined;
+    replayed = undefined;
+    throw new ShippedReadPending(() => load(miss));
+  };
+  return {
+    findMergedByTrailer: (taskId) => read((github) => github.findMergedByTrailer(taskId)),
+    headRefName: (prUrl) => read((github) => github.headRefName(prUrl)),
   };
 }
 
@@ -29248,7 +29353,8 @@ export async function retroTriggerCheckAsync(
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
   const ledgerNdjson = await (deps.readLedgerNdjson ?? readRetroTriggerLedgerAsync)(config);
-  const github = deps.github ?? retroShippedGithubGateway();
+  // Constructed where the sync check constructs its gateway, so an unresolvable origin still fails the check here.
+  const github = deps.github ?? (await retroShippedGithubGatewayAsync());
   let read: MergedCommitsRead;
   try {
     read = { commits: await (deps.readMergedCommits ?? (() => readRetroMergedCommitsAsync()))() };
@@ -29467,7 +29573,7 @@ export function retroTriggerCheck(
   const config = deps.config ?? loadConfig();
   if (retroMarkerIsCorrupt(config)) return undefined;
   const pre = retroTriggerPrelude(now, config, deps, readRetroTriggerLedger(config));
-  return "decided" in pre ? pre.decided : retroTriggerConclude(now, pre, pre.github.unavailable?.());
+  return "decided" in pre ? pre.decided : retroTriggerConcludeSync(now, pre, pre.github.unavailable?.());
 }
 
 /** A torn marker is never replayed as "no marker" — fail closed exactly like `retroCommand`'s own guard. */
@@ -29564,17 +29670,42 @@ function retroTriggerPrelude(
   return { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github: deps.github ?? retroShippedGithubGateway() };
 }
 
-/** The GitHub-backed rest of {@link retroTriggerCheck}, given the probe's answer (`undefined` when GitHub is usable). */
-function retroTriggerConclude(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): RetroTriggerDecision | undefined {
-  const { ledgerPath, marker, policy, records, runs, taskIdsWithRuns, github } = ctx;
-  if (githubUnavailable) {
-    reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
+/** The GitHub-backed rest of {@link retroTriggerCheckAsync}, given the probe's answer (`undefined` when GitHub is usable):
+ *  {@link retroTriggerConcludeSync} with `shippedSince` awaited. A read killed at its bound declines NAMING it. */
+async function retroTriggerConclude(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): Promise<RetroTriggerDecision | undefined> {
+  if (retroTriggerProbeDeclined(now, ctx, githubUnavailable)) return undefined;
+  let shipped: ShippedRecord[];
+  try {
+    ({ shipped } = await shippedSinceAsync(ctx.runs, ctx.marker?.ts, ctx.github));
+  } catch (error) {
+    if (!(error instanceof ShippedReadTimeoutError)) throw error;
+    reportRetroTriggerDecline(ctx.ledgerPath, ctx.marker, now, error.message);
     return undefined;
   }
-  if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
+  return retroTriggerDecide(now, ctx, shipped);
+}
+
+/** The GitHub-backed rest of {@link retroTriggerCheck}, given the probe's answer (`undefined` when GitHub is usable). */
+function retroTriggerConcludeSync(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): RetroTriggerDecision | undefined {
+  if (retroTriggerProbeDeclined(now, ctx, githubUnavailable)) return undefined;
+  return retroTriggerDecide(now, ctx, shippedSince(ctx.runs, ctx.marker?.ts, ctx.github).shipped);
+}
+
+/** An unavailable GitHub declines the tick (reported once per reason); a usable one clears the decline latch. */
+function retroTriggerProbeDeclined(now: Date, ctx: RetroTriggerContext, githubUnavailable: string | undefined): boolean {
+  if (githubUnavailable) {
+    reportRetroTriggerDecline(ctx.ledgerPath, ctx.marker, now, githubUnavailable);
+    return true;
+  }
+  if (lastRetroTriggerDecline?.ledgerPath === ctx.ledgerPath) {
     lastRetroTriggerDecline = undefined;
   }
-  const { shipped } = shippedSince(runs, marker?.ts, github);
+  return false;
+}
+
+/** The decision over the credited merges: those plus the runless ones, against the cadence thresholds. */
+function retroTriggerDecide(now: Date, ctx: RetroTriggerContext, shipped: ShippedRecord[]): RetroTriggerDecision | undefined {
+  const { marker, policy, records, taskIdsWithRuns, github } = ctx;
   const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
   const mergesSinceMarker = shipped.length + runlessMerges.length;
   // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally

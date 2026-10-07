@@ -895,6 +895,30 @@ export function shippedSince(
   return { shipped, discrepancies };
 }
 
+/** A gateway read {@link shippedSinceAsync} must await before {@link shippedSince} can answer: thrown by an awaitable
+ *  gateway in place of a blocking read. `load` performs it; the walk then re-runs over the loaded answers. */
+export class ShippedReadPending extends Error {
+  constructor(readonly load: () => Promise<void>) {
+    super("a shipped-since gateway read is pending");
+  }
+}
+
+/** An awaited shipped-since read killed at its bound. NAMED, never success-shaped: the trigger declines with it. */
+export class ShippedReadTimeoutError extends Error {}
+
+/** {@link shippedSince}, awaited: the ONE body, re-run after each {@link ShippedReadPending} load until the gateway
+ *  answers from memory. A gateway that never throws one (every sync fixture) is walked exactly once. */
+export async function shippedSinceAsync(runs: RunSummary[], sinceTs: string | undefined, github: ShippedGithub): Promise<ShippedResult> {
+  for (;;) {
+    try {
+      return shippedSince(runs, sinceTs, github);
+    } catch (error) {
+      if (!(error instanceof ShippedReadPending)) throw error;
+      await error.load();
+    }
+  }
+}
+
 function ledgerCreditAnnotation(r: RunSummary): string {
   return `ledger-credited gate-side merge (verdictSource=ledger-credit, matched by ${r.creditMatch ?? "pr_url"}); run observed ${r.observedVerdict ?? "unknown"}`;
 }
