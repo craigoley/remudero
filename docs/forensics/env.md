@@ -80,6 +80,11 @@ worker's `gh` runs outside Seatbelt (it fails TLS verification under it); and th
 own push is commented as "the ONE orchestrator-initiated push in this file (the worker itself
 normally pushes from inside its own sandbox)" — a FALLBACK, not the route.
 
+SINCE REMOVED: both the `excludedCommands` exclusion and the `.config/gh` grant are gone. The bundled
+CLI ran a whole compound command unsandboxed when any part matched `gh *`, and the grant let a worker
+write the operator's own gh config. A worker's `gh` now runs sandboxed and authenticates with
+`GH_TOKEN` alone (test/a-claude-worker-gh-runs-inside-the-sandbox.test.ts).
+
 AND THE WORKER ALREADY HOLDS THIS CREDENTIAL ON MACOS. `WORKER_HOME_SYMLINKS` (worker-home.ts)
 grants `.config/gh` into every per-run worker HOME, with the reason recorded verbatim as "gh CLI
 auth token, so a worker can open/merge PRs". A container simply stores the same secret in a
