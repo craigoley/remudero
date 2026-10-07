@@ -17,10 +17,11 @@
  * A change the graph cannot model — config, the lockfile, a workflow, a test helper or fixture —
  * selects the FULL suite and says which file forced it.
  */
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   IMPACT_MAP_STALENESS_BOUND,
@@ -489,20 +490,43 @@ export function symbollessSourceFiles(changed: readonly string[], diffText: stri
     changedSymbols(sections.get(f) ?? "", readFile).length === 0);
 }
 
+/** This module's own checkout. The census and plan-reading listings run ITS diff-class.mjs, tsx and
+ *  tsconfig, pointed at the target tree as DATA: a worker worktree's own scripts/ are worker-written
+ *  code, and the host must not execute them (the W1-T6091 shape, worker-provider.ts). */
+const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** BACKSTOP on one listing child: it fires only when a listing hangs, and the overrun throws. */
+export const AFFECTED_LISTING_TIMEOUT_MS = 2 * 60_000;
+
+/** The listing child's whole environment: an allowlist, never the parent's, so no GH_, GITHUB_,
+ *  token, key or provider variable reaches it, under a throwaway HOME and TMPDIR. */
+export function affectedListingEnv(home: string, parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const tmp = join(home, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  const env: Record<string, string> = { HOME: home, TMPDIR: tmp, PATH: parent.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
+  for (const key of ["LANG", "LC_ALL"] as const) {
+    const value = parent[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 /** Reads the selector's input from `repoRoot`: git's tracked code files and their contents, and
- *  diff-class's own census and plan-reading listings (spawned, as src/ always reaches scripts/). A
- *  tracked file missing from disk (a concurrent delete) imports nothing and is left out; any other
- *  failure THROWS, and {@link affectedSelectionOrFull} turns that into a named full run. */
+ *  diff-class's own census and plan-reading listings (spawned from {@link HARNESS_ROOT} with
+ *  `--plan-reading-root <repoRoot>`, as src/ always reaches scripts/). A tracked file missing from
+ *  disk (a concurrent delete) imports nothing and is left out; any other failure THROWS, and
+ *  {@link affectedSelectionOrFull} turns that into a named full run. */
 export function readAffectedSuitesInput(
   repoRoot: string,
   changed: readonly string[],
   extra: { recentFailures?: readonly string[]; symbolSuites?: readonly string[] } = {},
 ): AffectedSuitesInput {
-  const run = (cmd: string, args: string[]) => {
-    const r = spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
+  const lines = (r: SpawnSyncReturns<string>, what: string): string[] => {
+    if (r.status !== 0) throw new Error(`${what} exited ${r.status}: ${(r.error?.message ?? r.stderr ?? "").trim().slice(0, 200)}`);
     return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   };
+  const run = (cmd: string, args: string[]) =>
+    lines(spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" }), `${cmd} ${args.join(" ")}`);
   const files = new Map<string, string>();
   for (const path of run("git", ["ls-files", "--", "src", "scripts", "bin", "test"])) {
     if (!CODE_FILE.test(path)) continue;
@@ -513,14 +537,23 @@ export function readAffectedSuitesInput(
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
-  const list = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`)), "changed.txt");
-  writeFileSync(list, changed.join("\n") + "\n");
-  const diffClass = join(repoRoot, "scripts", "diff-class.mjs");
-  const census = run(process.execPath, ["--import", "tsx", diffClass, "--list-census-suites", "--changed-files", list]);
-  const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f))
-    ? run(process.execPath, ["--import", "tsx", diffClass, "--list-plan-reading-suites", "--changed-files", list])
-    : [];
-  return { files, pathReaders: [...census, ...prose], ...extra };
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`));
+  try {
+    const list = join(dir, "changed.txt");
+    writeFileSync(list, changed.join("\n") + "\n");
+    const env = affectedListingEnv(join(dir, "home"));
+    const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+    const listing = (flag: string) => lines(spawnSync(
+      process.execPath,
+      ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: AFFECTED_LISTING_TIMEOUT_MS },
+    ), `diff-class ${flag}`);
+    const census = listing("--list-census-suites");
+    const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f)) ? listing("--list-plan-reading-suites") : [];
+    return { files, pathReaders: [...census, ...prose], ...extra };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** The selection, or a FULL run naming why its input could not be read — never a narrower guess. */
