@@ -124,6 +124,28 @@ test("a live retention cursor preserves newest ownership through duplicates and 
   }
 });
 
+test("retro eviction opens one live cursor rather than restarting it for every dropped row", async (t) => {
+  const { root, state } = stateDir("retro-cursor-cost-");
+  try {
+    const rows = Array.from({ length: 101 }, (_, i) => ({ ts: "2026-09-01T00:00:00.000Z",
+      step: "cursor-cost", value: i }));
+    writePlain(join(state, "ledger.ndjson"), rows);
+    const cursors = new Map<Map<unknown, unknown>, number>();
+    const entries = Map.prototype.entries;
+    const spy = t.mock.method(Map.prototype, "entries", function (this: Map<unknown, unknown>) {
+      cursors.set(this, (cursors.get(this) ?? 0) + 1);
+      return entries.call(this);
+    });
+    let read;
+    try { read = await readRetroLedgerNdjson(state, { maxRows: 2, maxBytes: 1_000_000 }); }
+    finally { spy.mock.restore(); }
+    assert.equal(read.droppedRows, 99, "the actual reader really evicted the fixture rows");
+    const matching = [...cursors].filter(([map]) => [...map.keys()].join("\n") === read.ndjson);
+    assert.equal(matching.length, 1, "the real retained identity map is observed");
+    assert.equal(matching[0]![1], 1, "eviction never restarts from the first deleted slot");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("771 rotations complete under a 128 MiB old-space ceiling", () => {
   const { root, state } = stateDir("retro-771-rotations-");
   try {
