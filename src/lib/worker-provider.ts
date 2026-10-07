@@ -4,6 +4,7 @@ import { execFile as execFileChild, execFileSync, spawn as spawnChild, type Chil
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import {
@@ -12,6 +13,17 @@ import {
   type CapabilityUseRequest,
 } from "./capability-grant.js";
 import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalEffectResult } from "./action-reconciliation.js";
+import {
+  affectedSelectionOrFull,
+  changedSymbols,
+  symbollessSourceFiles,
+  type AffectedSelection,
+  type AffectedSuitesInput,
+} from "./affected-suites.js";
+import { callerReachableSuites } from "./ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -22,7 +34,7 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { withTempDir } from "./tmp.js";
+import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
@@ -3291,7 +3303,7 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
-  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags; unit_test runs only the suites the harness selects from your diff, and refuses a selection too broad to run here. No shell; no network.", required: ["check"] },
 };
 
 /** The `--import` chain package.json's `test`/`test:ci` scripts load before any suite: tsx, then
@@ -3448,10 +3460,12 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
  * reader cannot see either.
  *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite —
- * under the same setup imports as `test:ci` ({@link TEST_PROCESS_GUARD_IMPORTS}).
- * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
- * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
+ * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
+ * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Elsewhere this
+ * argv runs the whole suite under the same setup imports as `test:ci`
+ * ({@link TEST_PROCESS_GUARD_IMPORTS}), and re-admitting caller arguments stays a separate,
+ * deliberate decision rather than a default. */
 export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
@@ -3467,6 +3481,174 @@ export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string
   const at = argv.indexOf(TEST_SETUP_IMPORT);
   if (cwd !== undefined && at > 0 && !existsSync(join(cwd, TEST_SETUP_IMPORT))) argv.splice(at - 1, 2);
   return argv;
+}
+
+// ── W1-T6091: THE unit_test CHECK RUNS THE DIFF'S AFFECTED SUITES ────────────────────────────
+// MEASURED 2026-10-06: the whole suite is ~21 min against OPENWEIGHT_CHECK_TIMEOUT_MS's 10, so a
+// whole-tree unit_test always timed out, at ~70 core-minutes a call, and left no ledger row.
+
+/** The file whose presence says a tree carries the affected-suites model (the census and
+ *  plan-reading listings the selector reads). A consumer repo has none, and keeps the fixed
+ *  whole-tree argv: it has no model to narrow by, its suite is its own size, and the wall-clock
+ *  bound still ends the call — now ledgered, so its cost is visible rather than assumed. */
+export const OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER = "scripts/diff-class.mjs";
+/** Above this many selected suites the check refuses rather than run: at the cap below, forty
+ *  suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
+export const OPENWEIGHT_UNIT_TEST_MAX_SUITES = 40;
+/** `--test-concurrency` for a harness-scoped run: node's default is cores-1, which on the fleet
+ *  host is 7 suites at once per lane, each spawning git and tsx. W1-T6090's testRunConcurrency
+ *  replaces this constant when it lands. */
+export const OPENWEIGHT_UNIT_TEST_CONCURRENCY = 2;
+/** Prefix that runs a scoped check below the daemon's own priority. */
+export const OPENWEIGHT_UNIT_TEST_NICE: readonly string[] = ["nice", "-n", "10"];
+/** Bound on computing the selection itself (git reads plus the census listings). */
+export const OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS = 2 * 60_000;
+/** One row per run_check call, any check. Deliberately NOT in DECISION_RELEVANT_LEDGER_STEPS
+ *  (lib/ledger.ts): nothing decides on it; it prices the check, so rotation may archive it. */
+export const OPENWEIGHT_RUN_CHECK_LEDGER_STEP = "cash.run_check";
+/** The prefix every refusal of a too-broad selection carries, so a lane reads one sentence. */
+export const OPENWEIGHT_UNIT_TEST_TOO_BROAD = "selection too broad for an open-weight check — run in CI";
+
+const UNIT_TEST_SUITE = /^test\/[^\0\n]*\.test\.ts$/;
+/** This module's own checkout: the selector's helper scripts run from HERE, never from the
+ *  worktree, whose files the model writes and which therefore run only inside the sandbox. */
+const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function fullSelection(reason: string): AffectedSelection {
+  return { suites: [], fullRun: true, reasons: [`full run: ${reason}`], recentOnly: { floor: [] } };
+}
+
+/**
+ * The suites a worktree's diff against its merge base with origin/main affects, by the same
+ * selector `preflight-author.mjs`'s authorSelection uses: the NARROW arm (changed tests, suites
+ * naming a changed symbol or its src/ caller, path readers and namers) when every changed source
+ * file names a symbol, else the floor. Every input is read from git and from files as DATA;
+ * the census listings come from {@link HARNESS_ROOT}'s diff-class.mjs pointed at the worktree,
+ * since the worktree's own copy is model-writable code this process must not execute.
+ * Anything unreadable is a FULL selection naming why — never a narrower guess.
+ */
+export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpawn = defaultPreflightSpawn): AffectedSelection {
+  const root = realpathSync(cwd);
+  const run = (file: string, args: string[], at = root): string => {
+    const r = spawn(file, args, { cwd: at });
+    if (r.status !== 0) throw new Error(`${file} ${args.slice(0, 3).join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
+    return r.stdout;
+  };
+  const lines = (text: string) => text.split("\n").map((l) => l.trim()).filter(Boolean);
+  let base: string;
+  let changed: string[];
+  try {
+    base = run("git", ["merge-base", "origin/main", "HEAD"]).trim();
+    changed = [...new Set([
+      ...lines(run("git", ["diff", "--name-only", base])),
+      ...lines(run("git", ["ls-files", "--others", "--exclude-standard"])),
+    ])].sort();
+  } catch (err) {
+    return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
+  }
+  return affectedSelectionOrFull(changed, (): AffectedSuitesInput => {
+    const diff = run("git", ["diff", "-U0", base, "--", "src", "scripts", "bin"]);
+    const readFile = (path: string) => readFileSync(join(root, path), "utf8");
+    const symbolless = symbollessSourceFiles(changed, diff, readFile);
+    const symbols = symbolless.length > 0 ? [] : changedSymbols(diff, readFile);
+    const files = new Map<string, string>();
+    for (const path of lines(run("git", ["ls-files", "--", "src", "scripts", "bin", "test"]))) {
+      if (!/\.(?:ts|mts|mjs|js|cjs)$/.test(path) || !existsSync(join(root, path))) continue;
+      files.set(path, readFile(path));
+    }
+    const dir = makeTempDir("ow-unit-test");
+    try {
+      const list = join(dir, "changed.txt");
+      writeFileSync(list, changed.join("\n") + "\n");
+      const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+      const listing = (flag: string) =>
+        lines(run(process.execPath, ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", root], HARNESS_ROOT));
+      const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f));
+      const pathReaders = [...listing("--list-census-suites"), ...(prose ? listing("--list-plan-reading-suites") : [])];
+      return {
+        files,
+        pathReaders,
+        ...(symbolless.length > 0 ? {} : { symbolSuites: symbols.length === 0 ? [] : callerReachableSuites(symbols, root, spawn).suites }),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+/** What one `unit_test` call does with a selection: run an explicit file list, run nothing, or
+ *  refuse with the reason. A whole-tree run is never one of the outcomes. */
+export type OpenWeightUnitTestPlan =
+  | { kind: "run"; argv: string[]; suites: string[] }
+  | { kind: "empty"; reasons: string[] }
+  | { kind: "refused"; reason: string; suites: number };
+
+/** Pure: `baseArgv` is {@link openWeightCheckArgv}'s unit_test argv. Suites are kept only when
+ *  they are `test/…​.test.ts` files present under `cwd`, so no entry can read as a flag. */
+export function openWeightUnitTestPlan(selection: AffectedSelection, baseArgv: readonly string[], cwd: string): OpenWeightUnitTestPlan {
+  if (selection.fullRun) {
+    return { kind: "refused", reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${selection.reasons.join("; ")}`, suites: 0 };
+  }
+  const suites = [...new Set(selection.narrow ?? selection.suites)]
+    .filter((s) => UNIT_TEST_SUITE.test(s) && existsSync(join(cwd, s)))
+    .sort();
+  if (suites.length > OPENWEIGHT_UNIT_TEST_MAX_SUITES) {
+    return {
+      kind: "refused",
+      reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${suites.length} affected suites exceed the ${OPENWEIGHT_UNIT_TEST_MAX_SUITES}-suite bound`,
+      suites: suites.length,
+    };
+  }
+  if (suites.length === 0) return { kind: "empty", reasons: selection.reasons };
+  const argv = [...OPENWEIGHT_UNIT_TEST_NICE, ...baseArgv, `--test-concurrency=${OPENWEIGHT_UNIT_TEST_CONCURRENCY}`, ...suites];
+  return { kind: "run", argv, suites };
+}
+
+/** {@link selectOpenWeightUnitTestSuites} in a child process, so its git reads and listings never
+ *  block the daemon's event loop. It runs THIS checkout's code (cwd {@link HARNESS_ROOT}) with the
+ *  check's credential-free env; a child that fails or overruns is a FULL selection naming why. */
+export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Record<string, string>): Promise<AffectedSelection> {
+  const code = "const m = await import(process.argv[1]);" +
+    "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout) as AffectedSelection;
+  } catch (err) {
+    const e = err as { killed?: boolean; message?: string };
+    return fullSelection(e.killed === true
+      ? `the selection overran ${OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS / 1000}s`
+      : `the selection failed — ${String(e.message ?? err).slice(0, 300)}`);
+  }
+}
+
+/** Where a run_check row goes, and whose run it belongs to. */
+export interface OpenWeightRunCheckLedger {
+  config: Config;
+  runId?: string;
+  taskId?: string;
+  clock: Pick<Clock, "now" | "iso">;
+}
+
+function ledgerRunCheck(
+  ledger: OpenWeightRunCheckLedger,
+  row: { check: unknown; outcome: "ran" | "empty" | "refused"; suites: number | null; startedAt: number; exitCode?: number; timedOut?: boolean; reason?: string },
+): void {
+  appendLedger(ledgerPathFor(ledger.config), {
+    run_id: ledger.runId ?? "unattributed",
+    task_id: ledger.taskId ?? "unattributed",
+    step: OPENWEIGHT_RUN_CHECK_LEDGER_STEP,
+    check: String(row.check),
+    outcome: row.outcome,
+    suites: row.suites,
+    duration_ms: ledger.clock.now() - row.startedAt,
+    exit_code: row.exitCode ?? null,
+    timed_out: row.timedOut ?? false,
+    ...(row.reason !== undefined ? { reason: row.reason.slice(0, 500) } : {}),
+  });
 }
 
 /** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
@@ -3551,6 +3733,7 @@ async function executeOpenWeightTool(
   checkEnv: Record<string, string>,
   workerHome: string,
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
+  ledger: OpenWeightRunCheckLedger,
 ): Promise<unknown> {
   switch (name) {
     case "read_file":
@@ -3577,7 +3760,26 @@ async function executeOpenWeightTool(
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
       // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
       // fresh network namespace before it runs.
-      const argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      const startedAt = ledger.clock.now();
+      let argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      // W1-T6091: in a tree carrying the selector, unit_test runs the HARNESS-derived affected
+      // suites as explicit files, or nothing, or refuses — never the whole tree.
+      let suites: number | null = null;
+      if (args.check === "unit_test" && existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER))) {
+        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd);
+        if (plan.kind === "refused") {
+          ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason });
+          return { check: args.check, ran: false, suites: plan.suites, refused: plan.reason };
+        }
+        if (plan.kind === "empty") {
+          const output = `no suite is affected by this worktree's diff; nothing ran (${plan.reasons.join("; ") || "no changed file reaches a suite"})`;
+          ledgerRunCheck(ledger, { check: args.check, outcome: "empty", suites: 0, startedAt });
+          return { check: args.check, ran: false, suites: 0, output };
+        }
+        argv = plan.argv;
+        suites = plan.suites.length;
+      }
+      const scoped = suites === null ? {} : { suites };
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -3585,14 +3787,16 @@ async function executeOpenWeightTool(
           workerHome,
           env: checkEnv,
         });
-        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0 });
+        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
       } catch (err) {
         // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
         // still throws, because that is not a result.
-        const e = err as { status?: number; code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer };
+        const e = err as { status?: number; code?: number | string; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
-        return { check: args.check, exitCode, output: out.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true });
+        return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
       }
     }
     case "grep_files": {
@@ -4004,7 +4208,8 @@ export async function spawnFoundryClaudeWorker(
         }
         let result: unknown;
         try {
-          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
+          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
+            { config, runId: args.runId, taskId: args.taskId, clock });
         } catch (error) {
           // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash ${label} tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -4272,6 +4477,7 @@ export async function spawnOpenWeightWorker(
                 checkEnv,
                 args.workerHome,
                 args.runCheck,
+                { config, runId: args.runId, taskId: args.taskId, clock },
               ));
         } catch (error) {
           if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
