@@ -113,12 +113,12 @@ test("Foundry Haiku stops a real failed local Read before a fabricated follow-up
     const result = await spawnOpenWeightWorker({ cwd: f.root, workerHome: join(f.root, "home"), prompt: "Read the file",
       tools: ["Read"], maxTurns: 2, env, clock: fixedClock(NOW), fetchImpl: async () => {
         sent++;
-        return response({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "read-1", name: "Read",
-          input: { file_path: "missing-file.txt" } }] });
+        return response({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "read-1", name: "read_file",
+          input: { path: "missing-file.txt" } }] });
       },
     }, f.config, { model: MODEL, effort: "medium" });
     assert.equal(result.isError, true);
-    assert.match(result.stderr, /tool Read failed/);
+    assert.match(result.stderr, /tool read_file failed/);
     assert.equal(sent, 1, "the model never receives an invented successful tool result");
   } finally { f.close(); }
 });
