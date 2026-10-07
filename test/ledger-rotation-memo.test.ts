@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -45,6 +46,40 @@ test("streamed real rotation loads match buffered rows and torn evidence for gzi
     await rejected.load([{ path: plain, form: "plain" }]);
     assert.equal(rejected.retention().failedArchives, 1, "consumer failure must not install a partial memo");
   } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("a real rotation load streams the archive and never reads the whole file into memory", async () => {
+  // The default path must stream: a whole-file fs.readFile here is the buffered load this change removed.
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as { readFile: typeof readFile };
+  const original = fsp.readFile;
+  let wholeFileReads = 0;
+  fsp.readFile = ((...args: Parameters<typeof readFile>) => {
+    wholeFileReads++;
+    return original(...args);
+  }) as typeof readFile;
+  syncBuiltinESMExports();
+  const fx = writeLedger([], { rotations: [] });
+  try {
+    const content = JSON.stringify({ step: "first", value: "🚀 " }) + "\nbroken\n" + JSON.stringify({ step: "last" });
+    for (const form of ["plain", "gzip"] as const) {
+      const path = join(fx.dir, `ledger.2026-09-21T01-00-00-000Z.ndjson${form === "gzip" ? ".gz" : ""}`);
+      writeFileSync(path, form === "gzip" ? gzipSync(content) : content);
+      const streamed = createLedgerRotationMemo(identity);
+      await streamed.load([{ path, form }]);
+      assert.equal(wholeFileReads, 0, `the default ${form} load read the whole archive instead of streaming it`);
+      const buffered = createLedgerRotationMemo(identity, { readFile: original });
+      await buffered.load([{ path, form }]);
+      const fallback = () => { throw new Error("successful load must be memoized"); };
+      const actual = streamed.pass().rotationRecords({ path, form }, fallback);
+      assert.deepEqual(actual, buffered.pass().rotationRecords({ path, form }, fallback));
+      assert.deepEqual(actual.tornLines, ["broken"]);
+      assert.equal(actual.rows.length, 2);
+    }
+  } finally {
+    fsp.readFile = original;
+    syncBuiltinESMExports();
     rmSync(fx.dir, { recursive: true, force: true });
   }
 });
