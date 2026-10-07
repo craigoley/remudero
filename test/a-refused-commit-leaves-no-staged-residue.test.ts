@@ -84,6 +84,11 @@ function seedRepo(hook?: string): GitRepo {
     repo.git("add", "-A");
     repo.git("commit", "--quiet", "-m", "install synthetic pre-commit hook");
     repo.git("config", "core.hooksPath", "hooks");
+    // W1-T6106: a host commit runs hooks from the HARNESS copy, never the worktree's tracked one; the synthetic hook
+    // stands in for the install's own hooks/ through the daemon-environment seam.
+    process.env.RMD_HARNESS_HOOKS_DIR = join(repo.dir, "hooks");
+  } else {
+    delete process.env.RMD_HARNESS_HOOKS_DIR;
   }
   return repo;
 }

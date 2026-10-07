@@ -123,7 +123,11 @@ export interface HostGitOptions {
 }
 
 /** This install's own `hooks/` — the code the daemon ships, never a worktree's tracked copy. */
-export function harnessHooksDir(): string {
+export function harnessHooksDir(env: NodeJS.ProcessEnv = process.env): string {
+  // `RMD_HARNESS_HOOKS_DIR` is the daemon's OWN environment (a worker cannot set it): a seam for a fixture that must stand a
+  // refusing gate in for the install's hooks/, never a path read from a worktree.
+  const override = env.RMD_HARNESS_HOOKS_DIR;
+  if (override !== undefined && override !== "") return override;
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "hooks");
 }
 
@@ -208,7 +212,7 @@ function readFileConfigList(file: string, key: string, env: NodeJS.ProcessEnv): 
     const out = execFileSync("git", ["config", "--file", file, "--get-all", key], { encoding: "utf8", env: { ...env, GIT_CONFIG_NOSYSTEM: "1" }, stdio: ["ignore", "pipe", "ignore"] });
     return out.split("\n").slice(0, -1);
   } catch {
-    return [];
+    return []; // exit 1: the key is unset (or the file absent) — no helper, never a guess
   }
 }
 
@@ -235,7 +239,11 @@ export function hostWorktreeGitPlan(worktreePath: string, args: readonly string[
   env.GIT_CONFIG_GLOBAL = daemonGlobalConfig(process.env);
   env.GIT_PAGER = "cat";
   env.GIT_EDITOR = "true";
-  const hooks = pin !== null && sub !== undefined && HOOKED_SUBCOMMANDS.has(sub) ? (opts.hooksDir ?? harnessHooksDir()) : "/dev/null";
+  // A pinned worktree always gets the harness gate. One nothing recorded gets it only when it asked for hooks at all (the
+  // `core.hooksPath` worktreeAdd sets), which is exactly when the raw call would have run some.
+  const wantsHooks =
+    pin !== null || readConfigList(["-C", worktreePath, "-c", "core.fsmonitor=false"], "core.hooksPath", env).length > 0;
+  const hooks = wantsHooks && sub !== undefined && HOOKED_SUBCOMMANDS.has(sub) ? (opts.hooksDir ?? harnessHooksDir(env)) : "/dev/null";
   if (hooks !== "/dev/null" && !existsSync(hooks)) {
     throw new HarnessHooksMissingError(worktreePath, sub ?? "", hooks);
   }
@@ -270,12 +278,28 @@ export function hostWorktreeGitPlan(worktreePath: string, args: readonly string[
   return { argv: ["-C", worktreePath, ...pinning, ...hardening, ...credentials, ...rest], env };
 }
 
+/** A failure reads as the CALL the caller made (`git -C <worktree> push …`), not the hardened argv: callers classify a failed
+ *  git by that leading text (`runErrorCause`), and a hundred-character config preamble in every log line helps no one. */
+function asCallerFailure(error: unknown, plan: HostGitPlan, worktreePath: string, args: readonly string[]): unknown {
+  if (!(error instanceof Error)) return error;
+  const hardened = `git ${plan.argv.join(" ")}`;
+  const logical = `git -C ${worktreePath} ${args.join(" ")}`;
+  error.message = error.message.split(hardened).join(logical);
+  const failed = error as Error & { cmd?: string };
+  if (typeof failed.cmd === "string") failed.cmd = failed.cmd.split(hardened).join(logical);
+  return error;
+}
+
 /** `execFileSync("git", …)` for a worker worktree, hardened. Same return and throw shapes as `execFileSync`. */
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], options: ExecFileSyncOptionsWithStringEncoding, host?: HostGitOptions): string;
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], options?: ExecFileSyncOptions, host?: HostGitOptions): string | Buffer;
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], options: ExecFileSyncOptions = {}, host: HostGitOptions = {}): string | Buffer {
   const plan = hostWorktreeGitPlan(worktreePath, args, host);
-  return execFileSync("git", plan.argv, { ...options, env: { ...plan.env, ...(options.env ?? {}), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: plan.env.GIT_CONFIG_GLOBAL } });
+  try {
+    return execFileSync("git", plan.argv, { ...options, env: { ...plan.env, ...(options.env ?? {}), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: plan.env.GIT_CONFIG_GLOBAL } });
+  } catch (error) {
+    throw asCallerFailure(error, plan, worktreePath, args);
+  }
 }
 
 const execFilePromise = promisify(execFile);
@@ -288,11 +312,15 @@ export async function hostWorktreeGitAsync(
   host: HostGitOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
   const plan = hostWorktreeGitPlan(worktreePath, args, host);
-  return execFilePromise("git", plan.argv, {
-    encoding: "utf8",
-    ...options,
-    env: { ...plan.env, ...(options.env ?? {}), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: plan.env.GIT_CONFIG_GLOBAL },
-  });
+  try {
+    return await execFilePromise("git", plan.argv, {
+      encoding: "utf8",
+      ...options,
+      env: { ...plan.env, ...(options.env ?? {}), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: plan.env.GIT_CONFIG_GLOBAL },
+    });
+  } catch (error) {
+    throw asCallerFailure(error, plan, worktreePath, args);
+  }
 }
 
 /** `spawnSync("git", …)` for a worker worktree, hardened — for callers that need the exit status rather than a throw. */

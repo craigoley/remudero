@@ -5134,7 +5134,7 @@ export function stampRunWorktreeAssignment(worktreePath: string, assignmentId: s
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     } catch {
-      return "";
+      return ""; // exit 1: no per-worktree core.hooksPath, so git's default hooks dir is the prior one
     }
   })();
   const current =

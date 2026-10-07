@@ -118,6 +118,13 @@ function buildFixture(): Fixture {
   mkdirSync(join(seed.dir, "hooks"), { recursive: true });
   writeFileSync(join(seed.dir, "hooks", "pre-push"), hookScript(logPath));
   chmodSync(join(seed.dir, "hooks", "pre-push"), 0o755);
+  // W1-T6106: a host push runs the gate from the HARNESS copy of hooks/, never the worktree's tracked one — the same
+  // refusing gate stands in for the install's own hooks/ through the daemon-environment seam.
+  const harnessHooks = join(root, "harness-hooks");
+  mkdirSync(harnessHooks, { recursive: true });
+  writeFileSync(join(harnessHooks, "pre-push"), hookScript(logPath));
+  chmodSync(join(harnessHooks, "pre-push"), 0o755);
+  process.env.RMD_HARNESS_HOOKS_DIR = harnessHooks;
   seed.git("add", "-A");
   seed.git("commit", "-q", "-m", "seed");
   seed.git("push", "-q", "origin", "main");
@@ -131,6 +138,7 @@ function buildFixture(): Fixture {
     origin: origin.dir,
     hookLog: () => readFileSync(logPath, "utf8").split("\n").filter(Boolean),
     cleanup: () => {
+      delete process.env.RMD_HARNESS_HOOKS_DIR;
       origin.cleanup();
       seed.cleanup();
       rmSync(root, { recursive: true, force: true });
