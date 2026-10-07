@@ -32,6 +32,7 @@ import {
   defaultCreditOverridePath,
   defaultCreditStorePath,
   loadCreditStore,
+  noteLedgerGeneration,
   projectPlan,
   type CreditStore,
   type DeriveDeps,
@@ -228,6 +229,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const sentinel: Row = {};
   const rows: Row[] = [sentinel];
   const rowTsMs: number[] = [Number.NEGATIVE_INFINITY];
+  // W1-T6253: every in-place change to `rows` (or the sentinel's ts) is a new generation, so an index held for the
+  // old contents is never served for the new ones.
+  let rowsGeneration = 0;
+  const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
+  touched();
   let lastSeq = 0;
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
   let bulkOpen = false;
@@ -272,6 +278,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     if (at > 0) {
       rows.splice(at, 1);
       rowTsMs.splice(at, 1);
+      touched();
     }
   }
 
@@ -281,6 +288,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     while (rowTsMs[at - 1]! > tsMs) at--;
     rows.splice(at, 0, row);
     rowTsMs.splice(at, 0, tsMs);
+    touched();
     standing.set(key, { row, tsMs });
     latestTsMs = Math.max(latestTsMs, tsMs);
   }
@@ -340,7 +348,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const tsMs = Number(r.ts_ms);
       fresh++;
       if (BOARD_UNREAD_STEPS.has(String(r.step))) {
-        if (tsMs > latestTsMs) sentinel.ts = String(r.ts);
+        if (tsMs > latestTsMs) {
+          sentinel.ts = String(r.ts);
+          touched();
+        }
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
@@ -350,6 +361,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       else while (rowTsMs[at - 1]! > tsMs) at--;
       rows.splice(at, 0, row);
       rowTsMs.splice(at, 0, tsMs);
+      touched();
       latestTsMs = Math.max(latestTsMs, tsMs);
       const dirt = boardDirtForRow(row, rules);
       if (dirt.all) {
@@ -381,6 +393,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const order = rows.map((_, i) => i).sort((a, b) => rowTsMs[a]! - rowTsMs[b]!);
       const [sortedRows, sortedTs] = [order.map((i) => rows[i]!), order.map((i) => rowTsMs[i]!)];
       sortedRows.forEach((row, i) => { rows[i] = row; rowTsMs[i] = sortedTs[i]!; });
+      touched();
     }
     const workers = ingestWorkers();
     if (ingestActivity() || workers || fresh > 0) pending = true;

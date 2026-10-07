@@ -1177,8 +1177,38 @@ function pushIndexed(
   else buckets.set(key, [row]);
 }
 
-/** Build the {@link LedgerIndex} for `rows` in a single pass. */
+/** W1-T6253: the row generation an owner of a mutable rows array last registered for it, and the index held for it. */
+const ledgerGenerations = new WeakMap<ReadonlyArray<Record<string, unknown>>, number>();
+const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: LedgerIndex }>();
+let ledgerIndexBuilds = 0;
+
+/** W1-T6253: an owner mutating `rows` in place registers each generation; an unregistered array is indexed every call. */
+export function noteLedgerGeneration(rows: ReadonlyArray<Record<string, unknown>>, generation: number): void {
+  ledgerGenerations.set(rows, generation);
+}
+
+/** The generation registered for `rows`, or undefined when its owner registers none. */
+export function ledgerGenerationOf(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  return ledgerGenerations.get(rows);
+}
+
+/** How many indexes this process has computed: the W1-T6253 tests' counting seam. */
+export function ledgerIndexBuildCount(): number {
+  return ledgerIndexBuilds;
+}
+
+/** Build the {@link LedgerIndex} for `rows` in a single pass, or return the one held for its unchanged generation. */
 export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+  const generation = ledgerGenerations.get(rows);
+  const held = generation === undefined ? undefined : generationIndexes.get(rows);
+  if (held && held.generation === generation) return held.index;
+  ledgerIndexBuilds++;
+  const index = computeLedgerIndex(rows);
+  if (generation !== undefined) generationIndexes.set(rows, { generation, index });
+  return index;
+}
+
+function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();
@@ -3833,7 +3863,8 @@ export function projectPlan(
   const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
   // R-23: AND INDEX IT ONCE. Reading once was half the fix — the ten per-task helpers each still walked the
   // whole array, so an N-task plan scanned it ~10N times.
-  const ledgerIndex = effectiveDeps.unindexedForEquivalenceTest ? undefined : buildLedgerIndex(ledgerLinesOnce);
+  const supplied = effectiveDeps.ledgerIndex?.rows === ledgerLinesOnce ? effectiveDeps.ledgerIndex : undefined;
+  const ledgerIndex = effectiveDeps.unindexedForEquivalenceTest ? undefined : supplied ?? buildLedgerIndex(ledgerLinesOnce);
   effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce, ledgerIndex };
   // W1-T951 DELIVERABLE A, READ AND WRITE THE DURABLE STORE ONCE PER PLAN. Without it an N-task plan would
   // parse the store once per task and fsync N times per projection.
