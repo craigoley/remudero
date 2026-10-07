@@ -513,6 +513,7 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     compaction_configured: false,
     compaction_failures: [],
     max_turns: 20,
+    worker_exit: "unobserved",
   });
   assert.equal(BILLING_MODE, "subscription");
 });
