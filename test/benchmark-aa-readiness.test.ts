@@ -13,6 +13,7 @@ import {
 } from "../src/lib/benchmark-aa-prospective.js";
 import {
   benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
+  runtimePinRefusals,
   type BenchmarkAaReadinessInput, type ReadinessTask, type RuntimePins,
 } from "../src/lib/benchmark-aa-readiness.js";
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
@@ -20,6 +21,7 @@ import { DEFAULT_INSTANCE_STATE_BASE } from "../src/lib/instance-gateway.js";
 import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "../src/lib/paired-trial.js";
 import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
 import { benchmarkAaReadinessRuntime, HANDLERS } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const SHA = "a".repeat(40);
 const OTHER_SHA = "b".repeat(40);
@@ -122,6 +124,59 @@ test("calibration driver refuses drifting runtime pins before dispatch", async (
   const unpinned = deriveRuntimePins({ harnessRevision: { state: "unavailable", reason: "executing-source-not-clean" }, installRoot: "/install",
     git: () => { throw new Error("git must not run without a harness pin"); }, readStamp: () => undefined });
   assert.deepEqual(unpinned.revisions.promptRevision, { state: "unavailable", reason: "executing-source-not-clean" });
+});
+
+test("a clean newer tool checkout cannot claim the revision of an already loaded harness", () => {
+  const repo = gitRepo({ kind: "runtime-tool-pins" });
+  mkdirSync(join(repo.dir, "settings"));
+  writeFileSync(join(repo.dir, "settings", "tools.json"), '{"version":1}\n');
+  repo.git("add", "settings"); repo.git("commit", "--quiet", "-m", "first tools");
+  const revision = repo.git("rev-parse", "HEAD");
+  const harnessRevision = { source: "executing-module-git" as const, revision };
+  const clean = deriveRuntimePins({ harnessRevision, installRoot: repo.dir, readStamp: () => SHA });
+  assert.deepEqual(clean.revisions.toolRevision, { source: "resolved-artifact", revision });
+  writeFileSync(join(repo.dir, "settings", "tools.json"), '{"version":2}\n');
+  repo.git("add", "settings"); repo.git("commit", "--quiet", "-m", "new tools");
+  assert.notEqual(repo.git("rev-parse", "HEAD"), revision);
+  assert.equal(repo.git("status", "--porcelain", "--", "settings", "hooks"), "", "the default Git path sees clean committed tools");
+  const advanced = deriveRuntimePins({ harnessRevision, installRoot: repo.dir, readStamp: () => SHA });
+  assert.deepEqual(advanced.revisions.toolRevision, { state: "unavailable", reason: "executing-tool-revision-drift" });
+  assert.deepEqual(runtimePinRefusals(advanced, { ...STACK, ...REVISIONS, harnessRevision: revision,
+    promptRevision: revision, toolRevision: revision, scorerRevision: revision }),
+  ["runtime-pin-unknown:toolRevision:executing-tool-revision-drift"]);
+});
+
+test("a tool checkout advancing during the actual status read remains unavailable", () => {
+  const repo = gitRepo({ kind: "runtime-tool-pin-race" });
+  mkdirSync(join(repo.dir, "hooks"));
+  writeFileSync(join(repo.dir, "hooks", "tool"), "first\n");
+  repo.git("add", "hooks"); repo.git("commit", "--quiet", "-m", "first tools");
+  const revision = repo.git("rev-parse", "HEAD");
+  let headReads = 0;
+  const result = deriveRuntimePins({ harnessRevision: { source: "executing-module-git", revision },
+    installRoot: repo.dir, readStamp: () => undefined,
+    git: (cwd, args) => {
+      assert.equal(cwd, repo.dir);
+      const output = repo.git(...args);
+      if (args[0] === "rev-parse") headReads++;
+      if (args[0] === "status") {
+        writeFileSync(join(repo.dir, "hooks", "tool"), "new\n");
+        repo.git("add", "hooks"); repo.git("commit", "--quiet", "-m", "tools advanced during inspection");
+      }
+      return output;
+    },
+  });
+  assert.equal(headReads, 2, "the clean status must be bracketed by real commit identity reads");
+  assert.deepEqual(result.revisions.toolRevision, { state: "unavailable", reason: "executing-tool-revision-drift" });
+});
+
+test("the default tool Git reader preserves a real missing install as unavailable", () => {
+  const repo = gitRepo({ kind: "runtime-tool-pin-missing" });
+  const result = deriveRuntimePins({ harnessRevision: { source: "executing-module-git", revision: repo.git("rev-parse", "HEAD") },
+    installRoot: join(repo.dir, "absent"), readStamp: () => undefined });
+  assert.ok(result.revisions.toolRevision !== undefined && "state" in result.revisions.toolRevision);
+  assert.equal(result.revisions.toolRevision.state, "unavailable");
+  assert.match(result.revisions.toolRevision.reason, /^executing-module-revision-unavailable:/);
 });
 
 test("calibration resumes identity-qualified assignments without replaying completed pairs", async () => {
