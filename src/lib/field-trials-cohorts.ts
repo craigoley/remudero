@@ -66,7 +66,7 @@ export function servedTrialCohorts(rows: readonly FlowRow[], asOf: string, perio
     const attempt = terminal.row;
     if ([row.host, row.runId, row.taskId].some((value) => value === null)
       || row.host !== attempt.host || row.runId !== attempt.runId || row.taskId !== attempt.taskId
-      || row.provider === null || row.provider !== attempt.provider) { refuse("attempt-identity-mismatch"); continue; }
+      || row.provider == null || row.provider !== attempt.provider) { refuse("attempt-identity-mismatch"); continue; }
     if (row.ts === null || attempt.ts === null || ![row.ts, attempt.ts, asOf].every((ts) => Number.isFinite(Date.parse(ts)))
       || Date.parse(attempt.ts) < Date.parse(row.ts) || Date.parse(attempt.ts) > Date.parse(asOf)) {
       refuse("attempt-time-unavailable-or-outside-window"); continue;

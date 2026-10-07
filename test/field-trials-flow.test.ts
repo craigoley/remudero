@@ -108,6 +108,9 @@ test("private trial cohorts refuse wrong assignment joins and missing or future 
     "attempt-time-unavailable-or-outside-window": 3, "served-model-unavailable": 1, "worker-outcome-unavailable": 1,
     "assignment-context-unavailable": 1, "terminal-attempt-unavailable": 1 });
   assert.deepEqual(controlledFold(controlledRows("asof"), "bad-date").excluded, { "attempt-time-unavailable-or-outside-window": 1 });
+  const legacy = flowReadOf(controlledRows("legacy-provider")).rows;
+  delete legacy[0]!.provider; delete legacy[1]!.provider;
+  assert.deepEqual(servedTrialCohorts(legacy, T(11), periodOf).excluded, { "attempt-identity-mismatch": 1 });
 });
 
 test("private trial cohorts deduplicate equivalent receipts and preserve conflicting assignment or attempt identities", () => {
