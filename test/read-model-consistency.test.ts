@@ -515,3 +515,27 @@ test("the oracle agrees with an activity ring that dropped its oldest rows and h
   assert.equal(run.mismatches.projectionMissing, 1, "only the lost newest row");
   assert.deepEqual(ring(), clean, "the healed ring equals a clean projection");
 });
+
+test("a same-millisecond tie at the activity ring's edge agrees and is not re-healed", (t) => {
+  // Host, 2026-10-07: every READ-MODEL-CONSOLE/SITE escalation sampled one row of a same-millisecond
+  // group (board_snapshot.unchanged, board_gateway.issue_fetch_bytes, board_gateway.issue_fetch_ok).
+  const rowsDir = scratch(t, "oracle-rows");
+  const edge = 20; // rows 0..519: the ring keeps the newest ACTIVITY_RING_ROWS, from row 20 up
+  const lines = Array.from({ length: ACTIVITY_RING_ROWS + edge }, (_, i) => row(T0 + Math.max(i, edge) * 1_000, "board_gateway.issue_fetch_bytes", { n: i }));
+  writeFileSync(join(rowsDir, LIVE), text(lines));
+  const clock = fixedClock(CHECK_AT);
+  const db = openProjectorReadModel(scratch(t, "oracle-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  if (!got.ok) throw new Error("lease");
+  createLedgerProjector({ ledgerDir: rowsDir, db, lease: got.lease, clock }).tick();
+  const f: Fixture = { rowsDir, metricPath: join(scratch(t, "oracle-metric"), LIVE), db, lease: got.lease, lines };
+  const edgeRows = () => db.prepare("SELECT count(*) AS n FROM activity_ring WHERE ts_ms = ?").get(T0 + edge * 1_000)?.n;
+  assert.equal(edgeRows(), 1, "positive control: the ring's oldest millisecond holds one of its twenty-one tied rows");
+  const issues = fakeIssues();
+  const first = check(f, { escalation: { issues, ledgerPath: f.metricPath, runId: "oracle" } });
+  assert.deepEqual([first.outcome, first.mismatches.projectionMissing], ["agree", 0], "a tie the ring trimmed is not missing");
+  const again = check(f, {}, fixedClock(CHECK_AT + ORACLE_DRIFT_INTERVAL_MS));
+  assert.deepEqual([again.outcome, again.healedRows], ["agree", 0], "a recheck neither heals nor escalates");
+  assert.deepEqual(issues.titles, [], "no escalation");
+});
