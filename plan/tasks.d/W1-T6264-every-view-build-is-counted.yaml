@@ -1,0 +1,38 @@
+- id: W1-T6264
+  title: "EVERY VIEW'S BUILDS ARE COUNTED, NOT ONLY ITS SLOW ONES — read_model.slow_view logs a build only past its pass budget, so a staged view's cost is invisible (workstreams logged 638 s of slow builds in a day it built 27,207 times)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a payload-free periodic tally of each view's builds in the read-model worker
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item C4); measuring a change's live benefit needs total build cost, not a censored sample"
+  plan_refs: [W1-T5885, W1-T5896, W1-T5066]
+  files: [src/lib/read-model-worker.ts, test/every-view-build-is-counted.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06T19:00Z to 2026-10-07T19:00Z on the production ledger: read_model.slow_view logged now@core
+    4,345 times (18,461 s) and workstreams 116 times (638 s). But workstreams.built shows 27,207 workstreams builds in
+    the same day, about 1 s of CPU each in an isolated replay. slow_view fires only when one unit's cost exceeds passMs,
+    and a staged view (workstreams, now) splits a build across passes, so most of its cost never reaches a row. Only
+    workstreams writes a per-build row; other views write none. So the box's per-view CPU cannot be ranked from
+    telemetry, and a change's live saving (e.g. PR 9922) is measured only for the one view that happens to log builds.
+  design: |
+    (1) The read-model worker keeps, per view, instance and thread/lane, a running tally of materialize calls, builds
+    that yielded a body, and their summed and maximum cost in ms.
+    (2) Every 10 minutes, and only when a tally moved, it logs one payload-free row `read_model.view_builds` per tally
+    with those numbers and the window. No bodies, no keys beyond the view, instance and lane.
+    (3) slow_view is unchanged.
+    (4) No new memory sampling: this counts work the worker already times.
+  acceptance:
+    - claim: "a view built under its pass budget is counted in read_model.view_builds with its summed cost, and an idle window writes no row"
+      proof: "unit test: test/every-view-build-is-counted.test.ts"
+    - claim: "the worker emits the view build tally"
+      proof: "grep: read_model\\.view_builds in src/lib/read-model-worker.ts"
+  falsifier: |
+    Count only builds over passMs: the under-budget build is missing from the row and the test fails. Emit on every
+    window: the idle window writes a row and the test fails.
