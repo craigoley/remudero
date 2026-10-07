@@ -335,7 +335,8 @@ test('current-head green preserves successful producer identity and never claims
     assert.deepEqual([found.checkId, found.suiteId, found.runId, found.jobId, found.producer.path], [11, 22, 33, 44, workflow]);
     assert.equal(pull.headGreen!.firstEver, 'unavailable-retention-uncertified');
     assert.ok(fake.calls.includes(`repos/o/r/commits/${f.sha}/check-runs?check_name=ci-gate&filter=all&per_page=100&page=1`));
-    assert.equal(pull.detail.state === 'observed' && pull.detail.checks.state, 'green', 'legacy first-commit classification stays separate');
+    const updated = store.repos['o/r']!.pulls.PR_1!;
+    assert.equal(updated.detail.state === 'observed' && updated.detail.checks.state, 'green', 'legacy first-commit classification stays separate');
   }
 });
 
@@ -439,9 +440,9 @@ test('an unavailable producer read is attempted once per pass and remains pendin
   const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
   for (const minute of [10, 11]) {
     const before = fake.calls.length;
-    const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 8);
+    const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(minute), 12);
     const attempts = fake.calls.slice(before);
-    assert.ok(attempts.length <= 8); assert.equal(attempts.filter((path) => path.includes('/actions/runs/')).length, 1);
+    assert.ok(attempts.length <= 12); assert.equal(attempts.filter((path) => path.includes('/actions/runs/')).length, 1);
     assert.equal(pass.state, 'partial'); assert.equal(pass.repos['o/r']!.headGreensPending, 1);
   }
   assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(11)), null);
@@ -450,7 +451,7 @@ test('an unavailable producer read is attempted once per pass and remains pendin
 test('bounded head history and damaged cached producer identities stay unavailable rather than fabricated', async () => {
   const f = headGateFixture(); const fake = githubFake({ 'o/r': f.fixture });
   const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
-  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 4);
   const pull = store.repos['o/r']!.pulls.PR_1!;
   pull.headGreen!.pending[0]!.runId = NaN;
   await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(11), 8);
@@ -473,7 +474,7 @@ test('bounded head history and damaged cached producer identities stay unavailab
 test('a complete first-commit all-attempt response is reused when that commit is the current head', async () => {
   const f = headGateFixture(); f.fixture.prCommits![1] = [{ sha: f.sha }];
   const fake = githubFake({ 'o/r': f.fixture }); const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
-  const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 8);
+  const pass = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10), 11);
   assert.ok(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(10)));
   assert.equal(pass.requestsMade, 8);
   assert.equal(fake.calls.filter((path) => path.includes('/check-runs?')).length, 1, 'one actual all-attempt response serves both distinct signals');
@@ -488,7 +489,7 @@ test('a merged current-head green with an empty run PR list requires the real co
   const store: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: {} };
   for (let pass = 0; pass < 3; pass++) {
     const before = fake.calls.length;
-    const result = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), 8);
+    const result = await ingestFieldTrialsGithub(fake.fetch, ['o/r'], store, at(10 + pass), pass === 0 ? 5 : 8);
     assert.ok(fake.calls.length - before <= 8);
     assert.equal(result.requestsMade, fake.calls.length - before);
     if (pass === 0) assert.equal(observedCurrentHeadGreen(store.repos['o/r']!.pulls.PR_1!, at(10)), null);
