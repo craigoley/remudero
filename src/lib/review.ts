@@ -6,7 +6,6 @@ import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
-import type { WorkerExit } from "./worker-provider.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
@@ -9109,7 +9108,7 @@ export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
 export function reviewerRerunDecision(
-  first: { exit?: WorkerExit },
+  first: { exit?: Parameters<typeof reviewerOutcome>[0]["exit"] },
   priorSignal?: string,
 ): "rerun" | "accept" {
   return first.exit?.kind === "signal" && priorSignal === undefined ? "rerun" : "accept";
