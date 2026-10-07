@@ -33,7 +33,10 @@ import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 const USER = "fixture-user";
 const PASS = "fixture-pass";
 const SOCKET_PASS = "fixture-socket-pass";
-const SAVED = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "RMD_HARNESS_HOOKS_DIR"] as const;
+const FLEET_TOKEN = "fixture-gh-token";
+/** deploy/entrypoint.sh's helper, verbatim: the core managed checkout carries it locally AND globally. */
+const ENTRYPOINT_HELPER = '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f';
+const SAVED = ["GH_TOKEN", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "RMD_HARNESS_HOOKS_DIR"] as const;
 const saved = new Map(SAVED.map((k) => [k, process.env[k]] as const));
 
 let root: string;
@@ -154,7 +157,7 @@ before(async () => {
   Object.assign(process.env, { GIT_CONFIG_GLOBAL: globalWithHelper, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0",
     RMD_HARNESS_HOOKS_DIR: join(root, "harness-hooks") });
   writeFileSync(join(root, "server.js"), SERVER);
-  server = spawn(process.execPath, [join(root, "server.js"), served, join(root, "server.log"), `${USER}:${PASS}`, `${USER}:${SOCKET_PASS}`],
+  server = spawn(process.execPath, [join(root, "server.js"), served, join(root, "server.log"), `${USER}:${PASS}`, `${USER}:${SOCKET_PASS}`, `x-access-token:${FLEET_TOKEN}`],
     { stdio: ["ignore", "pipe", "inherit"] });
   const port = await new Promise<string>((resolve) => server.stdout!.once("data", (d: Buffer) => resolve(d.toString().trim())));
   base = `http://127.0.0.1:${port}`;
@@ -173,6 +176,64 @@ describe("W1-T6148: a clean worktree still authenticates through the harness hel
     leafPush(wt, branch);
     assert.equal(landed(bare, branch), raw(wt, ["rev-parse", "HEAD"]).trim(), "the push landed in the real remote");
     assert.match(serverLog(), new RegExp(`authorized ${USER}:${PASS} /lane-${n}.git/git-receive-pack`), "it authenticated");
+  });
+});
+
+describe("W1-T6148: the fleet's real managed-checkout keys pass untouched (measured on the host 2026-10-07)", () => {
+  /** The core managed checkout's local key set: pushurl EQUAL to url, the entrypoint helper locally,
+   *  core.hookspath, extensions.worktreeconfig, branch.*, remote.origin.fetch, user.*, the core.* init keys. */
+  function coreShapedLane(globalHelper: boolean) {
+    const lane = cutLane();
+    const local = (k: string, v: string) => raw(lane.wt, ["config", "--local", k, v]);
+    local("remote.origin.pushurl", lane.url);
+    local("credential.helper", ENTRYPOINT_HELPER);
+    local("core.hookspath", "hooks");
+    local("branch.main.remote", "origin");
+    local("branch.main.merge", "refs/heads/main");
+    local("branch.run-W1-T1-1.remote", "origin");
+    local("branch.run-W1-T1-1.merge", "refs/heads/run-W1-T1-1");
+    const fleetGlobal = join(root, `fleet-global-${n}`);
+    writeFileSync(fleetGlobal, globalHelper ? `[credential]\n\thelper = "${ENTRYPOINT_HELPER.replace(/"/g, '\\"')}"\n` : "");
+    const keys = raw(lane.wt, ["config", "--list", "--show-scope", "--no-includes"]).split("\n")
+      .filter((l) => l.startsWith("local\t")).map((l) => l.slice(6).split("=")[0]);
+    for (const k of ["remote.origin.pushurl", "remote.origin.url", "remote.origin.fetch", "credential.helper", "core.hookspath",
+      "extensions.worktreeconfig", "branch.main.merge", "branch.main.remote", "user.name", "user.email", "core.bare",
+      "core.filemode", "core.logallrefupdates", "core.repositoryformatversion"]) {
+      assert.ok(keys.includes(k), `the fixture carries the fleet's local ${k}`);
+    }
+    return { ...lane, fleetGlobal };
+  }
+
+  it("a worktree of the core managed checkout's exact key set is not refused and pushes authenticated", () => {
+    const { wt, bare, branch, fleetGlobal } = coreShapedLane(true);
+    Object.assign(process.env, { GIT_CONFIG_GLOBAL: fleetGlobal, GH_TOKEN: FLEET_TOKEN });
+    try {
+      assert.doesNotThrow(() => leaf.hostWorktreeGit(wt, ["status", "--porcelain"]), "no key of the real set is refused");
+      leafPush(wt, branch);
+      assert.equal(landed(bare, branch), raw(wt, ["rev-parse", "HEAD"]).trim(), "the push landed");
+      assert.match(serverLog(), new RegExp(`authorized x-access-token:${FLEET_TOKEN} /lane-${n}.git/git-receive-pack`),
+        "through the GLOBAL entrypoint helper the leaf re-added; the local copy was reset");
+    } finally {
+      process.env.GIT_CONFIG_GLOBAL = globalWithHelper;
+    }
+  });
+
+  it("a host whose ONLY helper is repo-local fails closed: the push is unauthenticated and lands nothing", () => {
+    const { wt, bare, branch, fleetGlobal } = coreShapedLane(false);
+    Object.assign(process.env, { GIT_CONFIG_GLOBAL: fleetGlobal, GH_TOKEN: FLEET_TOKEN });
+    try {
+      assert.throws(() => leafPush(wt, branch), gitPush.PushFailedError);
+      assert.equal(landed(bare, branch), undefined);
+    } finally {
+      process.env.GIT_CONFIG_GLOBAL = globalWithHelper;
+    }
+  });
+
+  it("a pushurl that differs from the url, or a second one, is still refused", () => {
+    const { wt, url } = cutLane();
+    raw(wt, ["config", "--local", "remote.origin.pushurl", url]);
+    raw(wt, ["config", "--local", "--add", "remote.origin.pushurl", url]);
+    assert.throws(() => leaf.hostWorktreeGit(wt, ["status"], { log: () => {} }), /remote\.origin\.pushurl/);
   });
 });
 

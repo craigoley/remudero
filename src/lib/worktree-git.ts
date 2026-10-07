@@ -310,15 +310,23 @@ function parseConfigListing(out: string): ConfigEntry[] {
 function refusedConfigKeys(entries: readonly ConfigEntry[], recordedRemote: string | null): string[] {
   const refused = new Set<string>();
   const origin: string[] = [];
+  const pushurl: string[] = [];
   for (const { scope, key, value } of entries) {
     if (scope === "worktree" && !WORKTREE_SCOPE_KEYS.has(key)) refused.add(key);
-    if (scope === "local" && !admittedLocalKey(key)) refused.add(key);
-    if (scope === "local" && key === "remote.origin.url") origin.push(value ?? "");
+    if (scope !== "local") continue;
+    if (key === "remote.origin.url") origin.push(value ?? "");
+    if (key === "remote.origin.pushurl") pushurl.push(value ?? "");
+    else if (!admittedLocalKey(key)) refused.add(key);
   }
   if (origin.length > 1) refused.add(`remote.origin.url (${origin.length} values)`);
   if (recordedRemote !== null && origin.length === 1 && origin[0] !== recordedRemote) {
     refused.add("remote.origin.url (not the remote recorded when the worktree was cut)");
   }
+  // The fleet's core checkout carries a pushurl EQUAL to its url (measured 2026-10-07): admitted, since it
+  // redirects nothing. One that differs from the origin url (the recorded one when there is a record), or
+  // a second one, is refused.
+  const expected = recordedRemote ?? (origin.length === 1 ? origin[0] : undefined);
+  if (pushurl.length > 1 || (pushurl.length === 1 && pushurl[0] !== expected)) refused.add("remote.origin.pushurl");
   return [...refused].sort();
 }
 
