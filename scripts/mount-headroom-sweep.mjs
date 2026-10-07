@@ -723,21 +723,20 @@ export function computeAssignmentSweep(runs, assignmentFields, newestTs) {
   }));
 }
 
-/**
- * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries, and build the
- * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
- */
 export const MOUNT_SWEEP_LEDGER_STEPS = new Set([
   "run.start", "verdict", "verdict.merged", "pr.opened", "correction.provenance",
   ASSIGNMENT_EVENT_STEP, ...ARM_DONE_STEPS, ...Object.values(ARCHITECT_LANE_STEPS),
 ]);
 
-/** Keep reducer inputs, including gatherRuns' arbitrary first-pr_url fallback. Never retain or
- *  hash unrelated observations; their raw run count and newest timestamp are still measured. */
+/** Retain reducer inputs and arbitrary first-pr_url fallbacks; raw counts and freshness still see every row. */
 export function isMountSweepEvidence(row) {
   return MOUNT_SWEEP_LEDGER_STEPS.has(row.step) || Boolean(row.run_id && row.pr_url);
 }
 
+/**
+ * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries, and build the
+ * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
+ */
 export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) {
   let newestTs;
   const collector = ledgerRecordCollector({
