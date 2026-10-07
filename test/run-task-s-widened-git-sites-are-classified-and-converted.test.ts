@@ -85,7 +85,6 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   runShardRepairPass: { count: 1, cls: "CHECKOUT", reason: `${OWN}: its one caller passes repoDir: repoRoot` },
   gardenCheckout: { count: 1, cls: "CHECKOUT", reason: GARDEN },
   gardenCheckoutAsync: { count: 1, cls: "CHECKOUT", reason: GARDEN },
-  gardenLandSteps: { count: 1, cls: "CHECKOUT", reason: GARDEN },
   refreshKnowledgeAssertions: { count: 1, cls: "CHECKOUT", reason: GARDEN },
   buildRegisteredGarden: { count: 1, cls: "CHECKOUT", reason: OWN },
   gardenReplayCommand: { count: 1, cls: "CHECKOUT", reason: OWN },

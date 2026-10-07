@@ -211,14 +211,14 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "is codex's",
   },
   "src/lib/worker.ts": {
-    count: 23,
+    count: 24,
     reason:
       "CHECKOUT (W1-T6133 converted the WORKTREE sites): defaultLaneListGit lists the managed checkout's " +
       "registration (cwd: repoDir); the rest are worktreeAdd/Remove, pruneStaleRuns and branch reads of the " +
       "managed checkout",
   },
   "src/run-task.ts": {
-    count: 78,
+    count: 77,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
