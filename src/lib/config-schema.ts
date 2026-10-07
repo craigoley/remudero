@@ -376,6 +376,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_ACCOUNT_FILE_PATH", "Points serve account-usage reads at the operator's account file copy.", ["src/lib/serve.ts"]),
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
+  envEntry("RMD_SCRATCH_ROOT", "The host scratch root; the local coverage gate puts its scratch there, ahead of a TMPDIR on another volume, when it has the 20 GiB reserve; default /mnt/scratch when it is a mount.", ["src/lib/ci-parity.ts"]),
   envEntry("RMD_TEST_SLOT_DIR", "The directory holding the host-wide test-run slots, shared by every container and the host; default /mnt/scratch/rmd/test-slots on the host, else /tmp/rmd-test-slots.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_SLOTS", "How many test-suite runs may hold a host-wide slot at once; default one per four cores.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
