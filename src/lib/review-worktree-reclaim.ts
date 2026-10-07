@@ -21,6 +21,7 @@
  * dirs and any hand-cut lane never match it and are never even considered, let alone touched.
  */
 import { execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
@@ -202,10 +203,8 @@ function defaultResolveRepoDir(worktreePath: string): string | undefined {
 
 function defaultReadHeadSha(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    // W1-T6122: a reviewer ran in this PR-head tree, so the read goes through the leaf.
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch (e) {
     console.error(`review-worktree-reclaim: could not read HEAD at ${worktreePath} (${String((e as Error)?.message ?? e)})`);
     return undefined;

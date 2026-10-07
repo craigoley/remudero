@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -82,11 +82,8 @@ export function relintGuidanceLines(violations: ReadonlyArray<RelintViolation>):
 export function newMonolithIdsAgainstBase(worktreeRoot: string, baseRef = "origin/main"): ReadonlySet<string> {
   const relPath = "plan/tasks.yaml";
   try {
-    const baseRaw = execFileSync("git", ["-C", worktreeRoot, "show", `${baseRef}:${relPath}`], {
-      encoding: "utf8",
-      maxBuffer: 1 << 26,
-    });
-    const headRaw = execFileSync("git", ["-C", worktreeRoot, "show", `:${relPath}`], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const baseRaw = hostWorktreeGit(worktreeRoot, ["show", `${baseRef}:${relPath}`], { maxBuffer: 1 << 26 });
+    const headRaw = hostWorktreeGit(worktreeRoot, ["show", `:${relPath}`], { maxBuffer: 1 << 26 });
     const base = new Set(parseTasksFromYaml(baseRaw, `${baseRef}:${relPath}`).map((t) => t.id));
     return new Set(parseTasksFromYaml(headRaw, relPath).map((t) => t.id).filter((id) => !base.has(id)));
   } catch {
