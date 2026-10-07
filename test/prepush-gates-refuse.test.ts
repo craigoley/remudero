@@ -257,6 +257,19 @@ test("W1-T3388: a head the gate would REFUSE is named at push time, and the push
   assert.match(stderr, /run-<taskId>-<epochMs>/, "and both conforming forms, not one");
 });
 
+test("the pre-push advisory names run-unfiled for an agent session and a PR-<n> trailer commit for an open pull request", () => {
+  // #9857: a codex/ head was told only "add a trailer, or push a run-<taskId> branch"; with no filed task
+  // and a pull request already open, the gate's own text then demanded a force-push.
+  const dir = scratch();
+  stubGate(dir, 1);
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" }, "refs/heads/local abc123 refs/heads/codex/some-work def456\n");
+
+  assert.equal(status, 0, "still advisory: the push goes on");
+  assert.match(stderr, /git push origin HEAD:run-unfiled-\$\(date \+%s\)000/, "the exact command for a session with no filed task");
+  assert.match(stderr, /Remudero-Task: PR-<n>/, "the repair once a pull request is open");
+  assert.match(stderr, /never an amend or a force-push/);
+});
+
 test("W1-T3388: a head the gate accepts says nothing and blocks nothing", () => {
   const dir = scratch();
   stubGate(dir, 0);
