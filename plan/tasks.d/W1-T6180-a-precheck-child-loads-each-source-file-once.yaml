@@ -1,0 +1,41 @@
+- id: W1-T6180
+  title: "A PRECHECK CHILD LOADS EACH SOURCE FILE ONCE, AND THE COVERAGE MERGE SAYS WHAT IT DROPPED — census-precheck.mjs loads src/lib/test-slot.ts through tsx's tsImport, a second module namespace, so a child already running under tsx compiles that file's whole import graph twice (31 src files in the W1-T6138 pre-push fixture's children); #9855 made the merge keep only the instance the source map describes, but nothing reports how often it had to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern across the precheck loader and the merge that absorbs its duplicates — one compilation per source file per process, and a visible count when the merge drops one
+  band_meaning: span
+  origin: "operator session 2026-10-07: #9835/#9861 diff-coverage BLOCKED on lines their suites ran (root-caused and merge-side fixed in #9855)"
+  plan_refs: [W1-T6138, W1-T6108, W1-T5923]
+  files: [scripts/census-precheck.mjs, scripts/coverage-merge-ratchet.mjs, test/a-precheck-child-loads-each-source-file-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: `defaultImportTestSlot` in scripts/census-precheck.mjs calls
+    `tsImport(pathToFileURL(.../src/lib/test-slot.ts).href, import.meta.url)` from "tsx/esm/api".
+    In a process that already runs under tsx (the W1-T6138 pre-push fixture's children, which load
+    src through the precheck shims) that is a SECOND compilation of test-slot.ts and its import
+    graph: the raw V8 report of each such child lists 31 src/lib URLs twice (clock.ts, drain-lock.ts,
+    fs-race-safe.ts, review.ts, worker-home.ts, ...) with one source map per URL. Before #9855 that
+    zeroed real hits at the range merge across all eight shards (#9835: worker-home.ts:527 read 0
+    after 38 hits in its own shard). #9855's `scriptsTheSourceMapDescribes` now drops the unmapped
+    instance, silently: the merge's summary line does not say it dropped anything.
+  design: |
+    Load once: when the process already has tsx's loader registered (detect it, never assume it),
+    import test-slot.ts with a plain dynamic `import()` so it shares the module graph; keep
+    `tsImport` only for a plain-node process, which has no first compilation to duplicate. Then make
+    the merge's own drop visible: coverage-merge-ratchet's summary line (premap and merge modes)
+    reports `droppedRepeatInstances=<n>` across its reports, so a future dual load shows up as a
+    number in every shard log instead of a coverage hole.
+  acceptance:
+    - claim: "a precheck child running under tsx compiles test-slot.ts and its graph once"
+      proof: 'grep: test("W1-T6180: a precheck child under tsx compiles each source file once" in test/a-precheck-child-loads-each-source-file-once.test.ts'
+    - claim: "the coverage merge reports how many repeated script instances it dropped"
+      proof: 'grep: test("W1-T6180: the merge summary counts the repeated instances it dropped" in test/a-precheck-child-loads-each-source-file-once.test.ts'
+  falsifier: |
+    Keep tsImport unconditional: a raw V8 report from a census-precheck child started under
+    `node --import tsx` lists src/lib/test-slot.ts twice and the first test fails.
