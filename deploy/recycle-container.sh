@@ -689,12 +689,12 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
-  # `.Config.Image` (the reference this container was started FROM), never `.Image` (the resolved
-  # digest section 7 below already owns, for a different comparison: proving the STARTED container
-  # matches what THIS run just pulled).
+  # `.Image`, the id this container was created from. `.Config.Image` is a tag that any instance's
+  # pull re-points: after a Node base bump the first instance recycled, and every later one read
+  # the NEW image's NODE_VERSION against its own and refused (2026-10-07).
   IMAGE_ENV_LINES=()
   IMAGE_ENV_KNOWN=0
-  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   if [ -n "${CONTAINER_IMAGE_REF}" ]; then
     if IMAGE_ENV_RAW="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_IMAGE_REF}" 2>/dev/null)"; then
       IMAGE_ENV_KNOWN=1
@@ -1475,6 +1475,35 @@ done
 # for the daemon's own launch below. The verdict is the EXIT CODE (workerSmokeMain exits 0 only on
 # PASS); the printed `WORKER-SMOKE <PASS|FAIL> <reason>` line is the explanation. A hang is a failure.
 SMOKE_NAME="${CONTAINER_NAME}-worker-smoke"
+cleanup_leftover_smoke() {
+  local phase="$1" smoke_id smoke_names smoke_state
+  local stale_smoke_rows
+  stale_smoke_rows="$(docker ps -a --filter "name=${SMOKE_NAME}" --format '{{.ID}} {{.Names}} {{.State}}' 2>/dev/null || true)"
+  while read -r smoke_id smoke_names smoke_state; do
+    [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
+    if [ -z "${smoke_state}" ] || [ "${smoke_state}" = "running" ]; then
+      if [ "${phase}" = "before the smoke" ]; then
+        echo "recycle-container: REFUSING — leftover ${SMOKE_NAME} (${smoke_state:-unknown}) blocks the smoke; it was not removed." >&2
+        echo "  Wait for that smoke to finish, then remove the leftover with docker rm ${SMOKE_NAME} and re-run." >&2
+        return 1
+      fi
+      continue
+    fi
+    if docker container rm "${smoke_id}" >/dev/null 2>&1; then
+      echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) ${phase}"
+    elif [ "${phase}" = "before the smoke" ]; then
+      echo "recycle-container: REFUSING — could not remove leftover ${SMOKE_NAME} (${smoke_state}) before the smoke." >&2
+      echo "  Resolve the removal failure with docker rm ${SMOKE_NAME} and re-run." >&2
+      return 1
+    else
+      echo "recycle-container: could not remove leftover ${SMOKE_NAME} (${smoke_state}) — its image stays pinned" >&2
+    fi
+  done <<EOF_SMOKE
+${stale_smoke_rows}
+EOF_SMOKE
+  return 0
+}
+
 SMOKE_TIMEOUT_S="${RMD_RECYCLE_SMOKE_TIMEOUT_S:-300}"
 SMOKE_ARGS=(
   --rm --name "${SMOKE_NAME}"
@@ -1504,6 +1533,10 @@ SMOKE_ARGS+=(
 SMOKE_TIMEOUT_CMD=()
 if command -v timeout >/dev/null 2>&1; then
   SMOKE_TIMEOUT_CMD=(timeout "${SMOKE_TIMEOUT_S}")
+fi
+if ! cleanup_leftover_smoke "before the smoke"; then
+  clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+  exit 1
 fi
 echo "recycle-container: worker smoke — one real worker query on ${PULLED_IMAGE_ID} (bounded ${SMOKE_TIMEOUT_S}s)"
 set +e
@@ -1680,18 +1713,7 @@ echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_I
 if [ "${RMD_RECYCLE_SKIP_RECLAIM:-0}" = "1" ]; then
   echo "recycle-container: reclaim SKIPPED (RMD_RECYCLE_SKIP_RECLAIM=1)"
 else
-  STALE_SMOKE_ROWS="$(docker ps -a --filter "name=${SMOKE_NAME}" --format '{{.ID}} {{.Names}} {{.State}}' 2>/dev/null || true)"
-  while read -r smoke_id smoke_names smoke_state; do
-    [ -n "${smoke_id}" ] && [ "${smoke_names}" = "${SMOKE_NAME}" ] || continue
-    [ -n "${smoke_state}" ] && [ "${smoke_state}" != "running" ] || continue
-    if docker container rm "${smoke_id}" >/dev/null 2>&1; then
-      echo "recycle-container: removed leftover ${SMOKE_NAME} (${smoke_state}) — it would pin its image through the reclaim"
-    else
-      echo "recycle-container: could not remove leftover ${SMOKE_NAME} (${smoke_state}) — its image stays pinned" >&2
-    fi
-  done <<EOF_SMOKE
-${STALE_SMOKE_ROWS}
-EOF_SMOKE
+  cleanup_leftover_smoke "before the reclaim"
 
   # Every image id any container — running or stopped — is built on, plus the digest just pulled.
   PROTECTED_IMAGE_IDS="$(docker ps -aq 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null || true)"
