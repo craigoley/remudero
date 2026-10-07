@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760); the spawner counts are that builder's measurement"
   plan_refs: [W1-T6083, W1-T2292, W1-T5923]
   files: [test/setup/tmp-hygiene.ts, src/lib/test-impact-map.ts, src/lib/affected-suites.ts, scripts/coverage-merge-ratchet.mjs, scripts/coverage-session-blanking-check.mjs, test/a-spawned-child-credits-the-test-that-spawned-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
