@@ -9123,6 +9123,7 @@ export function reviewerOutcome(opts: {
   /** The reviewer WorkerResult.subtype, when a spawn actually ran to a terminal
    * state ("success" | "error_max_turns" | …). */
   subtype?: string;
+  exit?: { kind: "signal"; signal: string } | { kind: "exit"; code: number } | { kind: "unobserved" };
   /** true when the spawn itself THREW (e.g. before yielding any result) —
    * distinct from a subtype, since there is none to report. */
   spawnError?: boolean;
@@ -9137,6 +9138,7 @@ export function reviewerOutcome(opts: {
   if (opts.planOnlySkip) return "not_attempted_plan_only";
   if (!opts.attempted) return "not_attempted";
   if (opts.spawnError) return "spawn_error";
+  if (opts.exit?.kind === "signal") return "signal_terminated";
   return opts.subtype ?? "unknown";
 }
 
