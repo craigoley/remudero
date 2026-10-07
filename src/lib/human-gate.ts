@@ -144,6 +144,47 @@ export interface FeedbackGateSource extends HumanGateSource {
 }
 
 /** Feedback is a choice only while unresolved; age requests triage, never approval. */
+/**
+ * The two row lookups projectFeedbackGates makes per entry, answered from one pass. `triageStartedWithin` is
+ * `rows.some(triage.start for this feedback id, ts within [from, through])`; `lastGrillUrl` is the issue_url of
+ * `rows.findLast(triage.grill_opened for this task id with a string issue_url)`. A non-string id has no key, so
+ * it is asked of the rows directly, exactly as before.
+ */
+function feedbackRowIndex(rows: readonly Record<string, unknown>[] | undefined): {
+  triageStartedWithin(id: unknown, from: number, through: number): boolean;
+  lastGrillUrl(taskId: string): unknown;
+} {
+  let starts: Map<string, number[]> | undefined;
+  let grills: Map<string, unknown> | undefined;
+  const build = (): void => {
+    starts = new Map();
+    grills = new Map();
+    for (const r of rows ?? []) {
+      if (r.step === "triage.start" && typeof r.feedback_id === "string" && typeof r.ts === "string") {
+        const ms = Date.parse(r.ts);
+        if (!Number.isNaN(ms)) (starts.get(r.feedback_id) ?? starts.set(r.feedback_id, []).get(r.feedback_id)!).push(ms);
+      } else if (r.step === "triage.grill_opened" && typeof r.task_id === "string" && typeof r.issue_url === "string") {
+        grills.set(r.task_id, r.issue_url); // later rows overwrite: findLast's answer
+      }
+    }
+  };
+  return {
+    triageStartedWithin(id, from, through) {
+      if (rows === undefined) return false;
+      if (typeof id !== "string") {
+        return rows.some((r) => r.step === "triage.start" && r.feedback_id === id && typeof r.ts === "string" && Date.parse(r.ts) >= from && Date.parse(r.ts) <= through);
+      }
+      if (!starts) build();
+      return starts!.get(id)?.some((ms) => ms >= from && ms <= through) === true;
+    },
+    lastGrillUrl(taskId) {
+      if (rows === undefined) return undefined;
+      if (!grills) build();
+      return grills!.get(taskId);
+    },
+  };
+}
+
 export function projectFeedbackGates(input: {
   instance: string; entries: readonly (FeedbackEntry & { unverified?: true })[]; now: number;
   rows?: readonly Record<string, unknown>[]; age?: FeedbackAgeEvidence; unavailableReason?: string;
@@ -161,6 +202,9 @@ export function projectFeedbackGates(input: {
     result.state = input.unavailableReason ? "unavailable" : "partial";
     reasons.push("feedback proposal resolution could not be verified");
   }
+  // Each pending entry asked two questions of EVERY row (836,723 fact rows on core, 2026-10-07): about 1.7 s of a now
+  // build, booked to its `decisions.dependencies` lap. One pass answers both for every entry: the same rows, matched the same way.
+  const rowIndex = feedbackRowIndex(input.rows);
   for (const entry of entries) {
     if (["accepted", "rejected", "answered"].includes(entry.status)) { result.records.push(entry); continue; }
     if ((entry.status === "grilling" || entry.status === "proposed") && feedbackHasAnswer(entry, entries)) {
@@ -172,14 +216,14 @@ export function projectFeedbackGates(input: {
     if (entry.status === "new") {
       const created = Date.parse(entry.ts);
       const claimed = age.samples.some((s) => s.instance === input.instance && s.id === entry.id && created + s.ageMs <= input.now)
-        || input.rows?.some((r) => r.step === "triage.start" && r.feedback_id === entry.id && typeof r.ts === "string" && Date.parse(r.ts) >= created && Date.parse(r.ts) <= input.now);
+        || rowIndex.triageStartedWithin(entry.id, created, input.now);
       const calibrated = age.state === "measured" && age.observedMaxMs !== null && created >= Date.parse(age.window.from) && input.now <= Date.parse(age.window.through) && created <= input.now;
       if (claimed || !calibrated || input.now - created <= age.observedMaxMs!) {
         result.backlog.push({ entry, state: claimed ? "claimed" : calibrated ? "machine" : "uncalibrated" }); continue;
       }
       kind = "feedback_new"; resolutionVerb = "triage";
     }
-    const grillUrl = input.rows?.findLast((r) => r.step === "triage.grill_opened" && r.task_id === `TRIAGE-${entry.id}` && typeof r.issue_url === "string")?.issue_url;
+    const grillUrl = rowIndex.lastGrillUrl(`TRIAGE-${entry.id}`);
     gates.push({ kind, subject: entry.id, ownerSurface: "inbox", openedAt: entry.ts ?? null,
       url: typeof grillUrl === "string" ? grillUrl : entry.proposal_pr ?? null,
       reason: (feedbackQuestionContext(entry) || entry.id) + (kind === "feedback_new" ? `\n\nUnclaimed feedback age ${input.now - Date.parse(entry.ts)} ms; ${age.reason}. Run triage for ${entry.id}.` : ""), resolutionVerb });
