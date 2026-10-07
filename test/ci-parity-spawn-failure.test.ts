@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
 import { shellOut } from "../src/lib/ci-parity.js";
 
@@ -46,11 +49,20 @@ test("shellOut names the SIGNAL when a real child is killed, instead of the anon
   );
 });
 
-test("a crash and a policy kill stay distinguishable, because the signal is named rather than generalised", () => {
-  const probe = defaultPreflightSpawn("/bin/sh", ["-c", "kill -SEGV $$"]);
+test("a crash and a policy kill stay distinguishable in isolated fixture scratch", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-test-parity-crash-cwd-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // On Linux the deliberate crash can write a core in its cwd. Prove both REAL
+  // children use fixture scratch without disabling dumps or hiding checkout dirt.
+  const probe = defaultPreflightSpawn("/bin/sh", ["-c", "pwd; kill -SEGV $$"], { cwd: dir });
   assert.equal(probe.signal, "SIGSEGV", "precondition: a real SIGSEGV");
+  assert.equal(probe.stdout.trim(), realpathSync(dir), "the real crash child's cwd is fixture scratch");
 
-  const r = shellOut(defaultPreflightSpawn, "segv-probe", "/bin/sh", ["-c", "kill -SEGV $$"]);
+  const r = shellOut((file, args, opts) => {
+    const child = defaultPreflightSpawn(file, args, opts);
+    assert.equal(child.stdout.trim(), realpathSync(dir), "the shellOut crash child also uses fixture scratch");
+    return child;
+  }, "segv-probe", "/bin/sh", ["-c", "pwd; kill -SEGV $$"], { cwd: dir });
   // SIGKILL under a sandbox is policy; SIGSEGV is a crash. Different findings, different fixes.
   assert.match(r.detail, /SIGSEGV/);
   assert.doesNotMatch(r.detail, /SIGKILL/);
