@@ -8,6 +8,7 @@ import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } 
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
 import { renderMachineShard } from "./machine-filing.js";
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
 import { loadPolicy } from "./policy.js";
@@ -64,8 +65,11 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
   delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
   delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
   const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+  // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
+  const load = readHostLoad();
+  const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
   try {
-    execFileSync(process.execPath, args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
+    execFileSync(child.file, child.args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
     return true;
   } catch (e) {
     if (typeof (e as { status?: unknown }).status === "number") return false;

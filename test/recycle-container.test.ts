@@ -1090,6 +1090,8 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
     [join(base, "repos-coverage"), "/home/node/Remudero/repos/.remudero-coverage"],
     [join(base, "read-model"), "/home/node/rmd-scratch/read-model"],
     [join(base, "worker-homes"), "/home/node/rmd-scratch/worker-homes"],
+    // W1-T6090: one host-wide dir, not per state key, so the runtime contract checks it too.
+    [join(scratch.root, "rmd", "test-slots"), "/home/node/rmd-scratch/test-slots"],
     [join(base, "containers", "remudero-daemon", "tmp"), "/tmp"],
   ];
   const containerTmp = binds[binds.length - 1][0];
@@ -1102,6 +1104,7 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
   for (const [src, dest] of binds) assert.ok(argv.includes(`${src}:${dest}`), `bound ${dest}: ${argv.join(" ")}`);
   assert.ok(argv.includes("RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model"));
   assert.ok(argv.includes("RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes"), "the daemon's worker homes follow their bind");
+  assert.ok(argv.includes("RMD_TEST_SLOT_DIR=/home/node/rmd-scratch/test-slots"), "the daemon's test runs find the host-wide slot");
   for (const [src] of binds) assert.ok(existsSync(src), `created ${src}`);
   assert.deepEqual(readdirSync(containerTmp), [], "the new container starts with an empty /tmp, as a new container always did");
   assert.deepEqual(readFileSync(join(state, ".scratch-mounts"), "utf8").trim().split("\n"), binds.map(([src]) => src).sort(), "the boot-time restore list names every bound dir");
