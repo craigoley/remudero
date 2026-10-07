@@ -5538,6 +5538,13 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
+export async function worktreeRemoveAsync(repoDir: string, worktreePath: string): Promise<void> {
+  reapWorkerScratch(worktreePath);
+  await worktreeGit(["-C", repoDir, "worktree", "remove", "--force", worktreePath], true);
+  removeWorktreeBase(worktreePath);
+  sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+}
+
 /** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
 export interface PruneSummary {
   worktrees: string[];
