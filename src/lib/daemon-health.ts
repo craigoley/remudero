@@ -50,7 +50,6 @@ import { DEFAULT_POLL_INTERVAL_MS, IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STE
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
 
-/** `@types/node` 22 names this IntervalHistogram and 24 ELDHistogram; the return type is both. */
 type EventLoopDelayHistogram = ReturnType<typeof monitorEventLoopDelay>;
 
 /** {@link deriveLastPoll}'s result — see this module's header for each field's own source. */
