@@ -36,6 +36,9 @@
 # `.config/remudero-container` stay shared (provider config, not per-run state). The host
 # directories `.claude-site` and `.claude-console` must exist (owned by the service user) before
 # the next `--install`. NOT measured on the host from this checkout: what each instance writes.
+# W1-T6061 (2026-10-06) PUTS SITE AND CONSOLE BACK ON THE OWNER'S claude_dir: recycle-container.sh
+# never learned the owner's read-only credential mount, the host never created the two directories,
+# and every site and console recycle refused for two days. The split returns with W1-T6095.
 #
 # W1-T4227 — THE FLEET'S ONE REGISTRY (Account → Project → Repository → Instance). Each instance
 # also names its `project` (absent means project "default", a standalone repo) and its
@@ -66,7 +69,7 @@ instances:
     github_repo: craigoley/remudero-site
     container_name: remudero-site-daemon
     state_dir: /home/craigoleyagent/rmd-site-state
-    claude_dir: /home/craigoleyagent/.claude-site
+    claude_dir: /home/craigoleyagent/.claude
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
@@ -76,7 +79,7 @@ instances:
     github_repo: craigoley/remudero-console
     container_name: remudero-console-daemon
     state_dir: /mnt/rmd/remudero-console-state
-    claude_dir: /home/craigoleyagent/.claude-console
+    claude_dir: /home/craigoleyagent/.claude
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
