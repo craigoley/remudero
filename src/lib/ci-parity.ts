@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -38,6 +38,9 @@ const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.ur
 export const CI_COVERAGE_SHARD_COUNT = 4;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
+/** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */
+const HOST_SCRATCH_ROOT = "/mnt/scratch";
+const SCRATCH_ROOT_ENV_NAME = "RMD_SCRATCH_ROOT";
 
 /** A local route is deliberately narrower than CI parity: it is permission to re-drive one stale
  * verdict, not permission to run an arbitrary check name copied from GitHub. */
@@ -812,6 +815,67 @@ export function coverageScratchDir(repoRoot: string): string {
   return join(base, name);
 }
 
+/** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
+export interface CoverageScratchPolicy {
+  /** The scratch root to prefer; `null` disables the preference, absent resolves it from the host. */
+  root?: string | null;
+  /** Whether two directories sit on one device; defaults to comparing `st_dev`. */
+  sameVolume?: (a: string, b: string) => boolean;
+}
+
+function sameDevice(a: string, b: string): boolean {
+  try {
+    return statSync(a).dev === statSync(b).dev;
+  } catch {
+    // A path that cannot be stat'ed cannot be shown to share a volume; the caller then weighs both.
+    return false;
+  }
+}
+
+/** The scratch root a host run prefers: `RMD_SCRATCH_ROOT`, else /mnt/scratch when it is a mount.
+ *  A test process resolves nothing, so no expectation depends on the host it runs on. */
+function resolveCoverageScratchRoot(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.NODE_TEST_CONTEXT) return undefined;
+  const configured = env[SCRATCH_ROOT_ENV_NAME];
+  if (configured) return configured;
+  return existsSync(HOST_SCRATCH_ROOT) && !sameDevice(HOST_SCRATCH_ROOT, dirname(HOST_SCRATCH_ROOT)) ? HOST_SCRATCH_ROOT : undefined;
+}
+
+type CoverageScratchChoice = { ok: true; dir: string; note: string } | { ok: false; detail: string };
+
+/** Prefers the scratch root over a TMPDIR on another device when the scratch root has the reserve;
+ *  refuses only when neither volume has it, naming both free figures. */
+function chooseCoverageScratch(
+  repoRoot: string,
+  freeBytes: (path: string) => number,
+  policy: CoverageScratchPolicy,
+): CoverageScratchChoice {
+  const tmpDir = coverageScratchDir(repoRoot);
+  const tmpBase = dirname(tmpDir);
+  let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
+  if (root !== undefined) {
+    try {
+      root = realpathSync(root);
+    } catch {
+      // Deliberate: a scratch root that does not resolve is not a candidate; TMPDIR's own check decides.
+      root = undefined;
+    }
+  }
+  const tmpNote = `scratch=${tmpBase} (TMPDIR volume)`;
+  if (root === undefined || (policy.sameVolume ?? sameDevice)(root, tmpBase)) return { ok: true, dir: tmpDir, note: tmpNote };
+  const scratchFree = freeBytes(root);
+  if (scratchFree >= COVERAGE_FREE_RESERVE_BYTES) {
+    return { ok: true, dir: join(root, basename(tmpDir)), note: `scratch=${root} (scratch root, preferred over TMPDIR volume ${tmpBase})` };
+  }
+  const tmpFree = freeBytes(tmpBase);
+  if (tmpFree >= COVERAGE_FREE_RESERVE_BYTES) return { ok: true, dir: tmpDir, note: tmpNote };
+  return {
+    ok: false,
+    detail: `FAIL — coverage-ratchet: neither volume has the ${COVERAGE_FREE_RESERVE_BYTES} byte reserve before starting coverage shards: ` +
+      `scratch root ${root} has ${scratchFree} free bytes, TMPDIR volume ${tmpBase} has ${tmpFree} free bytes. Free space on one of them.`,
+  };
+}
+
 export function coverageGateLockDir(repoRoot: string, discriminator?: string): string {
   const hash = createHash("sha256").update(realpathSync(repoRoot));
   if (discriminator) hash.update(`\0${discriminator}`);
@@ -904,6 +968,7 @@ function testWithCoverageShards(
   shardRoot: string,
   slot: TestSlotLease,
   testSlot: TestSlotOptions,
+  scratchNote: string,
 ): CiParityLeafResult {
   let retainedCompactBytes = 0;
   let peakBytes = 0;
@@ -986,7 +1051,7 @@ function testWithCoverageShards(
   peakBytes = Math.max(peakBytes, Number(mergeMetrics[3]));
   return {
     ok: true,
-    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ${slot.note}; ` +
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ${scratchNote}; ${slot.note}; ` +
       `merged coverage/lcov.info; rawBytes=${rawBytes} compactBytes=${retainedCompactBytes} ` +
       `mergeInputBytes=${mergeMetrics[1]} stagingBytes=${mergeMetrics[2]} peakBytes=${peakBytes}`,
   };
@@ -1048,8 +1113,11 @@ export function testWithCoverageLeaf(
   },
   lockDiscriminator?: string,
   testSlot: TestSlotOptions = {},
+  scratchPolicy: CoverageScratchPolicy = {},
 ): CiParityLeafResult {
-  const stableScratch = coverageScratchDir(repoRoot);
+  const chosen = chooseCoverageScratch(repoRoot, freeBytes, scratchPolicy);
+  if (!chosen.ok) return { ok: false, detail: chosen.detail };
+  const stableScratch = chosen.dir;
   const activeTmp = process.env.TMPDIR;
   if (pathIsWithin(repoRoot, stableScratch) || stableScratch.length > MAX_COVERAGE_SCRATCH_PATH) {
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch path ${stableScratch} must be outside the checkout and at most ${MAX_COVERAGE_SCRATCH_PATH} characters; set TMPDIR to a short isolated scratch volume.` };
@@ -1086,7 +1154,9 @@ export function testWithCoverageLeaf(
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
     // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
     slot = acquireTestSlot("coverage-ratchet:test-with-coverage", testSlot);
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot);
+    const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
+    // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
+    return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
   } finally {
     slot?.release();
     if (ownedNestedScratch !== undefined) {
