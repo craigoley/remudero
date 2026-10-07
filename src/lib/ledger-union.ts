@@ -1,6 +1,7 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { isMainThread, threadId } from "node:worker_threads";
 import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { pipeline } from "node:stream/promises";
@@ -919,6 +920,15 @@ export interface LedgerRotationMemo {
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
   retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number };
+  reportRetention: (stateDir: string, instance?: string, log?: MemoRetentionLog) => void;
+}
+
+type MemoRetentionLog = (step: string, extra: Record<string, unknown>) => void;
+type MemoRetentionContext = { thread: string; lane?: "fast" | "heavy"; log: MemoRetentionLog; instances: readonly { name: string; ledgerDir: string }[] };
+let memoRetentionContext: MemoRetentionContext | undefined;
+
+export function setLedgerMemoRetentionContext(context: MemoRetentionContext | undefined): void {
+  memoRetentionContext = context;
 }
 
 /** Lines one turn of the event loop parses while {@link createLedgerRotationMemo} loads a rotation. */
@@ -942,6 +952,8 @@ export function createLedgerRotationMemo(
     yieldTurn?: () => Promise<void>;
     /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
     pattern?: RegExp;
+    holder?: string;
+    writeRetention?: (path: string, row: { run_id: string; task_id: string; step: string; [key: string]: unknown }) => void;
   } = {},
 ): LedgerRotationMemo {
   const statKey = io.statKey ?? ((path: string) => {
@@ -952,6 +964,7 @@ export function createLedgerRotationMemo(
   const yieldTurn = io.yieldTurn ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
   let memo = new Map<string, MemoEntry>();
   const loading = new Map<string, Promise<void>>();
+  const reported = new Map<string, string>();
 
   const loadOne = async (entry: LedgerCorpusEntry): Promise<void> => {
     let key = "";
@@ -1016,8 +1029,28 @@ export function createLedgerRotationMemo(
     }
   };
 
-  return {
+  const result: LedgerRotationMemo = {
     size: () => memo.size,
+    reportRetention: (stateDir, instance, log) => {
+      if (!io.holder) return;
+      const context = memoRetentionContext;
+      const identity = {
+        thread: context?.thread ?? (isMainThread ? "main" : `worker-${threadId}`),
+        ...(context?.lane ? { lane: context.lane } : {}),
+        holder: io.holder,
+        instance: instance ?? context?.instances.find((i) => i.ledgerDir === stateDir)?.name ?? (basename(stateDir) === "state" ? basename(dirname(stateDir)) : basename(stateDir)),
+      };
+      const emit = log ?? context?.log;
+      if (!emit && !io.writeRetention) return;
+      const counts = result.retention();
+      const key = JSON.stringify([identity.thread, identity.lane, identity.holder, identity.instance]);
+      const signature = JSON.stringify(counts);
+      if (reported.get(key) === signature) return;
+      const extra = { ...identity, ...counts };
+      if (emit) emit("read_model.memo_retention", extra);
+      else io.writeRetention!(join(stateDir, LEDGER_FILENAME), { run_id: "memo-retention", task_id: "SERVE", step: "read_model.memo_retention", ...extra });
+      reported.set(key, signature);
+    },
     retention: () => {
       let rows = 0, tornRows = 0, failedArchives = 0;
       for (const entry of memo.values()) {
@@ -1070,6 +1103,7 @@ export function createLedgerRotationMemo(
       };
     },
   };
+  return result;
 }
 
 type LedgerSighting = string | Record<string, unknown>;
@@ -1276,6 +1310,7 @@ export async function readLedgerUnionRecordsMemoized(
     pass = memo.pass();
     read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
   }
+  memo.reportRetention(stateDir);
   return read;
 }
 
