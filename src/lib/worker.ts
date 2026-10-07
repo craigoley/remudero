@@ -112,6 +112,7 @@ import {
   perRunWorkerHomeDir,
   reapWorkerHome,
   seedClaudeFleetCredentials,
+  type ClaudeCredentialSeedEvent,
   workerCredentialFilePath,
   workerClaudeCredentialDir,
   workerKeychainPaths,
@@ -759,6 +760,12 @@ function defaultLogKeychainHeadroom(
   spawn: { runId?: string; taskId?: string },
 ): void {
   console.error(JSON.stringify(workerKeychainHeadroomLogFields(summary, expectedRunMs, spawn)));
+}
+
+/** W1-T6252: a spawn that provisioned or healed the shared Claude credential store says so on stderr. This module
+ * writes no ledger rows; the usage probe's sink in run-task.ts records the same event durably. */
+function logClaudeCredentialSeed(event: ClaudeCredentialSeedEvent): void {
+  console.error(JSON.stringify({ event: `worker.credential_${event.kind}`, store: event.store, prior_verdict: event.priorVerdict }));
 }
 
 // ── Toolchain resolution ──────────────────────────────────────────────────
@@ -2849,8 +2856,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // named reason class so the failure stays queryable. It refuses only the unambiguously unusable. An EXPIRED token is
       // reported and allowed through: nothing here can re-provision, the CLI maintains its own refresh, and refusing would be
       // a bound firing on a healthy condition (recon-cloud-workers-spike stop 6).
-      // Heal an emptied .claude-fleet fork BEFORE judging it, or the refusal below fires until the container is recreated.
-      seedClaudeFleetCredentials({ realHome });
+      // Provision or heal the shared credential store BEFORE judging it, or the refusal below fires until someone intervenes.
+      seedClaudeFleetCredentials({ realHome, onEvent: logClaudeCredentialSeed });
       assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
     // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent, but a target that EXISTS and
@@ -3213,7 +3220,13 @@ function usageHasEnvironmentAuthentication(env: NodeJS.ProcessEnv): boolean {
  * this passes an async generator; converting `spawnWorker` itself is a separate decision (W1-T2516-adjacent). */
 export function openUsageProbeSession(
   runQuery?: UsageProbeQueryFn,
-  context: { realHome?: string; platform?: NodeJS.Platform; refresh?: UsageCredentialRefreshWait } = {},
+  context: {
+    realHome?: string;
+    platform?: NodeJS.Platform;
+    refresh?: UsageCredentialRefreshWait;
+    /** W1-T6252: told when this probe provisioned or healed the shared credential store; run-task.ts ledgers it. */
+    onCredentialSeed?: (event: ClaudeCredentialSeedEvent) => void;
+  } = {},
 ): UsageProbeSession {
   // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test runner. An injected
   // `runQuery` creates no connection and is not what this stops.
@@ -3223,8 +3236,10 @@ export function openUsageProbeSession(
   // Linux workers consume the narrowed credential grant; capacity must observe that same store.
   // Darwin continues to use its existing keychain rather than selecting a different config store.
   if ((context.platform ?? process.platform) !== "darwin") {
-    // The probe reads the same fork a spawn does, so it heals an emptied one the same way first.
-    if (runQuery === undefined) seedClaudeFleetCredentials({ realHome: context.realHome ?? homedir() });
+    // The probe resolves the same shared store a spawn does, so it provisions or heals it the same way first.
+    if (runQuery === undefined) {
+      seedClaudeFleetCredentials({ realHome: context.realHome ?? homedir(), onEvent: context.onCredentialSeed });
+    }
     options.env = {
       ...process.env,
       CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),

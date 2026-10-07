@@ -18,7 +18,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
@@ -635,6 +635,7 @@ export interface NowViewOptions {
   };
   /** Legacy grill-only injection seam; production reads all statuses so durable answers remain visible. */
   listGrilling?: (instance: NowInstance) => FeedbackEntry[];
+  dependencyGates?: typeof nowDependencyVerificationGates;
   feedbackAgeObservation?: { roots: readonly FeedbackAgeRoot[]; window: FeedbackAgeEvidence["window"] };
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
@@ -645,6 +646,18 @@ export interface NowViewOptions {
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
 export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
+
+function feedbackFileIdentities(path: string): string {
+  try {
+    return JSON.stringify(readdirSync(path).filter((name) => name.endsWith(".yaml")).sort().map((name) => {
+      const s = statSync(join(path, name), { bigint: true });
+      return [name, s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs, s.mode].map(String);
+    }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return `missing: ${(error as Error).message}`;
+    return `unreadable: ${(error as Error).message}`;
+  }
+}
 
 /** A full sha, never an abbreviation: what `git rev-parse` prints, so a file answer is compared byte for byte. */
 const isFullSha = (text: string): boolean => /^[0-9a-f]{40,64}$/.test(text);
@@ -908,15 +921,21 @@ export function createNowView(opts: NowViewOptions): {
   };
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
   const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!));
+  const dependencyGates = opts.dependencyGates ?? nowDependencyVerificationGates;
+  const feedbackListings = new Map<string, { key: string; entries: FeedbackEntry[] }>();
+  const reconciledFeedback = new Map<string, { key: string; entries: FeedbackEntry[] }>();
+  const dependencySources = new Map<string, { db: ReadModelDb; key: string; sources: HumanGateSource[] }>();
+  const feedbackKey = (instance: NowInstance): string => instance.name === core && instance.feedbackRoot
+    ? JSON.stringify([feedbackFileIdentities(feedbackDir(instance.feedbackRoot)), feedbackFileIdentities(queuedFeedbackDir(dirname(instance.ledgerDir)))]) : "none";
   const feedbackAge = opts.feedbackAgeObservation ? measureFeedbackAge(opts.feedbackAgeObservation.roots, opts.feedbackAgeObservation.window) : undefined;
   /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. NOT the
    *  live ledger's mtime: every ledger row the pin and reviewer gates read already advances the projector
    *  generation `step` keys on, so the mtime only added serve's own diagnostic rows as a rebuild cause. */
-  const decisionsKey = (instance: NowInstance): string => {
+  const decisionsKey = (instance: NowInstance, feedback: string): string => {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stateRoot = dirname(instance.ledgerDir);
-    const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}:${mtimeOf(queuedFeedbackDir(stateRoot)) ?? "-"}` : "none";
+    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
@@ -1004,10 +1023,11 @@ export function createNowView(opts: NowViewOptions): {
       deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
+    const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
@@ -1017,14 +1037,24 @@ export function createNowView(opts: NowViewOptions): {
     } else {
       try {
         // W1-T5730: the landing queue overlays the checkout, so a queued answer leaves the list and a queue-only grill joins it.
-        let listed = listGrilling(instance);
-        try {
-          listed = overlayQueuedFeedbackEntries(listed, dirname(instance.ledgerDir));
-        } catch (error) {
-          const reason = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
-          reasons.grill = reason;
+        const cached = feedbackListings.get(instance.name);
+        let listed = cached?.key === keys.feedback ? cached.entries : listGrilling(instance);
+        feedbackLap("list");
+        if (cached?.key !== keys.feedback) {
+          try {
+            listed = overlayQueuedFeedbackEntries(listed, dirname(instance.ledgerDir));
+            feedbackListings.set(instance.name, { key: keys.feedback, entries: listed });
+          } catch (error) {
+            const reason = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
+            reasons.grill = reason;
+          }
         }
-        feedbackEntries = projectReconciledFeedback(listed, statusGithub);
+        feedbackLap("overlay");
+        const key = JSON.stringify([keys.feedback, keys.github]);
+        const reconciled = reconciledFeedback.get(instance.name);
+        feedbackEntries = !reasons.grill && reconciled?.key === key ? reconciled.entries : projectReconciledFeedback(listed, statusGithub);
+        if (!reasons.grill) reconciledFeedback.set(instance.name, { key, entries: feedbackEntries });
+        feedbackLap("reconcile");
         all.push(...grillDecisions(instance.name, feedbackEntries));
       } catch (error) {
         reasons.grill = `the feedback store is unreadable: ${(error as Error).message}`;
@@ -1054,7 +1084,13 @@ export function createNowView(opts: NowViewOptions): {
       ...(changeManagementUnknown ? { reason: snapshot.blockedPrsUnverifiedReason ?? snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}),
       actions: nowActions(snapshot, rows),
     }));
-    sources.push(...nowDependencyVerificationGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }));
+    const dependencyKey = JSON.stringify([keys.plan, generation, keys.github]);
+    let dependencies = dependencySources.get(instance.name);
+    if (!dependencies || dependencies.db !== db || dependencies.key !== dependencyKey) {
+      dependencies = { db, key: dependencyKey, sources: dependencyGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }) };
+      dependencySources.set(instance.name, dependencies);
+    }
+    sources.push(...dependencies.sources);
     lap("dependencies");
     const ledger = gateLedger(instance);
     lap("ledger");
@@ -1084,7 +1120,7 @@ export function createNowView(opts: NowViewOptions): {
     state: NowSlotState;
     now: number;
     stage: number;
-    keys: { plan: string; github: string; decisions: string };
+    keys: { plan: string; github: string; feedback: string; decisions: string };
     plan?: Plan;
     gateway?: ReturnType<typeof snapshotGithub>;
     h?: Held;
@@ -1098,11 +1134,11 @@ export function createNowView(opts: NowViewOptions): {
   const ran = new Map<string, Record<string, number>>();
   /** The `decisions` stage's parts as `decisions.<part>` stages, each the ms since the previous lap: a cold or slow
    *  decisions build (p99 27 s on 2026-10-06) is then attributed to its part, not only to the stage. */
-  const decisionsLap = (name: string): ((part: string) => void) => {
+  const decisionsLap = (name: string, prefix = "decisions"): ((part: string) => void) => {
     let last = clock.now();
     return (part) => {
       const at = clock.now();
-      (ran.get(name) ?? ran.set(name, {}).get(name)!)[`decisions.${part}`] = at - last;
+      (ran.get(name) ?? ran.set(name, {}).get(name)!)[`${prefix}.${part}`] = at - last;
       last = at;
     };
   };
@@ -1160,7 +1196,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github, b.plan))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
@@ -1185,7 +1221,8 @@ export function createNowView(opts: NowViewOptions): {
     let b = builds.get(instance.name);
     if (b && b.db !== entry.db) b = undefined;
     if (!b) {
-      const keys = { plan: planKey(instance), github: githubKey(instance), decisions: decisionsKey(instance) };
+      const feedback = feedbackKey(instance);
+      const keys = { plan: planKey(instance), github: githubKey(instance), feedback, decisions: decisionsKey(instance, feedback) };
       const h = held.get(instance.name);
       const due = !h || h.db !== entry.db || h.generation !== entry.state.generation || h.planKey !== keys.plan || h.githubKey !== keys.github
         || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS;

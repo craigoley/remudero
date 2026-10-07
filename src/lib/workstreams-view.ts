@@ -194,6 +194,59 @@ function withMeta(rows: Row[], present: boolean): LedgerLines {
   return Object.assign(rows, { torn: 0, present }) as unknown as LedgerLines;
 }
 
+export function createLiveLedgerTail(path: string): () => LedgerLines {
+  let held: { dev: number; ino: number; size: number; off: number; rows: Row[]; torn: number } | undefined;
+  const parse = (text: string): LedgerLines => {
+    // ledger-read-intent: live — reuse the whole-file parser for each newly read slice.
+    return readLedgerLines(path, { existsSync: () => true, readFileSync: () => text });
+  };
+  return () => {
+    try {
+      if (!existsSync(path)) {
+        held = undefined;
+        // ledger-read-intent: live — preserve the whole-file reader's absent-file metadata.
+        return readLedgerLines(path);
+      }
+      const fd = openSync(path, "r");
+      let bytes: Buffer;
+      let st: ReturnType<typeof fstatSync>;
+      try {
+        st = fstatSync(fd);
+        if (!st.isFile()) throw new Error(`live ledger is not a regular file: ${path}`);
+        if (!held || held.dev !== st.dev || held.ino !== st.ino || st.size < held.size) {
+          held = { dev: st.dev, ino: st.ino, size: st.size, off: 0, rows: [], torn: 0 };
+        }
+        bytes = Buffer.alloc(st.size - held.off);
+        let read = 0;
+        while (read < bytes.length) {
+          const count = readSync(fd, bytes, read, bytes.length - read, held.off + read);
+          if (count === 0) throw new Error(`live ledger shrank during read: ${path}`);
+          read += count;
+        }
+      } finally {
+        closeSync(fd);
+      }
+      const end = bytes.lastIndexOf(10) + 1;
+      const complete = parse(bytes.subarray(0, end).toString("utf8"));
+      // An unterminated row is reported like readLedgerLines, but never committed to the held offset.
+      const partial = parse(bytes.subarray(end).toString("utf8"));
+      for (const row of complete) held.rows.push(row);
+      held.torn += complete.torn;
+      held.off += end;
+      held.size = st.size;
+      const out = held.rows.concat(partial);
+      Object.defineProperty(out, "torn", { value: held.torn + partial.torn, configurable: true });
+      Object.defineProperty(out, "present", { value: true, configurable: true });
+      return out as LedgerLines;
+    } catch (error) {
+      held = undefined;
+      console.error("workstreams: live ledger tail read failed", { path, error });
+      // ledger-read-intent: live — retry whole after a failed tail read; an unreadable file still throws.
+      return readLedgerLines(path);
+    }
+  };
+}
+
 /** The route's own failure body when a projection throws, so a broken instance reads as GET /v1/operator-activity would. */
 function unavailable(now: number, error: unknown): OperatorActivityEnvelope {
   return {
@@ -247,6 +300,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   /** Keyed by the very `data` object a body published, as now-view's `shown`. */
   const shown = new WeakMap<WorkstreamsData, { builtMs: number; entries: Map<string, Built> }>();
   const legacyMemos = new Map<string, LedgerRotationMemo>();
+  const liveLedgerTail = new Map(opts.instances.map((i) => [i.name, createLiveLedgerTail(join(i.ledgerDir, LEDGER_FILENAME))]));
   const projectionReuse = createWorkstreamsProjectionReuse();
   /** When each instance's reuse was last audited (or first held), on the build clock. */
   const reuseAuditedAt = new Map<string, number>();
@@ -279,7 +333,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       gatewaySources.set(instance.name, w.gateway.source);
     }],
     // ledger-read-intent: live — the frontier and projection read what /v1/plan/view and the route read.
-    ["ledger", (instance, w) => void (w.live = readLedgerLines(join(instance.ledgerDir, LEDGER_FILENAME)))],
+    ["ledger", (instance, w) => void (w.live = liveLedgerTail.get(instance.name)!())],
     ["projection", (instance, w, b) => {
       const github = w.gateway!.github;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);

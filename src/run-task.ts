@@ -21,6 +21,7 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
+import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
@@ -1403,6 +1404,7 @@ import {
   planOnlyDiff,
   enforcementDataInDiff,
   reviewerOutcome,
+  reviewerRerunDecision,
   reviewerVerdictContract,
   reviewEvidenceStrength,
   claimReviewDecision,
@@ -2808,6 +2810,7 @@ import {
   sweepStaleWorkerHomes,
   sweepStaleWorkerHomesAsync,
   workerKeychainPaths,
+  type ClaudeCredentialSeedEvent,
 } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
@@ -7795,48 +7798,60 @@ async function runReview(args: {
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
-          reviewer = args.account(
-            await reviewerSpawnWorker({
-            cwd: snapshot.cwd,
-            permissionMode: "bypassPermissions",
-            settingsFile: args.settingsFile,
-            // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
-            // resolved "reviewer" mount, never a hardcoded literal. Before this, an
-            // undeclared 12-turn cap with no model/effort override walled
-            // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
-            // as a completed review (P10-a; reviewerOutcome below makes it legible).
-            model: reviewerSpawnMount!.model,
-            mountProvider: reviewerSpawnMount!.provider,
-            effort: reviewerSpawnMount!.effort,
-            maxTurns: reviewerSpawnMount!.maxTurns,
-            maxBudgetUsd: args.budgetUsd,
-            config: args.config,
-            queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
-            // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
-            tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
-            // REVIEW-CASH-DIVERT: OFFER THE CASH SURFACE. Without this the auction's divert chain refuses
-            // this spawn outright ("tool surface is not implementable by cash"), which under a
-            // full squeeze takes the REQUIRED `remudero-review` check down and with it every
-            // merge on the board. One unconditional line, exactly like recon/diagnose — the
-            // branch lives in `cashDivertSpawnFields`, where a unit test can reach it.
-            ...cashDivertSpawnFields("review"),
-            runId: args.runId,
-            taskId: task.id,
-            // Reviews are admission-gating work.  Give the advisory worker the same idle-activity
-            // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
-            // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
-            // a terminal verdict when this bound trips.
-            ...reviewerClockBound,
-            onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-            streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
-            prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
-            }),
-          );
+          let priorSignal: string | undefined;
+          for (;;) {
+            reviewerAssignment = undefined as WorkerSelectionAssignment | undefined;
+            reviewer = args.account(
+              await reviewerSpawnWorker({
+                cwd: snapshot.cwd,
+                permissionMode: "bypassPermissions",
+                settingsFile: args.settingsFile,
+                // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
+                // resolved "reviewer" mount, never a hardcoded literal. Before this, an
+                // undeclared 12-turn cap with no model/effort override walled
+                // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
+                // as a completed review (P10-a; reviewerOutcome below makes it legible).
+                model: reviewerSpawnMount!.model,
+                mountProvider: reviewerSpawnMount!.provider,
+                effort: reviewerSpawnMount!.effort,
+                maxTurns: reviewerSpawnMount!.maxTurns,
+                maxBudgetUsd: args.budgetUsd,
+                config: args.config,
+                queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
+                // W1-T2829/W1-T2946: preserve read-only tools while granting Codex narrow TMPDIR writes and dependency reads.
+                tools: SPECIALIST_TOOLS, sandboxIntent: "disposable-review", sandboxReadRoots: snapshot.dependencyReadRoots,
+                // REVIEW-CASH-DIVERT: OFFER THE CASH SURFACE. Without this the auction's divert chain refuses
+                // this spawn outright ("tool surface is not implementable by cash"), which under a
+                // full squeeze takes the REQUIRED `remudero-review` check down and with it every
+                // merge on the board. One unconditional line, exactly like recon/diagnose — the
+                // branch lives in `cashDivertSpawnFields`, where a unit test can reach it.
+                ...cashDivertSpawnFields("review"),
+                runId: args.runId,
+                taskId: task.id,
+                // Reviews are admission-gating work.  Give the advisory worker the same idle-activity
+                // watchdog as dispatch workers so a provider/SDK stall cannot hold the decision claim
+                // (and leave `remudero-review=pending`) forever.  The deterministic floor still posts
+                // a terminal verdict when this bound trips.
+                ...reviewerClockBound,
+                onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
+                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
+              }),
+            );
+            assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
+            if (priorSignal !== undefined && reviewer.exit?.kind === "signal") {
+              log("review.reviewer.signal_ended_twice", {
+                first_signal: priorSignal, second_signal: reviewer.exit.signal,
+              });
+            }
+            if (reviewerRerunDecision(reviewer, priorSignal) === "accept") break;
+            priorSignal = (reviewer.exit as { kind: "signal"; signal: string }).signal;
+            log("review.reviewer.rerun", { first_signal: priorSignal, session_id: reviewer.sessionId });
+          }
         } finally {
           stopTelemetry?.();
         }
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
-        assertReviewerSnapshotIntegrity(snapshot.cwd, headSha);
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
         reviewerSubtype = reviewer.subtype;
@@ -17173,10 +17188,12 @@ const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, 
     rmSync(home, { recursive: true, force: true });
   }
 };
-const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+export const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
-    let stdout = "";
-    let stderr = "";
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let retainedBytes = 0;
+    let outputLimitExceeded = false;
     let timedOut = false;
     let spawnError: string | undefined;
     let settled = false;
@@ -17185,7 +17202,11 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ status, output: `${stdout}\n${stderr}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
+      const decode = (chunks: Buffer[]) => {
+        const decoder = new StringDecoder("utf8");
+        return decoder.write(Buffer.concat(chunks)) + (outputLimitExceeded ? "" : decoder.end());
+      };
+      resolve({ status, output: `${decode(stdout)}\n${decode(stderr)}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
     };
     // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
     // the environment synchronously, so clearing it around the call is enough.
@@ -17197,11 +17218,17 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
       }),
     );
     const collect = (chunk: Buffer, into: "out" | "err") => {
-      if (into === "out") stdout += chunk.toString("utf8");
-      else stderr += chunk.toString("utf8");
-      if (stdout.length + stderr.length > maxOutputBytes && spawnError === undefined) {
+      if (settled || timedOut || outputLimitExceeded) return;
+      const remaining = maxOutputBytes - retainedBytes;
+      const kept = Math.min(chunk.byteLength, remaining);
+      if (kept > 0) (into === "out" ? stdout : stderr).push(Buffer.from(chunk.subarray(0, kept)));
+      retainedBytes += kept;
+      if (chunk.byteLength > remaining) {
+        outputLimitExceeded = true;
         spawnError = "maxBuffer exceeded (ENOBUFS)";
+        if (timer) clearTimeout(timer);
         child.kill();
+        killAfterGrace(child);
       }
     };
     child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
@@ -17209,9 +17236,10 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
     timer = setTimeout(() => {
       timedOut = true;
       child.kill();
+      killAfterGrace(child);
     }, timeoutMs);
     child.on("error", (e) => {
-      spawnError = e.message;
+      spawnError ??= e.message;
       finish(null);
     });
     child.on("close", (code) => finish(code));
@@ -32885,6 +32913,23 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
   }
 }
 
+/** W1-T6252: ledgers the probe's shared-credential provisioning and heals, so lineage splits are countable. */
+export function usageCredentialSink(config: Config): (event: ClaudeCredentialSeedEvent) => void {
+  return (event) => {
+    try {
+      appendLedger(ledgerPathFor(config), {
+        run_id: "USAGE-PROBE",
+        task_id: "DAEMON",
+        step: event.kind === "provisioned" ? "usage.credential_provisioned" : "usage.credential_healed",
+        store: event.store,
+        prior_verdict: event.priorVerdict,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ event: "usage.credential_ledger_failed", reason: String((error as Error)?.message ?? error) }));
+    }
+  };
+}
+
 /**
  * Read current `/usage` headless and parse it; `undefined` on any failure (best-effort;
  * the drain/daemon continues on an unreadable read — max + budget still bound it. That
@@ -33005,7 +33050,7 @@ export async function readUsageSnapshotPreferSdk(
   } = {},
 ): Promise<UsageSnapshot | undefined> {
   const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
-  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s));
+  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s, { onCredentialSeed: usageCredentialSink(config) }));
   // W1-T5719: the CLI fallback is AWAITED off the loop, never an `execFileSync` on it.
   const viaCli = deps.viaCli ?? ((s) => readUsageSnapshotAsync(config, defaultAsyncUsageProbeRunner, s));
   // A SOURCE THAT CANNOT ANSWER MUST NOT BREAK THE CALLER. `readUsageSnapshotViaSdk` already
@@ -36507,9 +36552,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "config": {
       const d = deps("config");
       return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
-        (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
+        (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
-          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          // Leave the build seam absent: production must use the heap-bounded measurement worker.
+          const mountRecommendations = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
           return withDue(async () => {
             try {
               await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });

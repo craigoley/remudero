@@ -5046,6 +5046,11 @@ export async function runDaemon(
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
       const freshness = refillClosed ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
+      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      if (freshnessAction === "restart" && freshness?.stale) {
+        inFlightFreshness ??= freshness;
+        refillClosed ??= "stale code";
+      }
       let reason =
         refillClosed ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
@@ -5058,6 +5063,7 @@ export async function runDaemon(
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
         let next: Task | undefined;
+        let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
           const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
           const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.());
@@ -5069,12 +5075,20 @@ export async function runDaemon(
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           next = fits.dispatch.find((t) => !inFlightTasks.has(t));
-          if (next) snapshots.push(snapshot);
+          if (next) nextSnapshot = snapshot;
         };
         const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
         const conclude = (): Task | undefined => {
+          // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
+          if (next) {
+            const latched = refillClosed ?? (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
+            if (latched !== undefined) {
+              reason = `${latched} (decided while the refill read was in flight)`;
+              next = undefined;
+            }
+          }
           if (!next) {
             log("dispatch.lane_refill_held", {
               lane,
@@ -5085,6 +5099,7 @@ export async function runDaemon(
             });
             return undefined;
           }
+          snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });

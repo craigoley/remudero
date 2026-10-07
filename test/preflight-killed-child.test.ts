@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -56,9 +56,13 @@ test("MEASURED: a real killed child reports a signal with NO error, and the deta
   );
 });
 
-test("a crash and a policy kill are different findings, so the signal is named rather than generalised", () => {
-  const segv = defaultPreflightSpawn("/bin/sh", ["-c", "kill -SEGV $$"]);
+test("a crash and a policy kill are different findings in isolated fixture scratch", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-test-preflight-crash-cwd-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Keep the real signal, and keep its Linux core dump out of the author tree.
+  const segv = defaultPreflightSpawn("/bin/sh", ["-c", "pwd; kill -SEGV $$"], { cwd: dir });
   assert.equal(segv.signal, "SIGSEGV", "precondition: a real SIGSEGV");
+  assert.equal(segv.stdout.trim(), realpathSync(dir), "the real crash child's cwd is fixture scratch");
   const detail = spawnFailureDetail("commitlint", segv);
   assert.ok(detail);
   // SIGKILL under a sandbox is policy; SIGSEGV is a crash. Reporting both as "killed" without the

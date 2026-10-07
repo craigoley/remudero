@@ -1,0 +1,46 @@
+- id: W1-T6282
+  title: "A BUSY PRIMARY ACTUALLY REACHES ITS IMAGE RECYCLE — after W1-T6249 core still sat 80+ min behind a published image: the launcher's hand-off opens only when the daemon tree contains the install HEAD (a moving target on a busy repo), and the one tick it opened, deploy-run judged boot-settling and never handed the recycle off"
+  repo: remudero
+  depends_on: [W1-T6249, W1-T6260]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-07: core hand-recycled twice (15:38Z, 22:19Z) for the same starvation"
+  plan_refs: [W1-T6249, W1-T6260, W1-T4844, W1-T4917, W1-T341]
+  files: [deploy/install-host-units.sh, src/lib/deployer.ts, test/a-busy-primary-reaches-its-image-recycle.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 after W1-T6249 (#9926) was rendered on the host at 19:19Z:
+    - Image b3fbc42d (acr-build of 6f222cd67) published 20:58Z. Console and site recycled onto it at 21:05Z; core
+      stayed on 974d52ae and was hand-recycled at 22:19Z.
+    - Core's watchdog, 20:55-22:15Z: every busy tick but one logged `deploy code -- busy, and daemon tree <X> does not
+      contain install head <Y>; deferring.` (deploy/install-host-units.sh:446-449, deploy_code_busy_handoff). The daemon
+      tree did advance (fb51fe52 -> d8923460), but the install head moved on each merge (c691fb13, af745afd,
+      c72a4c87), so the tree is perpetually one merge behind.
+    - The single tick that passed (21:17:25Z, `contains install head ... asking deploy-run anyway`) reached deploy-run,
+      which logged `deploy.not_idle {"workers":0, ..., "boot_settling":true, "blockers":["boot-settling"]}`, NOT
+      `deploy.drain_handoff`. So on that tick `drainHandoff` was false (src/lib/deployer.ts ~1799-1830): either
+      decision.recycle was unset although a published image was not running, or boot-settling is checked on a path
+      the hand-off does not cover. The tree only catches up when the daemon restarts itself, which is exactly when
+      boot-settling is true, so the two gates close together.
+  design: |
+    1. Gate the launcher hand-off on DEPLOY LOGIC, not the whole HEAD: proceed when the daemon tree carries the install
+       head's version of the paths that decide and perform a deploy (deploy/, src/lib/deployer.ts and its imports),
+       i.e. `git diff --quiet <daemon_head> <install_head> -- <deploy-logic paths>`. That keeps W1-T4844/W1-T4917's
+       "deploy logic is never older than what it deploys" without waiting on unrelated merges.
+    2. Find why the 21:17Z tick did not hand off, and fix it so a pending published image while busy or boot-settling
+       is handed to recycle-container's own pause-and-drain (it waits for in-flight work itself; boot-settling is
+       not a reason to skip a backend that drains).
+    3. Measure after merge: on the next published image, core's ledger carries deploy.drain_handoff and core reaches
+       the image without a hand recycle.
+  acceptance:
+    - claim: "a busy primary whose daemon tree lags the install head only by non-deploy paths still hands a published image to the draining backend"
+      proof: 'grep: test("W1-T6282: a busy primary behind only on non-deploy paths hands its image recycle off" in test/a-busy-primary-reaches-its-image-recycle.test.ts'
+  falsifier: |
+    Keep the whole-HEAD ancestry gate: the fixture whose daemon tree lacks one docs-only install commit defers and the
+    test fails.

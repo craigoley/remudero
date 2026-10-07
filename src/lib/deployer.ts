@@ -946,6 +946,25 @@ export function pgrepFailureMeansZero(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { status?: unknown }).status === 1;
 }
 
+/** The worker command lines probeIdle counts — host `pgrep -f` and the container read alike. */
+const WORKER_PROCESS_PATTERN = "claude --output-format|codex exec";
+
+/** W1-T6260 — workers in ONE container's `docker top <c> -eo pid,ppid,args` table, each counted
+ *  once: a match whose parent also matches (codex's musl binary under its node wrapper) is the
+ *  same worker. `undefined` when no process row was read — a running container always has one. */
+export function countContainerWorkers(top: string): number | undefined {
+  const rows = top
+    .split("\n")
+    .slice(1)
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null);
+  if (rows.length === 0) return undefined;
+  const re = new RegExp(WORKER_PROCESS_PATTERN);
+  const matched = rows.filter((m) => re.test(m[3]));
+  const pids = new Set(matched.map((m) => m[1]));
+  return matched.filter((m) => !pids.has(m[2])).length;
+}
+
 /** Does this `readdirSync` failure mean the directory genuinely holds no locks? ENOENT does — a
  *  directory never created holds none. EACCES, ENOTDIR, EIO and EMFILE do not: the directory may
  *  be full of locks nobody could count. */
@@ -1341,15 +1360,15 @@ export interface DeployDeps {
   /** Retract the recorded failure (state/DEPLOY_FAILED + DEPLOY_LAST_FAILED) once a deploy is VERIFIED
    *  healthy. Without it nothing ever unlinked the latch: core, console and site each carried a failure
    *  days older than their newest `deploy.ok` (measured 2026-09-29). Optional for fake-dep callers. */
-  clearFailure?: () => void;
+  clearFailure?: (observedCurrentHead?: string) => void;
 
   // ── PERSISTING REFUSAL (W1-T6062) ── a backend that refuses every recycle used to leave only
   // state/DEPLOY_FAILED and an hourly `deploy.restart_refused` row (site and console, 2026-10-04 to
   // 10-06). All OPTIONAL: an omitting caller keeps today's single marker and row, nothing more.
   /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
   refusalStreak?: () => RefusalStreak | undefined;
-  /** Store the streak, or clear it with `undefined`. */
-  setRefusalStreak?: (streak: RefusalStreak | undefined) => void;
+  /** Store the streak, or clear it with `undefined`; false reports a failed removal. */
+  setRefusalStreak?: (streak: RefusalStreak | undefined) => void | boolean;
   /** Open (or update) the one needs-human issue for this instance and reason; returns its url. */
   escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
   /** Close that issue once a recycle is VERIFIED healthy. */
@@ -1436,6 +1455,7 @@ export interface RefusalStreak {
   lastAtMs: number;
   /** The issue opened for this streak, once it has been. */
   issueUrl?: string;
+  failedHead?: string;
 }
 
 /** What the escalation path is told about a persisting refusal. */
@@ -1480,6 +1500,7 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
     prior && prior.key === key
       ? { ...prior, count: prior.count + 1, lastAtMs: nowMs }
       : { key, count: 1, firstAtMs: nowMs, lastAtMs: nowMs };
+  streak.failedHead = refusal.toHead;
   const instance = deps.refusalInstance?.() ?? "default";
   const lagCommits = deps.imageBakedCommitsBehind?.();
   if (streak.count >= REFUSAL_PERSISTING_AT) {
@@ -1523,8 +1544,8 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
   }
 }
 
-/** A verified recycle ends the streak: close the issue it opened and forget the count. */
-function retractRefusal(deps: DeployDeps, toHead: string): void {
+/** A verified healthy daemon ends the streak: close the issue it opened and forget the count. */
+function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): void {
   const prior = deps.refusalStreak?.();
   if (!prior) return;
   const instance = deps.refusalInstance?.() ?? "default";
@@ -1533,7 +1554,7 @@ function retractRefusal(deps: DeployDeps, toHead: string): void {
     try {
       deps.closeRefusalIssue(
         prior.issueUrl,
-        `A recycle of ${instance} to ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`,
+        `The daemon ${instance} at ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`,
       );
       closed = true;
     } catch (err) {
@@ -1544,7 +1565,12 @@ function retractRefusal(deps: DeployDeps, toHead: string): void {
       });
     }
   }
-  deps.setRefusalStreak?.(undefined);
+  if (!deps.setRefusalStreak || deps.setRefusalStreak(undefined) === false) return;
+  deps.log("deploy.failure_retracted", {
+    marker: "DEPLOY_REFUSAL_STREAK",
+    failed_head: prior.failedHead ?? failedHead ?? null,
+    observed_current_head: toHead,
+  });
   deps.log("deploy.refusal_cleared", { instance, count: prior.count, issue: prior.issueUrl ?? null, issue_closed: closed });
 }
 
@@ -1679,6 +1705,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
       });
     }
   }
+  const stopPresent = deps.stopPresent?.();
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -1688,7 +1715,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     lastFailedHead,
     lastFailedKind: deps.lastFailedKind?.(),
     daemonAlive: deps.daemonAlive?.(),
-    stopPresent: deps.stopPresent?.(),
+    stopPresent,
     runningHead,
     // PRODUCER AND CONSUMER TOGETHER. A field the decision reads and nothing supplies is the
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
@@ -1714,6 +1741,10 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
         ? "consumed"
         : "retained";
     if (request === "consumed") deps.clearMarker();
+    if (decision.satisfied === true && sameCommit(fromHead, origin) && stopPresent === false) {
+      deps.clearFailure?.(fromHead);
+      retractRefusal(deps, fromHead, lastFailedHead);
+    }
     // W1-T3694: the blocker rides the SAME skip row as `reason` — a stale-running daemon is
     // legible off this one line, naming both shas, rather than requiring a second read.
     deps.log("deploy.skip", {
@@ -1892,8 +1923,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const observedRows = healthInputs.rowsSeen ?? [];
   if (health.healthy) {
     deps.clearMarker();
-    deps.clearFailure?.();
-    retractRefusal(deps, toHead);
+    deps.clearFailure?.(toHead);
+    retractRefusal(deps, toHead, lastFailedHead);
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
@@ -2502,11 +2533,26 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // is precisely what {@link daemonIsIdle} calls quiet.
       const unreadable: string[] = [];
       let workers = 0;
-      try {
-        workers = exec("pgrep", ["-f", "claude --output-format|codex exec"]).split("\n").filter(Boolean).length;
-      } catch (err) {
-        if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
-        workers = 0; // pgrep exits 1 when there are no matches
+      // W1-T6260: deploy-run runs ON THE HOST, so pgrep sees every instance's workers; the
+      // launcher's named container scopes the count to this instance. Unnamed ⇒ single-instance.
+      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER;
+      if (container) {
+        let counted: number | undefined;
+        try {
+          counted = countContainerWorkers(exec("docker", ["top", container, "-eo", "pid,ppid,args"]));
+        } catch {
+          // Deliberate: container down or docker unreachable is UNKNOWN (unreadable below), never zero.
+          counted = undefined;
+        }
+        if (counted === undefined) unreadable.push("workers");
+        workers = counted ?? 0;
+      } else {
+        try {
+          workers = exec("pgrep", ["-f", WORKER_PROCESS_PATTERN]).split("\n").filter(Boolean).length;
+        } catch (err) {
+          if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
+          workers = 0; // pgrep exits 1 when there are no matches
+        }
       }
       const countLocks = (dir: string, signal: string): number => {
         try {
@@ -2630,8 +2676,11 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       if (streak === undefined) {
         try {
           unlinkSync(deployRefusalStreakPath(o.stateRoot));
-        } catch {
-          /* already gone */
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker: "DEPLOY_REFUSAL_STREAK", error: String(error) });
+            return false;
+          }
         }
         return;
       }
@@ -2639,12 +2688,30 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     },
     ...(o.escalateRefusal ? { escalateRefusal: o.escalateRefusal } : {}),
     ...(o.closeRefusalIssue ? { closeRefusalIssue: o.closeRefusalIssue } : {}),
-    clearFailure: () => {
-      for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
+    clearFailure: (observedCurrentHead) => {
+      for (const [marker, path] of [
+        ["DEPLOY_FAILED", deployFailedAlertPath(o.stateRoot)],
+        ["DEPLOY_LAST_FAILED", deployLastFailedPath(o.stateRoot)],
+      ] as const) {
         try {
+          const raw = observedCurrentHead === undefined ? undefined : readFileSync(path, "utf8");
+          let failedHead = raw?.trim();
+          if (marker === "DEPLOY_FAILED" && raw !== undefined) {
+            try {
+              failedHead = (JSON.parse(raw) as { failedHead?: string } | null)?.failedHead;
+            } catch (error) {
+              log("deploy.failure_marker_unreadable", { marker, error: String(error) });
+              failedHead = undefined;
+            }
+          }
           unlinkSync(path);
-        } catch {
-          /* already gone */
+          if (observedCurrentHead !== undefined) {
+            log("deploy.failure_retracted", { marker, failed_head: failedHead ?? null, observed_current_head: observedCurrentHead });
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker, error: String(error) });
+          }
         }
       }
     },
