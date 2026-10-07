@@ -194,13 +194,14 @@ test("W1-T3676: a refused reclaim is not reported as a clean nothing-to-do run",
 
 // ── ACCEPTANCE 3: bytes inside an always-current file ───────────────────────────────────────────
 
-test("W1-T3676: reclaim reaches bytes inside an always-current file", () => {
+test("W1-T3676: reclaim reaches bytes inside an always-current file", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Math.floor(Date.now() / 1000) * 1000 });
   const codex = tree("codex-bulk");
   const db = liveDatabase(codex);
   const before = statSync(db).size;
   assert.ok(before > 2 * 1024 * 1024, `the fixture must hold real free pages to reclaim, got ${before} bytes`);
   const mtimeBefore = statSync(db).mtimeMs;
-  assert.ok(Date.now() - mtimeBefore < 60_000, "the fixture's mtime is current — no age tier can ever match it");
+  assert.equal(mtimeBefore, Date.now(), "the fixture's mtime is current — no age tier can ever match it");
 
   const run = runReclaim("good", [codex]);
   assert.equal(run.status, 0, run.stderr);
