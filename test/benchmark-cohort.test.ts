@@ -427,7 +427,9 @@ test("benchmark cohorts refuse unproven live rewrites and recover a completed to
     assert.equal(torn.snapshot.liveWatermark?.tailPendingBytes, 12);
     writeFileSync(live, assignment + attempt + later);
     const completed = await runBenchmarkCohortPass(stateDir);
-    assert.equal(completed.state, "complete");
+    assert.equal(completed.state, "complete", JSON.stringify({ reason: completed.snapshot.reason,
+      scannedSources: completed.scannedSources, pendingSources: completed.pendingSources,
+      watermark: completed.snapshot.liveWatermark }));
     assert.equal(completed.snapshot.cohorts[0].workerCallFailure, 1);
     assert.equal(completed.snapshot.sourceRows.assignments, 1);
   } finally {

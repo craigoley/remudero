@@ -555,7 +555,8 @@ function closedHalfOf(rows: SharedBoardSnapshotRows): ClosedHalf {
 
 /**
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
- * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
+ * `generation` is the files' identities; atomic re-saves may share an mtime but replace the inode.
+ * `content` moves only when what they hold does.
  * The closed/issues file is parsed once per change and shared ({@link createBoardSnapshotReader}), and so is the
  * gateway while `content` holds: the open half's 60 s re-save rebuilt both on every build (E33).
  */
@@ -603,7 +604,15 @@ export function snapshotSource(savedAt: string | null, reason: string | undefine
 }
 
 export function snapshotGeneration(root: string, owner: string, repo: string): string {
-  return `${mtimeOf(boardSnapshotPath(root, owner, repo)) ?? "-"}:${mtimeOf(boardOpenSnapshotPath(root, owner, repo)) ?? "-"}`;
+  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo)].map((path) => {
+    try {
+      const st = statSync(path);
+      return `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      // Missing/unreadable is an identity, not fresh evidence; snapshotGithub names the refusal.
+      return "-";
+    }
+  }).join(":");
 }
 
 export interface NowViewOptions {

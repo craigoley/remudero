@@ -87,6 +87,43 @@ test("invalid byte and row ceilings are refused before the corpus is opened", as
   await assert.rejects(readRetroLedgerNdjson("/not-opened", { maxRows: 0 }), /maxRows must be a positive safe integer/);
 });
 
+test("a live retention cursor preserves newest ownership through duplicates and one-row windows", async () => {
+  const { root, state } = stateDir("retro-live-retention-cursor-");
+  try {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ ts: "2026-09-01T00:00:00.000Z",
+      step: "cursor", value: ["a", "b", "c", "a", "a", "d", "b"][i % 7] }));
+    writePlain(join(state, "ledger.ndjson"), rows);
+    for (const maxRows of [1, 2, 4]) {
+      const expected = new Map<string, number>();
+      let droppedRows = 0;
+      let droppedBytes = 0;
+      let duplicatesCollapsed = 0;
+      let peak = 0;
+      for (const row of rows) {
+        const line = JSON.stringify(row);
+        if (expected.delete(line)) duplicatesCollapsed++;
+        while (expected.size >= maxRows) {
+          const [oldest, cost] = expected.entries().next().value!;
+          expected.delete(oldest);
+          droppedRows++;
+          droppedBytes += cost;
+        }
+        expected.set(line, Buffer.byteLength(line) + 1);
+        peak = Math.max(peak, expected.size);
+      }
+      const read = await readRetroLedgerNdjson(state, { maxRows, maxBytes: 1_000_000 });
+      assert.equal(read.ndjson, [...expected.keys()].join("\n"));
+      assert.equal(read.rowsKept, expected.size);
+      assert.equal(read.droppedRows, droppedRows);
+      assert.equal(read.droppedBytes, droppedBytes);
+      assert.equal(read.duplicatesCollapsed, duplicatesCollapsed);
+      assert.equal(read.dedupeEntriesPeak, peak);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("771 rotations complete under a 128 MiB old-space ceiling", () => {
   const { root, state } = stateDir("retro-771-rotations-");
   try {
