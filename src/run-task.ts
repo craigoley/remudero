@@ -32,7 +32,7 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -12267,13 +12267,6 @@ export async function runFixRung(opts: {
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
         : []),
-      // W1-T3079: POINT, DO NOT INJECT (design note iii) — spliced onto the rendered prompt here
-      // rather than inside `renderFixPrompt` itself (see the "Worker transcript archive" section
-      // above `runTask` for why). Names this task's predecessor transcript path(s), newest
-      // first, EXCLUDING this rung's own run; empty on a task's first fix rung.
-      ...predecessorTranscriptPromptLines(
-        predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
-      ),
       // W1-T4207: the previous strike's refused commit, named from its own `fix.commit_refused` row.
       ...lastCommitRefusalPromptLines(
         (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
@@ -12361,11 +12354,13 @@ export async function runFixRung(opts: {
     let spawnElapsedMs: number | undefined;
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
-      const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: fixReceipt.spawn }, fixArgs, {
+      const spawnOutcome = await withPredecessorTranscriptCopies(fixArgs, {
+        root: opts.config.root, taskId: opts.taskId, excludeRunId: opts.runId,
+      }, (args) => spawnFixWorkerBounded({ ...deps, spawn: fixReceipt.spawn }, args, {
         runId: opts.runId,
         taskId: opts.taskId,
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
-      });
+      }), deps.log);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
@@ -16059,6 +16054,61 @@ export function predecessorTranscriptPaths(
     .map((t) => t.path);
 }
 
+// W1-T5682: worktree-local TMPDIR copies stay readable even when Codex substitutes its private TMPDIR.
+export async function withPredecessorTranscriptCopies<T>(
+  args: SpawnWorkerArgs,
+  opts: { root: string; taskId: string; excludeRunId?: string; limit?: number },
+  spawn: (args: SpawnWorkerArgs) => Promise<T>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<T> {
+  const originals = predecessorTranscriptPaths(opts.root, opts.taskId, opts);
+  if (originals.length === 0) return spawn(args);
+  let scratch: string | undefined;
+  const copies: string[] = [];
+  try {
+    const parent = join(args.cwd, "state");
+    mkdirSync(parent, { recursive: true });
+    const physicalParent = realpathSync(parent);
+    if (!physicalParent.startsWith(`${realpathSync(args.cwd)}${sep}`)) {
+      throw new Error("predecessor scratch resolves outside the assigned worktree");
+    }
+    scratch = mkdtempSync(join(physicalParent, "rmd-predecessor-transcripts-"));
+    for (const original of originals) {
+      try {
+        const fd = openSync(original, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        try {
+          if (!fstatSync(fd).isFile()) throw new Error("predecessor transcript is not a regular file");
+          const buffer = Buffer.alloc(TRANSCRIPT_EXCERPT_CAP);
+          let bytes = 0;
+          while (bytes < buffer.length) {
+            const read = readSync(fd, buffer, bytes, buffer.length - bytes, bytes);
+            if (read === 0) break;
+            bytes += read;
+          }
+          const copy = join(scratch, basename(original));
+          writeFileSync(copy, buffer.subarray(0, bytes), { flag: "wx", mode: 0o600 });
+          copies.push(copy);
+        } finally {
+          closeSync(fd);
+        }
+      } catch (error) {
+        log("transcript.copy_error", { task_id: opts.taskId, path: original, reason: String(error) });
+      }
+    }
+  } catch (error) {
+    log("transcript.copy_error", { task_id: opts.taskId, reason: String(error) });
+  }
+  try {
+    return await spawn(copies.length === 0 ? args : {
+      ...args,
+      env: { ...args.env, TMPDIR: scratch! },
+      prompt: [args.prompt, ...predecessorTranscriptPromptLines(copies)].join("\n"),
+    });
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /**
  * Renders the ONE line design note (iii) asks the fix/diagnose prompt to gain, spliced onto the
  * already-rendered prompt at its call site (see this section's header doc for why the splice
@@ -18575,7 +18625,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const dispatchDiagnose = async (): Promise<{ text: string }> => {
       say("diagnose worker (two strikes — evidence-only, before any third patch)");
       const d = account(
-        await spawn({
+        await withPredecessorTranscriptCopies({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
@@ -18590,17 +18640,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          // W1-T3079: POINT, DO NOT INJECT (design note iii) — names this task's predecessor
-          // transcript path(s) from an EARLIER run (never this run's own just-archived
-          // `implement` transcript, excluded by `runId`), newest first. Empty on a task's first
-          // run: the diagnose prompt is byte-identical to before this task in that case.
-          prompt: [
-            renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
-            ...predecessorTranscriptPromptLines(
-              predecessorTranscriptPaths(config.root, taskId, { excludeRunId: runId }),
-            ),
-          ].join("\n"),
-        }),
+          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+        }, { root: config.root, taskId, excludeRunId: runId }, spawn, log),
       );
       log("diagnose.worker_done", {
         session_id: d.sessionId,
