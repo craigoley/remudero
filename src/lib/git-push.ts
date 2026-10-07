@@ -2,6 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, parseWorktreeGitInvocation, worktreeGitInvocation } from "./worktree-git.js";
 
 /**
  * THE git-push LEAF — the single place this codebase pushes a branch to origin.
@@ -62,11 +63,11 @@ export class PushFailedError extends RmdError {
  */
 export function defaultPushExec(file: string, args: string[], opts: { stdio: "inherit" | "ignore" }): void {
   if (opts.stdio === "ignore") {
-    execFileSync(file, args, opts);
+    runGitSync(file, args, { stdio: "ignore" });
     return;
   }
   try {
-    const out = execFileSync(file, args, { stdio: ["inherit", "inherit", "pipe"] });
+    const out = runGitSync(file, args, { stdio: ["inherit", "inherit", "pipe"] });
     void out;
   } catch (err) {
     const captured = (err as { stderr?: Buffer | string } | null)?.stderr;
@@ -80,16 +81,30 @@ export function defaultPushExec(file: string, args: string[], opts: { stdio: "in
 
 const execFilePromise = promisify(execFile);
 
+/** W1-T6106: a `-C <worktree>` invocation (see {@link worktreeGitInvocation}) NEVER reaches `git` raw — it runs through the
+ *  hardened leaf, which pins the gitdir, overrides code-executing config and runs the hooks from the harness copy. */
+function runGitSync(file: string, args: string[], options: { stdio: "ignore" | ["inherit", "inherit", "pipe"] | ["ignore", "pipe", "pipe"]; encoding?: "utf8" }): string | Buffer {
+  const invocation = file === "git" ? parseWorktreeGitInvocation(args) : null;
+  if (invocation === null) return execFileSync(file, args, options);
+  return hostWorktreeGit(invocation.worktreePath, invocation.args, options);
+}
+
+async function runGitAsync(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const invocation = file === "git" ? parseWorktreeGitInvocation(args) : null;
+  if (invocation === null) return execFilePromise(file, args, { encoding: "utf8" });
+  return hostWorktreeGitAsync(invocation.worktreePath, invocation.args);
+}
+
 /** W1-T5284 — {@link defaultPushExec} off the event loop: the run-branch push held the daemon loop
  *  14.7 s in one profile window. The child's stdout is written through as `inherit` would; a failed
  *  push re-emits its stderr and throws the same {@link PushFailedError}. */
 export async function defaultPushExecAsync(file: string, args: string[], opts: { stdio: "inherit" | "ignore" }): Promise<void> {
   if (opts.stdio === "ignore") {
-    await execFilePromise(file, args, { encoding: "utf8" });
+    await runGitAsync(file, args);
     return;
   }
   try {
-    const { stdout } = await execFilePromise(file, args, { encoding: "utf8" });
+    const { stdout } = await runGitAsync(file, args);
     if (stdout) process.stdout.write(stdout);
   } catch (err) {
     const failed = err as { stdout?: string; stderr?: string } | null;
@@ -196,7 +211,7 @@ function* pushRunBranchSteps(
     // for why this is a pre-push local read rather than trusting the push's own exit code or
     // output. `capture`, never `stdio`: the two fix-rung call sites this guards run with
     // `stdio: "ignore"`, so this must hold with the push's own output thrown away.
-    const observedHeadSha = (yield* step(() => io.capture("git", ["-C", worktreePath, "rev-parse", "HEAD"]))).trim();
+    const observedHeadSha = (yield* step(() => io.capture("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"])))).trim();
     if (observedHeadSha !== opts.expectedHeadSha) {
       throw new LanePushForeignHeadError(
         `refusing to push the run branch at ${worktreePath}: it was asked to land ` +
@@ -214,7 +229,7 @@ function* pushRunBranchSteps(
     yield* leasedForcePushSteps(worktreePath, { ...io, stdio, setUpstream: opts.setUpstream === true });
     return;
   }
-  const args = ["-C", worktreePath, "push"];
+  const args = worktreeGitInvocation(worktreePath, ["push"]);
   if (opts.setUpstream) args.push("-u");
   args.push("origin", "HEAD");
   yield* step(() => io.exec("git", args, { stdio }));
@@ -248,7 +263,7 @@ function* leasedForcePushSteps(
 ): Steps<void> {
   const read = function* (args: string[]): Steps<string | undefined> {
     try {
-      const out = (yield* step(() => io.capture("git", ["-C", worktreePath, ...args]))).trim();
+      const out = (yield* step(() => io.capture("git", worktreeGitInvocation(worktreePath, args)))).trim();
       return out.length > 0 ? out : undefined;
     } catch {
       // An absent ref, not a fault -- every caller below names its own reason for `undefined`.
@@ -321,7 +336,7 @@ function* leasedForcePushSteps(
   }
   // `setUpstream` still composes rather than being silently dropped — a flag that quietly stops
   // applying when another is set is a worse contract than one that costs a line here.
-  const args = ["-C", worktreePath, "push"];
+  const args = worktreeGitInvocation(worktreePath, ["push"]);
   if (io.setUpstream) args.push("-u");
   args.push(`--force-with-lease=${ref}:${lastPublished}`, "origin", `HEAD:${ref}`);
   try {
@@ -400,7 +415,7 @@ function reportForeignHead(
 export type GitCapture = (file: string, args: string[]) => string;
 
 export function defaultGitCapture(file: string, args: string[]): string {
-  return execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return String(runGitSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 }
 
 /** {@link GitCapture} for {@link gitPushRunBranchAsync}: awaited when it returns a promise. */
@@ -408,7 +423,7 @@ export type GitCaptureAsync = (file: string, args: string[]) => string | Promise
 
 /** {@link defaultGitCapture} off the event loop. */
 export async function defaultGitCaptureAsync(file: string, args: string[]): Promise<string> {
-  return (await execFilePromise(file, args, { encoding: "utf8" })).stdout;
+  return (await runGitAsync(file, args)).stdout;
 }
 
 /**
@@ -538,10 +553,10 @@ export function gitPushEmptyCommit(
   const exec = opts.exec ?? defaultPushExec;
   const ref = `refs/heads/${branch}`;
   // The head's OWN tree — so the commit is empty by construction, not by a flag.
-  const treeSha = capture("git", ["-C", repoDir, "rev-parse", `${headSha}^{tree}`]).trim();
-  const newSha = capture("git", ["-C", repoDir, "commit-tree", treeSha, "-p", headSha, "-m", message]).trim();
+  const treeSha = capture("git", worktreeGitInvocation(repoDir, ["rev-parse", `${headSha}^{tree}`])).trim();
+  const newSha = capture("git", worktreeGitInvocation(repoDir, ["commit-tree", treeSha, "-p", headSha, "-m", message])).trim();
   try {
-    exec("git", ["-C", repoDir, "push", `--force-with-lease=${ref}:${headSha}`, "origin", `${newSha}:${ref}`], {
+    exec("git", worktreeGitInvocation(repoDir, ["push", `--force-with-lease=${ref}:${headSha}`, "origin", `${newSha}:${ref}`]), {
       stdio: "ignore",
     });
   } catch (err) {
@@ -558,7 +573,7 @@ export function gitPushEmptyCommit(
   }
   // THE ELISION CHECK (see the doc comment above): trust the ref's ACTUAL resulting value,
   // never the exit code alone.
-  const observed = capture("git", ["-C", repoDir, "ls-remote", "origin", ref]).trim().split(/\s+/)[0];
+  const observed = capture("git", worktreeGitInvocation(repoDir, ["ls-remote", "origin", ref])).trim().split(/\s+/)[0];
   if (observed !== newSha) {
     throw new LanePushForeignHeadError(
       `push to ${branch} reported success but the remote ref reads ${observed ? observed : "<absent>"}, ` +

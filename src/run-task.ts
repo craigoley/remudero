@@ -1311,6 +1311,7 @@ import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
+import { execGitInvocation, execGitInvocationAsync, hostWorktreeGit, hostWorktreeGitAsync, hostWorktreeGitSpawn, worktreeGitInvocation } from "./lib/worktree-git.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
@@ -1806,8 +1807,8 @@ function inspectFreshReviewerWorktree(
   // A `branch` line says it is not detached. A stale reviewer must never make an existing ref its
   // recovery surface even when the ref happens to resolve to the requested commit today.
   if (block.some((line) => line.startsWith("branch ")) || listedHead !== revision) return "unsafe";
-  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
-  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
+  const actualHead = git(worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"])).trim();
+  const porcelain = git(worktreeGitInvocation(worktreePath, ["status", "--porcelain", "-uno"]));
   return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
 }
 
@@ -2251,7 +2252,7 @@ export function buildSweepEffects(
     deps.log,
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, {
-      git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
+      git: (args) => execGitInvocation("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
       // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
       // and refuses another; this needs the same throwaway detached tree, at the base revision.
       addWorktree: realDeps().reviewWorktree.addWorktree,
@@ -3859,7 +3860,7 @@ export function stripRepoRootFlag(argv: string[]): string[] {
 function readWorktreeHeadReflog(worktreePath: string): HeadReflogEntry[] | undefined {
   try {
     return parseHeadReflog(
-      execFileSync("git", ["-C", worktreePath, "reflog", "show", "--format=%H%x09%gs", "HEAD"], {
+      hostWorktreeGit(worktreePath, ["reflog", "show", "--format=%H%x09%gs", "HEAD"], {
         encoding: "utf8",
       }),
     );
@@ -3876,7 +3877,7 @@ function workerCreatedCurrentHead(
 ): boolean {
   if (!before) return false;
   try {
-    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const after = readWorktreeHeadReflog(worktreePath);
     return after ? headWasCreatedAfterReflogSnapshot(before, after, headSha) : false;
   } catch {
@@ -4419,14 +4420,14 @@ export function fillDerivedBody(worktreePath: string): string {
   try {
     const range = "origin/main..HEAD";
     const count = parseInt(
-      execFileSync("git", ["-C", worktreePath, "rev-list", "--count", range], { encoding: "utf8" }).trim(),
+      hostWorktreeGit(worktreePath, ["rev-list", "--count", range], { encoding: "utf8" }).trim(),
       10,
     );
     if (!count || count <= 0) return "";
     if (count === 1) {
-      return execFileSync("git", ["-C", worktreePath, "log", "-1", range, "--format=%b"], { encoding: "utf8" }).trim();
+      return hostWorktreeGit(worktreePath, ["log", "-1", range, "--format=%b"], { encoding: "utf8" }).trim();
     }
-    const subjects = execFileSync("git", ["-C", worktreePath, "log", "--reverse", range, "--format=%s"], {
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--reverse", range, "--format=%s"], {
       encoding: "utf8",
     })
       .trim()
@@ -4721,7 +4722,7 @@ export function runGhPrCreate(
  */
 export function lastCommitSubject(worktreePath: string): string | undefined {
   try {
-    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s"], {
+    const subject = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%s"], {
       encoding: "utf8",
     }).trim();
     return subject.length > 0 ? subject : undefined;
@@ -4791,8 +4792,8 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   // function's own best-effort contract; only a base that is present AND zero commits behind
   // suppresses the amend.
   try {
-    execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" });
-    const ahead = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"], {
+    hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" });
+    const ahead = hostWorktreeGit(worktreePath, ["rev-list", "--count", "origin/main..HEAD"], {
       encoding: "utf8",
     });
     if ((parseInt(ahead.trim(), 10) || 0) === 0) return false;
@@ -4802,12 +4803,12 @@ export function appendTaskTrailerToCommit(worktreePath: string, taskId: string):
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const trailerRe = new RegExp(`^Remudero-Task:\\s*${escaped}\\s*$`, "m");
   try {
-    const message = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], {
+    const message = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%B"], {
       encoding: "utf8",
     });
     if (trailerRe.test(message)) return false; // already carries THIS task's trailer — left alone
     const newMessage = `${message.replace(/\n+$/, "")}\n\nRemudero-Task: ${taskId}\n`;
-    execFileSync("git", ["-C", worktreePath, "commit", "--amend", "-m", newMessage], { stdio: "pipe" });
+    hostWorktreeGit(worktreePath, ["commit", "--amend", "-m", newMessage], { stdio: "pipe" });
     return true;
   } catch {
     return false;
@@ -4877,7 +4878,7 @@ export function diffIsClassifiedIrreversible(diffText: string): boolean {
  */
 function irreversibleSignalForWorktree(worktreePath: string): boolean {
   try {
-    const patch = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD"], {
+    const patch = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD"], {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -5537,11 +5538,11 @@ export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: 
   const taskId = extractTaskTrailerId(body);
   if (taskId === undefined) return [];
   try {
-    execFileSync("git", ["-C", cwd, "cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
+    hostWorktreeGit(cwd, ["cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
   } catch {
     // The head object is not local yet (a branch pushed since the last fetch): ask origin for it once.
     try {
-      execFileSync("git", ["-C", cwd, "fetch", "--quiet", "origin", headSha], { stdio: "pipe", timeout: 60_000 });
+      hostWorktreeGit(cwd, ["fetch", "--quiet", "origin", headSha], { stdio: "pipe", timeout: 60_000 });
     } catch {
       // Unreadable head means unreadable plan: no divergence cure, and the escalation still carries its reason.
       return [];
@@ -5921,7 +5922,7 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
 
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
-  const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
+  const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, [...args], { encoding: "utf8" }));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
   const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
@@ -7342,7 +7343,7 @@ function materializeReviewerSnapshot(
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", "--", sourceRepo, cwd], {
       stdio: ["ignore", "pipe", "ignore"],
     });
-    execFileSync("git", ["-C", cwd, "checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
+    hostWorktreeGit(cwd, ["checkout", "--quiet", "--detach", "--force", expectedHeadSha], {
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
@@ -7355,7 +7356,7 @@ function materializeReviewerSnapshot(
 
   let materializedHead: string;
   try {
-    materializedHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+    materializedHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -7388,11 +7389,11 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
   let actualHead: string;
   let status: string;
   try {
-    actualHead = execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+    actualHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
+    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -9252,15 +9253,15 @@ export function resolveClearedEscalation(
  */
 export function captureWorktreeSnapshotViaGit(worktreePath: string): WorktreeSnapshot | undefined {
   try {
-    const status = execFileSync("git", ["-C", worktreePath, "status", "--porcelain=v1", "-z", "--no-renames"], {
+    const status = hostWorktreeGit(worktreePath, ["status", "--porcelain=v1", "-z", "--no-renames"], {
       encoding: "utf8",
       maxBuffer: 1 << 26,
     });
-    const diff = execFileSync("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary", "HEAD"], {
+    const diff = hostWorktreeGit(worktreePath, ["diff", "--no-ext-diff", "--binary", "HEAD"], {
       encoding: "utf8",
       maxBuffer: 1 << 26,
     });
-    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], {
       encoding: "utf8",
       maxBuffer: 1 << 26,
     })
@@ -10467,13 +10468,13 @@ export type ReadFixRoundCommits = (worktreePath: string, sinceSha: string) => Fi
  * invoke this with a real, previously-observed head sha.
  */
 export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string): FixRoundCommit[] {
-  const shas = execFileSync("git", ["-C", worktreePath, "rev-list", "--reverse", `${sinceSha}..HEAD`], { encoding: "utf8" })
+  const shas = hostWorktreeGit(worktreePath, ["rev-list", "--reverse", `${sinceSha}..HEAD`], { encoding: "utf8" })
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
   return shas.map((sha) => {
-    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s", sha], { encoding: "utf8" }).trim();
-    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff-tree", "--no-commit-id", "--name-only", "-r", sha], {
+    const subject = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%s", sha], { encoding: "utf8" }).trim();
+    const changedFiles = hostWorktreeGit(worktreePath, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha], {
       encoding: "utf8",
     })
       .split("\n")
@@ -10517,7 +10518,7 @@ export function runNpmScriptViaSpawn(script: string, cwd: string): { status: num
 export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
   let preTree: string | null = null;
   try {
-    preTree = execFileSync("git", ["-C", opts.cwd, "write-tree"], { encoding: "utf8" }).trim();
+    preTree = hostWorktreeGit(opts.cwd, ["write-tree"], { encoding: "utf8" }).trim();
   } catch (e) {
     // No pre-add index snapshot to roll back to (e.g. an unmerged index) — record it; a refused
     // commit below can then only log-and-skip its rollback, not restore. See (v) below.
@@ -10525,15 +10526,15 @@ export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string
       `commitGeneratorOutputViaGit: snapshot.error ${String((e as Error)?.message ?? e)}\n`,
     );
   }
-  execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
-  const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
+  hostWorktreeGit(opts.cwd, ["add", "-A"], { stdio: "pipe" });
+  const staged = hostWorktreeGit(opts.cwd, ["status", "--porcelain=v1"], { encoding: "utf8" });
   if (staged.trim().length === 0) return { sha: "", changed: false };
   try {
-    execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+    hostWorktreeGit(opts.cwd, ["commit", "-m", opts.message], { stdio: "pipe" });
   } catch (commitError) {
     if (preTree !== null) {
       try {
-        execFileSync("git", ["-C", opts.cwd, "read-tree", preTree], { stdio: "pipe" });
+        hostWorktreeGit(opts.cwd, ["read-tree", preTree], { stdio: "pipe" });
       } catch (rollbackError) {
         // (v): a rollback that itself fails must say so, not fail silently — but the ORIGINAL
         // commit error is still what gets rethrown below, never this one.
@@ -10545,7 +10546,7 @@ export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string
     // (iii): the commit's own refusal text must still reach the caller, unmodified.
     throw commitError;
   }
-  const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const sha = hostWorktreeGit(opts.cwd, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   return { sha, changed: true };
 }
 
@@ -12345,7 +12346,7 @@ export async function runFixRung(opts: {
     // W1-T4458 (ii): this round's own starting head; whatever lands ahead of it is this round's work.
     let roundStartSha: string | undefined;
     try {
-      roundStartSha = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      roundStartSha = hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     } catch {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
@@ -12572,7 +12573,7 @@ export async function runFixRung(opts: {
     // fail-open discipline every other optional read in this rung already takes.
     let expectedHeadShaForPush = harnessCommittedSha;
     try {
-      expectedHeadShaForPush ??= execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
+      expectedHeadShaForPush ??= hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"], {
         encoding: "utf8",
       }).trim();
     } catch {
@@ -12742,8 +12743,8 @@ export async function runFixRung(opts: {
       let verified = false;
       try {
         const mainSha = await (deps.readMainTip ?? (() => {
-          execFileSync("git", ["-C", opts.worktreePath, "fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
-          return execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+          hostWorktreeGit(opts.worktreePath, ["fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
+          return hostWorktreeGit(opts.worktreePath, ["rev-parse", "origin/main"], { encoding: "utf8" }).trim();
         }))();
         const probes: BaseProbeResult = files.length > BASE_REPRODUCTION_MAX_FILES ? Object.assign([], { reason: "too many test files" }) : files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
           buildBaseReproductionProbe(opts.config, opts.worktreePath, deps.ledgerPath, deps.log))(
@@ -12815,8 +12816,8 @@ export async function runFixRung(opts: {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
       try {
-        const changed = workerChangedPaths(execFileSync("git", ["-C", opts.worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL], { encoding: "utf8" }));
-        if (roundStartSha) changed.push(...execFileSync("git", ["-C", opts.worktreePath, "diff", "--name-only", "-z", roundStartSha, "HEAD"], { encoding: "utf8" }).split("\0").filter(Boolean));
+        const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL], { encoding: "utf8" }));
+        if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"], { encoding: "utf8" }).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
@@ -12901,7 +12902,7 @@ export async function runFixRung(opts: {
       },
       {
         readProducedHeadSha: () =>
-          execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+          hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         readHeadSha: deps.readHeadShaForProvenance ?? readHeadShaRest,
         log: deps.log,
       },
@@ -13503,17 +13504,17 @@ export async function runFixRung(opts: {
  * fake and assert the exact recorded `git add`/`git commit` invocation, rather than reaching for a
  * `diff-cov:` directive a process-boundary spawn cannot use.
  */
-export function buildProofAmendmentGitOps(execFileSyncFn: typeof execFileSync = execFileSync): {
+export function buildProofAmendmentGitOps(execFileSyncFn: typeof execFileSync = execGitInvocation as typeof execFileSync): {
   gitAdd: (worktreePath: string, relPath: string) => void;
   gitCommit: (worktreePath: string, message: string) => string;
 } {
   return {
     gitAdd: (worktreePath, relPath) => {
-      execFileSyncFn("git", ["-C", worktreePath, "add", relPath]);
+      execFileSyncFn("git", worktreeGitInvocation(worktreePath, ["add", relPath]));
     },
     gitCommit: (worktreePath, message) => {
-      execFileSyncFn("git", ["-C", worktreePath, "commit", "-m", message]);
-      return execFileSyncFn("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      execFileSyncFn("git", worktreeGitInvocation(worktreePath, ["commit", "-m", message]));
+      return execFileSyncFn("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"]), { encoding: "utf8" }).trim();
     },
   };
 }
@@ -13711,7 +13712,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
   proofs: readonly string[];
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
-    execFileSync("git", ["-C", input.worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    hostWorktreeGit(input.worktreePath, [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   let changedFiles: string[];
   let mergeBase: string;
   try {
@@ -14532,7 +14533,7 @@ export function harvestFollowupsFromReport(
 /** Commits on the worktree's HEAD ahead of `base` (0 ⇒ the worker committed nothing). */
 function commitsAhead(worktreePath: string, base: string): number {
   try {
-    const out = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", `${base}..HEAD`], {
+    const out = hostWorktreeGit(worktreePath, ["rev-list", "--count", `${base}..HEAD`], {
       encoding: "utf8",
     });
     return parseInt(out.trim(), 10) || 0;
@@ -16971,7 +16972,7 @@ async function deferOpenToSiblingPr(
     return undefined;
   }
   if (sibling.state === "none") return undefined;
-  const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   log("pr.open_deferred_to_existing", {
     existing_pr_number: sibling.number,
     existing_pr_url: sibling.url,
@@ -17095,22 +17096,22 @@ export async function pushFixRound(
     throw new FixRoundPushError("run-error", { text, censuses: ["merged-tree-typecheck"], offeredBaselines: [] }, text);
   }
   const capture = deps.capture ?? defaultGitCaptureAsync;
-  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
+  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execGitInvocationAsync(file, args)));
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
     await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
-      const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
-        `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      const pushArgs = priorHeadSha === undefined ? args : worktreeGitInvocation(wt, ["push",
+        `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`]);
       await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
-        const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
+        const observed = (await capture("git", worktreeGitInvocation(wt, ["ls-remote", "origin", `refs/heads/${branch}`]))).split(/\s/)[0];
         if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
       }
     } });
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
-    const remote = await execFilePromise("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
+    const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
       .then(({ stdout }) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
@@ -17149,7 +17150,7 @@ const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
 
 const realCoverageChangedFiles = (wt: string): string[] =>
-  execFileSync("git", ["-C", wt, ...MERGE_BASE_DIFF_ARGS], { encoding: "utf8" }).split("\n").map((f) => f.trim()).filter(Boolean);
+  hostWorktreeGit(wt, [...MERGE_BASE_DIFF_ARGS], { encoding: "utf8" }).split("\n").map((f) => f.trim()).filter(Boolean);
 
 /**
  * W1-T5074: ASYNC on purpose. `runTask` runs inside the daemon process, so a `spawnSync` here froze every
@@ -17338,7 +17339,7 @@ export async function repairCensusRefusedPush(input: {
   recheck?: () => Promise<CensusPushRefusal | undefined>;
 }): Promise<CensusPushRungOutcome> {
   const { task, worktreePath: cwd, log } = input;
-  const head = () => execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const head = () => hostWorktreeGit(cwd, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const startHead = head();
   const offered = new Set(input.refusal.offeredBaselines);
   const { harnessCommits, cashTools } = fixRoundGitOwnership(input.config);
@@ -17398,7 +17399,7 @@ export async function repairCensusRefusedPush(input: {
       log,
       say: input.say,
     });
-    const baselineFiles = execFileSync("git", ["-C", cwd, "diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES], { encoding: "utf8" })
+    const baselineFiles = hostWorktreeGit(cwd, ["diff", "--name-only", startHead, "HEAD", "--", ...CENSUS_BASELINE_FILES], { encoding: "utf8" })
       .split("\n")
       .filter(Boolean);
     log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
@@ -18731,7 +18732,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // verdict branch that may remove the worktree. The source-size pilot is advisory: it can defer
     // or file a bounded decomposition follow-up, but never blocks the feature verdict.
     try {
-      const expectedHead = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+      const expectedHead = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
@@ -19071,7 +19072,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let branchOnOrigin = false;
     let probeFailure: RemotePresenceProbeFailure | undefined;
     try {
-      execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
+      hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch], {
         // W1-T2267: was `stdio: "ignore"`, which discarded the probe's own stderr — the exact
         // evidence `fallbackPushCause` needs to tell an unreadable remote from a genuinely
         // absent ref. stdout/stdin stay ignored; only stderr is captured.
@@ -19147,7 +19148,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[] | undefined;
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, ...MERGE_BASE_DIFF_ARGS], {
+        diffFiles = hostWorktreeGit(worktreePath, [...MERGE_BASE_DIFF_ARGS], {
           encoding: "utf8",
         })
           .split("\n")
@@ -19265,7 +19266,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
-        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
         const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
@@ -19325,7 +19326,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       { taskId, prUrl, source: "implement", worker: impl, workerHeadCreatedLocally },
       {
         readProducedHeadSha: () =>
-          execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+          hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         readHeadSha: opts.readHeadShaForProvenance ?? readHeadShaRest,
         log,
       },
@@ -20287,7 +20288,7 @@ export function buildBaseProofDir(
   const mergeBase =
     deps.mergeBase ??
     ((cwd: string) =>
-      execFileSync("git", ["-C", cwd, "merge-base", "origin/main", "HEAD"], {
+      hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim());
@@ -20301,7 +20302,7 @@ export function buildBaseProofDir(
       // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
       // Node `code`) was MEASURED with stderr already piped, and is locked by
       // test/base-blob-read-failure.test.ts Group 0.
-      execFileSync("git", ["-C", cwd, "show", `${rev}:${rel}`], {
+      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], {
         encoding: "utf8",
         maxBuffer: 1 << 26,
         stdio: ["ignore", "pipe", "pipe"],
@@ -26213,7 +26214,7 @@ export function triageClaimReserverFor(worktreePath: string): TriageClaimReserve
     // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention), and a
     // throwing runner would make it indistinguishable from an unreachable remote — the exact
     // conflation `classifyPushFailure` exists to prevent.
-    run: gitRunAdapter((args) => spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })),
+    run: gitRunAdapter((args) => hostWorktreeGitSpawn(worktreePath, [...args], { encoding: "utf8" })),
   });
 }
 
@@ -26270,7 +26271,7 @@ export function dispatchClaimReserverAsyncFor(repoDir: string): DispatchClaimRes
  * someone else's live claim on a read that did not happen.
  */
 export function mergedTriageSubjects(worktreePath: string, limit = 500): string[] {
-  const r = spawnSync("git", ["-C", worktreePath, "log", "origin/main", "--pretty=%s", `-n${limit}`], { encoding: "utf8" });
+  const r = hostWorktreeGitSpawn(worktreePath, ["log", "origin/main", "--pretty=%s", `-n${limit}`], { encoding: "utf8" });
   if (r.status !== 0) return [];
   return (r.stdout ?? "").split("\n").filter((l) => l.length > 0);
 }
@@ -27821,7 +27822,7 @@ export function lintScopeMergeBase(
 export async function lintPlanForReview(
   headCheckoutDir: string | undefined,
   git: (cwd: string, args: string[]) => string = (cwd, args) =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 }),
+    hostWorktreeGit(cwd, [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 }),
   lint: typeof lintPlanCommand = lintPlanCommand,
 ): Promise<PlanLintOutcome> {
   if (!headCheckoutDir) return { ran: false, reason: "no PR-head checkout" };
@@ -31719,7 +31720,7 @@ export function citationStampPassFor(opts: {
   const readGitLog =
     opts.readGitLog ??
     ((wt: string) =>
-      execFileSync("git", ["-C", wt, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+      hostWorktreeGit(wt, ["log", "--format=%x1e%aI%x1f%s%x1f%b"], {
         encoding: "utf8",
         maxBuffer: 1 << 26,
       }));
@@ -34160,7 +34161,7 @@ export function readDispatchFilingSnapshot(
 ): { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] } {
   try {
     const read = readGit ?? ((cwd: string, args: string[]) =>
-      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+      hostWorktreeGit(cwd, [...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
     // macOS exposes /var through /private/var; canonicalize only real filesystem reads so the
     // injected reader seam remains usable with virtual fixture paths.
     const canonicalPlanPath = readGit ? planPath : realpathSync(planPath);
@@ -43358,7 +43359,7 @@ export const MERGE_HEAD_ABSENT_REASON =
   "a merge-conflict round's commit needs MERGE_HEAD, so current main is its second parent; no merge is in progress";
 
 function worktreeGitRunner(worktreePath: string): GitRunner {
-  return (args) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return (args) => hostWorktreeGit(worktreePath, [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /**
@@ -43583,7 +43584,7 @@ export function harnessCommitForShellLessWorker(
 export function headProvenanceFields(worktreePath: string): { head_sha?: string; head_assignment?: string } {
   let headSha: string;
   try {
-    headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "HEAD"], {
+    headSha = hostWorktreeGit(worktreePath, ["rev-parse", "--verify", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -43606,9 +43607,7 @@ export function createHarnessCommitRefusalRecorder(state: { reason?: string }): 
  *  `harnessCommitForShellLessWorker` ever reads git status, so "changed nothing" and "forgot the
  *  line" are otherwise indistinguishable from the refusal reason alone. */
 export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
-  const raw = execFileSync(
-    "git",
-    ["-C", worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL],
+  const raw = hostWorktreeGit(worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   return workerChangedPaths(raw).length > 0;
@@ -43740,10 +43739,10 @@ export function missingCommitLinePrompt(input: {
   declaredPaths?: readonly string[];
 }): string {
   if (!writerCannotResume(input.provider, input.tools)) return COMMIT_LINE_RESUME_PROMPT;
-  const diffStat = execFileSync("git", ["-C", input.worktreePath, "diff", "HEAD", "--stat"], {
+  const diffStat = hostWorktreeGit(input.worktreePath, ["diff", "HEAD", "--stat"], {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }).trim();
-  const untracked = execFileSync("git", ["-C", input.worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+  const untracked = hostWorktreeGit(input.worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }).split("\0").filter((path) => path && (input.declaredPaths === undefined ||
     input.declaredPaths.some((declared) => pathIsUnderDeclaredSurface(path, [declared])))).join("\n");
@@ -43929,8 +43928,8 @@ export function checkoutFixHeadRef(
     }
   }
 
-  execFileSync("git", ["-C", worktreePath, "checkout", branch], { stdio: "pipe" });
-  const checkedOutSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+  hostWorktreeGit(worktreePath, ["checkout", branch], { stdio: "pipe" });
+  const checkedOutSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -46869,12 +46868,12 @@ export const TRIAGE_CASH_TOOLS: readonly string[] = TRIAGE_WORKER_TOOLS.filter((
  * on itself; a human merging merely supplies the commits that fetch then picks up.
  */
 function worktreeMergeBase(worktreePath: string): string {
-  return execFileSync("git", ["-C", worktreePath, "merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim();
+  return hostWorktreeGit(worktreePath, ["merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim();
 }
 
 export function worktreeChangedFiles(worktreePath: string): string[] {
   const run = (args: string[]): string[] =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })
+    hostWorktreeGit(worktreePath, [...args], { encoding: "utf8" })
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
@@ -47130,7 +47129,7 @@ async function triageCommandLocked(
     // filing will push its branch to.
     const triageRemoteRefReserver = gitRemoteRefReserver({
       run: (args) => {
-        const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+        const r = hostWorktreeGitSpawn(worktreePath, [...args], { encoding: "utf8" });
         return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
       },
     });
@@ -47378,7 +47377,7 @@ async function triageCommandLocked(
     // nothing and escalates nothing; it makes the divergence legible at the moment it happens,
     // which is exactly what the three collisions of 2026-08-26 lacked.
     if (decision.action === "propose") {
-      const triageDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
+      const triageDiff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "--", "plan"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
@@ -47420,10 +47419,8 @@ async function triageCommandLocked(
       // from, in the SAME write as the `proposed` status transition (never half-written) —
       // fail-open to `summary: null` on any summarizer failure, exactly as before this task.
       await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: prUrl });
-      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/feedback/"], { stdio: "inherit" });
-      execFileSync(
-        "git",
-        ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
+      hostWorktreeGit(worktreePath, ["add", "-A", "--", "plan/feedback/"], { stdio: "inherit" });
+      hostWorktreeGit(worktreePath, ["commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
         { stdio: "inherit" },
       );
       await gitPushRunBranchAsync(worktreePath);
@@ -47469,10 +47466,8 @@ async function triageCommandLocked(
       const scopeFiles = triageDeclaredScope(feedbackId);
       let liveDiffFiles: string[] | undefined;
       try {
-        execFileSync("git", ["-C", worktreePath, "fetch", "origin", "main"], { stdio: "inherit" });
-        liveDiffFiles = execFileSync(
-          "git",
-          ["-C", worktreePath, "diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles],
+        hostWorktreeGit(worktreePath, ["fetch", "origin", "main"], { stdio: "inherit" });
+        liveDiffFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles],
           { encoding: "utf8" },
         )
           .split("\n")
@@ -47668,7 +47663,7 @@ export async function planCommand(
           // rejected push is NORMAL here (contention), so a throwing runner would make it
           // indistinguishable from an unreachable remote.
           run: (args) => {
-            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+            const r = hostWorktreeGitSpawn(worktreePath, [...args], { encoding: "utf8" });
             return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
           },
         }),
@@ -47773,7 +47768,7 @@ export async function planCommand(
       // MERGE BASE, not the moving tip — see `worktreeMergeBase`. A bare `origin/main` here made a
       // plan shard landed by SOMEONE ELSE's PR read as an id THIS worker filed, so the unreserved-id
       // warning named ids the run never touched.
-      const planDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
+      const planDiff = hostWorktreeGit(worktreePath, ["diff", worktreeMergeBase(worktreePath), "--", "plan"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
@@ -47845,7 +47840,7 @@ export async function planCommand(
     // changed-files block is an assertion about the actual commit, not the worker's pre-harness
     // advisory list; constructing it before regeneration would immediately make the PR contradict
     // its own diff whenever the index changes.
-    const planPrFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], {
+    const planPrFiles = hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
     })
@@ -50031,7 +50026,7 @@ export async function approveCommand(
                 count,
                 gitRemoteRefReserver({
                   run: (args) => {
-                    const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+                    const r = hostWorktreeGitSpawn(worktreePath, [...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
                   },
                 }),
@@ -50076,8 +50071,8 @@ export async function approveCommand(
       deps.overlap,
     );
 
-    execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
+    hostWorktreeGit(worktreePath, ["add", "--", ...shardRelPaths], { stdio: "inherit" });
+    hostWorktreeGit(worktreePath, ["commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
@@ -50184,7 +50179,7 @@ export async function approveCommand(
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
       try {
         const live = ghJson(["api", `repos/${owner}/${repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
-        const paths = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
+        const paths = hostWorktreeGit(worktreePath, ["diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
         const body = joinedRatificationPrBody(live.body ?? "", filedStampLine, branchFiledTaskIds(worktreePath), paths, { proofCwd: worktreePath });
         writePrBodyRest(prUrl, body);
         log("approve.join_body_refreshed", { pr_url: prUrl, paths });
@@ -50528,7 +50523,7 @@ async function approveBatchCommand(
                       count,
                       gitRemoteRefReserver({
                         run: (args) => {
-                          const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
+                          const r = hostWorktreeGitSpawn(batchWorktree, [...args], { encoding: "utf8" });
                           return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
                         },
                       }),
@@ -50552,8 +50547,8 @@ async function approveBatchCommand(
       allFiledTaskIds = filed.filedIds;
       log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
 
-      execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      hostWorktreeGit(batchWorktree, ["add", "--", ...allWrittenPaths], { stdio: "inherit" });
+      hostWorktreeGit(worktreePath, ["commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
       gitPushRunBranch(worktreePath);
       return branch;
     },

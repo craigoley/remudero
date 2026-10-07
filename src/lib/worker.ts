@@ -27,7 +27,7 @@ import {
 // (W1-T208).
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { performance } from "node:perf_hooks";
@@ -179,6 +179,7 @@ import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, typ
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { hostWorktreeGit, readWorktreePin, recordWorktreePin, removeWorktreePin } from "./worktree-git.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -5042,6 +5043,8 @@ export function worktreeBasePath(worktreePath: string): string {
  * about to be abandoned (W1-T405). */
 export function recordWorktreeBase(worktreePath: string, base: string): void {
   writeFileSync(worktreeBasePath(worktreePath), `${base}\n`);
+  // W1-T6106: the exact `.git` pointer the daemon just saw, so a host git call can refuse a rewritten one.
+  recordWorktreePin(worktreePath);
 }
 
 /** Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or unreadable, never a throw, so a
@@ -5063,6 +5066,7 @@ export function removeWorktreeBase(worktreePath: string): void {
   } catch {
     /* absent or unreadable — removal owes nothing here */
   }
+  removeWorktreePin(worktreePath);
 }
 
 /** W1-T4614: the trailer naming the selection assignment whose worker (or harness step) wrote a commit. */
@@ -5114,11 +5118,29 @@ function shellQuote(value: string): string {
  * worktree's previous hooks. Re-stamping changes only the id; an id that is not a plain token installs nothing (false). */
 export function stampRunWorktreeAssignment(worktreePath: string, assignmentId: string): boolean {
   if (!ASSIGNMENT_ID_RE.test(assignmentId)) return false;
+  // W1-T6106: through the hardened leaf, and the gitdir is the one worktreeAdd recorded — never re-derived from the
+  // worker-writable `.git` file. A pointer that no longer matches the record throws here and stamps nothing.
+  const pin = readWorktreePin(worktreePath);
   const git = (...args: string[]) =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    String(hostWorktreeGit(worktreePath, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).trim();
   if (realpathSync(git("rev-parse", "--show-toplevel")) !== realpathSync(worktreePath)) return false;
-  const hooksDir = join(git("rev-parse", "--path-format=absolute", "--git-dir"), ASSIGNMENT_HOOKS_DIRNAME);
-  const current = git("rev-parse", "--path-format=absolute", "--git-path", "hooks");
+  const gitDir = pin?.gitDir ?? git("rev-parse", "--path-format=absolute", "--git-dir");
+  const hooksDir = join(gitDir, ASSIGNMENT_HOOKS_DIRNAME);
+  // The leaf overrides `core.hooksPath` on every call, so the PRIOR value is read from the worktree's own config file.
+  const configured = (() => {
+    try {
+      return execFileSync("git", ["config", "--file", join(gitDir, "config.worktree"), "--get", "core.hooksPath"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      return "";
+    }
+  })();
+  const current =
+    configured !== ""
+      ? resolve(worktreePath, configured)
+      : execFileSync("git", ["--git-dir", gitDir, "rev-parse", "--path-format=absolute", "--git-path", "hooks"], { encoding: "utf8" }).trim();
   const priorFile = join(hooksDir, ASSIGNMENT_PRIOR_HOOKS_FILE);
   const prior = current === hooksDir ? readFileSync(priorFile, "utf8").trim() : current;
   mkdirSync(hooksDir, { recursive: true });
