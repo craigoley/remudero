@@ -21938,8 +21938,12 @@ export interface DepReviewDeps {
 }
 
 /** W1-T6258 — read the PR head with `git show` and push the `.nvmrc` commit from a scratch worktree. */
-export function defaultNodePinSyncIo(root: string): NodePinSyncIo {
-  const git = (args: string[], cwd = root): string => hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24 });
+export function defaultNodePinSyncIo(
+  root: string,
+  options: { git?: (args: string[], cwd: string) => string } = {},
+): NodePinSyncIo {
+  const runGit = options.git ?? ((args: string[], cwd: string): string => hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24 }));
+  const git = (args: string[], cwd = root): string => runGit(args, cwd);
   return {
     readAtHead(headSha, path) {
       try {

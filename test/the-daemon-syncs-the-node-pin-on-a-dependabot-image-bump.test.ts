@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { defaultNodePinSyncIo, depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
 import { execFileSync } from "node:child_process";
@@ -9,7 +9,8 @@ import { writeFileSync } from "node:fs";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { NodePinSyncIo } from "../src/lib/dep-review.js";
+import { syncNodePinForImageBump, type NodePinSyncIo } from "../src/lib/dep-review.js";
+import { hostWorktreeGit } from "../src/lib/worktree-git.js";
 
 const DOCKERFILE = (v: string) => `FROM node:${v}-bookworm-slim\nWORKDIR /app\n`;
 const DIFF = "diff --git a/deploy/Dockerfile b/deploy/Dockerfile\n--- a/deploy/Dockerfile\n+++ b/deploy/Dockerfile\n";
@@ -92,6 +93,40 @@ test("W1-T6258: a major image bump is ledgered refused and never synced", async 
   assert.equal(f.ledger().some((r) => r.step === "dep-review.decided"), true);
 });
 
+test("W1-T6258: unreadable and malformed image-bump inputs are refused without a push", () => {
+  const pushes: unknown[] = [];
+  const head = { sha: "a".repeat(40), ref: "dependabot/docker/deploy/node" };
+  const unreadable = syncNodePinForImageBump(DIFF, head, {
+    readAtHead: (_sha, path) => path === "deploy/Dockerfile" ? undefined : "24.21.0\n",
+    commitAndPush: (input) => { pushes.push(input); return "b".repeat(40); },
+  });
+  assert.deepEqual(unreadable, {
+    kind: "refused", reason: "unreadable",
+    detail: "deploy/Dockerfile, .nvmrc or the head ref could not be read",
+  });
+  const malformed = syncNodePinForImageBump(DIFF, head, {
+    readAtHead: (_sha, path) => path === "deploy/Dockerfile"
+      ? "FROM alpine:latest\nFROM node:24.22.0-bookworm-slim\n"
+      : "24.21.0\n",
+    commitAndPush: (input) => { pushes.push(input); return "b".repeat(40); },
+  });
+  assert.deepEqual(malformed, {
+    kind: "refused", reason: "unreadable",
+    detail: "deploy/Dockerfile must carry exactly one `FROM node:<x.y.z>-` line",
+  });
+  assert.deepEqual(pushes, [], "refused inputs must never attempt a branch write");
+});
+
+test("W1-T6258: a failed push is returned as a refusal, not thrown out of the daemon pass", () => {
+  const outcome = syncNodePinForImageBump(DIFF, {
+    sha: "a".repeat(40), ref: "dependabot/docker/deploy/node",
+  }, {
+    readAtHead: (_sha, path) => path === ".nvmrc" ? "24.21.0\n" : DOCKERFILE("24.22.0"),
+    commitAndPush: () => { throw new Error("lease lost"); },
+  });
+  assert.deepEqual(outcome, { kind: "refused", reason: "push-failed", detail: "lease lost" });
+});
+
 test("W1-T6258: the real node-pin IO reads at the head and pushes the .nvmrc commit through the hardened git leaf", () => {
   // FIXTURES ONLY: a gitRepo() checkout whose origin is a bare temp repository; nothing reaches GitHub.
   const remote = gitRepo({ bare: true, kind: "node-pin-remote" });
@@ -110,4 +145,28 @@ test("W1-T6258: the real node-pin IO reads at the head and pushes the .nvmrc com
   const onRemote = execFileSync("git", ["--git-dir", remote.dir, "rev-parse", "refs/heads/dependabot/docker/deploy/node"], { encoding: "utf8" }).trim();
   assert.equal(onRemote, pushed, "the pushed head is the new commit");
   assert.equal(execFileSync("git", ["--git-dir", remote.dir, "show", `${pushed}:.nvmrc`], { encoding: "utf8" }), "24.21.0\n");
+});
+
+test("W1-T6258: scratch-directory removal still succeeds when git worktree removal fails", () => {
+  const remote = gitRepo({ bare: true, kind: "node-pin-cleanup-remote" });
+  const seed = gitRepo({ kind: "node-pin-cleanup-seed" });
+  seed.addRemote("origin", remote.dir);
+  writeFileSync(join(seed.dir, ".nvmrc"), "22.22.3\n");
+  seed.git("add", ".nvmrc");
+  seed.git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "origin", "HEAD:refs/heads/dependabot/docker/deploy/node");
+  const head = seed.git("rev-parse", "HEAD").trim();
+  let scratch: string | undefined;
+  const io = defaultNodePinSyncIo(seed.dir, {
+    git: (args, cwd) => {
+      if (args[0] === "worktree" && args[1] === "add") scratch = dirname(args[5]!);
+      if (args[0] === "worktree" && args[1] === "remove") throw new Error("injected git cleanup failure");
+      return hostWorktreeGit(cwd || seed.dir, args, { maxBuffer: 1 << 24 });
+    },
+  });
+  withLiveWritesAllowed(() => io.commitAndPush({
+    headRef: "dependabot/docker/deploy/node", headSha: head, nvmrc: "24.21.0\n", subject: "chore(deps): sync .nvmrc",
+  }));
+  assert.ok(scratch, "the scratch path was captured from the actual git worktree-add command");
+  assert.equal(existsSync(scratch!), false, "the finally block removes scratch files even when git worktree remove fails");
 });
