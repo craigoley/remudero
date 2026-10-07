@@ -79,6 +79,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   REAP: producer("reap", "Reaper"),
   DRAIN: producer("drain", "Drain"),
   SWEEP: producer("sweep", "Sweep"),
+  MINT: producer("mint", "Task ID Minter"),
   FIX: producer("fix", "Fix Rung"),
   FLEET: producer("fleet", "Fleet"),
   SERVE: producer("serve", "Serve"),
