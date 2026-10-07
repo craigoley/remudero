@@ -15399,6 +15399,12 @@ export function probeVerdictKey(inputs: ProbeKeyInputs): string {
   return hash.digest("hex");
 }
 
+function hookFilesUnder(dir: string, rel = ""): string[] {
+  return readdirSync(join(dir, rel), { withFileTypes: true })
+    .flatMap((entry) => (entry.isDirectory() ? hookFilesUnder(dir, join(rel, entry.name)) : [join(rel, entry.name)]))
+    .sort();
+}
+
 /** Read the probe key's inputs from disk. The worker settings and every file in the hooks dir are
  *  read by CONTENT; the run's own id is normalised out of the settings so a per-run path is not a
  *  policy change. An absent image stamp (off-container) is the literal `absent`; any other read
@@ -15419,7 +15425,7 @@ export function readProbeKeyInputs(src: {
     imageBuildSha: existsSync(src.imageBuildShaPath) ? readFileSync(src.imageBuildShaPath, "utf8").trim() : "absent",
     harnessRevision: src.harnessRevision,
     workerSettings: digest(readFileSync(src.settingsFile, "utf8").split(src.runId).join("<run>")),
-    hooks: readdirSync(src.hooksDir).sort().map((name) => `${name}:${digest(readFileSync(join(src.hooksDir, name)))}`).join(","),
+    hooks: hookFilesUnder(src.hooksDir).map((rel) => `${rel}:${digest(readFileSync(join(src.hooksDir, rel)))}`).join(","),
     cliVersion: src.cliVersion ?? "unobserved",
     provider: src.provider,
     claudeBin: src.claudeBin,
