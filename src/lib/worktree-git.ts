@@ -350,9 +350,18 @@ function harnessCredentialConfig(entries: readonly ConfigEntry[]): Array<[string
 const CONFIG_LIST_ARGS = ["config", "--list", "--show-scope", "--null", "--no-includes"];
 const CONFIG_READ_TIMEOUT_MS = 30_000;
 
-function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog): Array<[string, string]> {
+/** Whether `pin` is the HARNESS's own checkout — the tree this code runs from, which no worker writes
+ *  (CI's runner checkout carries `actions/checkout`'s includeIf credentials). Real paths, never names: a
+ *  worker, reviewer or PR-head tree, or a worktree of the managed clone, is never this. */
+export function isHarnessCheckout(pin: PinnedWorktreeGit, harnessRoot: string = HARNESS_ROOT): boolean {
+  const here = real(pin.worktree);
+  return here !== undefined && here === real(harnessRoot);
+}
+
+function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog, harnessRoot: string = HARNESS_ROOT): Array<[string, string]> {
   const entries = parseConfigListing(listing);
-  const keys = refusedConfigKeys(entries, recordedWorktreeRemote(pin.worktree));
+  // The harness checkout skips only the refusal arm; the credential reset and every override still apply.
+  const keys = isHarnessCheckout(pin, harnessRoot) ? [] : refusedConfigKeys(entries, recordedWorktreeRemote(pin.worktree));
   if (keys.length > 0) {
     log("worktree_git.config_refused", { worktree: pin.worktree, git_dir: pin.gitDir, keys });
     throw new WorktreeConfigRefusedError(pin.worktree, keys);
@@ -361,11 +370,11 @@ function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog): A
 }
 
 /** Vet the pinned repository's own config before a call (W1-T6148); returns the overrides it adds. */
-export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = stderrLog): Array<[string, string]> {
+export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = stderrLog, harnessRoot: string = HARNESS_ROOT): Array<[string, string]> {
   const listing = execFileSync("git", CONFIG_LIST_ARGS, {
     cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), stdio: ["ignore", "pipe", "pipe"], timeout: CONFIG_READ_TIMEOUT_MS,
   });
-  return vetted(pin, listing, log);
+  return vetted(pin, listing, log, harnessRoot);
 }
 
 async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog): Promise<Array<[string, string]>> {

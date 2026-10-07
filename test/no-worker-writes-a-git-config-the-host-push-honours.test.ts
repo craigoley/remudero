@@ -237,6 +237,25 @@ describe("W1-T6148: the fleet's real managed-checkout keys pass untouched (measu
   });
 });
 
+describe("W1-T6148: the harness's own checkout is exempt from the refusal arm only", () => {
+  it("a repo playing the harness root with actions/checkout's includeIf is not refused; a worker tree with it is", () => {
+    const harness = gitRepo({ kind: "t6148-harness-root" });
+    const credentials = join(root, `checkout-credentials-${n}`);
+    writeFileSync(credentials, "");
+    harness.git("config", "--local", `includeIf.gitdir:${join(harness.dir, ".git")}.path`, credentials);
+    const pin = leaf.pinWorktreeGit(harness.dir);
+    assert.equal(leaf.isHarnessCheckout(pin, harness.dir), true);
+    const overrides = leaf.vetPinnedConfig(pin, () => {}, harness.dir);
+    assert.deepEqual(overrides[0], ["credential.helper", ""], "the credential reset still applies to the harness checkout");
+    assert.throws(() => leaf.vetPinnedConfig(pin, () => {}), (e: unknown) => e instanceof leaf.WorktreeConfigRefusedError,
+      "the same repository is refused when it is not the harness root");
+    const { wt } = cutLane();
+    raw(wt, ["config", "--local", `includeIf.gitdir:${join(wt, ".git")}.path`, credentials]);
+    assert.equal(leaf.isHarnessCheckout(leaf.pinWorktreeGit(wt)), false);
+    assert.throws(() => leaf.hostWorktreeGit(wt, ["status"], { log: () => {} }), /includeif\.gitdir/);
+  });
+});
+
 describe("W1-T6148: a planted credential helper never runs on a leaf push", () => {
   for (const scope of ["--worktree", "--local"] as const) {
     it(`credential.helper planted with config ${scope}: the control runs it, the leaf push lands without it`, () => {
