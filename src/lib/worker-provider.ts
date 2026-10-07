@@ -1910,6 +1910,7 @@ export interface ParsedCodexEvents {
   text: string;
   blocks: string[];
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   numTurns: number;
   isError: boolean;
   subtype: string;
@@ -2006,6 +2007,9 @@ class CodexJsonlAccumulator {
   private input = 0;
   private output = 0;
   private cacheRead = 0;
+  private completedTurns = 0;
+  private usageTurns = 0;
+  private missingUsageTurns = 0;
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
@@ -2035,6 +2039,8 @@ class CodexJsonlAccumulator {
       text: this.blocks.at(-1) ?? "",
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      tokenUsageState: this.usageTurns === 0 ? "unavailable"
+        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
       isError: this.errors.length > 0,
       subtype: this.errors.length > 0 ? "error_codex" : "success",
@@ -2080,10 +2086,22 @@ class CodexJsonlAccumulator {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
-    if (event.type === "turn.completed" && event.usage) {
-      this.input += event.usage.input_tokens ?? 0;
-      this.output += event.usage.output_tokens ?? 0;
-      this.cacheRead += event.usage.cached_input_tokens ?? 0;
+    if (event.type === "turn.completed") {
+      this.completedTurns += 1;
+      const input = event.usage?.input_tokens;
+      const output = event.usage?.output_tokens;
+      const cached = event.usage?.cached_input_tokens;
+      if (typeof input === "number" && Number.isSafeInteger(input) && input >= 0
+        && typeof output === "number" && Number.isSafeInteger(output) && output >= 0
+        && typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0 && cached <= input
+        && [this.input + input, this.output + output, this.cacheRead + cached].every(Number.isSafeInteger)) {
+        this.input += input;
+        this.output += output;
+        this.cacheRead += cached;
+        this.usageTurns += 1;
+      } else {
+        this.missingUsageTurns += 1;
+      }
     }
     if (event.type === "turn.failed" || event.type === "error") {
       const message = event.error?.message ?? event.type;
@@ -4514,7 +4532,7 @@ async function spawnCodexWorkerInPrivateTemp(
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
-    const notionalCostUsd = codexNotionalCostUsd(model, parsed.tokens);
+    const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     return {
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
