@@ -21920,14 +21920,12 @@ export interface DepReviewDeps {
     submissionKey: string;
   }) => FeedbackEntry;
   prMutations?: DepReviewPrMutations;
-  /** W1-T6258 — the node-pin sync's git reads and push; defaults to {@link defaultNodePinSyncIo}. */
   nodePin?: NodePinSyncIo;
 }
 
 /** W1-T6258 — read the PR head with `git show` and push the `.nvmrc` commit from a scratch worktree. */
 export function defaultNodePinSyncIo(root: string): NodePinSyncIo {
-  const git = (args: string[], cwd = root): string =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 24 });
+  const git = (args: string[], cwd = root): string => hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24 });
   return {
     readAtHead(headSha, path) {
       try {
