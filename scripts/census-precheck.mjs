@@ -468,8 +468,11 @@ export async function loadTestPriority(importSlot = defaultImportTestSlot) {
 }
 
 async function defaultImportTestSlot() {
+  const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", "test-slot.ts")).href;
+  // An active tsx resolver remaps the graph's .js imports to .ts, including API-registered loaders.
+  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) return import(url);
   const { tsImport } = await import("tsx/esm/api");
-  return tsImport(pathToFileURL(join(SCRIPT_REPO, "src", "lib", "test-slot.ts")).href, import.meta.url);
+  return tsImport(url, import.meta.url);
 }
 
 const TEST_PRIORITY = await loadTestPriority();
