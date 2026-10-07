@@ -29,6 +29,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { mintScopedToken } from "./github-app.js";
+import { setHarnessCredentialSocket } from "./worktree-git.js";
 
 /** A fresh, unguessable stand-in for a real credential — never derived from the real value, so a
  *  worker holding one learns nothing about what it substitutes for. `label` is cosmetic (it
@@ -460,6 +461,7 @@ export async function startDaemonGitCredentialSocket(opts: {
   const ledgerRow = (row: BoundaryLedgerRow) => opts.log(row.step, rowFields(row));
   let handle: CredentialHelperSocketHandle | undefined;
   const close = async (): Promise<void> => {
+    setHarnessCredentialSocket(undefined);
     await handle?.close();
     rmSync(socketPath, { force: true });
   };
@@ -478,5 +480,7 @@ export async function startDaemonGitCredentialSocket(opts: {
     );
     return undefined;
   }
+  // W1-T6148: the host git leaf re-adds the socket helper from this, never from a worktree's config.
+  setHarnessCredentialSocket(socketPath);
   return { socketPath, close };
 }

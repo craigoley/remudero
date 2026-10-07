@@ -27,6 +27,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -87,6 +88,8 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  /** The shell-less surface a caller declares only when its harness owns git (run-task.ts's coherence rule). */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   runId?: string;
@@ -111,6 +114,8 @@ export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; sign
 
 interface CodexWorkerResult {
   provider: "codex";
+  /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
+  harnessCommit?: CodexHarnessCommit;
   sessionId: string;
   costUsd: number;
   /** W1-T5629: NOTIONAL, never billed — see {@link codexNotionalCostUsd}. Absent when the model is unpriced. */
@@ -2233,28 +2238,6 @@ function isGitWorktree(cwd: string): boolean {
 }
 
 /**
- * Resolve only this checkout's Git administrative directories. Codex workspace-write protects
- * `.git` by default, while Remudero implementation prompts require the worker to commit. Linked
- * worktrees need both the per-worktree git dir and their shared common dir; paths outside the
- * configured Remudero root are refused instead of widening the sandbox from repository metadata.
- */
-export function codexGitWritableRoots(cwd: string, configRoot: string): string[] {
-  try {
-    const root = physicalPath(configRoot);
-    const output = execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    return [...new Set(output.split("\n").map((line) => line.trim()).filter(Boolean).map(physicalPath))]
-      .filter((candidate) => isWithin(root, candidate));
-  } catch (error) {
-    // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
-    return [];
-  }
-}
-
-/**
  * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
  * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
  * (`scripts/claude-md-budget-baseline.json`'s `capBytes`), and this ceiling binds only if that
@@ -2346,6 +2329,59 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
   ];
 }
 
+function codexReadOnly(args: CodexSpawnArgs): boolean {
+  return args.sandboxIntent !== "disposable-review" && Array.isArray(args.tools) &&
+    !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+}
+
+/**
+ * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
+ * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
+ * rule run-task.ts holds), else this module, after the run, through the host git leaf.
+ */
+export function codexHarnessCommits(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tools" | "cashTools">): boolean {
+  if (args.sandboxIntent === "disposable-review" || codexReadOnly(args as CodexSpawnArgs)) return false;
+  const shellLess = Array.isArray(args.tools) && !args.tools.includes("Bash");
+  return args.cashTools === undefined && !shellLess;
+}
+
+/** Told to a codex writer whose edits {@link commitCodexWriterEdits} commits. */
+export const CODEX_HARNESS_COMMITS_PART =
+  "GIT: your sandbox cannot write this repository's git directory, so do not run `git commit`, `git push` or any git " +
+  "command that writes. The harness commits every change you leave in the worktree when you finish. End your final " +
+  "message with one line `COMMIT_MESSAGE: <conventional-commit subject, at most 100 characters>`.\n\n";
+
+const CODEX_FALLBACK_SUBJECT = "chore: commit the Codex worker's edits (harness commit, W1-T6148)";
+
+/** The subject a codex writer asked for: its last anchored `COMMIT_MESSAGE:` line, as worker.ts reads one. */
+export function codexCommitSubject(text: string): string {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  const subject = matches.at(-1)?.[1]?.trim() ?? "";
+  return subject.length > 0 && subject.length <= 100 ? subject : CODEX_FALLBACK_SUBJECT;
+}
+
+export type CodexHarnessCommit =
+  | { outcome: "committed"; sha: string }
+  | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
+  | { outcome: "refused"; reason: string };
+
+/** Commit what a codex writer left in `cwd`, through the leaf (pinned gitdir, vetted config, harness hooks).
+ *  Only in a tree `worktreeAdd` cut and recorded: a checkout the harness did not cut is never committed in. */
+export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
+  if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
+  try {
+    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    hostWorktreeGit(cwd, ["add", "-A"]);
+    hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
+    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(JSON.stringify({ event: "codex.harness_commit_refused", cwd, reason }));
+    return { outcome: "refused", reason };
+  }
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -2353,7 +2389,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
-  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const readOnly = codexReadOnly(args);
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
@@ -2413,13 +2449,14 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
-  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
+  // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
+  // plant config the host's authenticated push honours, so the harness commits for it instead
+  // ({@link commitCodexWriterEdits}).
   return [
     "exec",
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
-    ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
     "-C", args.cwd,
     "-",
   ];
@@ -4750,7 +4787,8 @@ async function spawnCodexWorkerInPrivateTemp(
     armClockBound();
   });
   armClockBound();
-  const prompt = CODEX_DOCTRINE_PRELUDE + args.prompt;
+  const harnessCommits = codexHarnessCommits(args);
+  const prompt = CODEX_DOCTRINE_PRELUDE + (harnessCommits ? CODEX_HARNESS_COMMITS_PART : "") + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
@@ -4763,7 +4801,9 @@ async function spawnCodexWorkerInPrivateTemp(
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
+    const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     return {
+      ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
       ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),

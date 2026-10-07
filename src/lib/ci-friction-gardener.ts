@@ -31,6 +31,7 @@ import {
   replayCiFrictionLadder,
 } from "./ci-friction-remedy.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { trailerTaskIds } from "./field-trials-github.js";
 import type { LedgerRecord } from "./retro.js";
 
 /**
@@ -519,21 +520,17 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
   // Source registration needs a delivery on main's first-parent history. A feature commit's
   // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
   const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
-  let commit: { at: string; revision: string; changed: string[] } | undefined;
-  for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE,
-    "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)%x09%H", "--name-only", "--first-parent", "--diff-merges=first-parent", "--max-count=4096"]).split("\n")) {
-    const [at, ids, revision] = line.split("\t");
-    if (ids === undefined || !at || !Number.isFinite(Date.parse(at))) {
-      if (commit && /^(src|scripts)\//.test(line)) commit.changed.push(line);
-      continue;
-    }
-    commit = revision && /^[0-9a-f]{40}$/.test(revision) ? { at, revision, changed: [] } : undefined;
-    for (const id of ids.split(",").map((v) => v.trim()).filter(Boolean)) {
-      if (commit) {
-        let group = builds.get(id);
-        if (group === undefined) { group = []; builds.set(id, group); }
-        group.push(commit);
-      }
+  for (const block of git(["log", refName, CI_FRICTION_HISTORY_SINCE,
+    "--format=%x01%cI%x09%H%x00%B%x00", "--name-only", "--first-parent", "--diff-merges=first-parent", "--max-count=4096"]).split("\x01")) {
+    const fields = block.split("\x00");
+    if (fields.length !== 3) continue;
+    const [at, revision] = fields[0]!.split("\t");
+    if (!at || !Number.isFinite(Date.parse(at)) || !revision || !/^[0-9a-f]{40}$/.test(revision)) continue;
+    const commit = { at, revision, changed: fields[2]!.split("\n").filter(line => /^(src|scripts)\//.test(line)) };
+    for (const id of trailerTaskIds(fields[1])) {
+      let group = builds.get(id);
+      if (group === undefined) { group = []; builds.set(id, group); }
+      group.push(commit);
     }
   }
   const tasks: CiFrictionRemedyTask[] = [];

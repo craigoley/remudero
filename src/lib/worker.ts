@@ -1,7 +1,7 @@
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
 import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -181,9 +181,12 @@ import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   GITDIR_RECORD_PREFIX,
+  HOST_GIT_CONFIG,
   hostWorktreeGit,
+  originUrlAtCut,
   pinnedConfigValue,
   pinWorktreeGit,
+  REMOTE_RECORD_PREFIX,
   WorktreePointerRefusedError,
   worktreeRecordPath,
   type PinnedWorktreeGit,
@@ -4224,12 +4227,14 @@ function installRootDir(): string {
 /** W1-T2699: point `cwd`'s PER-WORKTREE git config at the socket-based credential helper, resetting any
  *  accumulated `credential.helper` first — an empty value clears git's collected helper list
  *  (MEASURED against git 2.39.5), so the worktree entry added right after is the only one git tries
- *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
+ *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper.
+ *  W1-T6133: written through the leaf, so the `config.worktree` is the PINNED gitdir's; a pointer the
+ *  leaf refuses throws before the first write, and spawnWorker surfaces it as `credential_helper_unwired`. */
 export function wireCredentialHelperSocket(
   cwd: string,
   socketPath: string,
   writeConfig: (args: string[]) => void = (args) => {
-    execFileSync("git", ["-C", cwd, "config", "--worktree", ...args]);
+    hostWorktreeGit(cwd, ["config", "--worktree", ...args]);
   },
 ): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
@@ -4246,10 +4251,18 @@ export function wireCredentialHelperSocket(
   writeConfig(["--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`]);
 }
 
-/** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5). */
+/** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5).
+ *  W1-T6133: read through the leaf. An unset key (exit 1) reads as empty, as spawnSync's stdout did; a refused
+ *  pointer reads NOT wired, so the writer runs, refuses, and the refusal is surfaced rather than skipped. */
 export function credentialHelperSocketWired(cwd: string, socketPath: string): boolean {
-  const read = (...args: string[]): string =>
-    spawnSync("git", ["-C", cwd, "config", "--worktree", ...args], { encoding: "utf8" }).stdout ?? "";
+  const read = (...args: string[]): string => {
+    try {
+      return hostWorktreeGit(cwd, ["config", "--worktree", ...args]);
+    } catch {
+      // Unset, unreadable or refused: none is evidence of wiring, and the writer reports the last.
+      return "";
+    }
+  };
   const helpers = read("--get-all", "credential.helper").split("\n");
   return read("--get", "credential.useHttpPath").trim() === "true" && helpers[0] === "" && helpers.some((h) => h.includes(`"${socketPath}"`));
 }
@@ -5053,7 +5066,10 @@ export function worktreeBasePath(worktreePath: string): string {
 export function recordWorktreeBase(worktreePath: string, base: string, gitDir?: string): void {
   // W1-T6106: the gitdir this worktree was cut with rides on the same record, the anchor the host git leaf
   // pins every call to; the base sha stays the first line, which is all readWorktreeBase reads.
-  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}`);
+  // W1-T6148: so does its origin URL, which the leaf then requires the pinned config to still name.
+  const remote = gitDir === undefined ? undefined : originUrlAtCut(gitDir);
+  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}` +
+    `${remote === undefined ? "" : `${REMOTE_RECORD_PREFIX}${remote}\n`}`);
 }
 
 /** Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or unreadable, never a throw, so a
@@ -5244,6 +5260,21 @@ function ensureWorktreeConfigEnabled(repoDir: string): void {
   execFileSync("git", ["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
 }
 
+/** W1-T6147: the environment for the git that CUTS a tree. `worktree add` checks out and runs post-checkout from the SOURCE
+ * clone's hooks path — a relative `core.hooksPath=hooks` is the base's tracked hooks/, none is the common gitdir's hooks/,
+ * which a codex writer can write — so the leaf's {@link HOST_GIT_CONFIG} rides at command-line precedence (the env form of
+ * `-c`, leaving argv unchanged) and the harness's own hooks dir is the only one git reads. */
+function noHookGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(k)) env[k] = v;
+  env.GIT_CONFIG_COUNT = String(HOST_GIT_CONFIG.length);
+  HOST_GIT_CONFIG.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -5289,7 +5320,7 @@ export function worktreeAdd(
   execFileSync(
     "git",
     ["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base],
-    { stdio: "inherit" },
+    { stdio: "inherit", env: noHookGitEnv() },
   );
   // Record the base BEFORE the currency check below: a refusal throws out of this function with no return value, so the
   // record must already be on disk to be attributable (W1-T405).
@@ -5367,9 +5398,9 @@ const execFilePromise = promisify(execFile);
 
 /** Async Git calls used by daemon worktree creation. The two commands whose sync form inherits stdio
  * forward both streams to stderr, including output produced before a failure. */
-async function worktreeGit(args: string[], forwardOutput = false): Promise<string> {
+async function worktreeGit(args: string[], forwardOutput = false, env?: NodeJS.ProcessEnv): Promise<string> {
   try {
-    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8" });
+    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8", ...(env ? { env } : {}) });
     if (forwardOutput) {
       if (stdout) process.stderr.write(stdout);
       if (stderr) process.stderr.write(stderr);
@@ -5409,7 +5440,7 @@ export async function worktreeAddAsync(
     // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
-  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
+  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv());
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
   // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
   const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
@@ -5437,7 +5468,8 @@ export async function worktreeAddAsync(
     const from = createdBase;
     try {
       await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"]);
-      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead]);
+      // W1-T6147: the tree has no worktree hooksPath yet, so this merge would run post-merge from the clone's.
+      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead], false, noHookGitEnv());
     } catch {
       break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
     }
@@ -6499,21 +6531,18 @@ function laneWorkKeepReason(config: Config, path: string, branch?: string): Work
   const taskId = [branch ?? "", basename(path)].map((name) => name.match(/^run-(W\d+-T\d+)-\d+$/)?.[1]).find(Boolean);
   if (taskId && present(join(config.root, "state", "inflight", `${taskId}.lock`))) return "inflight-lock";
   if (!present(join(path, ".git"))) return undefined;
+  // W1-T6133: an agent session wrote this tree, so every read goes through the leaf; a pointer it refuses
+  // throws WorktreePointerRefusedError, and runAdhocLaneReapRung's keepReason KEEPS the lane for it.
+  const git = (...args: string[]): string => hostWorktreeGit(path, args);
   const exclusions = ["--remotes"];
-  const remoteRefs = execFileSync("git", ["-C", path, "for-each-ref", "--format=%(refname)", "refs/remotes/"],
-    { encoding: "utf8", stdio: "pipe" });
+  const remoteRefs = git("for-each-ref", "--format=%(refname)", "refs/remotes/");
   if (!remoteRefs.trim()) {
     // A remote-less linked lane inherits the primary checkout's history; only lane-only commits protect it.
-    const dirs = execFileSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { encoding: "utf8", stdio: "pipe" }).trim().split("\n");
-    if (dirs[0] !== dirs[1]) {
-      const parentHead = execFileSync("git", ["--git-dir", dirs[1], "rev-parse", "--verify", "HEAD"],
-        { encoding: "utf8", stdio: "pipe" }).trim();
-      exclusions.push(parentHead);
-    }
+    const dirs = git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").trim().split("\n");
+    // `main-worktree/HEAD` is the common dir's HEAD, read through the pinned gitdir rather than a path it named.
+    if (dirs[0] !== dirs[1]) exclusions.push(git("rev-parse", "--verify", "main-worktree/HEAD").trim());
   }
-  const unpushed = execFileSync("git", ["-C", path, "rev-list", "--max-count=1", "HEAD", "--not", ...exclusions],
-    { encoding: "utf8", stdio: "pipe" });
+  const unpushed = git("rev-list", "--max-count=1", "HEAD", "--not", ...exclusions);
   return unpushed.trim() ? "unpushed-commit" : undefined;
 }
 
@@ -6582,7 +6611,7 @@ export function runAdhocLaneReapRung(
         try {
           return laneWorkKeepReason(config, path, branch);
         } catch (e) {
-          log("adhoc_lane.reap.work_undecidable", { path, error: String(e) });
+          log("adhoc_lane.reap.work_undecidable", { path, error: String(e), pointer_refused: e instanceof WorktreePointerRefusedError });
           return "work-undecidable";
         }
       },

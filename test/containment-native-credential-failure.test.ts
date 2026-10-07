@@ -26,7 +26,7 @@ test("native token validator admits both complete token diagnostics and refuses 
 
 function settings(root: string): string {
   const path = join(root, "worker.json");
-  writeFileSync(path, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true }, permissions: { deny: [], allow: [], ask: [] } }));
+  writeFileSync(path, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false }, permissions: { deny: [], allow: [], ask: [] } }));
   return path;
 }
 

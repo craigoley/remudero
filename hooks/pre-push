@@ -66,8 +66,7 @@ if [ ! -f "$tsx_loader" ]; then
 fi
 [ -f "$gate_root/tsconfig.json" ] && export TSX_TSCONFIG_PATH="$gate_root/tsconfig.json"
 export RMD_GATE_ROOT="$gate_root"
-# A check whose QUESTION is the tree's own code (its census suites, its package.json lint argv, its
-# capability generator) runs only when the tree is the gate root; from the harness it is skipped by name.
+# W1-T6138: branch-owned code runs in the proof sandbox; an unavailable sandbox is a named skip.
 own_tree=0
 [ "$gate_root" = "$tree_root" ] && own_tree=1
 # A loader-run check with no loader under the gate root could only exit 1, which reads as a violation.
@@ -117,7 +116,6 @@ if has ci-control-plane-precheck.mjs tsx; then
   if [ "$own_tree" -eq 1 ]; then
     node --import "$tsx_loader" "$gate_root/scripts/ci-control-plane-precheck.mjs"
   else
-    # Its capability arm spawns the TREE's generator, so a diff reaching it is skipped by name (exit 4).
     node --import "$tsx_loader" -e '
       const { pathToFileURL } = require("node:url");
       const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
@@ -125,11 +123,24 @@ if has ci-control-plane-precheck.mjs tsx; then
         let files;
         try { files = g.gitOrThrow(["diff", "--name-only", "origin/main...HEAD"]).split("\n").filter(Boolean); }
         catch (e) { console.error(String(e.message ?? e)); process.exit(2); }
-        if (m.affectedCapabilitySnapshot(files)) {
-          console.error("pre-push: ci-control-plane-precheck — this diff moves a capability-snapshot input, whose check runs the branch\x27s own generator; the host gate runs no worktree code: skipped, NOT passed (CI runs it)");
-          process.exit(4);
-        }
-        process.exit(m.runCiControlPlanePrecheck({ readChangedFiles: () => files }));
+        let runCapabilitySnapshot;
+        return at("/src/lib/git-push.ts").then((p) => {
+          const run = p.createPrePushSandboxRunner(process.cwd());
+          if (m.affectedCapabilitySnapshot(files)) {
+            try { runCapabilitySnapshot = run(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"]); }
+            catch (e) {
+              console.error("pre-push: ci-control-plane-precheck — " + e.message + ": skipped, NOT passed (CI runs it)");
+              process.exit(4);
+            }
+          }
+          process.exit(m.runCiControlPlanePrecheck({ readChangedFiles: () => files, runCapabilitySnapshot }));
+        }, (e) => {
+          if (m.affectedCapabilitySnapshot(files)) {
+            console.error("pre-push: ci-control-plane-precheck — this diff moves a capability-snapshot input, whose check runs the branch\x27s own generator; the host gate runs no worktree code: " + e.message + ": skipped, NOT passed (CI runs it)");
+            process.exit(4);
+          }
+          process.exit(m.runCiControlPlanePrecheck({ readChangedFiles: () => files, runCapabilitySnapshot }));
+        });
       }, () => process.exit(2));
     '
   fi
@@ -188,12 +199,27 @@ if has census-precheck.mjs; then
   if [ "$own_tree" -eq 1 ]; then
     node "$gate_root/scripts/census-precheck.mjs" --base origin/main
   else
-    # The counts run from the gate root over this tree as data, against the GATE ROOT's admission table;
-    # a census suite to run is this tree's own test file, so it reads NOT MEASURED instead (exit 2).
-    node -e '
+    # Counts and admission remain harness-owned; only the suite child crosses the sandbox boundary.
+    node ${tsx_loader:+--import "$tsx_loader"} -e '
       const { pathToFileURL } = require("node:url");
-      import(pathToFileURL(process.env.RMD_GATE_ROOT + "/scripts/census-precheck.mjs").href).then((m) => {
-        const runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
+      const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
+      at("/scripts/census-precheck.mjs").then(async (m) => {
+        let runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
+        try {
+          const p = await at("/src/lib/git-push.ts");
+          const run = p.createPrePushSandboxRunner(process.cwd());
+          runSuites = ({ root, files }) => {
+            try {
+              return m.runCensusSuitesViaChild({ root, files, run: (_file, _args, options) => run(process.execPath,
+                ["--test", "--test-reporter=tap", "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
+            } catch (e) {
+              console.error("pre-push: census-precheck — " + e.message + ": skipped, NOT passed (CI runs it)");
+              throw e;
+            }
+          };
+        } catch (e) {
+          console.error("pre-push: census-precheck sandbox runner unavailable: " + e.message + ": skipped, NOT passed");
+        }
         process.exitCode = m.main(["--base", "origin/main"], { admitted: () => m.listAdmittedCensusMembers(process.env.RMD_GATE_ROOT), runSuites });
       }, (e) => { console.error(String(e?.message ?? e)); process.exitCode = 2; });
     '
@@ -214,7 +240,38 @@ fi
 # spawns that npm script's argv (offline, no test runner), abstains on a stale origin/main, and reports a
 # machine-filing-admission-only finding without blocking.
 if [ "$own_tree" -ne 1 ] && has lint-plan-precheck.mjs; then
-  echo "pre-push: lint-plan-precheck runs the branch's own package.json lint argv; the host gate runs no worktree code: skipped, NOT passed (CI runs it)" >&2
+  node ${tsx_loader:+--import "$tsx_loader"} -e '
+    const { readFileSync } = require("node:fs");
+    const { pathToFileURL } = require("node:url");
+    const at = (p) => import(pathToFileURL(process.env.RMD_GATE_ROOT + p).href);
+    at("/src/lib/git-push.ts").then(async (p) => {
+        const [m, g] = await Promise.all([at("/scripts/lint-plan-precheck.mjs"), at("/scripts/lib/git.mjs")]);
+        const root = g.gitOrThrow(["rev-parse", "--show-toplevel"]);
+        const lint = m.lintArgvFromPackage(readFileSync(root + "/package.json", "utf8"));
+        if (!lint) throw new Error("package.json has no plain node lint-plan:fast script");
+        const fork = g.gitOrThrow(["merge-base", "HEAD", lint.base ?? "origin/main"]);
+        const run = p.createPrePushSandboxRunner(root);
+        const verdict = m.lintPlanPrecheckVerdict({
+          changedFiles: g.gitOrThrow(["diff", "--name-only", fork + "...HEAD"]).split("\n").filter(Boolean),
+          subjects: g.gitOrThrow(["log", "--format=%s", fork + "..HEAD"]).split("\n").filter(Boolean),
+          lint: () => {
+            const r = run(process.execPath, lint.args);
+            return { status: r.status, output: String(r.stdout ?? "") + "\n" + String(r.stderr ?? "") };
+          }
+        });
+        for (const line of verdict.lines) (verdict.exit === 0 && verdict.lines.length === 1 ? console.log : console.error)(line);
+        process.exitCode = verdict.exit;
+    }).catch((e) => {
+      console.error("pre-push: lint-plan-precheck runs the branch\x27s own package.json lint argv; the host gate runs no worktree code: " + e.message + ": skipped, NOT passed (CI runs it)");
+      process.exitCode = 2;
+    });
+  '
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
 elif has lint-plan-precheck.mjs; then
   node "$gate_root/scripts/lint-plan-precheck.mjs" --base origin/main
   rc=$?

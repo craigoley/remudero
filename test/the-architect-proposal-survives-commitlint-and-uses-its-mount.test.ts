@@ -51,7 +51,9 @@ test("W1-T5122: a proposal over a long multi-line brief commits and passes commi
       const message = planCommitMessage({
         decision: { action: "propose", detail, files: ["MASTER-PLAN.md"] }, mode: "expand", brief,
       });
-      applyPlanProposalCommit(cwd, message);
+      // W1-T6136: the default leaf runs no tracked hook, so the commitlint hook needs a raw git to fire.
+      applyPlanProposalCommit(cwd, message, undefined, (dir, args, stdio) =>
+        String(execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: gitEnv, stdio }) ?? ""));
       assert.notEqual(git(cwd, "rev-parse", "HEAD"), before);
       assert.deepEqual(checkCommitMessage(message), []);
       assert.match(message, /Operator brief \(summary\) — repair the proposal lane/);

@@ -146,7 +146,7 @@ test("END TO END: spawnWorker itself refuses at the real boundary, with NOTHING 
   // fresh temp dir with no git remote — so there is no origin to push to even if anything tried.
   const dir = mkdtempSync(join(tmpdir(), "rmd-spawn-guard-e2e-"));
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
 
   let err: unknown;
   try {

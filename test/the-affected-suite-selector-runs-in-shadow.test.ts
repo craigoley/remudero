@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,8 +101,7 @@ test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const f of ["src/a.ts", "src/b.ts"]) writeFileSync(join(repo.dir, f), TREE[f]!);
   repo.git("add", "src");
   repo.git("commit", "-qm", "fixture");
-  symlinkSync(join(REPO_ROOT, "scripts"), join(repo.dir, "scripts"));
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(repo.dir, "node_modules"));
+  mkdirSync(join(repo.dir, "test")); // the HARNESS's listings read this tree's test/ as data
   rmSync(join(repo.dir, "src/a.ts"));
   assert.deepEqual([...readAffectedSuitesInput(repo.dir, ["src/b.ts"]).files.keys()], ["src/b.ts"]);
   rmSync(join(repo.dir, "src/b.ts"));

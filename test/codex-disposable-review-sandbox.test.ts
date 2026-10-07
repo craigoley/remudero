@@ -94,8 +94,7 @@ test("W1-T2946: disposable reviews get private test writes without widening othe
     const implementation = await captureCodexSpawn(root, ["Read", "Write", "Edit", "Bash"], undefined, [dependencyRoot]);
     assert.equal(implementation.options.args[implementation.options.args.indexOf("--sandbox") + 1], "workspace-write");
     assert.equal(implementation.options.args.includes("sandbox_workspace_write.network_access=true"), true);
-    assert.ok(implementation.options.args.includes("--add-dir"), "implementation workers retain their Git metadata grant");
-    assert.notEqual(implementation.options.args[implementation.options.args.indexOf("--add-dir") + 1], implementation.options.env.TMPDIR);
+    assert.equal(implementation.options.args.includes("--add-dir"), false, "W1-T6148: implementation workers get no Git metadata grant");
     assert.equal(implementation.options.args.some((arg) => arg.includes(realpathSync(dependencyRoot))), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
