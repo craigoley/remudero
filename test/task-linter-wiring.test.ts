@@ -12,7 +12,7 @@ import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -446,20 +446,19 @@ async function runLintPlanCapturingEverything(args: string[], checkoutRoot = REP
   }
 }
 
-function wiringCheckout() {
-  const repo = gitRepo({ kind: "lint-wiring-isolated" });
+function seedWiringPlan(repo: GitRepo): void {
   const fixtureDir = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring");
   mkdirSync(fixtureDir, { recursive: true });
   writeFileSync(join(fixtureDir, "tasks.yaml"), readFileSync(join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml")));
   writeFileSync(join(repo.dir, "test", "task-linter-wiring.test.ts"), readFileSync(fileURLToPath(import.meta.url)));
   repo.git("add", ".");
   repo.git("commit", "-qm", "seed the real committed lint fixture and test corpus");
-  return repo;
 }
 
 test("W1-T497 ACCEPTANCE 1+3: the isolated --base probe leaves the shared checkout clean while warning on a zero-resolving proof", async (t) => {
-  const repo = wiringCheckout();
+  const repo = gitRepo({ kind: "lint-wiring-isolated" });
   t.after(() => repo.cleanup());
+  seedWiringPlan(repo);
   const fixturePlan = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
   const shardPath = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
@@ -546,8 +545,9 @@ function grepProbeShardYaml(caseFileRel: string, dirAsFileRel: string): string {
 }
 
 test("W1-T1225 ACCEPTANCE: the isolated --base probe warns on case-only grep and preserves the real directory read refusal", async (t) => {
-  const repo = wiringCheckout();
+  const repo = gitRepo({ kind: "lint-wiring-isolated" });
   t.after(() => repo.cleanup());
+  seedWiringPlan(repo);
   const fixturePlan = join(repo.dir, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
   const shardPath = join(
     repo.dir,
