@@ -11,7 +11,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileS
 import { basename, join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import {
+// A NAMESPACE import, deliberately: at the merge base the W1-T6124 exports do not exist, and a named
+// import would fail the whole file at load — the reviewer reads that as "never ran", not as a red.
+// Read through the namespace, each test reaches its own assertion and fails there instead.
+import * as review from "../src/lib/review.js";
+const {
   defaultAsyncProofSpawner,
   defaultProofSpawner,
   ensureDeps,
@@ -20,7 +24,6 @@ import {
   judgeCriterion,
   judgeReview,
   judgeReviewAsync,
-  parseWhitelistedProof,
   probeProofSandbox,
   proofCheckoutGitDirs,
   proofInstallEnv,
@@ -29,7 +32,7 @@ import {
   proofSandboxArgv,
   ProofSandboxUnavailableError,
   setProofSandboxForTests,
-} from "../src/lib/review.js";
+} = review;
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const CREDENTIALS: Record<string, string> = {
