@@ -495,7 +495,6 @@ export type BoardFetchHalf = "both" | "open" | "closed";
  *  rows whose rendered fields can still move — and unconditionally so it never depends on GitHub
  *  bumping `updated_at`, which matters most for `auto_merge`. Cold: closed and merged PRs, walked
  *  newest-updated-first, stopped at the first row already held with an identical `updated_at`.
- *
  *  Invariant: sorted `updated_at` descending, so every changed row sorts strictly above every
  *  unchanged one and rows never reached keep their cached values. Throws on a failed page without
  *  mutating the cache — swallowing would report "the repo has zero PRs" (W1-T181). */
@@ -506,6 +505,28 @@ export function fetchBoardPrsRest(
   known?: ReadonlyMap<number, BoardPrRest>,
   half: BoardFetchHalf = "both",
 ): BoardFetchResult {
+  const walk = boardPrsWalk(owner, repo, known, half);
+  for (let step = walk.next(); ; step = walk.next(fetch(step.value))) if (step.done) return step.value;
+}
+
+/** {@link fetchBoardPrsRest} with each page awaited: the same walk; a rejected page ends it as a throw does. */
+export async function fetchBoardPrsRestAsync(
+  owner: string,
+  repo: string,
+  fetch: (args: string[]) => Promise<unknown>,
+  known?: ReadonlyMap<number, BoardPrRest>,
+  half: BoardFetchHalf = "both",
+): Promise<BoardFetchResult> {
+  const walk = boardPrsWalk(owner, repo, known, half);
+  for (let step = walk.next(); ; step = walk.next(await fetch(step.value))) if (step.done) return step.value;
+}
+
+function* boardPrsWalk(
+  owner: string,
+  repo: string,
+  known: ReadonlyMap<number, BoardPrRest> | undefined,
+  half: BoardFetchHalf,
+): Generator<string[], BoardFetchResult, unknown> {
   const mode: "full" | "delta" = known && known.size > 0 ? "delta" : "full";
   const perPage = mode === "delta" ? BOARD_DELTA_PAGE_SIZE : BOARD_FULL_PAGE_SIZE;
   // W1-T2323: seeded from `known` as before. For `"open"` the caller passes no `known`, because
@@ -520,7 +541,7 @@ export function fetchBoardPrsRest(
   // Hot half. Paginated rather than assuming one page: a repo holding >100 open PRs must not
   // silently drop the tail.
   for (let page = 1; wantOpen && page <= BOARD_MAX_PAGES; page += 1) {
-    const rows = fetch(boardPrsRestArgs(owner, repo, "open", page, perPage)) as RestPullRow[];
+    const rows = (yield boardPrsRestArgs(owner, repo, "open", page, perPage)) as RestPullRow[];
     calls += 1;
     for (const row of rows) {
       const pr = mapBoardPr(row);
@@ -534,7 +555,7 @@ export function fetchBoardPrsRest(
   // walk runs to a short page — which is why a cold closed pass is 25 pages and not 2.
   // Why: what the split changed is who pays that, never whether — docs/forensics/open-prs-rest.md.
   for (let page = 1; wantClosed && page <= BOARD_MAX_PAGES; page += 1) {
-    const rows = fetch(boardPrsRestArgs(owner, repo, "closed", page, perPage)) as RestPullRow[];
+    const rows = (yield boardPrsRestArgs(owner, repo, "closed", page, perPage)) as RestPullRow[];
     calls += 1;
     let reachedKnown = false;
     for (const row of rows) {

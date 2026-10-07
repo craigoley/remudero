@@ -1392,38 +1392,196 @@ fi
 # and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
 # ledger, run locks and service tokens the file header protects are untouched by this rung too.
 #
+# W1-T3676 — THE BYTES ARE INSIDE TWO ALWAYS-CURRENT FILES. MEASURED 2026-09-16: 3.72 GiB of the
+# 6.5 GiB sat in thread_history_1.sqlite and state_5.sqlite, live databases whose mtime is today on
+# every run, so the age tier above can never match them and freed 29.6 MiB. Lowering the tier would
+# delete more history and still miss every byte that matters, and deleting a live database risks an
+# in-flight session. So after the age sweep, each tree's IN-TIER real SQLite files (checked by the
+# file header, never the name) are COMPACTED IN PLACE — `wal_checkpoint(TRUNCATE)` + `VACUUM`, which
+# releases the free pages the owning tool's own deletes left inside the file and keeps every row.
+# This runs only in the window the LIVE refusal already names as safe (no fleet container up), with
+# busy_timeout=0 so a writer the refusal cannot see makes it fail rather than wait, and only when
+# the file's filesystem has twice its size free (VACUUM writes a full copy). The engine is `sqlite3`
+# on PATH, else `node` with node:sqlite; RMD_AGENT_HISTORY_SQLITE_ENGINE=sqlite3|node|none pins it.
+#
+# AND EVERY TREE SAYS WHAT IT COULD NOT REACH, AND WHY: `could not reach <bytes> — reason: <r>`, one
+# line per reason — within-age-tier, live-rows (still held by rows the owning tool keeps),
+# no-sqlite-engine, insufficient-free-space, compaction-failed, and live-fleet-container when the
+# refusal holds. A refusal is a refusal, not a run with nothing to do: section 4c prints the closing
+# verdict `agent history reclaim: REFUSED` or `COMPLETED`. The exit code stays 0 on a refusal, on
+# purpose — this fleet is always up, so a non-zero refusal would fail every nightly and bury the
+# snapshot alarm (W1-T5545) under a permanent false one.
+#
 # FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
-# container; collapse the per-tree report into one total and the split assertion fails.
+# container; collapse the per-tree report into one total and the split assertion fails. Sweep by
+# mtime alone, or report only bytes freed, and test/agent-history-reclaim-reaches-the-bulk.test.ts
+# fails against a real SQLite fixture whose mtime is always current.
+agent_history_verdict=""
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
+  AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
+  IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+  # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the traversal
+  # portable and ask the host's `stat` for the two metadata fields separately. The format is probed
+  # once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
+  agent_history_probe_stat() {
+    AGENT_HISTORY_STAT_FORMAT="bsd"
+    if stat -c '%Y %s' "$1" >/dev/null 2>&1; then AGENT_HISTORY_STAT_FORMAT="gnu"; fi
+  }
+  agent_history_file_metadata() {
+    if [ "${AGENT_HISTORY_STAT_FORMAT}" = "gnu" ]; then
+      stat -c '%Y %s' "$1"
+    else
+      stat -f '%m %z' "$1"
+    fi
+  }
+  # Bytes of a file plus its SQLite companions (a database's WAL and shared-memory files belong to it).
+  agent_history_held_bytes() {
+    local total=0 f m
+    for f in "$1" "$1-wal" "$1-shm"; do
+      [ -f "${f}" ] || continue
+      m="$(agent_history_file_metadata "${f}")" || continue
+      total=$((total + ${m#* }))
+    done
+    printf '%s' "${total}"
+  }
+  agent_history_is_sqlite() { [ -f "$1" ] && [ "$(head -c 15 "$1" 2>/dev/null)" = "SQLite format 3" ]; }
+  # <tree> <label> <bytes> <reason> <files> <why>
+  agent_history_unreached() {
+    echo "host-update: agent history reclaim${2} — ${1}: could not reach $(human_kb $(($3 / 1024))) — reason: ${4} (${5} file(s)); ${6}"
+  }
   if [ -n "${LIVE}" ]; then
     echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
     printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
     echo "  a running lane may still be writing the very session/thread file this would remove." >&2
     echo "  No file under any configured tree was touched." >&2
+    agent_history_verdict=refused
+    for rdir in "${AGENT_HISTORY_DIRS[@]}"; do
+      [ -n "${rdir}" ] && [ -d "${rdir}" ] || continue
+      agent_history_probe_stat "${rdir}"
+      refused_bytes=0
+      refused_files=0
+      while IFS= read -r -d '' path; do
+        metadata="$(agent_history_file_metadata "${path}")" || continue
+        refused_bytes=$((refused_bytes + ${metadata#* }))
+        refused_files=$((refused_files + 1))
+      done < <(find "${rdir}" -type f -print0 2>/dev/null)
+      agent_history_unreached "${rdir}" " REFUSED" "${refused_bytes}" live-fleet-container "${refused_files}" \
+        "a fleet container is RUNNING, so nothing under this tree was removed or compacted"
+    done
   else
-    AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
-    IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+    agent_history_verdict=completed
+    [ "${DRY_RUN}" -eq 1 ] && agent_history_verdict=dry-run
+    AGENT_HISTORY_SQLITE_ENGINE="${RMD_AGENT_HISTORY_SQLITE_ENGINE:-auto}"
+    if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "auto" ]; then
+      AGENT_HISTORY_SQLITE_ENGINE=none
+      if command -v sqlite3 >/dev/null 2>&1; then
+        AGENT_HISTORY_SQLITE_ENGINE=sqlite3
+      elif command -v node >/dev/null 2>&1 && node --no-warnings -e "require('node:sqlite')" >/dev/null 2>&1; then
+        AGENT_HISTORY_SQLITE_ENGINE=node
+      fi
+    fi
+    case "${AGENT_HISTORY_SQLITE_ENGINE}" in
+      sqlite3|node|none) ;;
+      *) echo "host-update: WARNING — RMD_AGENT_HISTORY_SQLITE_ENGINE='${AGENT_HISTORY_SQLITE_ENGINE}' is not sqlite3|node|none; compacting nothing." >&2
+         AGENT_HISTORY_SQLITE_ENGINE=none ;;
+    esac
+    AGENT_HISTORY_NODE_SQLITE="const { DatabaseSync } = require('node:sqlite');
+const [mode, file] = process.argv.slice(1);
+try {
+  if (mode === 'measure') {
+    const db = new DatabaseSync(file, { readOnly: true });
+    const pageSize = db.prepare('PRAGMA page_size').get().page_size;
+    const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
+    db.close();
+    console.log(pageSize * free);
+  } else {
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA busy_timeout=0');
+    if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get().busy) throw new Error('database is busy (WAL checkpoint)');
+    db.exec('VACUUM');
+    db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    db.close();
+  }
+} catch (e) { console.error(String(e && e.message || e).split('\n')[0]); process.exit(1); }"
+    # <measure|compact> <db>: measure prints the free-page bytes; compact prints nothing on success.
+    # Either prints one reason line on failure.
+    agent_history_sqlite() {
+      local out
+      if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "node" ]; then
+        SQLITE_TMPDIR="$(dirname "$2")" node --no-warnings -e "${AGENT_HISTORY_NODE_SQLITE}" "$1" "$2" 2>&1 </dev/null
+        return
+      fi
+      if [ "$1" = "measure" ]; then
+        out="$(sqlite3 -readonly -batch "$2" 'PRAGMA page_size;' 'PRAGMA freelist_count;' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+        printf '%s\n' "${out}" | awk 'NR == 1 { p = $1 } NR == 2 { f = $1 } END { if (p !~ /^[0-9]+$/ || f !~ /^[0-9]+$/) exit 1; print p * f }'
+        return
+      fi
+      out="$(SQLITE_TMPDIR="$(dirname "$2")" sqlite3 -batch -bail "$2" 'PRAGMA busy_timeout=0;' \
+        'PRAGMA wal_checkpoint(TRUNCATE);' 'VACUUM;' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+      if printf '%s\n' "${out}" | grep -q '^1|'; then echo "database is busy (WAL checkpoint)"; return 1; fi
+    }
+    # Section 4b's second pass over one tree: compact its in-tier SQLite files and say, per reason,
+    # what it could not reach. Runs after the age sweep, so what is left is in the tier by definition.
+    agent_history_compact_tree() {
+      local tree="$1" path held after freed avail_kb out label=""
+      local done_n=0 done_b=0 tier_b=0 tier_n=0 rows_b=0 rows_n=0 eng_b=0 eng_n=0 space_b=0 space_n=0 fail_b=0 fail_n=0 fail_why=""
+      [ "${DRY_RUN}" -eq 1 ] && label=" (DRY RUN)"
+      while IFS= read -r -d '' path; do
+        case "${path}" in
+          *-wal|*-shm|*-journal) if agent_history_is_sqlite "${path%-*}"; then continue; fi ;;
+        esac
+        held="$(agent_history_held_bytes "${path}")"
+        if ! agent_history_is_sqlite "${path}"; then
+          tier_b=$((tier_b + held)); tier_n=$((tier_n + 1)); continue
+        fi
+        if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "none" ]; then
+          eng_b=$((eng_b + held)); eng_n=$((eng_n + 1)); continue
+        fi
+        if [ "${DRY_RUN}" -eq 1 ]; then
+          if ! out="$(agent_history_sqlite measure "${path}")"; then
+            fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
+          fi
+          [ "${out}" -le "${held}" ] || out="${held}"
+          echo "  would compact ${path}: $(human_kb $((out / 1024))) of $(human_kb $((held / 1024))) is free pages"
+          done_n=$((done_n + 1)); done_b=$((done_b + out)); rows_b=$((rows_b + held - out)); rows_n=$((rows_n + 1))
+          continue
+        fi
+        avail_kb="$(df -Pk "$(dirname "${path}")" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+        if ! [ "${avail_kb:-0}" -ge $((2 * held / 1024 + 1)) ] 2>/dev/null; then
+          space_b=$((space_b + held)); space_n=$((space_n + 1)); continue
+        fi
+        if ! out="$(agent_history_sqlite compact "${path}")"; then
+          fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
+        fi
+        after="$(agent_history_held_bytes "${path}")"
+        freed=$((held - after)); [ "${freed}" -ge 0 ] || freed=0
+        echo "  compacted ${path}: $(human_kb $((held / 1024))) -> $(human_kb $((after / 1024))), freed $(human_kb $((freed / 1024)))"
+        done_n=$((done_n + 1)); done_b=$((done_b + freed)); rows_b=$((rows_b + after)); rows_n=$((rows_n + 1))
+      done < <(find "${tree}" -type f ! -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+      if [ "${done_n}" -gt 0 ]; then
+        if [ "${DRY_RUN}" -eq 1 ]; then
+          echo "host-update: agent history reclaim (DRY RUN) — ${tree}: would compact ${done_n} live database(s) in place, freeing up to $(human_kb $((done_b / 1024))); nothing changed"
+        else
+          echo "host-update: agent history reclaim — ${tree}: compacted ${done_n} live database(s) in place, freed $(human_kb $((done_b / 1024)))"
+        fi
+      fi
+      [ "${tier_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${tier_b}" within-age-tier "${tier_n}" "younger than ${AGENT_HISTORY_MAX_AGE_DAYS}d and not a database; kept by the age tier"
+      [ "${rows_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${rows_b}" live-rows "${rows_n}" "held by rows the owning tool still keeps; only its own retention can release them"
+      [ "${eng_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${eng_b}" no-sqlite-engine "${eng_n}" "live SQLite database(s), and no sqlite3 (or node with node:sqlite) on this host to compact them"
+      [ "${space_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${space_b}" insufficient-free-space "${space_n}" "VACUUM needs twice the file's size free on its filesystem"
+      [ "${fail_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${fail_b}" compaction-failed "${fail_n}" "${fail_why}"
+      if [ $((tier_n + rows_n + eng_n + space_n + fail_n)) -eq 0 ]; then
+        echo "host-update: agent history reclaim${label} — ${tree}: could not reach 0.0KB — every byte was in scope"
+      fi
+    }
     for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
       [ -n "${hdir}" ] || continue
       if [ ! -d "${hdir}" ]; then
         echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
         continue
       fi
-      # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the
-      # traversal portable and ask the host's `stat` for the two metadata fields separately.
-      # Probe the format once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
-      AGENT_HISTORY_STAT_FORMAT="bsd"
-      if stat -c '%Y %s' "${hdir}" >/dev/null 2>&1; then
-        AGENT_HISTORY_STAT_FORMAT="gnu"
-      fi
-      agent_history_file_metadata() {
-        if [ "${AGENT_HISTORY_STAT_FORMAT}" = "gnu" ]; then
-          stat -c '%Y %s' "$1"
-        else
-          stat -f '%m %z' "$1"
-        fi
-      }
+      agent_history_probe_stat "${hdir}"
       if [ "${DRY_RUN}" -eq 1 ]; then
         would_bytes=0
         while IFS= read -r -d '' path; do
@@ -1433,6 +1591,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
         done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
         would_kb=$((would_bytes / 1024))
         echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+        agent_history_compact_tree "${hdir}"
         continue
       fi
       freed_bytes=0
@@ -1454,6 +1613,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
       )
       freed_kb=$((freed_bytes / 1024))
       echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+      agent_history_compact_tree "${hdir}"
     done
   fi
 fi
@@ -1472,6 +1632,15 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
+  # W1-T3676: section 4b's verdict, so a refusal never reads as a clean run with nothing to do.
+  case "${agent_history_verdict}" in
+    refused)
+      echo "host-update: agent history reclaim: REFUSED — a fleet container was RUNNING, so nothing under any tree"
+      echo "  was removed or compacted. This is NOT a clean nothing-to-do run: the per-tree 'could not reach'"
+      echo "  lines above name what each tree still holds." ;;
+    completed) echo "host-update: agent history reclaim: COMPLETED — see the per-tree 'freed' and 'could not reach' lines above." ;;
+    dry-run) echo "host-update: agent history reclaim: DRY RUN — nothing was removed or compacted." ;;
+  esac
   if [ "${DRY_RUN}" -eq 0 ]; then
     snapshot_receipt="${RMD_STATE_SNAPSHOT_RECEIPT:-${XDG_STATE_HOME:-$HOME/.local/state}/remudero/state-snapshot.receipt}"
     snapshot_result=ok

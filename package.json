@@ -91,6 +91,7 @@
     "census:wall-clock-bound": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-wall-clock-bound-declares-itself.test.ts",
     "census:authority": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/authority-ratchet.test.ts",
     "census:no-draft-pr": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-draft-pull-request-ever-sits-on-the-board.test.ts",
+    "census:no-nested-preflight": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
     "census:ledger-rotation": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-rotation.test.ts",
     "census:unretained-step": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-union-read-of-an-unretained-step-is-refused.test.ts",
     "census:spend": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/spend-is-counted-once-at-its-producer.test.ts",
