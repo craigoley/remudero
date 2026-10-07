@@ -3023,14 +3023,14 @@ export {
  * this default is itself exercisable (test/binary-pin-rung.test.ts drives it against the live
  * binary rather than only through the injected seam).
  *
- * `deploy/Dockerfile` is located relative to THIS MODULE, never `process.cwd()`: the daemon, the
+ * `deploy/package.json` is located relative to THIS MODULE, never `process.cwd()`: the daemon, the
  * CLI and a worker all run from different directories, and only the module path is stable across
  * them. Neither read is guarded here — {@link readBinaryPin} catches both and renders `unknown`,
  * which is the point of it having three states.
  */
 export function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readBinaryPin>[0] {
   return {
-    readDockerfile: () => readFileSync(fileURLToPath(new URL("../deploy/Dockerfile", import.meta.url)), "utf8"),
+    readCliManifest: () => readFileSync(fileURLToPath(new URL("../deploy/package.json", import.meta.url)), "utf8"),
     runClaudeVersion: () => execFileSync(claudeBin, ["--version"], { encoding: "utf8" }),
   };
 }
