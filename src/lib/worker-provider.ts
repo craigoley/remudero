@@ -3492,8 +3492,8 @@ export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string
  *  whole-tree argv: it has no model to narrow by, its suite is its own size, and the wall-clock
  *  bound still ends the call — now ledgered, so its cost is visible rather than assumed. */
 export const OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER = "scripts/diff-class.mjs";
-/** Above this many selected suites the check refuses rather than run: at the cap below, forty
- *  suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
+/** PRIMARY CONTROL: above this many selected suites the check refuses rather than run. At the
+ *  cap below, forty suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
 export const OPENWEIGHT_UNIT_TEST_MAX_SUITES = 40;
 /** `--test-concurrency` for a harness-scoped run: node's default is cores-1, which on the fleet
  *  host is 7 suites at once per lane, each spawning git and tsx. W1-T6090's testRunConcurrency
@@ -3501,7 +3501,8 @@ export const OPENWEIGHT_UNIT_TEST_MAX_SUITES = 40;
 export const OPENWEIGHT_UNIT_TEST_CONCURRENCY = 2;
 /** Prefix that runs a scoped check below the daemon's own priority. */
 export const OPENWEIGHT_UNIT_TEST_NICE: readonly string[] = ["nice", "-n", "10"];
-/** Bound on computing the selection itself (git reads plus the census listings). */
+/** BACKSTOP on computing the selection itself (git reads plus the census listings): it fires
+ *  only when a listing hangs, and the overrun is a refusal naming it. */
 export const OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS = 2 * 60_000;
 /** One row per run_check call, any check. Deliberately NOT in DECISION_RELEVANT_LEDGER_STEPS
  *  (lib/ledger.ts): nothing decides on it; it prices the check, so rotation may archive it. */
@@ -3544,6 +3545,7 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
       ...lines(run("git", ["ls-files", "--others", "--exclude-standard"])),
     ])].sort();
   } catch (err) {
+    // No readable diff means no narrow answer: a FULL selection naming why, which then refuses.
     return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
   }
   return affectedSelectionOrFull(changed, (): AffectedSuitesInput => {
@@ -3618,6 +3620,7 @@ export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Re
     );
     return JSON.parse(stdout) as AffectedSelection;
   } catch (err) {
+    // A failed or overrun selection is never an empty one: it is FULL, so the check refuses.
     const e = err as { killed?: boolean; message?: string };
     return fullSelection(e.killed === true
       ? `the selection overran ${OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS / 1000}s`
