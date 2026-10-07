@@ -359,7 +359,12 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
-  const pathReaders = input.pathReaders;
+  const pathReaders = [...input.pathReaders];
+  // This census reads tracked src TypeScript through git ls-files, outside the import/read maps.
+  const dependencyCensus = "test/dependency-declarations-match-use.test.ts";
+  if (input.files.has(dependencyCensus) && files.some((f) => f.startsWith("src/") && f.endsWith(".ts"))) {
+    pathReaders.push(dependencyCensus);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

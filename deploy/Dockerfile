@@ -70,20 +70,23 @@ ENV HOME=/home/node
 # `ClaudeToolchainBlockedError` when it finds none, so every worker spawn fails before it starts.
 # Baked, not mounted: a container depending on a binary it does not carry is not self-sufficient.
 # The image-local package lock carries registry tarball integrity for both CLIs; `npm ci` is the
-# only install command here, so the build cannot silently resolve a different package tree. The
-# ARGs remain the operator-visible version contract and are checked against that lock below.
-# `DISABLE_AUTOUPDATER=1` is image-wide, wider than `buildWorkerEnv`'s per-worker grant, so no
-# operator exec can rewrite the pinned binaries. Falsifier: both `--version` calls below prove the
-# lockfile-installed bins are on PATH, in-layer. deploy/verify-image.sh and `checkBinaryPin` read
-# the Claude ARG below.
-ARG CLAUDE_CODE_VERSION=2.1.289
-ARG CODEX_VERSION=0.160.0
+# only install command here, so the build cannot silently resolve a different package tree.
+# deploy/package.json is the ONE version declaration: dependabot bumps it with its lock, so a bump
+# needs no edit here (a second copy as ARGs drifted on every bump, #9768). The layer refuses a
+# range or a lock that disagrees with it. `DISABLE_AUTOUPDATER=1` is image-wide, wider than
+# `buildWorkerEnv`'s per-worker grant, so no operator exec can rewrite the pinned binaries.
+# Falsifier: both `--version` calls below prove the lockfile-installed bins are on PATH, in-layer.
+# deploy/verify-image.sh and `readBinaryPin` read the same deploy/package.json pins.
 ENV DISABLE_AUTOUPDATER=1
 COPY --chown=root:root deploy/package.json deploy/package-lock.json /opt/remudero-image-clis/
 # The throwaway `npm_config_cache` below is REQ 14; REQ 11's chown no longer has to repair it.
 RUN set -eu; \
-    test "$(node -p "require('/opt/remudero-image-clis/package-lock.json').packages['node_modules/@anthropic-ai/claude-code'].version")" = "${CLAUDE_CODE_VERSION}"; \
-    test "$(node -p "require('/opt/remudero-image-clis/package-lock.json').packages['node_modules/@openai/codex'].version")" = "${CODEX_VERSION}"; \
+    for pkg in @anthropic-ai/claude-code @openai/codex; do \
+      declared="$(node -p "require('/opt/remudero-image-clis/package.json').dependencies['${pkg}']")"; \
+      locked="$(node -p "require('/opt/remudero-image-clis/package-lock.json').packages['node_modules/${pkg}'].version")"; \
+      echo "${declared}" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$' || { echo "deploy/package.json must pin ${pkg} exactly, not '${declared}'"; exit 1; }; \
+      test "${declared}" = "${locked}" || { echo "deploy/package.json pins ${pkg} ${declared} but its lock installs ${locked}"; exit 1; }; \
+    done; \
     export npm_config_cache=/tmp/npm-build-cache; \
     npm ci --prefix /opt/remudero-image-clis --omit=dev --no-audit --no-fund; \
     ln -s /opt/remudero-image-clis/node_modules/.bin/claude /usr/local/bin/claude; \

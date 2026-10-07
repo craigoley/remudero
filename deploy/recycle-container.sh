@@ -689,12 +689,12 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
-  # `.Config.Image` (the reference this container was started FROM), never `.Image` (the resolved
-  # digest section 7 below already owns, for a different comparison: proving the STARTED container
-  # matches what THIS run just pulled).
+  # `.Image`, the id this container was created from. `.Config.Image` is a tag that any instance's
+  # pull re-points: after a Node base bump the first instance recycled, and every later one read
+  # the NEW image's NODE_VERSION against its own and refused (2026-10-07).
   IMAGE_ENV_LINES=()
   IMAGE_ENV_KNOWN=0
-  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   if [ -n "${CONTAINER_IMAGE_REF}" ]; then
     if IMAGE_ENV_RAW="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_IMAGE_REF}" 2>/dev/null)"; then
       IMAGE_ENV_KNOWN=1

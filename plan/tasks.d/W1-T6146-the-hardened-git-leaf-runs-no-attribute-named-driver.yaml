@@ -57,6 +57,15 @@
     config.worktree, the tracked .gitattributes names the driver, the clean command runs and writes its marker, and
     the test fails.
   notes: |
+    RE-READ 2026-10-07 after #9809 (W1-T6148) merged: the leaf now lists config with
+    `--show-scope` and refuses (worktree_git.config_refused, nothing run) any LOCAL or WORKTREE key
+    outside its inert allowlist, and `admittedLocalKey` admits no filter.* key and only flat merge.*/
+    diff.* keys, so a worker-planted driver in the pinned gitdir's config is refused before git runs.
+    No test yet plants a filter or merge driver and observes that refusal, so this task's test still
+    has a job: write it first; it may pass at head. The RESIDUAL is SYSTEM/GLOBAL scope (e.g.
+    `git lfs install`'s filter.lfs.clean/smudge/process), which the allowlist does not inspect and a
+    worker cannot write; decide there whether HOST_GIT_CONFIG should neutralise drivers by name or the
+    residual is accepted, and say which.
     FIXTURES ONLY: the driver commands, markers, attributes and planted config live in a gitRepo() fixture under the
     test's tmp dir; nothing writes a real gitconfig or a managed checkout's config. No depends_on: W1-T6106 (#9778),
     which built the leaf, is merged. W1-T6121 (#9794, open at filing) adds a `timeout` option to the same file's
