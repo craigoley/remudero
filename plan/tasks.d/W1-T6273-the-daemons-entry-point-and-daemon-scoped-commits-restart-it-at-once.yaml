@@ -1,0 +1,40 @@
+- id: W1-T6273
+  title: "THE DAEMON'S ENTRY POINT AND DAEMON-SCOPED COMMITS RESTART IT AT ONCE — freshnessAdvanceWorth gives full weight only to DAEMON_SELF_PATH_PREFIXES, which omit src/run-task.ts (daemonCommand, the tick, the lane gateways) and the sweep, so W1-T6259 (#9927), a fix to the daemon's own loop, scored the generic src/ floor of 1 and the busy daemon waited ~63 min for its upper-age horizon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — which advances the freshness governor counts as the daemon's own code
+  band_meaning: span
+  origin: "operator session 2026-10-07: daemon.freshness_decision rows 19:50–20:38Z ('change 2 + staleness N < 18')"
+  plan_refs: [W1-T4945, W1-T6259]
+  files: [src/lib/deploy-judge.ts, test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-07 in the core daemon's ledger: after #9927 merged (683f762c0) every
+    daemon.freshness_decision read "busy, and pressure N (change 2 + staleness M) < 18: wait for an idle
+    moment" until 20:38:42Z, when the upper-age horizon forced it (pressure 34). READ on origin/main:
+    `freshnessAdvanceWorth` (src/lib/deploy-judge.ts) returns 18 only when a file starts with a
+    DAEMON_SELF_PATH_PREFIXES entry (src/lib/daemon, drain, dispatch-, ledger, self-sync.ts, bin/,
+    package*.json, tsconfig.json); otherwise `deterministicDeployWorth` floors any src/ change at 1.
+    src/run-task.ts, where daemonCommand, the tick and the lane gateways live, is not on the list. The
+    advance's commit subject is already carried (daemonFreshnessFromService) but unused.
+  design: |
+    Add src/run-task.ts and src/lib/sweep to DAEMON_SELF_PATH_PREFIXES, and give full weight to a
+    commit whose conventional scope names the daemon's machinery (daemon, drain, dispatch, sweep), so a
+    new daemon-side module is covered by how its author scopes the commit rather than by editing a list.
+    Every other src change keeps the floor of 1 and still waits for an idle moment.
+  acceptance:
+    - claim: "a change to src/run-task.ts is full freshness weight and a busy daemon takes W1-T6259's real advance at once"
+      proof: 'grep: test("W1-T6273: a change to run-task\.ts, the daemon''s own entry point, is full freshness weight" in test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts'
+    - claim: "a commit scoped (daemon|drain|dispatch|sweep) is full weight wherever its files are"
+      proof: 'grep: test("W1-T6273: a daemon-scoped commit is full weight wherever its files are" in test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts'
+    - claim: "an unrelated src change still waits for an idle moment"
+      proof: 'grep: test("W1-T6273: an unrelated src change still waits for an idle moment" in test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts'
+  falsifier: |
+    Keep the old prefix list: freshnessAdvanceWorth({ files: ["src/run-task.ts"] }) scores 1, a busy
+    decideFreshnessRestart over W1-T6259's advance defers, and the first test fails.

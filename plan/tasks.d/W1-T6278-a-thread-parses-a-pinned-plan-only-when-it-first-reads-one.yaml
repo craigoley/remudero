@@ -1,0 +1,54 @@
+- id: W1-T6278
+  title: "A THREAD PARSES A PINNED PLAN ONLY WHEN IT FIRST READS ONE — every thread that loads thread-plan.ts parses every pin on receipt (6 to 9 threads per pin, 2.9 s and 27.7 MiB each), including workers that never read a plan, such as a short-lived integrity or issue worker that asks for the published pin at start"
+  repo: remudero
+  depends_on: [W1-T6262]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — when a thread turns a received plan pin into a parsed Plan
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item C3, option b), from serve.plan_pin_adopted rows, an isolated parse replay and a static import walk"
+  plan_refs: [W1-T5894, W1-T6262]
+  files: [src/lib/thread-plan.ts, test/a-thread-parses-a-pinned-plan-only-when-it-first-reads-one.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06T19:00Z to 2026-10-07T19:00Z on the production ledger (read-only union): 101 plan pins, each
+    adopted by 6 threads at p50 and up to 9. parseMs p50 2,934, p90 4,228; 1,897 s of CPU in the day.
+    OBSERVED in an isolated replay: one parse of main's plan (3,397 tasks) retains 27.7 MiB after GC.
+    OBSERVED in the source (static import walk over src/lib, main b736de19; re-read at d8923460, after W1-T6262 merged as
+    PR 9941): thread-plan.ts registers its
+    BroadcastChannel listener when the module loads, and adoptThreadPlan parses on receipt. Every one of these
+    reaches thread-plan.ts statically:
+    - read-model-worker.ts, the entry of the projector, views, heavy views, integrity and issue workers;
+    - read-model-slow-lane.ts;
+    - console-projection-worker.ts;
+    - board-worker.ts;
+    - repo-dashboard-route.ts's telemetry worker;
+    - serve.ts.
+    So a thread that never calls threadPlan, threadStrictPlan or threadPlanLoad still parses every pin, and a
+    short-lived worker posts `ask`, receives the published pin and parses it at start.
+    INFERRED: the projector and the transient workers account for part of the 6-9 adoptions per pin; the share is
+    unmeasured, because adoption rows carry threadId but not the thread's role. W1-T6262 (PR 9941) makes a parse
+    incremental, but every thread still parses on receipt and keeps its own blob cache.
+  design: |
+    (1) On a pin, a thread records the pin and its text (the SharedArrayBuffer is shared, not copied) as pending for
+    that path, and drops any parse held for an older pin. It parses nothing.
+    (2) threadPlanLoad (and so threadPlan and threadStrictPlan) parses a pending pin on first call for that path, with
+    W1-T6262's incremental blob cache, and holds it as today. Every reader answers exactly what an eager adoption
+    answered.
+    (3) The adoption row is kept and moves to the parse: serve.plan_pin_adopted is posted when a thread parses, and
+    gains the thread's role (views, heavy, projector, slow-lane, console, board, main, other) so adoptions per role are
+    measurable. A pin a thread never reads posts nothing. A failed parse posts adopt_failed exactly as today.
+    (4) A test drives two threads: one reads after the pin and one never reads. It proves the reader's Plan is
+    deep-equal to an eager parse and the non-reader parses nothing.
+  acceptance:
+    - claim: "a thread that never reads a plan parses no pin, a thread that reads gets a Plan deep-equal to an eager parse of the same pin, and a pin superseded before any read is never parsed"
+      proof: "unit test: test/a-thread-parses-a-pinned-plan-only-when-it-first-reads-one.test.ts"
+    - claim: "the adoption row names the thread's role"
+      proof: "grep: threadRole in src/lib/thread-plan.ts"
+  falsifier: |
+    Parse on receipt as today: the non-reader's parse count is one and the test fails. Serve a pending pin's previous
+    parse on first read: the reader's Plan differs from the eager parse and the test fails.

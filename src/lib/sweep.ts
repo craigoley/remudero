@@ -68,7 +68,7 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
@@ -115,7 +115,7 @@ import {
   hasCreditBackfillReceipt,
   loadCreditStore,
   readLedgerLines,
-  readMergeCreditedTaskIds,
+  readMergeCreditedTaskIdsAsync,
   recordCreditBackfillReceipt,
   saveCreditStore,
   taskIdFromRunBranch,
@@ -3872,7 +3872,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readFleetState: async (live) => {
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
-      const union = readLedgerUnionRawLinesSync(dirname(ledgerPath), {
+      const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
         requireArchives: false, refuseIncomplete: true,
         step: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
       });
@@ -17002,7 +17002,7 @@ export async function runCreditBackfill(
   // own doc — an unfinished walk's "not credited" is an absence of evidence. W1-T3223 does not
   // branch on that absence either: only the separate durable proof that THIS WRITER already
   // appended may suppress it, so a genuinely new merge still receives its first correction.
-  const creditScan = readMergeCreditedTaskIds(deps.ledgerPath, {
+  const creditScan = await readMergeCreditedTaskIdsAsync(deps.ledgerPath, {
     // Only the tasks this pass could ask about, so the walk stops as soon as they are all resolved
     // rather than reading to the cap. Measured: real plan ids resolve below depth 8.
     candidates: candidates.map((c) => c.taskId),
