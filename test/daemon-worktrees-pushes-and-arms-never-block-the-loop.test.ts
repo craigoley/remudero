@@ -99,7 +99,8 @@ function slowOriginFixture(kind: string, extra: string[] = []) {
       `#!/bin/sh\necho "start ${service}" >> '${transportLog}'\nsleep 0.3\ngit ${service} "$@"\nrc=$?\necho "end ${service}" >> '${transportLog}'\nexit $rc\n`,
       { mode: 0o755 },
     );
-    execFileSync("git", ["config", "--file", globalConfig, `remote.origin.${key}`, script]);
+    // Even with --file, Git reads the cwd checkout config, which the proof sandbox masks.
+    execFileSync("git", ["-C", root, "config", "--file", globalConfig, `remote.origin.${key}`, script]);
   }
   const lines = (): string[] => (existsSync(transportLog) ? readFileSync(transportLog, "utf8").split("\n").filter(Boolean) : []);
   return {
