@@ -5,7 +5,8 @@
 #
 # INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch (the state
 # root's and repos/'s), the read model's DB files (rebuilt from the ledger on an empty dir), the
-# per-spawn worker homes (made and reaped per spawn) and each container's /tmp are bound here;
+# per-spawn worker homes (made and reaped per spawn), each container's /tmp and the HOST-WIDE test
+# slots (one dir for every container and the host, src/lib/test-slot.ts) are bound here;
 # the ledger, repos, lanes, plan and every state file, the read-model switch file included, stay put.
 # DARK until RMD_SCRATCH=on or the switch file exists; an unmounted or unwritable scratch root makes
 # the launch run exactly as before and say why. Falsifier: test/scratch-mounts.test.ts.
@@ -25,6 +26,7 @@
 SCRATCH_STATE_DEST="/home/node/Remudero"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
 SCRATCH_WORKER_HOME_DEST="/home/node/rmd-scratch/worker-homes"
+SCRATCH_TEST_SLOT_DEST="/home/node/rmd-scratch/test-slots"
 SCRATCH_MANIFEST_NAME=".scratch-mounts"
 
 scratch_root() { printf '%s' "${RMD_SCRATCH_ROOT:-/mnt/scratch}"; }
@@ -47,6 +49,19 @@ scratch_root_is_mounted() {
     [ "${mnt}" = "${root}" ] && return 0
   done < "${mounts}"
   return 1
+}
+
+# ONE directory for the whole host, not per state dir: every container and the host operator's own
+# runs (test-slot.ts resolves /mnt/scratch/rmd/test-slots) must see the same slot files.
+scratch_test_slot_dir() { printf '%s/rmd/test-slots' "$(scratch_root)"; }
+
+# Every container user and the host operator reclaim each other's slot records, so the directory is
+# 0777 and NOT sticky (a sticky bit would stop one uid unlinking another's dead record). Never fatal.
+scratch_open_test_slots() {
+  local dir="$1"
+  [ "${dir}" = "$(scratch_test_slot_dir)" ] || return 0
+  chmod 0777 "${dir}" 2>/dev/null || true
+  return 0
 }
 
 scratch_enabled() {
@@ -90,7 +105,8 @@ ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
 ${base}/repos-coverage	${SCRATCH_STATE_DEST}/repos/.remudero-coverage
 ${base}/read-model	${SCRATCH_READ_MODEL_DEST}
 ${base}/worker-homes	${SCRATCH_WORKER_HOME_DEST}
-${SCRATCH_CONTAINER_TMP}	/tmp"
+${SCRATCH_CONTAINER_TMP}	/tmp
+$(scratch_test_slot_dir)	${SCRATCH_TEST_SLOT_DEST}"
   local src dest
   while IFS='	' read -r src dest; do
     SCRATCH_DIRS+=("${src}")
@@ -100,7 +116,8 @@ ${SCRATCH_BINDS}
 EOF
   SCRATCH_ARGS+=(-e "RMD_READ_MODEL_DB_DIR=${SCRATCH_STATE_DEST}/state:${SCRATCH_READ_MODEL_DEST}")
   SCRATCH_ARGS+=(-e "RMD_WORKER_HOME_DIR=${SCRATCH_STATE_DEST}:${SCRATCH_WORKER_HOME_DEST}")
-  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}"
+  SCRATCH_ARGS+=(-e "RMD_TEST_SLOT_DIR=${SCRATCH_TEST_SLOT_DEST}")
+  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}; test slots shared at $(scratch_test_slot_dir)"
   return 0
 }
 
@@ -110,6 +127,14 @@ scratch_prepare() {
   [ "${#SCRATCH_ARGS[@]}" -gt 0 ] || return 1
   local dir manifest tmp
   for dir in "${SCRATCH_DIRS[@]}"; do
+    if [ "${dir}" = "$(scratch_test_slot_dir)" ]; then
+      # Shared with other uids: one it cannot write degrades only the slot (test-slot.ts names
+      # slot_unavailable), never the launch's other binds.
+      mkdir -p "${dir}" 2>/dev/null || true
+      scratch_open_test_slots "${dir}"
+      [ -w "${dir}" ] || SCRATCH_NOTE="${SCRATCH_NOTE}; WARNING: ${dir} is not writable, so test runs here go unslotted"
+      continue
+    fi
     if ! mkdir -p "${dir}" 2>/dev/null || [ ! -w "${dir}" ]; then
       SCRATCH_NOTE="NOT USED — could not create a writable ${dir}; launching with everything on the state disk"
       SCRATCH_ARGS=()
@@ -174,6 +199,7 @@ scratch_restore() {
         chown "${owner}" "${path}" 2>/dev/null || true
         path="$(dirname "${path}")"
       done
+      scratch_open_test_slots "${dir}"
       echo "scratch-mounts: restored ${dir}"
     done < "${manifest}"
   done
