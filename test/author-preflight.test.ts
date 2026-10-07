@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -12,7 +12,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   verifiedSuites: (root: string, suites: string[]) => string[];
   completeTestResult: (result: { status: number | null; stdout?: string; signal?: string; error?: Error }) => boolean;
   authorEnvironment: (parent: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
-  main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown }) => number;
+  main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown; spawn?: typeof spawnSync }) => number;
 };
 
 function fixture(baseline: Record<string, string> = {}) {
@@ -55,6 +55,76 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.selection, 'affected-narrow');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
+  assert.deepEqual(receipt.gitHistory, { state: 'complete' });
+});
+
+test('author preflight refuses a real shallow boundary before selection or expensive validation even when every object is present', () => {
+  const f = fixture();
+  const head = f.git('rev-parse', 'HEAD');
+  const parent = f.git('rev-parse', 'HEAD^');
+  const boundary = join(f.root, '.git', 'shallow');
+  // Only this freshly initialized fixture is changed. Its parent object remains present,
+  // reproducing a boundary that survives a bundle import of otherwise complete objects.
+  writeFileSync(boundary, head + '\n');
+  assert.equal(f.git('rev-parse', '--is-shallow-repository'), 'true');
+  assert.equal(f.git('cat-file', '-t', parent), 'commit');
+  let selections = 0;
+  const select = () => { selections++; return { fullRun: true, suites: [], reasons: ['fixture full floor'] }; };
+  for (const argv of [[], ['--dry-run']]) {
+    assert.equal(mod.main(argv, { root: f.root, select }), 1);
+    const receipt = f.receipt();
+    assert.equal(receipt.verdict, 'refused');
+    assert.deepEqual(receipt.gitHistory, { state: 'shallow' });
+    assert.match(receipt.error, /complete Git history required.*git fetch --unshallow/);
+    assert.equal(selections, 0);
+    assert.deepEqual(receipt.steps, []);
+    assert.deepEqual(receipt.suites, []);
+    assert.equal(receipt.testSlot, undefined);
+  }
+  unlinkSync(boundary); // Only this test's generated boundary, never a host repository.
+  assert.equal(f.git('rev-parse', '--is-shallow-repository'), 'false');
+  assert.equal(mod.main(['--dry-run'], { root: f.root, select }), 0);
+  assert.equal(selections, 1, 'positive control: complete history actually reaches selection');
+  assert.equal(f.receipt().selection, 'full-fallback');
+  assert.deepEqual(f.receipt().gitHistory, { state: 'complete' });
+  assert.equal(f.git('rev-parse', 'HEAD'), head);
+});
+
+test('author preflight refuses ambiguous history output before selection without inventing complete history', () => {
+  for (const stdout of ['', 'false\ntrue\n', 'unavailable\n']) {
+    const f = fixture();
+    let selected = false;
+    const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) =>
+      file === 'git' && args.includes('--is-shallow-repository')
+        ? { status: 0, stdout, stderr: '', signal: null, pid: 0, output: [] }
+        : spawnSync(file, args, opts)) as typeof spawnSync;
+    assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
+    assert.equal(selected, false);
+    assert.deepEqual(f.receipt().gitHistory, { state: 'unknown' });
+    assert.match(f.receipt().error, /completeness is unavailable/);
+    assert.deepEqual(f.receipt().steps, []);
+  }
+});
+
+test('author preflight preserves native history read failures and signals before expensive validation', () => {
+  const failures = [
+    { status: 1, stdout: 'false\n', stderr: 'fixture Git history refusal', signal: null },
+    { status: null, stdout: 'false\n', stderr: '', signal: 'SIGTERM' },
+    { status: null, stdout: 'false\n', stderr: '', signal: null, error: new Error('fixture Git history unreadable') },
+  ];
+  for (const failure of failures) {
+    const f = fixture();
+    let selected = false;
+    const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) =>
+      file === 'git' && args.includes('--is-shallow-repository')
+        ? { ...failure, pid: 0, output: [] }
+        : spawnSync(file, args, opts)) as typeof spawnSync;
+    assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
+    assert.equal(selected, false);
+    assert.deepEqual(f.receipt().gitHistory, { state: 'unknown' });
+    assert.match(f.receipt().error, /git rev-parse --is-shallow-repository failed/);
+    assert.deepEqual(f.receipt().steps, []);
+  }
 });
 
 test('author preflight clears foreign Git scope without hiding a dirty intended tree', () => {
