@@ -21937,7 +21937,6 @@ export interface DepReviewDeps {
   nodePin?: NodePinSyncIo;
 }
 
-/** W1-T6258 — read the PR head with `git show` and push the `.nvmrc` commit from a scratch worktree. */
 export function defaultNodePinSyncIo(
   root: string,
   options: { git?: (args: string[], cwd: string) => string } = {},
@@ -21968,7 +21967,7 @@ export function defaultNodePinSyncIo(
         try {
           git(["worktree", "remove", "--force", tree]);
         } catch (error) {
-          void error; // the scratch directory is removed below either way
+          void error;
         }
         rmSync(scratch, { recursive: true, force: true });
       }
