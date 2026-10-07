@@ -79,7 +79,8 @@ test("the read hook keeps util.promisify.custom, name and length on every patche
     assert.equal(fs.readFile.name, readFile.name);
     assert.equal(fs.readFile.length, readFile.length);
     // The promisified shape is the original's, not the callback convention's.
-    assert.deepEqual(await promisify(fs.readFile)("/repo/openapi/daemon.yaml"), { custom: true });
+    const promisified = promisify(fs.readFile) as unknown as (p: string) => Promise<unknown>;
+    assert.deepEqual(await promisified("/repo/openapi/daemon.yaml"), { custom: true });
     assert.equal(fs.readFileSync("/repo/openapi/daemon.yaml"), "sync");
     assert.equal(await fs.promises.readFile("/repo/deploy/a.yaml"), "promise");
   } finally {
