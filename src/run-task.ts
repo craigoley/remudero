@@ -36536,9 +36536,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "config": {
       const d = deps("config");
       return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
-        (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
+        (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
-          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          // Leave the build seam absent: production must use the heap-bounded measurement worker.
+          const mountRecommendations = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
           return withDue(async () => {
             try {
               await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
