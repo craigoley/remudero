@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -104,12 +104,11 @@ test("a revoked gh config slot that cannot be inspected fails the materializatio
   const realHome = join(root, "real");
   const home = join(root, "wh");
   mkdirSync(realHome, { recursive: true });
-  mkdirSync(join(home, ".config"), { recursive: true });
-  chmodSync(join(home, ".config"), 0o000); // a real EACCES on the slot, never a stubbed error
+  mkdirSync(home, { recursive: true });
+  symlinkSync(".config", join(home, ".config")); // a real ELOOP on the slot for every uid, never a stubbed error
   try {
-    assert.throws(() => workerHome.materializeWorkerHome({ workerHome: home, realHome }), /EACCES/);
+    assert.throws(() => workerHome.materializeWorkerHome({ workerHome: home, realHome }), /ELOOP/);
   } finally {
-    chmodSync(join(home, ".config"), 0o700);
     rmSync(root, { recursive: true, force: true });
   }
 });
