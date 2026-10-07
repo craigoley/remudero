@@ -14,8 +14,22 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/9824
+summary:
+  headline: Authorize an audited console-author replacement path
+  what_happened: The recycler keeps a non-empty author identity from the outgoing
+    container, and the entrypoint preserves it. A shell override cannot change
+    that saved identity, so the console may continue using the generic author.
+  decision: Require a per-target, audited author replacement path with preflight
+    checks and post-recycle verification; test first-time setup and replacement
+    of a bad saved identity while preserving runtime environment values.
+  options:
+    - label: Approve the change
+      consequence: Build and verify the commissioning and replacement paths before
+        relying on the console author.
+    - label: Keep the current behavior
+      consequence: The generic author remains when the outgoing container has a saved
+        identity.
 expansion: null
 submission_key: null
 thread_id: null
