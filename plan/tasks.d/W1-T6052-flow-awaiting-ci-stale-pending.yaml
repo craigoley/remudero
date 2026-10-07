@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.35
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flow-blocker:awaiting-ci:stale-pending"
