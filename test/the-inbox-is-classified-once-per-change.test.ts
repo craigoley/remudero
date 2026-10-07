@@ -20,6 +20,7 @@ import {
   classifyAllProposalsMemo,
   classifyAllProposalsSliced,
   INBOX_CLASSIFY_SLICE,
+  peekClassifiedInbox,
   type PanelGraphDeps,
 } from "../src/lib/panel-graph.js";
 import {
@@ -461,6 +462,54 @@ test("GET /v1/inbox classifies through the memo", async () => {
   assert.equal(bodies[0], bodies[1]);
   const expected = uncachedClassify(w, w.plan);
   assert.equal(JSON.parse(bodies[0]).declined.length, expected.filter((c) => c.state === "declined").length);
+});
+
+function pausedRefresh(w: World) {
+  let resume!: () => void;
+  let entered!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { resume = resolve; });
+  const result = classifyAllProposalsSliced(w.deps, () => w.plan, async () => { entered(); await gate; });
+  return { paused, resume, result };
+}
+
+test("an older sliced classification cannot overwrite a newer completed inbox generation", async () => {
+  const w = makeWorld();
+  const older = pausedRefresh(w);
+  await older.paused;
+  w.sha.value = SHA_B;
+  const newer = await classifyAllProposalsSliced(w.deps, () => w.plan, async () => undefined);
+  older.resume();
+  const oldResult = await older.result;
+  assert.notEqual(oldResult, newer, "the older caller still receives its own coherent snapshot");
+  assert.equal(peekClassifiedInbox(w.deps), newer, "completion order must not roll the shared memo back");
+  assert.equal(await classifyAllProposalsSliced(w.deps, () => w.plan), newer);
+});
+
+test("a synchronous inbox classification supersedes an older sliced refresh", async () => {
+  const w = makeWorld();
+  const older = pausedRefresh(w);
+  await older.paused;
+  w.sha.value = SHA_B;
+  const newer = classifyAllProposalsMemo(w.deps, () => w.plan);
+  older.resume();
+  await older.result;
+  assert.equal(peekClassifiedInbox(w.deps), newer);
+  assert.equal(classifyAllProposalsMemo(w.deps, () => w.plan), newer);
+});
+
+test("an ABA inbox input change cannot rejoin a superseded pending refresh", async () => {
+  const w = makeWorld();
+  const older = pausedRefresh(w);
+  await older.paused;
+  w.sha.value = SHA_B;
+  classifyAllProposalsMemo(w.deps, () => w.plan);
+  w.sha.value = SHA_A;
+  const pending = classifyAllProposalsSliced(w.deps, () => w.plan, async () => undefined);
+  older.resume();
+  const [newest, oldResult] = await Promise.all([pending, older.result]);
+  assert.notEqual(newest, oldResult, "returning to the same fingerprint does not revive retired work");
+  assert.equal(peekClassifiedInbox(w.deps), newest);
 });
 
 test("ledgerProposalVerdicts answers what isRatifiedInLedger and declinedReasonInLedger answer", () => {
