@@ -15,7 +15,9 @@ import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { planRepairGitRun, prHeadTreeGit, rebaseDirtyFleetBranchViaGit, renumberPlanPrIds, type OpenPrView } from "../src/lib/sweep.js";
+// A namespace import, so the file still loads where prHeadTreeGit is absent and each test fails on its own.
+import * as sweep from "../src/lib/sweep.js";
+import { planRepairGitRun, rebaseDirtyFleetBranchViaGit, renumberPlanPrIds, type OpenPrView } from "../src/lib/sweep.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   credentialHelperSocketWired,
@@ -246,8 +248,8 @@ test("W1-T6133: the lane reaper keeps a lane whose pointer it refuses instead of
 test("W1-T6133: the PR-head seams address only their own tree, and the reservation runner reports git's own exit", () => {
   const parent = gitRepo({ kind: "t6133-seams" });
   const tree = parent.addWorktree(join(makeTempDir("t6133-seams-wt"), "wt"), "wt");
-  assert.throws(() => prHeadTreeGit(tree.dir)("git", ["-C", parent.dir, "status"]), /must address/);
-  assert.equal(prHeadTreeGit(tree.dir)("git", ["-C", tree.dir, "rev-parse", "HEAD"]).trim(), tree.git("rev-parse", "HEAD"));
+  assert.throws(() => sweep.prHeadTreeGit(tree.dir)("git", ["-C", parent.dir, "status"]), /must address/);
+  assert.equal(sweep.prHeadTreeGit(tree.dir)("git", ["-C", tree.dir, "rev-parse", "HEAD"]).trim(), tree.git("rev-parse", "HEAD"));
   const run = planRepairGitRun(tree.dir);
   assert.deepEqual(run(["rev-parse", "--abbrev-ref", "HEAD"]), { status: 0, stdout: "wt\n", stderr: "" });
   const missing = run(["rev-parse", "--verify", "--quiet", "refs/heads/absent"]);
