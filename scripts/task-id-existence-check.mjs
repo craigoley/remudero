@@ -31,6 +31,19 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { join, relative } from "node:path";
 import { git } from "./lib/git.mjs";
+import {
+  adjudicateReservationChain,
+  parseReservationHolderFields,
+  parseReservationHolderLine,
+  RESERVATION_PUSH_GRACE_MS,
+} from "../src/lib/reservation-chain.mjs";
+
+export {
+  adjudicateReservationChain,
+  parseReservationHolderFields,
+  parseReservationHolderLine,
+  RESERVATION_PUSH_GRACE_MS,
+};
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
 // DECLARED_ID_LINE_RE matches the WHOLE line after `- id:` (`^...$`, not a character class), so a
@@ -164,53 +177,6 @@ export function resolveReservedIds(remote, cwd, opts = {}) {
   return { reachable: true, ids, holders, records };
 }
 
-function decodeHolderValue(raw) {
-  return decodeURIComponent(raw.replace(/\+/g, "%20"));
-}
-
-/** The holder line's raw `key=value` map: `undefined` with no line, `{ error }` on a malformed one. */
-function holderLineValues(message) {
-  const line = message.split(/\r?\n/).find((l) => l.startsWith("rmd-id holder "));
-  if (!line) return undefined;
-  const values = new Map();
-  for (const token of line.slice("rmd-id holder ".length).trim().split(/[ \t]+/)) {
-    if (!token) continue;
-    const eq = token.indexOf("=");
-    if (eq < 1) return { error: `malformed token ${token}` };
-    try {
-      values.set(token.slice(0, eq), decodeHolderValue(token.slice(eq + 1)));
-    } catch {
-      return { error: `malformed value for ${token.slice(0, eq)}` };
-    }
-  }
-  return { values };
-}
-
-export function parseReservationHolderLine(message) {
-  const read = holderLineValues(message);
-  if (read === undefined) return { status: "legacy" };
-  if (read.error !== undefined) return { status: "unreadable", reason: read.error };
-  const branch = read.values.get("branch");
-  // A holder line that PARSED and says `branch=unknown` is still unreadable as a CLAIM -- there is
-  // no branch to compare a filer against -- but it is not the same fact as a line that could not be
-  // read at all. `currentBranch` (src/lib/task-id-reservation.ts) writes that literal whenever it
-  // mints from a detached HEAD, which is how the fleet daemon reserves: it takes the id BEFORE the
-  // run branch exists. So `recordedBranch` carries what the reservation itself recorded, and ONLY
-  // this arm sets it -- a malformed token or an unfetchable ref stays a bare unreadable with no
-  // recorded value and therefore no hand-off to honour. See evaluateReservationHolderConflicts.
-  if (!branch) return { status: "unreadable", reason: "missing branch" };
-  if (branch === "unknown") return { status: "unreadable", reason: "missing branch", recordedBranch: "unknown" };
-  return { status: "known", branch };
-}
-
-/** W1-T6025: every field the holder line recorded, so a refusal names more than a branch; `undefined` if unparsable. */
-export function parseReservationHolderFields(message) {
-  const read = holderLineValues(message);
-  if (read === undefined || read.error !== undefined) return undefined;
-  const v = read.values;
-  return { branch: v.get("branch"), pid: v.get("pid"), host: v.get("host"), startedAt: v.get("started_at"), source: v.get("source"), takenOverFrom: v.get("taken_over_from") };
-}
-
 export function readReservationHolder(remote, cwd, ref, runGit = git) {
   return readReservationHolderRecord(remote, cwd, ref, runGit).holder;
 }
@@ -229,33 +195,9 @@ export function readReservationHolderRecord(remote, cwd, ref, runGit = git) {
   return { ...(chain[0] ?? { holder: { status: "legacy" } }), chain };
 }
 
-// W1-T6025: mirrors RESERVATION_PUSH_GRACE_MS in src/lib/task-id-reservation.ts; the W1-T6025 test pins parity.
-export const RESERVATION_PUSH_GRACE_MS = 2 * 60 * 60 * 1000;
-
 // Preserve the one-parent entry point for callers supplying a W1-T6025 record.
 export function adjudicateReservationHolder(record, graceMs = RESERVATION_PUSH_GRACE_MS) {
   return adjudicateReservationChain(record.chain ?? [record, ...(record.parent ? [record.parent] : [])], graceMs);
-}
-
-// Weigh each takeover against the rightful holder, even after earlier reclaimers lost.
-export function adjudicateReservationChain(links, graceMs = RESERVATION_PUSH_GRACE_MS) {
-  const head = links[0];
-  if (!head) return { holder: { status: "unreadable", reason: "empty reservation chain" }, fields: undefined };
-  const kept = { holder: head.holder, fields: head.fields };
-  if (links.length === 1) return kept;
-  if (links.some((link) => link.holder.status !== "known" || link.holder.branch === "main" || !Number.isFinite(Date.parse(link.fields?.startedAt)))) return kept;
-  let rightful = links.at(-1);
-  let takeover;
-  for (let i = links.length - 2; i >= 0; i--) {
-    const link = links[i];
-    const parent = links[i + 1];
-    if (link.fields.source !== "reclaimed" || link.fields.takenOverFrom !== parent.holder.branch) return kept;
-    const ageMs = Date.parse(link.fields.startedAt) - Date.parse(rightful.fields.startedAt);
-    const winner = ageMs < graceMs ? "original" : "reclaimer";
-    takeover = { reclaimer: link.fields, original: rightful.fields, ageMs, graceMs, winner };
-    if (winner === "reclaimer") rightful = link;
-  }
-  return { holder: rightful.holder, fields: rightful.fields, takeover };
 }
 
 export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBranch) {

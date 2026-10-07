@@ -38,8 +38,8 @@ import {
   type TaskIdCollision,
   type TaskIdDeclaration,
 } from "./task-id-reservation.js";
-// @ts-expect-error The shared gate is a plain .mjs script without a TS declaration file.
-import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "../../scripts/task-id-existence-check.mjs";
+// @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
+import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
