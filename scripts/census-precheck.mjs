@@ -535,6 +535,11 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
     trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
     remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
+  { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", script: "census:no-nested-preflight",
+    trigger: (input) =>
+      input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
+      addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
+    remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
 ];
 
 /**
@@ -610,7 +615,6 @@ export const PRECHECK_PARITY = {
   "test/authority-ratchet.test.ts": { run: "census:authority" },
   "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
-  "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts": { run: "census:no-nested-preflight" },
   ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
 };
 
