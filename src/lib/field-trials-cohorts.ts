@@ -1,14 +1,18 @@
-import type { FlowRow } from "./field-trials-flow.js";
-
 const PIN_FIELDS = ["harness", "prompt", "tool", "scorer", "environment"] as const;
 export type TrialRevisionPins = Record<typeof PIN_FIELDS[number], string | null>;
-const REVISION_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+export const TRIAL_REVISION_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+type TrialCohortRow = {
+  step: string; assignmentId: string | null; host: string | null; runId: string | null; taskId: string | null; ts: string | null;
+  provider?: string | null; selectedModel: string | null; selectedEffort?: string | null; servedModel: string | null;
+  taskClass: string | null; risk: string | null; workLane: string | null; success: boolean | null; stackRevisions?: TrialRevisionPins;
+};
 
 /** Retain only immutable observed IDs, never a boolean claim or a guessed checkout revision. */
 export function trialRevisionPins(stack: Record<string, unknown> | undefined): TrialRevisionPins {
   return Object.fromEntries(PIN_FIELDS.map((field) => {
     const pin = stack?.[`${field}Revision`] as { state?: unknown; value?: unknown } | undefined;
-    const value = pin?.state === "observed" && typeof pin.value === "string" && REVISION_RE.test(pin.value)
+    const value = pin?.state === "observed" && typeof pin.value === "string" && TRIAL_REVISION_RE.test(pin.value)
       ? pin.value.toLowerCase() : null;
     return [field, value];
   })) as TrialRevisionPins;
@@ -17,25 +21,25 @@ export function trialRevisionPins(stack: Record<string, unknown> | undefined): T
 /** BACKSTOP: cap private output cardinality; excess eligible assignments are counted as omitted. */
 export const TRIAL_COHORT_MAX = 256;
 
-export interface ServedTrialCohort {
+interface ServedTrialCohort {
   host: string; period: string; provider: string; selectedModel: string; servedModel: string; selectedEffort: string;
   taskClass: string; risk: string; workLane: string; revisions: TrialRevisionPins;
   assignments: number; workerSucceeded: number; workerFailed: number;
 }
 
-function assignmentIdentity(row: FlowRow): string {
+function assignmentIdentity(row: TrialCohortRow): string {
   return JSON.stringify([row.host, row.runId, row.taskId, row.ts, row.provider, row.selectedModel, row.selectedEffort,
     row.taskClass, row.risk, row.workLane, row.stackRevisions]);
 }
 
-function terminalIdentity(row: FlowRow): string {
+function terminalIdentity(row: TrialCohortRow): string {
   return JSON.stringify([row.host, row.runId, row.taskId, row.ts, row.provider, row.servedModel, row.success]);
 }
 
 /** Private observational partitions. A worker outcome is not a merged/accepted task or a causal effect. */
-export function servedTrialCohorts(rows: readonly FlowRow[], asOf: string, periodOf: (ts: string | null) => string) {
-  const assignments = new Map<string, { row: FlowRow; conflict: boolean }>();
-  const terminals = new Map<string, { row: FlowRow; conflict: boolean }>();
+export function servedTrialCohorts(rows: readonly TrialCohortRow[], asOf: string, periodOf: (ts: string | null) => string) {
+  const assignments = new Map<string, { row: TrialCohortRow; conflict: boolean }>();
+  const terminals = new Map<string, { row: TrialCohortRow; conflict: boolean }>();
   let unkeyedAssignments = 0;
   let duplicateAssignments = 0;
   for (const row of rows) {
@@ -77,7 +81,7 @@ export function servedTrialCohorts(rows: readonly FlowRow[], asOf: string, perio
       refuse("assignment-context-unavailable"); continue;
     }
     const pins = row.stackRevisions;
-    if (pins === undefined || PIN_FIELDS.some((field) => pins[field] === null || !REVISION_RE.test(pins[field]!))) {
+    if (pins === undefined || PIN_FIELDS.some((field) => pins[field] === null || !TRIAL_REVISION_RE.test(pins[field]!))) {
       refuse("immutable-stack-pins-unavailable"); continue;
     }
     const dimensions = { host: row.host!, period: periodOf(row.ts), provider: row.provider,

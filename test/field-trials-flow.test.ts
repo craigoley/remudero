@@ -20,7 +20,7 @@ import { emptyRepoStore, pullOf, type FieldTrialsGithubStore, type GithubPage, t
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { TaskCaseFile } from "../src/lib/task-case-file.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
-import { servedTrialCohorts, trialRevisionPins, TRIAL_COHORT_MAX } from "../src/lib/field-trials-cohorts.js";
+import { servedTrialCohorts, trialRevisionPins, TRIAL_COHORT_MAX, TRIAL_REVISION_RE } from "../src/lib/field-trials-cohorts.js";
 
 const T = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
 
@@ -75,6 +75,8 @@ test("private served trial cohorts partition exact immutable controls and report
 });
 
 test("private trial revisions retain only observed immutable IDs and reject misleading pin booleans", () => {
+  assert.equal(TRIAL_REVISION_RE.test("a".repeat(40)), true);
+  assert.equal(TRIAL_REVISION_RE.test("main"), false);
   assert.deepEqual(trialRevisionPins(undefined), Object.fromEntries(CONTROL_FIELDS.map((field) => [field, null])));
   for (const pin of [null, [], { state: "unavailable", value: "a".repeat(40) }, { state: "observed", value: "main" },
     { state: "observed", value: "a".repeat(41) }, { state: "observed", value: 1 }])
