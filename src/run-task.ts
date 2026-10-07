@@ -7309,7 +7309,7 @@ function materializeReviewerSnapshot(
   let sourceHead: string;
   let sourceRepo: string;
   try {
-    [sourceRepo, sourceHead] = hostWorktreeGit(sourceDir, ["rev-parse", "--show-toplevel", "HEAD"]).trim().split("\n");
+    [sourceRepo, sourceHead] = hostWorktreeGitAtTopLevel(sourceDir, ["rev-parse", "--show-toplevel", "HEAD"]).trim().split("\n");
   } catch {
     throw new ReviewerSnapshotError(
       "materialization",
@@ -26100,6 +26100,19 @@ export function gitRunAdapter(
     const r = run(args);
     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
+}
+
+export function hostWorktreeGitAtTopLevel(dir: string, args: string[]): string {
+  const log = (step: string, extra: Record<string, unknown>) => {
+    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
+  };
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    try {
+      return hostWorktreeGit(at, args, { log });
+    } catch (error) {
+      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
+    }
+  }
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
