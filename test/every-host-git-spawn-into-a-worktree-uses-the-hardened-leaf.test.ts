@@ -202,12 +202,11 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "and branch reads of the managed checkout",
   },
   "src/run-task.ts": {
-    count: 118,
+    count: 82,
     reason:
-      "WORKTREE (W1-T6121's file): commitGeneratorOutputViaGit (-C opts.cwd x6), planCriteriaAtHeadForRepair, " +
-      "materializeReviewerSnapshot, assertReviewerSnapshotIntegrity, repairCensusRefusedPush, " +
-      "buildBaseProofDir, lintPlanForReview, readDispatchFilingSnapshot (-C cwd); the rest address the managed " +
-      "checkout, a fix-owner repoDir, a base-proof or reviewer snapshot dir, or a clone",
+      "HARNESS (W1-T6121 converted every worker and reviewer site): the remaining sites address the managed " +
+      "checkout, plan sync, gardener/approve worktrees, the origin/main reviewer tree, fix recovery refs and " +
+      "clones — each reasoned in HARNESS_SITES in test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts",
   },
 };
 
