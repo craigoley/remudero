@@ -98,9 +98,7 @@ export interface TriggerInputs {
   /** W1-T4267: expected-versus-live Docker limits read by the watchdog tick. Undefined is
    *  UNKNOWN (an unreadable inspect or policy), never drift. */
   resourcePolicyDrift?: ResourcePolicyDrift[];
-  /** W1-T6110: planned-versus-live scratch binds and env read by the watchdog tick. Undefined is
-   *  UNKNOWN (no plan file, scratch off, unreadable inspect), never drift. */
-  mountPlanDrift?: MountPlanDrift[];
+  mountPlanDrift?: MountPlanDrift[]; // W1-T6110: scratch binds read by the tick; undefined is UNKNOWN
   /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
    *  which never recycles automatically — a recycle before the build lands would pull the old one. */
   imagePublished?: boolean;
@@ -174,18 +172,12 @@ export function readResourcePolicyDrift(
   }
 }
 
-/** W1-T6110: one scratch-plan entry the live container does not carry. `target` is a bind's
- *  container path or `env <NAME>`; `actual` is undefined when the container has no such entry. */
 export interface MountPlanDrift {
-  target: string;
+  target: string; // a bind's container path, or `env <NAME>`
   expected: string;
-  actual: string | undefined;
+  actual: string | undefined; // undefined: the container has no such bind or variable
 }
 
-/** W1-T6110: the scratch plan (`bind<TAB>source<TAB>destination` and `env<TAB>NAME=value` lines,
- *  from {@link readMountPlanDrift}) against `docker inspect`'s `{"Mounts":…,"Env":…}`. Only what the
- *  plan names is compared: every other mount or variable belongs to some other launch argument.
- *  An empty plan or an inspect that is not that shape is UNKNOWN (`undefined`), never drift. */
 export function mountPlanDriftFrom(planText: string, inspectJson: string): MountPlanDrift[] | undefined {
   const binds: [string, string][] = [];
   const env: [string, string][] = [];
@@ -194,14 +186,15 @@ export function mountPlanDriftFrom(planText: string, inspectJson: string): Mount
     if (kind === "bind" && a && b) binds.push([a, b]);
     if (kind === "env" && a?.includes("=")) env.push([a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]);
   }
-  if (binds.length === 0) return undefined;
+  if (binds.length === 0) return undefined; // W1-T6110: only what the plan names is compared
   let live: { Mounts?: unknown; Env?: unknown };
   try {
     live = JSON.parse(inspectJson) as { Mounts?: unknown; Env?: unknown };
   } catch {
     return undefined; // not an inspect at all — UNKNOWN, the same no-storm rule as a failed inspect
   }
-  if (!Array.isArray(live?.Mounts) || !(Array.isArray(live.Env) || live.Env === null)) return undefined;
+  if (live === null || typeof live !== "object") return undefined;
+  if (!Array.isArray(live.Mounts) || !(Array.isArray(live.Env) || live.Env === null)) return undefined;
   const mounts = live.Mounts as { Source?: unknown; Destination?: unknown; RW?: unknown }[];
   const vars = (live.Env ?? []) as unknown[];
   const drift: MountPlanDrift[] = [];
@@ -218,12 +211,6 @@ export function mountPlanDriftFrom(planText: string, inspectJson: string): Mount
   return drift;
 }
 
-/** W1-T6110: what deploy/scratch-mounts.sh's `scratch_plan` would bind into `container` for
- *  `stateDir` — the SAME sourced file the recycle and the launcher launch with — against the
- *  container's live mounts and env. The plan is DISABLED (switch off, scratch root unmounted, a
- *  refused name) or one `scratch_prepare` would drop (a planned directory it cannot create): both
- *  read UNKNOWN, never "remove the binds". A launch without them is what that same plan produces,
- *  so a recycle could only repeat it, every tick, while the host's NVMe is briefly gone. */
 export function readMountPlanDrift(
   exec: (cmd: string, args: string[]) => string,
   installPath: string,
@@ -233,7 +220,7 @@ export function readMountPlanDrift(
   try {
     const plan = exec("bash", [
       "-c",
-      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' +
+      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' + // off is UNKNOWN, never "remove binds"
         'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
         'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
         "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
@@ -760,9 +747,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  // W1-T4267 limits and W1-T6110 scratch binds: both apply only when a container is CREATED, so both
-  // are read here, recycle through one path and are held by the same STOP and failure back-off.
-  const createDrift = [
+  const createDrift = [ // W1-T4267 limits and W1-T6110 binds apply only at create: one path, same holds
     {
       noun: "resource policy drift",
       recycle: "automatic resource-policy recycle",
@@ -1277,8 +1262,7 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
-  /** W1-T6110: compare the scratch-mount plan with the container's binds. Undefined means UNKNOWN. */
-  mountPlanDrift?: () => MountPlanDrift[] | undefined;
+  mountPlanDrift?: () => MountPlanDrift[] | undefined; // W1-T6110; undefined means UNKNOWN
   // ── SERVE POLICY CONVERGENCE (serve-policy-convergence.ts) ── wired for the primary instance only.
   /** remudero-serve's live HostConfig against the serve role's policy; undefined is UNKNOWN. */
   servePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
@@ -2159,9 +2143,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
         process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
       ),
-    mountPlanDrift: () =>
-      // W1-T6110: the launcher's own `scratch_plan "$STATE_DIR" <container>`, read from the checkout
-      // recycle-container.sh launches with — so the recycle this triggers applies the same binds.
+    mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
       readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
     newestBakedSha: () => {
       let newestBaked: string | undefined;

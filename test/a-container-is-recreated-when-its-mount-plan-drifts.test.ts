@@ -315,14 +315,9 @@ test("an unreadable or disabled scratch plan never recycles a container to add o
   assert.equal(read(() => lacking, { RMD_SCRATCH_MOUNTS_FILE: join(f.root, "absent") }), undefined, "scratch root not mounted");
   // A plan scratch_prepare would drop (a planned dir it cannot create) launches without binds, so
   // recycling for them would repeat every tick.
-  if (process.getuid?.() !== 0) {
-    chmodSync(f.scratch, 0o555);
-    try {
-      assert.equal(read(() => lacking), undefined, "a scratch root the launch cannot write");
-    } finally {
-      chmodSync(f.scratch, 0o755);
-    }
-  }
+  writeFileSync(join(f.scratch, "rmd"), "a file where the plan's directories go\n");
+  assert.equal(read(() => lacking), undefined, "a planned dir the launch cannot create");
+  rmSync(join(f.scratch, "rmd"));
   // The inspect side: the container down or absent, or an answer that is not an inspect.
   assert.equal(read(() => { throw new Error("Error: No such object: remudero-daemon"); }), undefined);
   for (const text of ["not json", "null", JSON.stringify({ Mounts: null, Env: [] }), JSON.stringify({ Mounts: [], Env: "x" })]) {
