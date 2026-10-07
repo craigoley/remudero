@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  DECLARED_CLI_PIN_ARG,
+  DECLARED_CLI_PIN_PACKAGE,
   parseClaudeVersionOutput,
   parseDeclaredClaudeVersion,
   readBinaryPin,
@@ -25,8 +25,9 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
  * PRODUCER anywhere in the tree: `Config` carries `claudeBin`, a PATH, and no version, and
  * `resolveClaudeExecutable` runs `--version` with `stdio: "ignore"` and throws the output away. So
  * wiring it meant deciding what "recorded" means, and that choice is the design: the ONE
- * declaration this repo already makes, `ARG CLAUDE_CODE_VERSION` in deploy/Dockerfile, which
- * deploy/verify-image.sh now reads from the SAME line. One declaration, two consumers.
+ * declaration this repo already makes: the exact `@anthropic-ai/claude-code` dependency in
+ * deploy/package.json, which the image build and deploy/verify-image.sh read too. It used to be an
+ * `ARG` in deploy/Dockerfile, a second copy dependabot never bumped (#9768). One declaration.
  *
  * THREE STATES, NEVER TWO. A read that did not happen must never render as `match`. The recon that
  * produced this change found that law broken three times in one function (deployer.ts probeIdle,
@@ -34,7 +35,8 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
  */
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const REAL_DOCKERFILE = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+const REAL_MANIFEST = readFileSync(join(REPO_ROOT, "deploy", "package.json"), "utf8");
+const manifest = (pin: unknown) => JSON.stringify({ dependencies: { [DECLARED_CLI_PIN_PACKAGE]: pin } });
 
 /** A `claude` stand-in that prints a chosen version in the MEASURED real shape. */
 function fakeClaude(dir: string, version: string): string {
@@ -46,25 +48,20 @@ function fakeClaude(dir: string, version: string): string {
 
 // ── THE PARSERS, against the REAL declaration rather than a paraphrase of it ──────────────────
 
-test("parseDeclaredClaudeVersion reads the pin out of the REAL deploy/Dockerfile", () => {
-  const declared = parseDeclaredClaudeVersion(REAL_DOCKERFILE);
-  assert.match(String(declared), /^\d+\.\d+\.\d+$/, "the shipped Dockerfile must declare a parseable pin");
-  assert.ok(
-    REAL_DOCKERFILE.includes(`ARG ${DECLARED_CLI_PIN_ARG}=${declared}`),
-    "and the parse must agree with the literal line, not merely produce something version-shaped",
-  );
+test("parseDeclaredClaudeVersion reads the exact pin out of the REAL deploy/package.json", () => {
+  const declared = parseDeclaredClaudeVersion(REAL_MANIFEST);
+  assert.match(String(declared), /^\d+\.\d+\.\d+$/, "the shipped manifest must declare an exact pin");
+  assert.equal(declared, (JSON.parse(REAL_MANIFEST) as { dependencies: Record<string, string> }).dependencies[DECLARED_CLI_PIN_PACKAGE]);
 });
 
-test("parseDeclaredClaudeVersion returns undefined rather than guessing when the ARG is absent", () => {
-  assert.equal(parseDeclaredClaudeVersion("FROM node:22\nENV DISABLE_AUTOUPDATER=1\n"), undefined);
-  assert.equal(parseDeclaredClaudeVersion(""), undefined);
-  // A commented-out pin is not a declaration.
-  assert.equal(parseDeclaredClaudeVersion(`# ARG ${DECLARED_CLI_PIN_ARG}=9.9.9\n`), undefined);
-});
-
-test("parseDeclaredClaudeVersion tolerates quoting and trailing comments, since a future edit may add either", () => {
-  assert.equal(parseDeclaredClaudeVersion(`ARG ${DECLARED_CLI_PIN_ARG}="2.1.220"\n`), "2.1.220");
-  assert.equal(parseDeclaredClaudeVersion(`  ARG   ${DECLARED_CLI_PIN_ARG} = 2.1.220   # the pin\n`), "2.1.220");
+test("parseDeclaredClaudeVersion returns undefined rather than guessing for an absent pin or a range", () => {
+  assert.equal(parseDeclaredClaudeVersion("{}"), undefined);
+  assert.equal(parseDeclaredClaudeVersion(JSON.stringify({ dependencies: {} })), undefined);
+  // A range names no single version the image installs, so it is not a declaration.
+  assert.equal(parseDeclaredClaudeVersion(manifest("^2.1.220")), undefined);
+  assert.equal(parseDeclaredClaudeVersion(manifest(2)), undefined);
+  assert.equal(parseDeclaredClaudeVersion(manifest("2.1.220")), "2.1.220");
+  assert.throws(() => parseDeclaredClaudeVersion("not json"), SyntaxError, "malformed is a throw readBinaryPin reads as unknown");
 });
 
 test("parseClaudeVersionOutput takes the version and drops the product name", () => {
@@ -79,7 +76,7 @@ test("parseClaudeVersionOutput takes the version and drops the product name", ()
 
 test("a matched pair reads MATCH and names the version", () => {
   const r = readBinaryPin({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.220 (Claude Code)\n",
   });
   assert.equal(r.status, "match");
@@ -89,7 +86,7 @@ test("a matched pair reads MATCH and names the version", () => {
 
 test("a mismatched pair reads DRIFT and names BOTH versions — the operator must not have to guess which", () => {
   const r = readBinaryPin({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.227 (Claude Code)\n",
   });
   assert.equal(r.status, "drift");
@@ -103,21 +100,21 @@ test("EVERY read failure degrades to UNKNOWN, never to a match it never observed
   const thrower = () => {
     throw new Error("ENOENT");
   };
-  const unreadableDockerfile = readBinaryPin({ readDockerfile: thrower, runClaudeVersion: () => "2.1.220 (Claude Code)" });
-  assert.equal(unreadableDockerfile.status, "unknown");
-  assert.match(unreadableDockerfile.reason, /ENOENT/, "the cause is named, not swallowed");
+  const unreadableManifest = readBinaryPin({ readCliManifest: thrower, runClaudeVersion: () => "2.1.220 (Claude Code)" });
+  assert.equal(unreadableManifest.status, "unknown");
+  assert.match(unreadableManifest.reason, /ENOENT/, "the cause is named, not swallowed");
 
-  const noPin = readBinaryPin({ readDockerfile: () => "FROM node:22\n", runClaudeVersion: () => "2.1.220 (Claude Code)" });
+  const noPin = readBinaryPin({ readCliManifest: () => manifest("^2.1.220"), runClaudeVersion: () => "2.1.220 (Claude Code)" });
   assert.equal(noPin.status, "unknown");
 
-  const binaryWontRun = readBinaryPin({ readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n", runClaudeVersion: thrower });
+  const binaryWontRun = readBinaryPin({ readCliManifest: () => manifest("2.1.220"), runClaudeVersion: thrower });
   assert.equal(binaryWontRun.status, "unknown");
   assert.equal(binaryWontRun.declaredVersion, "2.1.220", "what WAS read is still reported");
 
-  const junk = readBinaryPin({ readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n", runClaudeVersion: () => "wrapper error" });
+  const junk = readBinaryPin({ readCliManifest: () => manifest("2.1.220"), runClaudeVersion: () => "wrapper error" });
   assert.equal(junk.status, "unknown");
 
-  for (const r of [unreadableDockerfile, noPin, binaryWontRun, junk]) {
+  for (const r of [unreadableManifest, noPin, binaryWontRun, junk]) {
     assert.notEqual(r.status, "match", "an unknown must NEVER be reported as a match");
     assert.ok(r.reason.trim().length > 0, "and it must say which read failed");
   }
@@ -125,16 +122,16 @@ test("EVERY read failure degrades to UNKNOWN, never to a match it never observed
 
 // ── THE DEFAULT DEPS, RUN FOR REAL — no injected seam, a real file and a real spawn ───────────
 
-test("defaultBinaryPinDeps really reads the shipped Dockerfile and really executes the binary", () => {
+test("defaultBinaryPinDeps really reads the shipped deploy/package.json and really executes the binary", () => {
   // Every other test here injects both reads, which would leave the default — the code that runs
   // in production — completely unexercised. This one drives it end to end.
   const dir = mkdtempSync(join(tmpdir(), "binary-pin-default-"));
   try {
-    const declared = parseDeclaredClaudeVersion(REAL_DOCKERFILE);
-    assert.ok(declared, "precondition: the shipped Dockerfile declares a pin");
+    const declared = parseDeclaredClaudeVersion(REAL_MANIFEST);
+    assert.ok(declared, "precondition: the shipped manifest declares a pin");
 
     const matched = readBinaryPin(defaultBinaryPinDeps(fakeClaude(dir, declared)));
-    assert.equal(matched.status, "match", "the REAL Dockerfile read plus a REAL spawn agree");
+    assert.equal(matched.status, "match", "the REAL manifest read plus a REAL spawn agree");
     assert.equal(matched.observedVersion, declared);
 
     const drifted = readBinaryPin(defaultBinaryPinDeps(fakeClaude(dir, "9.9.9")));
@@ -203,7 +200,7 @@ async function driveRun(binaryPinDeps: Parameters<typeof readBinaryPin>[0]) {
 
 test("BEHAVIORAL: the rung EXECUTES in the real run path and its reading reaches the ledger", async () => {
   const { ledger } = await driveRun({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.227 (Claude Code)\n",
   });
 
@@ -217,7 +214,7 @@ test("BEHAVIORAL: the rung EXECUTES in the real run path and its reading reaches
 
 test("BEHAVIORAL: the rung runs BEFORE the containment preflight, so it can explain a probe that then fails", async () => {
   const { res, ledger } = await driveRun({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.227 (Claude Code)\n",
   });
   assert.equal(res.verdict, "blocked_containment", "precondition: the run really reached and failed the containment probe");
@@ -230,7 +227,7 @@ test("BEHAVIORAL: the rung runs BEFORE the containment preflight, so it can expl
 
 test("BEHAVIORAL: a MATCHED pin is still ledgered — silence would make the rung indistinguishable from the unwired state", async () => {
   const { ledger } = await driveRun({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.220 (Claude Code)\n",
   });
   const line = ledger.find((l) => l.step === "preflight.binary_pin");
@@ -244,7 +241,7 @@ test("BEHAVIORAL: a mismatch does NOT block the run — the disposition is loud,
   // the FIFTH bound in this repo measured firing on a healthy condition. Pinned so a later edit
   // cannot quietly promote it to a gate.
   const { res } = await driveRun({
-    readDockerfile: () => "ARG CLAUDE_CODE_VERSION=2.1.220\n",
+    readCliManifest: () => manifest("2.1.220"),
     runClaudeVersion: () => "2.1.227 (Claude Code)\n",
   });
   assert.notEqual(res.verdict, "blocked_binary_pin", "there is no such verdict, and there must not be");

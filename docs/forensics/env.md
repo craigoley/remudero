@@ -262,6 +262,11 @@ carries `claudeBin`, a PATH, and no version; `resolveClaudeExecutable` runs `--v
 `stdio: "ignore"` and discards the output. Wiring it therefore required deciding what "recorded"
 means, which is the whole of the design below.
 
+**2026-10-07 — the declaration moved to deploy/package.json.** Its exact `@anthropic-ai/claude-code` and
+`@openai/codex` dependencies are now the one declaration: the image layer checks them against the lock,
+deploy/verify-image.sh and `readBinaryPin` read them, and the Dockerfile carries no version ARG. The ARGs
+were a second copy dependabot never bumped, so every CLI bump went red until hand-edited (#9768).
+
 THE SOURCE OF TRUTH IS THE ONE DECLARATION THIS REPO ALREADY MAKES: `ARG CLAUDE_CODE_VERSION` in
 deploy/Dockerfile. Two reasons, and the second is why nothing else was chosen:
   1. It is the version this repo SAYS its workers run — the Dockerfile argues it at length (the
