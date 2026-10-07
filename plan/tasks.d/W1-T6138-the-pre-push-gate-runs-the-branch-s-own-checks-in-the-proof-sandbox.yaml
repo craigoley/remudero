@@ -8,7 +8,7 @@
   budget_usd: 12.00
   risk: high  # Rule 19: one concern — where the host pre-push gate may execute the pushed tree's own code
   band_meaning: span
-  origin: "operator session 2026-10-07: follow-up from W1-T6120 (PR #9788) and W1-T6124 (PR #9784), both open at filing; verified read-only on both heads before filing"
+  origin: "operator session 2026-10-07: follow-up from W1-T6120 (PR #9788, merged 2026-10-07 while this was filed) and W1-T6124 (PR #9784, open at filing); verified read-only on both heads before filing"
   plan_refs: [W1-T6120, W1-T6124, W1-T6106, W1-T5617, W1-T4901, W1-T3423, W1-T499]
   files: [hooks/pre-push, src/lib/git-push.ts, test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts]
   status: queued
@@ -61,6 +61,6 @@
     tmp script that records its argv, `harnessHooksDir` pointed at the fixture through RMD_HARNESS_HOOKS_DIR. Nothing
     runs against a real worktree, the host or origin. TAKE THE CHEAP HALF FIRST if one check proves costly to
     sandbox: lint-plan-precheck alone recovers the most-measured red class (W1-T4901), and the census suites wait on a
-    count of host-path pushes whose census reads NOT MEASURED. Depends on W1-T6120 (#9788) and W1-T6124 (#9784), both
-    open at filing: re-read `prePushGateSteps`, the hook's `own_tree` arms and review.ts's sandbox exports at their
+    count of host-path pushes whose census reads NOT MEASURED. Depends on W1-T6120 (#9788, merged while this was filed) and W1-T6124 (#9784,
+    open at filing): re-read `prePushGateSteps`, the hook's `own_tree` arms and review.ts's sandbox exports at their
     merged heads before building.

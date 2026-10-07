@@ -46,5 +46,5 @@
   notes: |
     FIXTURES ONLY: the planted gitdir and its marker live in a gitRepo() fixture under the test's tmp dir. Split from
     W1-T6135 (run-task.ts) for Rule 19 sizing and because this half does not wait on W1-T6121. Depends on W1-T6123
-    (#9792, open at filing): the widened table and its CALLER class arrive with it; re-read the entries at its merged
+    (#9792, merged 2026-10-07 while this was filed): the widened table and its CALLER class arrive with it; re-read the entries at its merged
     head before building.

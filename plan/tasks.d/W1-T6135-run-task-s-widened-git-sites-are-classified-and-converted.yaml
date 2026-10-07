@@ -51,5 +51,5 @@
   notes: |
     FIXTURES ONLY, as W1-T6121. Split from W1-T6136 for Rule 19 sizing and because only this half waits on W1-T6121:
     this task is src/run-task.ts alone. Depends on W1-T6121 (open run-W1-T6121-* branch at filing; its conversions set
-    the starting population) and W1-T6123 (#9792, open at filing; the widened table arrives with it). Re-count at the
+    the starting population) and W1-T6123 (#9792, merged 2026-10-07 while this was filed; the widened table arrives with it). Re-count at the
     merged heads before building.

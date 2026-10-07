@@ -62,6 +62,6 @@
   notes: |
     FIXTURES ONLY: the PR head, its marker hooks, the planted gitdir and the bare remote are gitRepo() fixtures under
     the test's tmp dir; `assertLiveWriteAllowed` is satisfied the way the existing sweep tests satisfy it. Nothing
-    runs against the managed checkout, a real PR or origin. Depends on W1-T6123 (#9792, open at filing): the widened
-    exception table this lowers arrives with it. W1-T6122 (#9790, open at filing) edits the same two files' RAW table;
+    runs against the managed checkout, a real PR or origin. Depends on W1-T6123 (#9792, merged 2026-10-07 while this was filed): the widened
+    exception table this lowers arrives with it. W1-T6122 (#9790, merged 2026-10-07 while this was filed) edits the same two files' RAW table;
     whichever merges second rebases one entry. Re-count both tables at the merged heads before building.

@@ -1,0 +1,65 @@
+- id: W1-T6146
+  title: "THE HARDENED GIT LEAF RUNS NO ATTRIBUTE-NAMED DRIVER — HOST_GIT_CONFIG overrides fsmonitor, hooksPath, sshCommand, pager, protocol.ext and gpg, but not filter.<driver>.clean/smudge/process or merge.<driver>.driver; a tracked .gitattributes names the driver and the leaf deliberately keeps the pinned gitdir's own config, which a codex worker can write through its --add-dir git roots, so a leaf add, status, diff or rebase can run a command the worker chose, as the daemon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which config-defined programs a hardened host git call may execute
+  band_meaning: span
+  origin: "operator session 2026-10-07: raised by W1-T6121's builder (PR #9794); premise verified read-only on origin/main 0fffd033d and the W1-T6124 head before filing"
+  plan_refs: [W1-T6106, W1-T6124, W1-T2754, W1-T2699, W1-T6133]
+  files: [src/lib/worktree-git.ts, test/the-hardened-git-leaf-runs-no-attribute-named-driver.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 0fffd033d. Static reading only; no driver was configured anywhere real.
+    THE GAP. src/lib/worktree-git.ts `HOST_GIT_CONFIG` sets, at command-line precedence through GIT_CONFIG_COUNT,
+    core.fsmonitor, core.hooksPath, core.sshCommand, core.pager, protocol.ext.allow, commit.gpgSign and tag.gpgSign,
+    and `DIFF_SUBCOMMANDS` adds `--no-ext-diff --no-textconv` to diff/show/log only. Nothing touches `filter.*`
+    (clean on add, status, diff and commit -a; smudge on checkout, reset and rebase; the long-running `process`) or
+    `merge.<driver>.driver` (run by a merge or rebase on a path whose attribute names it). The leaf's own header says
+    WHAT IT DELIBERATELY KEEPS: "system and global config, and the pinned gitdir's own config".
+    WHO CAN WRITE A CONFIG THE LEAF READS. The ATTRIBUTE is the tree's: a tracked .gitattributes (`* filter=x`) is
+    PR content. The COMMAND must come from config, so reachability turns on the config writers:
+      - system and global: daemon-owned (deploy/entrypoint.sh writes $HOME/.gitconfig); not worker-writable unless a
+        proof child reaches HOME, which W1-T6124 closes. Not a route by itself.
+      - the pinned gitdir (common dir `config`, and the worktree's private gitdir `config.worktree`, enabled by
+        worker.ts `extensions.worktreeConfig`): src/lib/worker-provider.ts `codexExecArgs` passes
+        `codexGitWritableRoots(args.cwd, config.root)` — the `--git-dir` and `--git-common-dir` of the worker's tree —
+        as `--add-dir`, i.e. WRITABLE roots of codex's workspace-write sandbox. So a codex worker can write
+        `filter.x.clean = <cmd>` into that config and `* filter=x` into .gitattributes, and the next leaf `git add` or
+        `status` the harness runs in that worktree executes `<cmd>` as the daemon. REACHABLE, by static reading.
+      - a reviewer checkout: W1-T6124's head (`proofSandboxArgv`) masks the common `config` with /dev/null but binds
+        the worktree's private gitdir WRITABLE, so a proof could write `config.worktree` there; on main today the proof
+        child is unsandboxed and can write either. Reachable until W1-T6124, and narrower after it.
+    NOT TRACED: whether a Claude worker's sandbox can write its gitdir config the same way; the codex route alone
+    establishes reachability.
+  design: |
+    The builder owns the mechanism; constraints: (1) no host call through `hostWorktreeGit` / `hostWorktreeGitAsync`
+    runs a `filter.<d>.clean`, `.smudge` or `.process` command or a `merge.<d>.driver` from ANY config source.
+    Config keys cannot be wildcarded, so either enumerate the driver names the pinned config sources define (a
+    `config --get-regexp` read through the same pin, itself running no driver) and neutralise each at command-line
+    precedence, or stop the tree's attributes from naming drivers (an attribute source override, if the host's git
+    supports one: `GIT_ATTR_SOURCE` needs a newer git than the 2.39.5 the code comments measure, so the builder
+    probes it and the PR says which it used). (2) `filter.<d>.required = true` must not turn the neutralised driver
+    into a hard failure of every call: a failed filter is a named refusal row, never a silent wrong blob. (3) A
+    driver the daemon itself configures globally (git-lfs, if present) is neutralised the same way inside the leaf;
+    the PR names any production path that needs one and why. (4) Argv, outputs and error shapes are otherwise the
+    leaf's existing ones.
+  acceptance:
+    - claim: "a leaf add, status and diff on a fixture worktree whose pinned config.worktree defines a filter driver clean and smudge command that each write a marker, with a tracked .gitattributes naming that driver, never write either marker, a leaf rebase over a path whose attribute names a fixture merge driver never runs that driver, and the blob the leaf stores is the file's unfiltered content"
+      proof: "unit test: test/the-hardened-git-leaf-runs-no-attribute-named-driver.test.ts"
+  falsifier: |
+    At origin/main 0fffd033d, run `hostWorktreeGit(wt, ["add", "-A"])` on the fixture: git reads the pinned
+    config.worktree, the tracked .gitattributes names the driver, the clean command runs and writes its marker, and
+    the test fails.
+  notes: |
+    FIXTURES ONLY: the driver commands, markers, attributes and planted config live in a gitRepo() fixture under the
+    test's tmp dir; nothing writes a real gitconfig or a managed checkout's config. No depends_on: W1-T6106 (#9778),
+    which built the leaf, is merged. W1-T6121 (#9794, open at filing) adds a `timeout` option to the same file's
+    `HostWorktreeGitOptions`; whichever merges second rebases one hunk. SEPARATE, NOT THIS TASK: the same writable
+    pinned config can also set `remote.<name>.url`, `credential.helper` or `include.path`, which a leaf push or fetch
+    honours; this task neutralises attribute-named drivers only, and the PR should name any of those it finds reachable.

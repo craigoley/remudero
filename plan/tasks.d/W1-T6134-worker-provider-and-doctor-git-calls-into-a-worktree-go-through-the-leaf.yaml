@@ -47,5 +47,5 @@
     follows the planted pointer, the fsmonitor marker is written, and the test fails.
   notes: |
     FIXTURES ONLY: the planted gitdir and its marker command live in a gitRepo() fixture under the test's tmp dir.
-    Depends on W1-T6123 (#9792, open at filing): the widened exception table this lowers arrives with it; re-count it
+    Depends on W1-T6123 (#9792, merged 2026-10-07 while this was filed): the widened exception table this lowers arrives with it; re-count it
     at the merged head before building.

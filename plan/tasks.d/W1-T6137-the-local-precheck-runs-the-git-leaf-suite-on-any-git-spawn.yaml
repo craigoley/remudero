@@ -46,5 +46,5 @@
   notes: |
     The test slug avoids the word census so the shard is not read as a CI rule suite (as W1-T6123's did). Fixture
     diffs only, through the trigger's `readHead` / `readBase` seams; no suite is run against the real tree by the
-    trigger test. Depends on W1-T6123 (#9792, open at filing): the widened detector the trigger must share arrives
+    trigger test. Depends on W1-T6123 (#9792, merged 2026-10-07 while this was filed): the widened detector the trigger must share arrives
     with it.
