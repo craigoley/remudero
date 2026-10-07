@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: throughput research ('lean into automated flow and self improvement')"
   plan_refs: [W1-T5900, W1-T5901, W1-T5903, W1-T5825, W1-T4780]
   files: [src/lib/flow-gardener.ts, src/lib/garden-registry.ts, test/the-flow-gardener-files-a-stage-that-slows-down.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

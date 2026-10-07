@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: W1-T5997 reclaimed 15s after reservation from a stale checkout; both filers renumbered"
   plan_refs: [W1-T5279, W1-T3674, W1-T3640, W1-T3742, W1-T6025]
   files: [src/lib/task-id-reservation.ts, src/run-task.ts, test/a-reclaim-needs-proof-of-abandonment-and-announces-itself.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

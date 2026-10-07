@@ -1,5 +1,6 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
+import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
@@ -347,13 +348,14 @@ export interface BenchmarkRunAssignmentInput {
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
   work: BenchmarkWorkInput,
-  stackEvidence: BenchmarkStackEvidence = {},
+  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
 ) {
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
   // actual prompt/tools/scorer used by this worker call or grants this instance publication.
   return {
     version: BENCHMARK_RUN_VERSION,
     phase: "assignment" as const,
+    loadedModule: importedModuleOf(stackEvidence.loadedModule),
     work: {
       taskClass: observedString(work.taskClass, "not-recorded-at-assignment"),
       risk: observedString(work.risk, "not-recorded-at-assignment"),

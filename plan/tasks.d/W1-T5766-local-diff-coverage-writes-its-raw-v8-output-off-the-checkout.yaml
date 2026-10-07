@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 22:21Z (root disk hit 100% during #9169's coverage run); W1-T5709 covers coverageScratchDir only"
   plan_refs: [W1-T5709, W1-T5655, W1-T3299]
   files: [scripts/diff-coverage-local.mjs, test/local-diff-coverage-writes-its-raw-v8-output-off-the-checkout.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -70,6 +70,34 @@ test("Field Trials keeps the Sol 6.1 switch separate from Sol 6 and cash separat
   assert.equal(snapshot.causalClaims, "none");
 });
 
+test("the existing private repair family consumes explicit PR costs without exporting their identities", () => {
+  const store = emptyRepoStore();
+  for (const number of [1, 2]) {
+    const pull = pullOf(rawPull(number, { task: "W1-Tshared", merged: T(4) }))!;
+    store.pulls[pull.nodeId] = pull;
+  }
+  const rows = [1, 2].flatMap((number) => {
+    const context = { worker_run_id: `fix-${number}`, worker_rung: "fix", repair_round_id: `round-${number}`,
+      repair_pr_url: `https://github.com/acme/core/pull/${number}` };
+    return [
+      { ...assign("W1-Tshared", "daemon", `a-${number}`, T(2)), ...context },
+      row("worker.attempt", "W1-Tshared", "daemon", T(3), { ...context, selection_assignment_id: `a-${number}`,
+        total_cost_usd: number, billing_mode: "api" }),
+    ];
+  });
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(20),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": store } } });
+  const cost = Object.values(snapshot.families.repair)[0]!.cells.reworkCost;
+  assert.equal(cost.knownApiAttempts, 2); assert.equal(cost.apiCostEstimateUsd, 3);
+  assert.equal(cost.subscriptionNotionalUsd, null);
+  assert.equal(cost.history, "unavailable-retention-uncertified");
+  const candidate = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-repair-release-salt");
+  assert.equal(candidate.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(candidate), /fix-1|round-1|repair_pr_url|repair_round_id|worker_run_id/);
+  assert.equal(snapshot.causalClaims, "none");
+});
+
 type RawPull = Record<string, unknown>;
 
 function rawPull(number: number, opts: { task?: string; branch?: string; created?: string; merged?: string | null; mergeSha?: string;
@@ -676,4 +704,49 @@ test("private field trials distinguish explicit Codex notional from cash and kee
   assert.equal(counts.servedModelKnownAssignments, 1);
   assert.equal(counts.workerOutcomeKnownAssignments, 2, "known failure is an outcome, not an accepted task");
   assert.deepEqual(counts.servedModelUnavailableReasons, { "CLI-no-model": 1 });
+});
+
+test("the existing private flow consumes prevention source import and later work while its release excludes the evidence", () => {
+  const prevention = { id: "ci-friction:check:synthetic-private-gate", taskId: "W1-Tprivate-source", causeKey: "check:synthetic-private-gate",
+    path: "src/run-task.ts", blob: "b".repeat(40), mergeRevision: "a".repeat(40), mergedAt: T(2), workScope: "fix-worker-attempt" };
+  const imported = { state: "observed", source: "module-import-git", path: prevention.path, blob: prevention.blob,
+    revision: "c".repeat(40), capturedAt: T(3) };
+  const repair = { worker_run_id: "private-worker-source", worker_rung: "fix", repair_round_id: "private-source-round",
+    repair_pr_url: "https://github.com/acme/core/pull/9" };
+  const assigned = assign("private-task-source", "daemon", "private-source-assignment", T(4));
+  const rows = [row("ci-friction.scorecard", "DAEMON", "garden", T(2), { prevention_sources: [prevention] }),
+    { ...assigned, ...repair, benchmark_run: { ...((assigned as Record<string, unknown>).benchmark_run as object), loadedModule: imported } },
+    row("worker.attempt", "private-task-source", "daemon", T(5), { ...repair, selection_assignment_id: "private-source-assignment", success: true })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const actual = snapshot.preventionAdoption![0]!.evidence.records[0]!;
+  assert.equal(actual.expectedSource.blob, prevention.blob); assert.deepEqual(actual.loadedSource, imported);
+  assert.equal(actual.laterWork.state, "observed"); assert.equal(actual.efficacyClaim, "none");
+  const release = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-prevention-release-salt");
+  assert.equal(release.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(release), /private-worker-source|private-source-round|private-source-assignment|synthetic-private-gate|preventionAdoption|module-import-git/);
+});
+
+test('private repair cells separate observed current-head green from legacy first-commit success', () => {
+  const saved = repoStore([rawPull(1, { merged: T(2) }), rawPull(2, { merged: T(2) })]);
+  const first = saved.pulls.PR_node_1!; first.headSha = 'a'.repeat(40);
+  first.headGreen = { version: 1, headSha: first.headSha, state: 'observed', readAt: T(4),
+    history: { state: 'partial', nextPage: 2, pagesRead: 1, reason: 'pending-history' }, pending: [], seenCheckIds: [11],
+    firstEver: 'unavailable-retention-uncertified',
+    firstObserved: { checkId: 11, suiteId: 22, runId: 33, jobId: 44, checkCompletedAt: T(2),
+      completedAt: T(2), firstReadAt: T(3), validatedAt: T(4), producer: { workflowId: 55, path: '.github/workflows/ci.yml' } } };
+  const other = saved.pulls.PR_node_2!; other.headSha = 'b'.repeat(40); other.headGreen = first.headGreen;
+  const github: FieldTrialsGithubStore = { version: 'field-trials-github-v1', repos: { 'acme/core': saved } };
+  const sources = [{ label: 'core', repo: 'acme/core', ledger: flowReadOf([]) }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  const cells = Object.values(snapshot.families.repair).map((partition) => partition.cells.toFirstObservedCurrentHeadGreen);
+  assert.equal(cells.reduce((sum, cell) => sum + cell.observed, 0), 1);
+  assert.equal(cells.reduce((sum, cell) => sum + (cell.excluded['missing-join'] ?? 0), 0), 1);
+  for (const cell of cells) {
+    assert.equal(cell.firstEver, 'unavailable-retention-uncertified');
+    assert.equal(cell.basis, 'pr-created-to-observed-current-head-gate-success');
+  }
+  first.headGreen.firstObserved!.completedAt = T(30);
+  const future = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources, github });
+  assert.equal(Object.values(future.families.repair).reduce((sum, partition) => sum + partition.cells.toFirstObservedCurrentHeadGreen.observed, 0), 0);
 });

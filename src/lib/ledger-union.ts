@@ -1,4 +1,4 @@
-import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
+import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { addAbortSignal, type Readable } from "node:stream";
@@ -308,11 +308,57 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   throughRotation?: string;
   /** Resume the mutable live ledger at a byte offset when it has only grown. */
   liveStartOffset?: number;
+  /** Start one rotation at a DECOMPRESSED byte offset: the archive holding a rotated live file's unread tail. */
+  rotationStartOffset?: { name: string; offset: number };
+  /** After the live file is read whole: the inode read and the absolute offset its read ended at. */
+  onLiveRead?: (read: { ino?: number; endOffset: number }) => void;
   /** Seed the bounded replay window without persisting raw ledger lines. */
   dedupeSeed?: readonly { step: string; fingerprint: string }[];
   /** Asked after each ROTATION is fully read (never the live file): true ends the stream there, so
    *  a caller with a time budget stops on a rotation boundary it can resume from via `afterRotation`. */
   stopAfterRotation?: (path: string) => boolean;
+}
+
+/** Bytes of `input` from `offset` on. */
+async function* skipBytes(input: AsyncIterable<Buffer | string>, offset: number): AsyncGenerator<Buffer> {
+  let skip = offset;
+  for await (const chunk of input) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (skip >= bytes.length) {
+      skip -= bytes.length;
+      continue;
+    }
+    yield skip > 0 ? bytes.subarray(skip) : bytes;
+    skip = 0;
+  }
+}
+
+/** The sha256 of each DECOMPRESSED byte range of one ledger file, streamed; undefined where the file is shorter. */
+export async function ledgerFileRangeDigests(
+  path: string,
+  form: LedgerFileForm,
+  ranges: ReadonlyArray<{ start: number; end: number }>,
+): Promise<Array<string | undefined>> {
+  const hashes = ranges.map(() => createHash("sha256"));
+  const last = Math.max(0, ...ranges.map((range) => range.end));
+  let at = 0;
+  const source = nodeCreateReadStream(path);
+  const input: Readable = form === "gzip" ? source.pipe(createGunzip()) : source;
+  try {
+    for await (const chunk of input as AsyncIterable<Buffer>) {
+      ranges.forEach((range, index) => {
+        const from = Math.max(range.start, at);
+        const to = Math.min(range.end, at + chunk.length);
+        if (from < to) hashes[index]!.update(chunk.subarray(from - at, to - at));
+      });
+      at += chunk.length;
+      if (at >= last) break;
+    }
+  } finally {
+    input.destroy();
+    source.destroy();
+  }
+  return ranges.map((range, index) => (range.end <= at ? hashes[index]!.digest("hex") : undefined));
 }
 
 export function fingerprintLedgerLine(raw: string): string {
@@ -401,6 +447,7 @@ export async function* openLedgerUnion(
     let liveBytes = Math.max(0, opts.liveStartOffset ?? 0);
     let lastLineStartOffset = liveBytes;
     let lastLiveByte: number | undefined;
+    let liveIno: number | undefined;
     try {
       const liveStartOffset = entry.path === livePath && opts.liveStartOffset !== undefined
         ? Math.max(0, opts.liveStartOffset)
@@ -409,6 +456,7 @@ export async function* openLedgerUnion(
         entry.path,
         liveStartOffset === undefined ? undefined : { start: liveStartOffset },
       );
+      if (entry.path === livePath) source.once("open", (fd: number) => { liveIno = fstatSync(fd).ino; });
       if (entry.path === livePath) source.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         const newline = bytes.lastIndexOf(0x0a);
@@ -431,7 +479,8 @@ export async function* openLedgerUnion(
         addAbortSignal(opts.signal, source);
         if (gunzip) addAbortSignal(opts.signal, gunzip);
       }
-      for await (const raw of ndjsonLines(input)) {
+      const skip = opts.rotationStartOffset?.name === basename(entry.path) ? opts.rotationStartOffset.offset : 0;
+      for await (const raw of ndjsonLines(skip > 0 ? skipBytes(input, skip) : input)) {
         opts.signal?.throwIfAborted();
         rowOrdinal += 1;
         if (pendingLiveBad) {
@@ -475,6 +524,7 @@ export async function* openLedgerUnion(
       if (pendingLiveBad) opts.onMalformedRow?.(lastLiveByte !== 0x0a
         ? { ...pendingLiveBad, kind: "live-torn-tail", resumeOffset: lastLineStartOffset }
         : pendingLiveBad);
+      if (entry.path === livePath && !archiveUnread) opts.onLiveRead?.({ ino: liveIno, endOffset: liveBytes });
     } catch (error) {
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.

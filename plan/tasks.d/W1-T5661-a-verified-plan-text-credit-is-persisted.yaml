@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, persistVerifiedCredit and creditEvidenceFor follow-ups of W1-T5553 (#9124)"
   plan_refs: [W1-T5553, W1-T3990, W1-T272, W1-T5552]
   files: [src/lib/status.ts, src/run-task.ts, test/a-verified-plan-text-credit-is-persisted.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

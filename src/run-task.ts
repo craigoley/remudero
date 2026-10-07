@@ -502,6 +502,7 @@ import {
   type EscalationJudgeVerdict,
   type EscalationDedupKey,
   type EscalationOption,
+  type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
   type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
@@ -1021,12 +1022,15 @@ import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-tr
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
-const workerBoundaryStack: BenchmarkStackEvidence = {
+import { captureImportedModule } from "./lib/prevention-source-evidence.js";
+const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./lib/prevention-source-evidence.js").ImportedModuleEvidence } = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
+workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
@@ -10210,15 +10214,20 @@ export function fixWorkerReceipt(
   log: (step: string, extra?: Record<string, unknown>) => void,
   workerRunId: string,
   work: BenchmarkWorkInput = {},
+  repair?: RepairReceiptContext,
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  joinFields: () => Record<string, unknown>;
   ledgerFields: (result: WorkerResult) => Record<string, unknown>;
 } {
   let assignment: WorkerSelectionAssignment | undefined;
   let receiptFailure: string | undefined;
+  const repairFields = repairReceiptFields(repair);
+  const joinFields = () => ({ ...repairFields, worker_run_id: workerRunId,
+    ...(assignment ? { selection_assignment_id: assignment.id } : {}) });
   const receipt = benchmarkRunLedgerLogger((step, fields) => {
     try {
-      log(step, { ...fields, worker_run_id: workerRunId, worker_rung: "fix" });
+      log(step, { ...fields, ...repairFields, worker_run_id: workerRunId, worker_rung: "fix" });
     } catch (error) {
       receiptFailure ??= `${step}-ledger-write-failed`;
       throw error;
@@ -10250,13 +10259,14 @@ export function fixWorkerReceipt(
     const assignmentId = result.selectionAssignmentId ?? assignment?.id;
     return {
       ...fields,
+      ...repairFields,
       worker_run_id: workerRunId,
       ...(assignmentId ? { selection_assignment_id: assignmentId } : { selection_assignment_unavailable_reason: "assignment-not-observed" }),
       ...(assignment ? { requested_model: assignment.requested.model, selected_model: assignment.selected.model } : {}),
       ...(receiptFailure ? { benchmark_receipt_unavailable_reason: receiptFailure } : {}),
     };
   };
-  return { spawn: receipted, ledgerFields };
+  return { spawn: receipted, ledgerFields, joinFields };
 }
 
 /**
@@ -10853,6 +10863,7 @@ export async function runFixRung(opts: {
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
+    escalationIssues?: AsyncIssueGateway;
     ledgerPath: string;
     /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
     readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
@@ -11259,7 +11270,7 @@ export async function runFixRung(opts: {
         const detail = `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not observe an author for this content and will not reset, stash, clean, commit or push it. Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ${JSON.stringify(foreignTree.otherWorktrees)}.`;
         const issueUrl = await escalateWithJudge(
           { class: "BLOCKED", taskId: opts.taskId, runId: opts.runId, headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`, detail, options: [{ label: "discard", detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree." }, { label: "adopt", detail: "confirm this local content is intentional and should be preserved before resuming the fix rung." }], recommendation: "discard" },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", { site: "rung.foreign_tree", strike: strikes + 1, reason: preStrikeStandDown.reason, issue_url: issueUrl });
         deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`);
@@ -11303,7 +11314,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "yield",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.strike",
@@ -11739,7 +11750,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "revert",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.scope",
@@ -11837,7 +11848,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "hand-fix",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
@@ -11911,7 +11922,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "split",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
       // W1-T3166: async for the same reason as escalateInstrumentEntangled — its escalation is
       // now judged. Both return sites await; the outcome is unchanged.
@@ -11957,7 +11968,9 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+        const prerequisiteWorkerId = fixWorkerRunId(opts.runId, "prerequisite", systemClock.now());
+        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, prerequisiteWorkerId, fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+          { prUrl: opts.prUrl, roundId: prerequisiteWorkerId });
         const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
@@ -12338,7 +12351,8 @@ export async function runFixRung(opts: {
     }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
-    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+      { prUrl: opts.prUrl, roundId });
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
@@ -12479,7 +12493,8 @@ export async function runFixRung(opts: {
     if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+        { prUrl: opts.prUrl, roundId });
       const asked = await spawnFixWorkerBounded(
         { ...deps, spawn: askReceipt.spawn },
         {
@@ -12611,6 +12626,7 @@ export async function runFixRung(opts: {
       if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
+        ...fixReceipt.joinFields(),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
@@ -12986,7 +13002,7 @@ export async function runFixRung(opts: {
               ],
               recommendation: "hand-fix",
             },
-            { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+            { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
           );
           deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
           deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
@@ -13228,7 +13244,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("review.decision_conflict_escalated", { strike: strikes, review_decision_digest: digest, issue_url: issueUrl });
       return { outcome: "escalated", review, strikes, retriggers, reason: "review_decision_conflict", issueUrl };
@@ -13308,7 +13324,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
@@ -13372,7 +13388,7 @@ export async function runFixRung(opts: {
         ],
         recommendation: "hand-fix",
       },
-      { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+      { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
     );
     deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted" });
     deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
@@ -13463,7 +13479,7 @@ export async function runFixRung(opts: {
           ],
       recommendation: "hand-fix",
     },
-    { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+    { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
   );
   const exhaustionReason = stillConflicted
     ? "merge_conflict_unresolved"
@@ -19491,6 +19507,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
+          escalationIssues: ghIssueGatewayAsync(owner, task.repo),
           ledgerPath,
           log: (s, extra) => log(s, extra),
           say,
@@ -38001,7 +38018,7 @@ export async function daemonCommand(
               recommendation: "fix and resume",
             },
             {
-              issues: ghIssueGateway(target.owner, target.repo),
+              issues: ghIssueGatewayAsync(target.owner, target.repo),
               ledgerPath,
               runId,
               judge:

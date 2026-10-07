@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, single-lane runDrain never reads checkQuietHours"
   plan_refs: [W1-T5529, W1-T5482, W1-T2655, W1-T1038]
   files: [src/lib/drain.ts, src/run-task.ts, test/rmd-drain-holds-in-quiet-hours.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
