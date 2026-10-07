@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
   plan_refs: [W1-T5705, W1-T5697, W1-T3207, W1-T1041, W1-T4398]
   files: [.github/workflows/ci.yml, scripts/coverage-merge-ratchet.mjs, scripts/test-tier-manifest.mjs, test/the-coverage-lane-critical-path-is-its-slowest-shard-plus-a-serial-merge.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

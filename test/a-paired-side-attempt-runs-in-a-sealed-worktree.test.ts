@@ -132,7 +132,7 @@ test("a sealed attempt runs the pinned arm in a fresh detached worktree at the b
   assert.ok(args.prompt.endsWith(SEALED_ATTEMPT_CONTRACT_LINES.join("\n")), "the prompt ends with the sealed contract");
   assert.ok(!args.prompt.includes("HOLDOUT-OK"), "a holdout proof never reaches the worker");
   assert.equal(args.env?.GIT_CONFIG_VALUE_0, "sealed-paired-attempt://push-refused");
-  assert.deepEqual(npm, [`npm ci @ ${dir}`], "dependencies are primed the way the reviewer primes a checkout");
+  assert.deepEqual(npm, [`npm ci --ignore-scripts --no-audit --no-fund @ ${dir}`], "dependencies are primed the way the reviewer primes a checkout");
 
   assert.equal(result.headDir, dir);
   assert.ok(result.headSha !== null && result.headSha !== fixture.base, "the worker's edits are committed into a new head");

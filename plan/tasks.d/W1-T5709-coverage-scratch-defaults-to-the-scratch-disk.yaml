@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(b), refuse TMPDIR/coverage on /mnt/rmd"
   plan_refs: [W1-T5655, W1-T5669, W1-T5631, W1-T5708]
   files: [src/lib/ci-parity.ts, test/coverage-scratch-defaults-to-the-scratch-disk.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

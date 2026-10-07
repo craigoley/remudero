@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, host load ~33, ranked item 1) follow-up to PR #9723"
   plan_refs: [W1-T4102, W1-T4106, W1-T4267, W1-T6030]
   files: [deploy/scratch-mounts.sh, deploy/runtime-env-vars.sh, deploy/recycle-container.sh, src/lib/review.ts, src/lib/gate-gardener.ts, scripts/census-precheck.mjs, test/every-test-run-in-a-container-takes-the-host-wide-slot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

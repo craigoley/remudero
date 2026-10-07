@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import { gitPushRunBranch } from "./lib/git-push.js";
+import { hostWorktreeGit } from "./lib/worktree-git.js";
 import { benchmarkNonDispatchSpawn } from "./lib/benchmark-run.js";
 import {
   DENY_FLOOR_FALLBACK_MODE,
@@ -253,9 +254,7 @@ async function main(): Promise<void> {
   let pushPath = "git push (in-sandbox, HTTPS via gh credential helper)";
   let branchOnOrigin = false;
   try {
-    execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
-      stdio: "ignore",
-    });
+    hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
     branchOnOrigin = true;
   } catch {
     branchOnOrigin = false;
