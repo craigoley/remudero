@@ -12656,6 +12656,8 @@ export async function runFixRung(opts: {
       session_id: fixResult.sessionId,
       subtype: subtype ?? (harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype),
       ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
+      ...(fixWorkerEndedBySignal(fixResult)
+        ? { worker_exit: "signal", worker_exit_signal: fixResult.exit.signal } : {}),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
