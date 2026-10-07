@@ -60,6 +60,7 @@ import {
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
   splitConcatenatedJsonPages,
+  type ghIssueGateway,
   type OpenIssue,
 } from "./escalate.js";
 
@@ -149,10 +150,11 @@ interface RestReactionRow {
 export function ghEscalationAnswerGateway(
   owner: string,
   repo: string,
-  deps: { execAsync?: GhAsyncExecutor; exec?: (args: string[]) => string } = {},
+  deps: Parameters<typeof ghIssueGateway>[2] = {},
+  execAsync?: GhAsyncExecutor,
 ): EscalationAnswerGateway {
   const repoArg = `${owner}/${repo}`;
-  const read = (args: string[]) => ghTextAsync(args, {}, deps.execAsync);
+  const read = (args: string[]) => ghTextAsync(args, {}, execAsync);
   const write = deps.exec ?? ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   return {
     ownerLogin: owner,

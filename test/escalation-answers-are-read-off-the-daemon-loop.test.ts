@@ -45,13 +45,12 @@ test("W1-T6248: the escalation-answer gateway never reads GitHub synchronously",
   };
   const writes: string[][] = [];
   const gateway = ghEscalationAnswerGateway("o", "r", {
-    execAsync,
     exec: (args) => {
       assert.ok(args.includes("content=+1"), "a synchronous read must never reach the write transport");
       writes.push(args);
       return "";
     },
-  });
+  }, execAsync);
   assert.deepEqual((await gateway.listOpen("needs-question")).map((i) => [i.number, i.url, i.body]), [[2, "u2", "**Task:** W1-T6248"]]);
   assert.deepEqual((await gateway.listComments(2)).map((c) => c.id), [3, 4]);
   assert.deepEqual((await gateway.listReactions!(2)).map((r) => r.id), [5, 6]);
