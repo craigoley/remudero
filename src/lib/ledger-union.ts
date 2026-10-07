@@ -992,6 +992,8 @@ export function createLedgerRotationMemo(
                 const parsed = parseObject(line);
                 if (parsed !== undefined) slice.push(parsed);
               } catch {
+                // deliberate: malformed JSON remains torn evidence, not a missing or valid row;
+                // retain its exact text for the union caller's onTorn provenance check.
                 torn++;
                 tornLines.push(line);
               }
