@@ -277,6 +277,11 @@ test("W1-T3243: applyPlanProposalCommit — a rollback that itself fails is reco
 
 // ── commitGeneratorOutputViaGit (src/run-task.ts) — the SAME shape, the OTHER call site ─────
 
+/** W1-T6121: the production default is the hardened leaf, which never runs a worktree's tracked hooks — so the
+ *  three refusal arms below drive the rollback through this raw runner, the only way their synthetic hook fires. */
+const hookRunningGit = (cwd: string, args: string[]): string =>
+  execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" });
+
 test("W1-T3243: commitGeneratorOutputViaGit — a refused commit leaves no residue, restores the index exactly, keeps the caller's own staged content, and rethrows the hook's own text", () => {
   const repo = seedRepo(REFUSING_HOOK);
 
@@ -288,7 +293,7 @@ test("W1-T3243: commitGeneratorOutputViaGit — a refused commit leaves no resid
 
   let thrown: unknown;
   try {
-    commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output" });
+    commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output", git: hookRunningGit });
   } catch (e) {
     thrown = e;
   }
@@ -324,7 +329,7 @@ test("W1-T3243: commitGeneratorOutputViaGit — a write-tree snapshot failure is
   writeFileSync(join(repo.dir, "generator-output.txt"), "generated content\n", "utf8");
 
   const { thrown, stderrText } = captureStderr(() => {
-    commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output" });
+    commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output", git: hookRunningGit });
   });
 
   // (5) The write-tree snapshot failure is recorded, never left silent.
@@ -347,7 +352,7 @@ test("W1-T3243: commitGeneratorOutputViaGit — a rollback that itself fails is 
   let stderrText = "";
   try {
     ({ thrown, stderrText } = captureStderr(() => {
-      commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output" });
+      commitGeneratorOutputViaGit({ cwd: repo.dir, message: "chore: generator output", git: hookRunningGit });
     }));
   } finally {
     delete process.env.T3243_PRETREE;
