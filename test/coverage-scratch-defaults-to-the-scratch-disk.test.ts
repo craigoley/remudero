@@ -83,3 +83,56 @@ test("with TMPDIR already on the scratch device the TMPDIR volume is used unchan
     assert.match(result.detail, /\(TMPDIR volume\)/, "the TMPDIR volume is named as the chosen root");
   });
 });
+
+type Policy = NonNullable<Parameters<typeof testWithCoverageLeaf>[6]>;
+
+function runPolicy(f: Fixture, free: Record<string, number>, policy: Policy) {
+  return testWithCoverageLeaf(
+    f.repo, recordingSpawn(f.seen), join(f.repo, "coverage", "lcov.info"),
+    (path) => free[realpathSync(path)] ?? 0,
+    undefined, {}, policy,
+  );
+}
+
+test("with no device comparison injected, a scratch root on TMPDIR's own device leaves the TMPDIR volume in use", () => {
+  withFixture((f) => {
+    const result = runPolicy(f, { [f.state]: 300 * GIB, [f.scratch]: 300 * GIB }, { root: f.scratch });
+    assert.equal(f.seen.length, 1, `the run reached a coverage shard: ${result.detail}`);
+    assert.equal(f.seen[0], join(f.state, basename(coverageScratchDir(f.repo))), "both directories share this host's device, so TMPDIR is kept");
+  });
+});
+
+test("a TMPDIR volume that cannot be stat'ed is not assumed to share the scratch root's device", () => {
+  withFixture((f) => {
+    process.env.TMPDIR = join(dirname(f.repo), "gone");
+    const result = runPolicy(f, { [f.scratch]: 300 * GIB }, { root: f.scratch });
+    assert.equal(f.seen.length, 1, `the run reached a coverage shard: ${result.detail}`);
+    assert.equal(dirname(f.seen[0]!), f.scratch, "the unprovable device share sends the scratch dir to the scratch root");
+  });
+});
+
+test("RMD_SCRATCH_ROOT names the scratch root when the run is not inside a test process", () => {
+  withFixture((f) => {
+    const previous = { context: process.env.NODE_TEST_CONTEXT, root: process.env.RMD_SCRATCH_ROOT };
+    delete process.env.NODE_TEST_CONTEXT;
+    process.env.RMD_SCRATCH_ROOT = f.scratch;
+    try {
+      const result = runPolicy(f, { [f.state]: 12 * GIB, [f.scratch]: 300 * GIB }, { sameVolume: () => false });
+      assert.equal(f.seen.length, 1, `the run reached a coverage shard: ${result.detail}`);
+      assert.equal(dirname(f.seen[0]!), f.scratch, "the configured root is used");
+    } finally {
+      if (previous.context === undefined) delete process.env.NODE_TEST_CONTEXT;
+      else process.env.NODE_TEST_CONTEXT = previous.context;
+      if (previous.root === undefined) delete process.env.RMD_SCRATCH_ROOT;
+      else process.env.RMD_SCRATCH_ROOT = previous.root;
+    }
+  });
+});
+
+test("a scratch root that does not resolve is not a candidate and the TMPDIR volume decides", () => {
+  withFixture((f) => {
+    const result = runPolicy(f, { [f.state]: 300 * GIB }, { root: join(dirname(f.repo), "missing-scratch"), sameVolume: () => false });
+    assert.equal(f.seen.length, 1, `the run reached a coverage shard: ${result.detail}`);
+    assert.equal(f.seen[0], join(f.state, basename(coverageScratchDir(f.repo))), "the TMPDIR-derived scratch is used");
+  });
+});
