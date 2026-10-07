@@ -5,6 +5,7 @@ import { writeAtomicAsync } from "./fs-race-safe.js";
 
 export const GARDENER_RUNTIME_VERSION = 1;
 export const GARDENER_RUNTIME_FILE = "gardener-runtime.json";
+/** PRIMARY CONTROL: the 32-entry inventory fits below 64 KiB; no historical payload is admitted. */
 export const GARDENER_RUNTIME_MAX_BYTES = 64 * 1024;
 export type GardenerPhase = "scheduled" | "queued" | "running" | "completed" | "failed" | "cancelled" | "idle";
 export interface GardenerRuntimeEvent {

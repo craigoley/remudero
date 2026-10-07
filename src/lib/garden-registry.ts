@@ -15,7 +15,7 @@
 import { execFile, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
@@ -165,7 +165,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const earliest = Math.max(now, lastStartMs + schedule.minIntervalMs);
     const ticks = Math.max(1, Math.ceil((earliest - timerAnchorMs) / timerIntervalMs));
     const next = timerAnchorMs + ticks * timerIntervalMs;
-    return new Date(next <= now ? next + timerIntervalMs : next).toISOString();
+    return fixedClock(next <= now ? next + timerIntervalMs : next).iso();
   };
   const event = (phase: GardenerRuntimeEvent["phase"], fields: Partial<GardenerRuntimeEvent> = {}): GardenerRuntimeEvent => ({
     name, phase, observedAt: clock.iso(), passId: null,
