@@ -307,6 +307,8 @@ export interface WorkerResult {
   effort: string;
   /** Aggregate token usage off the result envelope (zeroed if none was seen). */
   tokens: TokenUsage;
+  /** Explicit stream completeness when reported; absent on legacy results. */
+  tokenUsageState?: "observed" | "partial" | "unavailable";
   /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
   modelUsage: Record<string, ModelUsageEntry>;
   /** The concrete model id the PROVIDER reported serving this call — the served half of the pair whose request half is `model`
@@ -548,6 +550,7 @@ export function workerLedgerFields(r: WorkerResult): {
   served_model_reason?: string;
   effort: string;
   tokens: TokenUsage;
+  token_usage_state?: "observed" | "partial" | "unavailable";
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
   total_cost_usd: number;
@@ -613,6 +616,7 @@ export function workerLedgerFields(r: WorkerResult): {
       : {}),
     effort: r.effort,
     tokens: r.tokens,
+    ...(r.tokenUsageState === undefined ? {} : { token_usage_state: r.tokenUsageState }),
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
     // W1-T5629: beside the billed figure, never in it — budgets and spend series keep reading `total_cost_usd`.

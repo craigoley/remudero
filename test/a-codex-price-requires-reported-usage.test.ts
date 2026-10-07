@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseCodexJsonl, spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { workerLedgerFields } from "../src/lib/worker.js";
+import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "../src/lib/benchmark-run.js";
 
 const completed = (usage?: Record<string, unknown>) => ({ type: "turn.completed", ...(usage ? { usage } : {}) });
 const zero = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 };
@@ -68,4 +70,49 @@ test("a real Codex worker prices complete usage, including an explicitly reporte
   const withTokens = await realWorker([completed(used)]);
   assert.ok(withTokens.notionalCostUsd !== undefined && withTokens.notionalCostUsd > 0);
   assert.equal(withTokens.costUsd, 0);
+});
+
+test("reported Codex usage completeness survives the real worker and both trial receipt paths", async () => {
+  for (const { events, state, reason } of [
+    { events: [completed(zero)], state: "observed", reason: undefined },
+    { events: [completed(used)], state: "observed", reason: undefined },
+    { events: [completed()], state: "unavailable", reason: "worker-token-usage-unavailable" },
+    { events: [completed(used), { type: "turn.started" }], state: "partial", reason: "worker-token-usage-partial" },
+  ] as const) {
+    const result = await realWorker([...events]);
+    assert.equal(result.tokenUsageState, state);
+    const ledger = workerLedgerFields(result);
+    const resources = benchmarkWorkerAttemptResources(result);
+    assert.equal(ledger.token_usage_state, state);
+    assert.equal(resources.token_usage_state, state);
+    for (const path of [ledger, resources]) {
+      const receipt = benchmarkRunAttemptReceipt({ ...path, step: "worker.attempt", selection_assignment_id: "synthetic", success: true })!;
+      if (state === "observed") {
+        assert.deepEqual(receipt.tokens, { state: "observed", value: { input: result.tokens.input, output: result.tokens.output } });
+        assert.deepEqual(receipt.accounting.subscriptionNotionalUsd, { state: "observed", value: result.notionalCostUsd });
+      } else {
+        assert.deepEqual(receipt.tokens, { state: "unavailable", reason });
+        assert.equal(receipt.accounting.subscriptionNotionalUsd.state, "unavailable");
+      }
+      assert.equal(receipt.accounting.apiCostUsd.state, "unavailable");
+      assert.equal(receipt.servedModel.state, "unavailable");
+    }
+  }
+});
+
+test("legacy worker usage remains compatible while explicit invalid token states refuse observation", async () => {
+  const current = await realWorker([completed(used)]);
+  const { tokenUsageState: _state, ...legacy } = current;
+  const resources = benchmarkWorkerAttemptResources(legacy);
+  assert.equal(Object.hasOwn(workerLedgerFields(legacy), "token_usage_state"), false);
+  assert.equal(Object.hasOwn(resources, "token_usage_state"), false);
+  assert.ok(resources.tokens);
+  const legacyZero = { ...legacy, tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 } };
+  assert.equal(Object.hasOwn(benchmarkWorkerAttemptResources(legacyZero), "tokens"), false);
+  for (const token_usage_state of ["invalid", null, 0]) {
+    const receipt = benchmarkRunAttemptReceipt({ step: "worker.attempt", tokens: { input: 1, output: 2 }, token_usage_state })!;
+    assert.deepEqual(receipt.tokens, { state: "unavailable", reason: "worker-token-usage-invalid" });
+  }
+  const missing = benchmarkRunAttemptReceipt({ step: "worker.attempt", token_usage_state: "observed" })!;
+  assert.deepEqual(missing.tokens, { state: "unavailable", reason: "worker-tokens-not-reported" });
 });

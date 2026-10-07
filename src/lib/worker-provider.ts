@@ -132,6 +132,7 @@ interface CodexWorkerResult {
   model: string;
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
   servedModel?: null;
@@ -4770,6 +4771,7 @@ async function spawnCodexWorkerInPrivateTemp(
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
+      tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
       servedModel: null,
       servedModelReason: CODEX_SERVED_MODEL_REASON,

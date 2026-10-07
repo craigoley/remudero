@@ -9,6 +9,8 @@
 //          [--diff <path>]          (a `git diff -U0` of the change: enables the symbol-level `narrow` selection)
 //          [--failed-from <log>]    (the full run's test output: failures are read from its TAP `location:` fields)
 //          [--recent-failures <path>] (one suite per line)
+//          [--impact-map <path>]    (W1-T6083: main's per-suite impact map: enables the shadow `impact` arm)
+//          [--base <ref>]           (the change's base, for the impact map's drift; default HEAD^1)
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgv, isMainModule } from "./lib/argv.mjs";
@@ -21,6 +23,7 @@ import {
   shadowRecord,
 } from "../src/lib/affected-suites.ts";
 import { callerReachableSuites } from "../src/lib/ci-parity.ts";
+import { readImpactArmInput } from "../src/lib/test-impact-map.ts";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.ts";
 
 /** test-with-retry.mjs's marker before pass two (W1-T4398), naming the files it re-runs. */
@@ -50,6 +53,8 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
     diff: { type: "string" },
     "failed-from": { type: "string" },
     "recent-failures": { type: "string" },
+    "impact-map": { type: "string" },
+    base: { type: "string" },
   });
   if (!values["changed-files"]) {
     console.error("usage: select-affected-suites.mjs --changed-files <path> [--diff <path>] [--failed-from <log>] [--recent-failures <path>]");
@@ -63,20 +68,26 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
       const symbols = changedSymbols(readFileSync(values.diff, "utf8"), (p) => readFileSync(join(root, p), "utf8"));
       extra.symbolSuites = callerReachableSuites(symbols, root, defaultPreflightSpawn).suites;
     }
+    if (values["impact-map"]) {
+      const diffText = values.diff ? readFileSync(values.diff, "utf8") : "";
+      extra.impact = readImpactArmInput(root, values["impact-map"], values.base ?? "HEAD^1", diffText);
+    }
     return readAffectedSuitesInput(root, changed, extra);
   });
   const log = values["failed-from"] ? readFileSync(values["failed-from"], "utf8") : "";
   const failed = log ? parseFailingTestFiles(log, root) : [];
   const record = shadowRecord(selection, failed, retryOutcomes(log, root));
 
-  const size = selection.fullRun ? "FULL" : `${record.floorSize} floor${record.narrowSize === undefined ? "" : `, ${record.narrowSize} narrow`}`;
-  const missed = record.failures.filter((f) => f.floor === "missed" || f.narrow === "missed");
+  const size = selection.fullRun ? "FULL" : `${record.floorSize} floor${record.narrowSize === undefined ? "" : `, ${record.narrowSize} narrow`}` +
+    (record.impactSize === undefined ? "" : `, ${record.impactSize} impact${record.impactFallback === undefined ? "" : " (fallback)"}`);
+  const missed = record.failures.filter((f) => f.floor === "missed" || f.narrow === "missed" || f.impact === "missed");
   const summary =
     `- W1-T4404 affected-suite selector (SHADOW — nothing skipped): would run ${size} of the suite for ${changed.length} changed file(s); ` +
     `${record.failures.length} real failure(s)` +
-    (record.failures.length === 0 ? "" : `: ${record.failures.map((f) => `${f.file} floor=${f.floor}${f.narrow ? ` narrow=${f.narrow}` : ""}`).join("; ")}`);
+    (record.failures.length === 0 ? "" : `: ${record.failures.map((f) => `${f.file} floor=${f.floor}${f.narrow ? ` narrow=${f.narrow}` : ""}${f.impact ? ` impact=${f.impact}` : ""}`).join("; ")}`);
   console.log(summary);
   if (selection.fullRun) console.log(`  ${selection.reasons[0]}`);
+  if (record.impactFallback !== undefined) console.log(`  impact arm fell back to the narrow selection: ${record.impactFallback}`);
   if (missed.length > 0) console.log(`  MISSED: ${missed.map((f) => f.file).join(", ")} — the selection would not have run a file that really failed`);
   console.log(`AFFECTED-SUITES-SHADOW: ${JSON.stringify(record)}`);
   if (summaryPath) appendFileSync(summaryPath, summary + "\n");
