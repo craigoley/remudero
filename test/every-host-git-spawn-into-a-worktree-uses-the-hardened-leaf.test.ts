@@ -347,6 +347,25 @@ export function widenedLeafSiteViolations(texts: ReadonlyMap<string, string>): s
   return out.sort();
 }
 
+/**
+ * W1-T6123 — the positive control's population: every git site the census can see, COMPLIANT AND RAW —
+ * named `-C <worktree>` argv, widened sites, and calls into the leaf. A conversion moves a site from a
+ * raw count to the leaf count, so this total holds while W1-T6121/W1-T6122 shrink the raw tables in any
+ * merge order (measured 2026-10-07: 487 on main, 487 with W1-T6122's head, 476 with W1-T6121's); a
+ * floor on the RAW count alone would fall through itself as the conversions land.
+ */
+export const VISIBLE_GIT_SITE_FLOOR = 400;
+
+export function visibleGitSiteCount(texts: ReadonlyMap<string, string>): number {
+  let n = 0;
+  for (const [file, text] of texts) {
+    n += text.match(WORKTREE_TARGET)?.length ?? 0;
+    n += text.match(new RegExp(LEAF_CALL.source, "g"))?.length ?? 0;
+    if (file !== LEAF_FILE) n += widenedGitSites(text).length;
+  }
+  return n;
+}
+
 export function readAll(): Map<string, string> {
   return new Map(srcFiles().map((file) => [file, readFileSync(join(REPO, file), "utf8")]));
 }
@@ -367,8 +386,8 @@ test("W1-T6106: every converted host git site calls the hardened leaf and spawns
 
 test("W1-T6106: no src file holds a raw git -C <worktree> spawn beyond its reasoned exception", () => {
   const texts = readAll();
-  const counted = [...texts.values()].reduce((n, text) => n + (text.match(WORKTREE_TARGET)?.length ?? 0), 0);
-  assert.ok(counted >= 50, `positive control: the pattern must find the known raw sites, found ${counted}`);
+  const counted = visibleGitSiteCount(texts);
+  assert.ok(counted >= VISIBLE_GIT_SITE_FLOOR, `positive control: the census must see the src/ git population, saw ${counted}`);
   for (const file of Object.keys(RAW_SITE_EXCEPTIONS)) assert.ok(texts.has(file), `exception names a missing file: ${file}`);
   assert.deepEqual(rawLeafSiteViolations(texts), []);
 });
@@ -387,8 +406,8 @@ test("W1-T6106: a raw git -C spawn into a worktree added to src fails the census
 
 test("W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception", () => {
   const texts = readAll();
-  const counted = [...texts].reduce((n, [file, text]) => n + (file === LEAF_FILE ? 0 : widenedGitSites(text).length), 0);
-  assert.ok(counted >= 300, `positive control: the widened count must find the known raw sites, found ${counted}`);
+  const counted = visibleGitSiteCount(texts);
+  assert.ok(counted >= VISIBLE_GIT_SITE_FLOOR, `positive control: the census must see the src/ git population, saw ${counted}`);
   for (const file of Object.keys(WIDENED_SITE_EXCEPTIONS)) assert.ok(texts.has(file), `widened exception names a missing file: ${file}`);
   assert.deepEqual(widenedLeafSiteViolations(texts), []);
 });

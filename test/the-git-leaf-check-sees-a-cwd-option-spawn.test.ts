@@ -15,7 +15,7 @@ import {
   readAll,
   widenedGitSites,
   widenedLeafSiteViolations,
-} from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts";
+} from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
 
 const kinds = (source: string) => widenedGitSites(source).map((site) => `${site.kind}@${site.fn ?? "-"}`);
 
@@ -57,18 +57,30 @@ test("W1-T6123: comments, strings, primitives in the daemon's cwd and W1-T6106's
   assert.deepEqual(kinds(source), []);
 });
 
-test("W1-T6123: the cwd-option git spawns in worker-provider.ts are counted while they are unconverted", () => {
-  const text = readAll().get("src/lib/worker-provider.ts") ?? "";
-  const sites = widenedGitSites(text);
-  const checked: string[] = [];
-  for (const name of ["isGitWorktree", "codexGitWritableRoots", "selectOpenWeightUnitTestSuites"]) {
+/** Known worktree-addressed sites W1-T6106's named count missed: the shard's three, plus the sweep's
+ *  PR-head trees and the worker's `config --worktree` and lane-reaper reads (W1-T6122's builder). */
+const KNOWN_WIDENED_SITES: ReadonlyArray<readonly [string, string]> = [
+  ["src/lib/worker-provider.ts", "isGitWorktree"],
+  ["src/lib/worker-provider.ts", "codexGitWritableRoots"],
+  ["src/lib/worker-provider.ts", "selectOpenWeightUnitTestSuites"],
+  ["src/lib/sweep.ts", "rebaseDirtyFleetBranchViaGit"],
+  ["src/lib/sweep.ts", "renumberPlanPrIds"],
+  ["src/lib/worker.ts", "wireCredentialHelperSocket"],
+  ["src/lib/worker.ts", "credentialHelperSocketWired"],
+  ["src/lib/worker.ts", "laneWorkKeepReason"],
+];
+
+test("W1-T6123: the cwd-option git spawns in worker-provider.ts and the known missed worktree sites are counted while unconverted", () => {
+  const texts = readAll();
+  const missed: string[] = [];
+  for (const [file, name] of KNOWN_WIDENED_SITES) {
+    const text = texts.get(file) ?? "";
     const body = functionBody(text, name);
-    assert.ok(body !== undefined, `${name} not found in src/lib/worker-provider.ts`);
-    if (!/["']git["']/.test(body)) continue; // converted: nothing raw left to see
-    checked.push(name);
-    assert.ok(sites.some((site) => site.fn === name), `${name} spawns git but the widened count does not see it`);
+    assert.ok(body !== undefined, `${name} not found in ${file}`);
+    if (!/["'](?:git|-C)["']/.test(body)) continue; // converted: nothing raw left to see
+    if (!widenedGitSites(text).some((site) => site.fn === name)) missed.push(`${file}: ${name}`);
   }
-  if (checked.length > 0) assert.ok((WIDENED_SITE_EXCEPTIONS["src/lib/worker-provider.ts"]?.count ?? 0) >= checked.length);
+  assert.deepEqual(missed, [], "each spawns git into a worktree but the widened count does not see it");
 });
 
 test("W1-T6123: a cwd-option git spawn into a worktree added to a src file fails the census naming that file", () => {
