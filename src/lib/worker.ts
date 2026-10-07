@@ -111,6 +111,7 @@ import {
   materializeSpawnWorkerHome as materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
+  seedClaudeFleetCredentials,
   workerCredentialFilePath,
   workerClaudeCredentialDir,
   workerKeychainPaths,
@@ -2842,6 +2843,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // named reason class so the failure stays queryable. It refuses only the unambiguously unusable. An EXPIRED token is
       // reported and allowed through: nothing here can re-provision, the CLI maintains its own refresh, and refusing would be
       // a bound firing on a healthy condition (recon-cloud-workers-spike stop 6).
+      // Heal an emptied .claude-fleet fork BEFORE judging it, or the refusal below fires until the container is recreated.
+      seedClaudeFleetCredentials({ realHome });
       assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
     // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent, but a target that EXISTS and
@@ -3214,6 +3217,8 @@ export function openUsageProbeSession(
   // Linux workers consume the narrowed credential grant; capacity must observe that same store.
   // Darwin continues to use its existing keychain rather than selecting a different config store.
   if ((context.platform ?? process.platform) !== "darwin") {
+    // The probe reads the same fork a spawn does, so it heals an emptied one the same way first.
+    if (runQuery === undefined) seedClaudeFleetCredentials({ realHome: context.realHome ?? homedir() });
     options.env = {
       ...process.env,
       CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),

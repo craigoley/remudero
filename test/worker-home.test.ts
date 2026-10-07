@@ -241,6 +241,49 @@ test("given an injected real-home fixture whose .claude-fleet ALREADY exists, th
   }
 });
 
+const USABLE = (token: string) => JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `r-${token}`, expiresAt: 1 } });
+const EMPTIED = JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "" } });
+
+// 2026-10-07: core's .claude-fleet fork was emptied at 10:27 (its refresh token rotated away by another
+// holder of the same login) while the owner file stayed usable; every Claude spawn and usage probe on
+// that container refused for five hours, until the container was recreated and re-seeded.
+test("an emptied .claude-fleet fork heals from a usable owner credential", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
+    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(fleet, { mode: 0o700 });
+    writeFileSync(join(fleet, ".credentials.json"), EMPTIED);
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "healed");
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), USABLE("owner"));
+    assert.equal(statSync(join(fleet, ".credentials.json")).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(fleet), [".credentials.json"], "no staged file is left behind");
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("a usable .claude-fleet fork is never replaced, and an unusable owner never replaces an emptied one", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
+    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(fleet, { mode: 0o700 });
+    writeFileSync(join(fleet, ".credentials.json"), USABLE("refreshed-by-a-worker"));
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), USABLE("refreshed-by-a-worker"));
+
+    writeFileSync(join(fleet, ".credentials.json"), EMPTIED);
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), EMPTIED);
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), EMPTIED);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
 test("a concurrent .claude-fleet create wins without replacing its credential", () => {
   const realHome = tmp();
   try {
