@@ -359,11 +359,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
+  const pathReaders = [...input.pathReaders];
+  const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
   // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
   const errorCensus = "test/error-subclass-census.test.ts";
-  const pathReaders = [...input.pathReaders];
-  if (input.files.has(errorCensus) && files.some((f) => /^src\/.*\.ts$/.test(f))) {
+  if (input.files.has(errorCensus) && changedSrcTypeScript) {
     pathReaders.push(errorCensus);
+  }
+  // This census reads tracked src TypeScript through git ls-files, outside the import/read maps.
+  const dependencyCensus = "test/dependency-declarations-match-use.test.ts";
+  if (input.files.has(dependencyCensus) && changedSrcTypeScript) {
+    pathReaders.push(dependencyCensus);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

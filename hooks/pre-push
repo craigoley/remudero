@@ -320,7 +320,10 @@ if has head-identity-gate.mjs tsx; then
     if ! node --import "$tsx_loader" "$gate_root/scripts/head-identity-gate.mjs" --head-ref "$head_ref"; then
       echo "pre-push: head-identity-gate would REFUSE this head in CI — advisory here, so the push" >&2
       echo "pre-push: continues. Fix it before CI does: add an anchored \`Remudero-Task: <id>\` trailer" >&2
-      echo "pre-push: to the head commit, or push a \`run-<taskId>-<epochMs>\` branch." >&2
+      echo "pre-push: to the head commit, or push a \`run-<taskId>-<epochMs>\` branch — or, with no filed" >&2
+      echo "pre-push: task (any Codex/Claude session branch), \`git push origin HEAD:run-unfiled-\$(date +%s)000\`." >&2
+      echo "pre-push: Once a pull request is open, push a NEW commit carrying \`Remudero-Task: PR-<n>\`" >&2
+      echo "pre-push: (its own number) — never an amend or a force-push." >&2
     fi
   else
     echo "pre-push: head-identity-gate — no pushable ref resolved, skipped, NOT passed" >&2

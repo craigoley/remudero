@@ -1,0 +1,48 @@
+- id: W1-T6179
+  title: "A FAILED PROOF RECORDS WHY IT FAILED — the proof executor returns only pass/fail/no-match and discards the child's stdout/stderr, so a review FAIL carries no cause; #9834 and #9838 were FAILed twice each by the Linux proof sandbox and the reason (git: 'unable to access .git/config: Permission denied') was found only by re-running the proofs inside the daemon container"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern across review.ts (the verdict) and run-task.ts (its ledger row) — the verdict carries a bounded, redacted tail of a failed proof's output
+  band_meaning: span
+  origin: "operator session 2026-10-07: #9834/#9838 review-only FAILs undiagnosable from GitHub or the ledger (fixed by #9861)"
+  plan_refs: [W1-T6124, W1-T387]
+  files: [src/lib/review.ts, src/run-task.ts, test/a-failed-proof-records-why-it-failed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: `ProofExecutor` in src/lib/review.ts is typed
+    `(whitelisted, cwd) => "pass" | "fail" | "no-match"`, so the child's stdout and stderr are dropped
+    at the executor and `CriterionVerdict` carries only `proof_exec`; its one diagnostic field,
+    `loadError`, is filled only for `cannot_evaluate`. run-task.ts's `review.posted` row records
+    `proof_exec` per criterion and nothing else. On 2026-10-07 #9834 and #9838 were FAILed twice
+    each on proofs that passed on macOS and in CI; the cause (the W1-T6124 sandbox bound /dev/null
+    over the review worktree's shared .git/config, which bwrap mounts nodev, so git died with
+    "fatal: unknown error occurred while reading the configuration files") was visible only by
+    running `rmd check-proof` inside remudero-daemon by hand. The fix lane twice returned
+    NEEDS_SCOPE on the same blind spot.
+  design: |
+    Keep the tail of what the child printed, without widening the executor's verdict contract: the
+    executor additionally returns a bounded tail (last N lines and at most B bytes of interleaved
+    stdout+stderr; defaults overridable by a policy read, never a source literal) for an
+    `executed_fail` and `cannot_evaluate` result, passed through the existing secret redaction
+    before it is stored. `CriterionVerdict` gains an optional `failureTail` beside `loadError`;
+    `review.posted` records it per failed criterion, and the posted FAIL comment shows it in a
+    collapsed block under the unmet criterion. A passing proof records nothing. Tiered, never a
+    single cut: under the bound the whole output is kept; over it, the tail plus an
+    `(N earlier lines omitted)` note; empty output says `(the proof printed nothing)`.
+  acceptance:
+    - claim: "a proof that fails records the tail of its own output on the criterion's verdict"
+      proof: 'grep: test("W1-T6179: a failed proof carries the tail of its output on its verdict" in test/a-failed-proof-records-why-it-failed.test.ts'
+    - claim: "the tail is bounded, says how many earlier lines it omitted, and is redacted"
+      proof: 'grep: test("W1-T6179: a long failure output is cut to a redacted tail that says so" in test/a-failed-proof-records-why-it-failed.test.ts'
+    - claim: "review.posted carries the failure tail for each failed criterion and nothing for a pass"
+      proof: 'grep: test("W1-T6179: review.posted records the failure tail only for failed criteria" in test/a-failed-proof-records-why-it-failed.test.ts'
+  falsifier: |
+    Keep the executor's string-only return: a fake proof that prints "fatal: unknown error occurred
+    while reading the configuration files" and exits 1 yields a verdict and a review.posted row
+    without that text, and the first and third tests fail.

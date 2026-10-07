@@ -269,6 +269,11 @@ REQ 11 blamed for the shipped root-owned cache; it does create one, but the chow
 so it was never the layer that survived to the image. It is fixed here anyway — the throwaway cache
 also stops the chown having to rewrite the whole tree into a second layer.
 
+**2026-10-07 — the declaration moved to deploy/package.json.** Its exact `@anthropic-ai/claude-code` and
+`@openai/codex` dependencies are now the one declaration: the image layer checks them against the lock,
+deploy/verify-image.sh and `readBinaryPin` read them, and the Dockerfile carries no version ARG. The ARGs
+were a second copy dependabot never bumped, so every CLI bump went red until hand-edited (#9768).
+
 ## `ARG CODEX_VERSION` and the global `codex` install
 
 ── THE CODEX CLI — OPT-IN SECOND SUBSCRIPTION, BAKED BUT DORMANT BY DEFAULT ─────────────────
