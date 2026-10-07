@@ -299,24 +299,23 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
 
 test("buildProofAmendmentGitOps runs git add/commit through an injected spawn, never a real process", () => {
   // The write ports `requestProofAmendment` receives for its `gitAdd`/`gitCommit` fields are built
-  // here through `execFileSyncFn`, APPENDED LAST and defaulted to the real `execFileSync` in
-  // production — this test injects a fake to assert the exact recorded external-tool invocation
-  // without ever crossing the process boundary, covering the lines a `diff-cov:` directive cannot
-  // exempt for a real spawn.
-  const calls: Array<{ file: string; args: readonly string[] }> = [];
-  const fakeExecFileSync = ((file: string, args: readonly string[]) => {
-    calls.push({ file, args });
+  // here through a `git(worktreePath, args)` runner, APPENDED LAST and defaulted to the hardened
+  // `hostWorktreeGit` leaf in production (W1-T6121) — this test injects a fake to assert the exact
+  // recorded invocation without ever crossing the process boundary.
+  const calls: Array<{ worktree: string; args: readonly string[] }> = [];
+  const fakeGit = (worktree: string, args: string[]): string => {
+    calls.push({ worktree, args });
     return "deadbeefcafefeed\n";
-  }) as unknown as typeof import("node:child_process").execFileSync;
-  const ops = buildProofAmendmentGitOps(fakeExecFileSync);
+  };
+  const ops = buildProofAmendmentGitOps(fakeGit);
 
   ops.gitAdd("/tmp/proof-amendment-wt", "plan/tasks.d/W1-T3434.yaml");
   const sha = ops.gitCommit("/tmp/proof-amendment-wt", "chore(plan): amend W1-T3434 proof");
 
   assert.deepEqual(calls, [
-    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "add", "plan/tasks.d/W1-T3434.yaml"] },
-    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "commit", "-m", "chore(plan): amend W1-T3434 proof"] },
-    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "rev-parse", "HEAD"] },
+    { worktree: "/tmp/proof-amendment-wt", args: ["add", "plan/tasks.d/W1-T3434.yaml"] },
+    { worktree: "/tmp/proof-amendment-wt", args: ["commit", "-m", "chore(plan): amend W1-T3434 proof"] },
+    { worktree: "/tmp/proof-amendment-wt", args: ["rev-parse", "HEAD"] },
   ]);
   assert.equal(sha, "deadbeefcafefeed", "gitCommit trims the recorded rev-parse output");
 });
