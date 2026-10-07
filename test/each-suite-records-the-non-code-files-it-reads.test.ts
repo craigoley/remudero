@@ -20,6 +20,7 @@ import {
   fullRunTrigger,
   readMapReaders,
   readReadMap,
+  readReadMapInput,
   readReadRecords,
   selectAffectedSuites,
   type AffectedSuitesInput,
@@ -321,6 +322,68 @@ test("a read map file round-trips, and a malformed one is a named problem, never
     assert.match(readReadMap(join(dir, "missing.json")).problem!, /unreadable/);
     writeFileSync(join(dir, "stray.json"), JSON.stringify({ format: "other" }));
     assert.deepEqual(readReadRecords(dir).problems, ["read-map.json is not a read record", "stray.json is not a read record"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readReadMapInput loads a saved map and measures its drift against the requested base", () => {
+  const dir = scratch();
+  try {
+    const path = join(dir, "read-map.json");
+    const saved = map();
+    writeFileSync(path, JSON.stringify(saved));
+    const calls: string[][] = [];
+    const loaded = readReadMapInput(dir, path, "base-tip", (cmd, args, opts) => {
+      assert.equal(cmd, "git");
+      assert.deepEqual(opts, { cwd: dir, encoding: "utf8" });
+      calls.push(args);
+      return { status: 0, stdout: args[0] === "rev-list" ? "3\n" : args[0] === "diff" ? `${SUITES[2]}\n` : "", stderr: "" };
+    });
+    assert.deepEqual(calls, [
+      ["merge-base", "--is-ancestor", saved.sha, "base-tip"],
+      ["rev-list", "--count", `${saved.sha}..base-tip`],
+      ["diff", "--name-only", saved.sha, "base-tip"],
+    ]);
+    assert.deepEqual(loaded, { map: saved, drift: { distance: 3, changedSinceMap: [SUITES[2]] } });
+    const selection = selectAffectedSuites(["openapi/daemon.yaml"], input(loaded));
+    assert.equal(selection.fullRun, false);
+    assert.deepEqual(selection.suites, [SUITES[0], SUITES[1], SUITES[2]]);
+
+    const foreign = readReadMapInput(dir, path, "other-tip", () => ({ status: 1, stdout: "", stderr: "" }));
+    assert.deepEqual(foreign, {
+      map: saved,
+      drift: { changedSinceMap: [], problem: `other-tip does not descend from ${saved.sha}` },
+    });
+    const fallback = selectAffectedSuites(["openapi/daemon.yaml"], input(foreign));
+    assert.equal(fallback.fullRun, true);
+    assert.match(fallback.readMapFallback!, /not an ancestor of the base \(other-tip does not descend from/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readReadMapInput preserves missing and malformed map problems without measuring drift", () => {
+  const dir = scratch();
+  try {
+    const path = join(dir, "read-map.json");
+    const run = () => assert.fail("an unavailable map must not trigger a drift query");
+    const missing = readReadMapInput(dir, path, "base-tip", run);
+    assert.deepEqual(missing.drift, { changedSinceMap: [] });
+    assert.equal(missing.map, undefined);
+    assert.match(missing.mapProblem!, /unreadable: .*ENOENT/);
+
+    writeFileSync(path, "{}");
+    const malformed = readReadMapInput(dir, path, "base-tip", run);
+    assert.deepEqual(malformed, {
+      mapProblem: `read map ${path} is not a rmd-read-map-v1 file`,
+      drift: { changedSinceMap: [] },
+    });
+    for (const loaded of [missing, malformed]) {
+      const selection = selectAffectedSuites(["openapi/daemon.yaml"], input(loaded));
+      assert.equal(selection.fullRun, true);
+      assert.equal(selection.readMapFallback, `no read map (${loaded.mapProblem})`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
