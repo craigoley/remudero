@@ -52,7 +52,8 @@ function ratchetFixture(over: Partial<BuildSweepEffectsDeps> = {}) {
     ghJsonImpl: () => ({ headRefName: branch, headRefOid: HEAD, body: "Remudero-Task: W1-T5742\n" }),
     registeredWorktreeOwnerImpl: () => undefined,
     fixBranchClaimKeyImpl: () => "t5742-claim",
-    createFixRungWorktreeImpl: () => {},
+    // W1-T6106: the push leaf pins the worktree's repository, so the fixture worktree carries a `.git` entry.
+    createFixRungWorktreeImpl: (_repo: unknown, path: unknown) => { mkdirSync(join(String(path), ".git"), { recursive: true }); },
     readBaselineRatchetWorktreeStateImpl: () => ({ headSha: HEAD,
       changedPaths: read++ === 0 ? [] : ["scripts/comment-load-baseline.json"] }),
     readPackageScriptsImpl: () => ({ "comment-load-ratchet": "fixture", "comment-load-signal": "fixture" }),

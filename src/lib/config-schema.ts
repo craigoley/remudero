@@ -388,6 +388,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_SHARED_READ_GAP_MS", "Overrides the short cross-process gap between shared GitHub reads; not a second cadence budget window.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
+  envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
