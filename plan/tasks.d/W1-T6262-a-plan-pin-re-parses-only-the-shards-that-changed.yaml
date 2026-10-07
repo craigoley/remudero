@@ -1,0 +1,48 @@
+- id: W1-T6262
+  title: "A PLAN PIN RE-PARSES ONLY THE SHARDS THAT CHANGED — every serve thread re-parses all ~3,400 tasks' blobs on each pin (2.9 s p50, 1,897 s of CPU a day across ~6 threads per pin), and each thread then holds its own 28 MiB parse"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how a thread turns a pinned plan's blobs into a Plan; it touches every serve thread's plan
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item C3), measured from serve.plan_pin_adopted rows and an isolated parse replay"
+  plan_refs: [W1-T5894, W1-T6247, W1-T6012]
+  files: [src/lib/thread-plan.ts, src/lib/plan.ts, test/a-plan-pin-re-parses-only-the-shards-that-changed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06T19:00Z to 2026-10-07T19:00Z on the production ledger (read-only union, counts only):
+    101 plan pins; each was adopted by 6 threads at p50 (max 9) through adoptThreadPlan, and each adoption ran
+    mergePlanBlobsQuarantiningDuplicates over EVERY blob the pin carries: parseMs p50 2,934, p90 4,228, max 6,540,
+    1,897 s of CPU in the day. No adoption failed.
+    OBSERVED in an isolated replay over main's plan (3,397 tasks): one full parse costs 1.7 to 2.2 s of CPU and
+    retains 27.7 MiB of heap after GC. So each serve process holds about 6 parses (about 166 MiB).
+    A merge changes one or two shards, but the pin's blobs are re-parsed whole by every thread. Plan changes also make
+    every read-model view rebuild with a fresh parse; in a workstreams replay those rebuilds cost 2.5 to 3 s against
+    0.2 s otherwise.
+    Related, not overlapping: W1-T6247 reuses the plan across open-PR view builds, and W1-T6012 covers the non-core
+    gateway's in-place reload. Neither changes how a pin's blobs are parsed.
+  design: |
+    (1) A thread keeps, per plan path, the parsed tasks of each blob, keyed by its label and an exact text identity
+    (a hash of the blob's bytes). On a new pin, an unchanged blob reuses its parsed tasks and a changed or new one is
+    parsed. The cross-shard merge, duplicate quarantine and invalid-shard handling then run over all blobs exactly as
+    mergePlanBlobsQuarantiningDuplicates does today, so a duplicate id that spans an unchanged and a changed shard is
+    still quarantined.
+    (2) The cache holds only the current pin's blobs: a blob absent from the new pin leaves the cache, so retention is
+    one parse per path, not one per pin.
+    (3) A reused Task object is shared between the previous and the new Plan. Before reuse, the task proves no reader
+    mutates a Task (an Object.freeze test over a reused parse through the plan readers), and that identity-keyed
+    caches (board-projection's planHash WeakMap) answer the same for a shared Task.
+    (4) serve.plan_pin_adopted gains parsed and reused blob counts, so the saving is measured live.
+  acceptance:
+    - claim: "a pin that changes one shard re-parses only that shard, and the Plan it answers is deep-equal to a full parse of the same blobs, including a duplicate id across an unchanged and a changed shard and an invalid shard"
+      proof: "unit test: test/a-plan-pin-re-parses-only-the-shards-that-changed.test.ts"
+    - claim: "the adoption row reports how many blobs it parsed and reused"
+      proof: "grep: reusedBlobs in src/lib/thread-plan.ts"
+  falsifier: |
+    Key the blob cache by label alone: an edited shard keeps its stale tasks and the deep-equal test fails. Drop the
+    cross-shard quarantine pass for reused blobs: the duplicate-across-shards case answers both tasks and the test fails.

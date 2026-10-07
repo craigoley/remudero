@@ -261,6 +261,9 @@ export interface Decision {
    *  prose — so a caller (the ledger row, a future status row) can render it as a standing
    *  blocker naming both shas without re-parsing text. */
   blocker?: StaleRunningDaemonBlocker;
+  /** W1-T6249 — set ONLY on the tick's AUTOMATIC recycles (a published image, or create-time drift),
+   *  as data so runDeployCycle can hand a busy one to a self-draining backend without parsing text. */
+  recycle?: "image" | "create-drift";
 }
 
 /** W1-T3694's own blocker shape — see {@link Decision.blocker}. */
@@ -771,7 +774,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     if (recentFailure) {
       return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
     }
-    return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; ") };
+    return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; "), recycle: "create-drift" };
   }
   if (!restartReasons && !imageStale) {
     // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
@@ -823,7 +826,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       return { deploy: false, reason: `${why}; a deploy failed under an hour ago — the automatic image recycle backs off` };
     }
     if (i.imagePublished === true) {
-      return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published` };
+      return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published`, recycle: "image" };
     }
     return {
       deploy: false,
@@ -1012,6 +1015,9 @@ export interface RestartBackend {
    *  suppresses it, or falls back to a different backend or a bare `docker restart`
    *  (design (iii)). */
   restart: () => void;
+  /** W1-T6249 — the backend PAUSES dispatch and waits (bounded) for in-flight work itself, refusing
+   *  if it outlasts that wait. A busy automatic recycle is handed to it rather than idle-gated. */
+  drainsItself?: boolean;
 }
 
 /** The outcome of probing a set of {@link RestartBackend}s: which one (if any) is usable, and
@@ -1741,6 +1747,30 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     deps.log("deploy.discarded_identical", { paths: tree.discardable, count: tree.discardable.length });
   }
 
+  // THE RESTART SEAM (W1-T3200): probed CAPABILITIES decide which backend restarts the daemon,
+  // never a hard-coded platform string — a host with launchctl uses it, a host with only the
+  // container scripts uses those, and either can be the sole backend a caller registers. Omitted
+  // ⇒ a single fallback wrapping `kickstart` below, unconditionally "available" — today's
+  // launchctl-only behaviour, unchanged (Rule 25: this supplies a second implementation of the
+  // existing seam, not a rewrite of every caller).
+  const restartBackends: readonly RestartBackend[] = deps.restartBackends?.() ?? [
+    {
+      name: "kickstart",
+      probe: () => true,
+      describe: () => "the injected kickstart() dependency",
+      restart: deps.kickstart,
+    },
+  ];
+
+  // W1-T6249 — A BUSY AUTOMATIC RECYCLE IS HANDED TO A BACKEND THAT DRAINS ITSELF. recycle-container.sh
+  // pauses dispatch, then waits (bounded) for in-flight work and refuses past it; this gate only hopes
+  // for a gap, which on 2026-10-07 never came. Mount-side restarts and kickstart keep the gate below.
+  const drainBackend = decision.recycle !== undefined ? selectRestartBackend(restartBackends).backend : undefined;
+  const drainHandoff = drainBackend?.drainsItself === true;
+  const handOff = (phase: string, fields: Record<string, unknown>): void => {
+    deps.log("deploy.drain_handoff", { phase, recycle: decision.recycle, backend: drainBackend?.name, ...fields });
+  };
+
   // Idle gate, WITH A DEFERRAL CEILING (W1-T341): the pull is safe anytime, but hold if a task
   // is in flight — unless the deferral has outlasted `ceilingMs`, in which case proceed anyway
   // rather than defer indefinitely (see evaluateIdleGate).
@@ -1758,7 +1788,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     boot_settling: probe1.bootSettling === true,
     blockers: idleBlockers(probe1),
   };
-  if (!gate1.proceed) {
+  if (!gate1.proceed && drainHandoff) {
+    handOff("pre-pull", gate1Fields);
+  } else if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
     deps.log("deploy.not_idle", { phase: "pre-pull", ...gate1Fields });
     return { deployed: false, reason: "not-idle (task in flight) — retry next interval", fromHead };
@@ -1790,7 +1822,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     boot_settling: probe2.bootSettling === true,
     blockers: idleBlockers(probe2),
   };
-  if (!gate2.proceed) {
+  if (!gate2.proceed && drainHandoff) {
+    handOff("pre-kickstart", gate2Fields);
+  } else if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
     deps.log("deploy.not_idle", {
       phase: "pre-kickstart",
@@ -1802,21 +1836,6 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (gate2.forced) {
     deps.log("deploy.idle_ceiling_forced", { phase: "pre-kickstart", ...gate2Fields });
   }
-
-  // THE RESTART SEAM (W1-T3200): probed CAPABILITIES decide which backend restarts the daemon,
-  // never a hard-coded platform string — a host with launchctl uses it, a host with only the
-  // container scripts uses those, and either can be the sole backend a caller registers. Omitted
-  // ⇒ a single fallback wrapping `kickstart` below, unconditionally "available" — today's
-  // launchctl-only behaviour, unchanged (Rule 25: this supplies a second implementation of the
-  // existing seam, not a rewrite of every caller).
-  const restartBackends: readonly RestartBackend[] = deps.restartBackends?.() ?? [
-    {
-      name: "kickstart",
-      probe: () => true,
-      describe: () => "the injected kickstart() dependency",
-      restart: deps.kickstart,
-    },
-  ];
 
   // W1-T380: a deferral episode ends ONLY on a cycle that actually restarts, so this branch
   // keeps the persisted clock INTACT — clearing it here once let a forced dry-run reset the
@@ -2186,6 +2205,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     })();
   const recycleContainerBackend: RestartBackend = {
     name: "recycle-container",
+    // Section 5 of the script: PAUSE, then a bounded wait for in-flight workers, refusing past it.
+    drainsItself: true,
     // Usable only when the SCRIPT is on this checkout AND a docker client is on PATH — everything
     // past that is the script's own authority (design (iii)): a daemon it cannot reach, a failed
     // pull, an image-id mismatch all surface as ITS OWN refusal (a thrown, non-zero exit), never

@@ -132,7 +132,20 @@ test("W1-T4917: a source CLI with a missing entrypoint cannot run deploy logic",
   assert.equal(read(f.deployed), "");
 });
 
-for (const [fault, reason] of [["claude", "active workers"], ["codex", "active workers"], ["sensor", "worker probe unreadable"], ["empty-sensor", "worker probe unreadable"], ["matcher", "worker probe unreadable"], ["dirty", "local edits"], ["dirty-after-fetch", "local edits"], ["status", "status unreadable"], ["fetch", "fetch failed"], ["diverged", "diverged"], ["install-ahead", "install checkout ancestry"], ["merge", "fast-forward failed"]]) {
+// W1-T6249: active work alone (a worker or a lock) still defers the REFRESH, but the tick then asks
+// deploy-run on the unmoved tree, whose drain handoff decides; see a-busy-primary-hands-its-image-recycle-to-the-drain.
+for (const fault of ["claude", "codex"]) {
+  test(`W1-T4917: ${fault} refuses the code refresh, and the tick still asks deploy-run on the old code`, (t) => {
+    const f = fixture(t);
+    const r = f.tick(fault);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /active workers/);
+    assert.match(read(f.deployed), /^old deploy-run --image-drift-only/);
+    assert.equal(read(join(f.daemon, "version")), "old");
+  });
+}
+
+for (const [fault, reason] of [["sensor", "worker probe unreadable"], ["empty-sensor", "worker probe unreadable"], ["matcher", "worker probe unreadable"], ["dirty", "local edits"], ["dirty-after-fetch", "local edits"], ["status", "status unreadable"], ["fetch", "fetch failed"], ["diverged", "diverged"], ["install-ahead", "install checkout ancestry"], ["merge", "fast-forward failed"]]) {
   test(`W1-T4917: ${fault} refuses the code refresh and deploy tick`, (t) => {
     const f = fixture(t);
     const r = f.tick(fault);
@@ -150,17 +163,17 @@ for (const dir of ["state/inflight", "worktrees"]) {
     const r = f.tick();
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /active locks/);
-    assert.equal(read(f.deployed), "");
+    assert.match(read(f.deployed), /^old deploy-run --image-drift-only/, "W1-T6249: deploy-run is still asked");
     assert.equal(read(join(f.daemon, "version")), "old");
   });
 }
 
-test("W1-T4917: a lock admitted during refresh defers deploy-run", (t) => {
+test("W1-T4917: a lock admitted during refresh fails the refresh; W1-T6249 still asks deploy-run", (t) => {
   const f = fixture(t);
   const r = f.tick("raced");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /active locks/);
-  assert.equal(read(f.deployed), "");
+  assert.match(read(f.deployed), /^new deploy-run --image-drift-only/);
 });
 
 test("W1-T4917: unreadable lock paths and a missing checkout defer deploy-run", (t) => {
