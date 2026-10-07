@@ -39,7 +39,7 @@ export function staticControlPlaneVerdict(repoRoot) {
   return { ok: registryGaps.length === 0 && parity.ok, registryGaps, parityProblems: parity.problems };
 }
 
-export function runCiControlPlanePrecheck({ base = "origin/main", repoRoot = process.cwd(), readChangedFiles = changedFiles, runCapabilitySnapshot = undefined, log = console.log, error = console.error } = {}) {
+export function runCiControlPlanePrecheck({ base = "origin/main", repoRoot = process.cwd(), readChangedFiles = changedFiles, runCapabilitySnapshot = undefined, run = spawnSync, log = console.log, error = console.error } = {}) {
   let files;
   try {
     files = readChangedFiles(base);
@@ -68,7 +68,7 @@ export function runCiControlPlanePrecheck({ base = "origin/main", repoRoot = pro
     }
   }
   if (capability) {
-    const result = runCapabilitySnapshot ?? (() => spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"], { cwd: repoRoot, encoding: "utf8" }))();
+    const result = runCapabilitySnapshot ?? (() => run(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"], { cwd: repoRoot, encoding: "utf8" }))();
     if (result.status !== 0) {
       error(`ci-control-plane-precheck: REFUSED -- capability snapshot is stale; run 'npm run capability-snapshot' and commit its outputs.\n${`${result.stdout ?? ""}${result.stderr ?? ""}`.trim()}`);
       return 1;

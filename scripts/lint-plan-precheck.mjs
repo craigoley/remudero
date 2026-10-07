@@ -69,8 +69,9 @@ export function lintPlanPrecheckVerdict({ changedFiles, subjects, lint }) {
 }
 
 /** The whole run, in-process: git and the lint are read from `cwd`, and every line goes to `log` / `warn`, so a test can
- *  drive it against a fixture repo. Returns the exit code; the two lines at the bottom are the only process glue. */
-export function runLintPlanPrecheck({ argv = [], cwd = process.cwd(), log = console.log, warn = console.error } = {}) {
+ *  drive it against a fixture repo; `run` starts the lint (the host gate passes its proof sandbox's, W1-T6138). Returns
+ *  the exit code; the two lines at the bottom are the only process glue. */
+export function runLintPlanPrecheck({ argv = [], cwd = process.cwd(), run = spawnSync, log = console.log, warn = console.error } = {}) {
   const fallbackBase = argv.includes("--base") ? argv[argv.indexOf("--base") + 1] : "origin/main";
   try {
     const root = gitOrThrow(["rev-parse", "--show-toplevel"], { cwd });
@@ -81,7 +82,7 @@ export function runLintPlanPrecheck({ argv = [], cwd = process.cwd(), log = cons
       changedFiles: gitOrThrow(["diff", "--name-only", `${forkPoint}...HEAD`], { cwd: root }).split("\n").filter(Boolean),
       subjects: gitOrThrow(["log", "--format=%s", `${forkPoint}..HEAD`], { cwd: root }).split("\n").filter(Boolean),
       lint: () => {
-        const r = spawnSync(process.execPath, lintArgv.args, { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 });
+        const r = run(process.execPath, lintArgv.args, { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 });
         return { status: r.status, output: `${r.stdout}\n${r.stderr}` };
       },
     });

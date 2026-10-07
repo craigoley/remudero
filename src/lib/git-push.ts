@@ -1,10 +1,12 @@
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { PROOF_SANDBOX_BINARY, proofChildEnv, proofSandboxArgv } from "./review.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import {
   HOST_GIT_CONFIG,
@@ -506,6 +508,56 @@ function withGateHome<T>(gate: PrePushGate, run: (env: NodeJS.ProcessEnv) => T):
   } finally {
     if (!settlesLater) cleanup();
   }
+}
+
+/** How the host gate runs a check's tree-owned half: inside the proof sandbox, or skipped with the reason it cannot start. */
+export type GateSandbox =
+  | { mode: "sandboxed"; run: (file: string, args: readonly string[], opts?: SpawnSyncOptions) => SpawnSyncReturns<string> }
+  | { mode: "skipped"; reason: string };
+
+/**
+ * W1-T6138 — THE TREE'S OWN CHECKS RUN IN THE PROOF SANDBOX, never in the daemon's process tree. The argv and env are
+ * W1-T6124's ({@link proofSandboxArgv}, {@link proofChildEnv}): the tree and a throwaway HOME writable, no daemon HOME,
+ * state or App key, no network, and `env` (the gate's allowlist) filtered again. A sandbox that does not start around
+ * node in THIS tree is `skipped` with its reason: the hook then keeps W1-T6120's skip-by-name, never an unsandboxed run.
+ */
+export function prePushGateSandbox(tree: string, env: NodeJS.ProcessEnv = process.env, exec: typeof spawnSync = spawnSync): GateSandbox {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prepush-sandbox-home-`));
+  process.once("exit", () => rmSync(home, { recursive: true, force: true }));
+  let argv: string[];
+  try {
+    argv = proofSandboxArgv({ cwd: tree, home, env });
+  } catch (error) {
+    return { mode: "skipped", reason: `the proof sandbox argv could not be built (${(error as Error).message})` };
+  }
+  const childEnv = { ...proofChildEnv(home, env), NODE_V8_COVERAGE: "" };
+  const spawn = (file: string, args: readonly string[], opts: SpawnSyncOptions = {}): SpawnSyncReturns<string> =>
+    exec(PROOF_SANDBOX_BINARY, [...argv, file, ...args], { maxBuffer: GATE_MAX_BUFFER, ...opts, cwd: tree, env: childEnv, encoding: "utf8" });
+  const start = spawn(process.execPath, ["-e", ""], { timeout: 10_000, killSignal: "SIGKILL" });
+  if (start.error !== undefined || start.status !== 0) {
+    const code = (start.error as NodeJS.ErrnoException | undefined)?.code;
+    const said = String(start.error?.message ?? start.stderr ?? "").trim().split("\n")[0];
+    const why = code === "ENOENT" ? `${PROOF_SANDBOX_BINARY} is not installed` : said || `exit ${start.status}`;
+    return { mode: "skipped", reason: `the proof sandbox cannot start on this ${process.platform} host (${why})` };
+  }
+  return { mode: "sandboxed", run: spawn };
+}
+
+/** A census child's `--import` values name the GATE's loader and setup files, which the sandbox does not mount: each
+ *  becomes the tree's file at the same repo-relative path (the longest suffix the tree holds), as CI's run of the
+ *  tree's own suite loads it. A value the tree has no copy of is left alone, so it fails inside the sandbox. */
+export function treeImportArgs(args: readonly string[], tree: string): string[] {
+  return args.map((arg, i) => {
+    if (args[i - 1] !== "--import") return arg;
+    const path = arg.startsWith("file:") ? fileURLToPath(arg) : arg;
+    if (!isAbsolute(path)) return arg;
+    const parts = path.split(sep).filter(Boolean);
+    for (let at = 0; at < parts.length; at++) {
+      const rel = parts.slice(at).join("/");
+      if (existsSync(join(tree, rel))) return `./${rel}`;
+    }
+    return arg;
+  });
 }
 
 /** A refused gate, in the shape a refused `git push` had: `runErrorCause` and `censusPushRefusal` read it. */
