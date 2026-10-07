@@ -1,0 +1,47 @@
+- id: W1-T6263
+  title: "A NEW SERVE PROCESS READS ROTATION DIGESTS, NOT 407 GZIP ARCHIVES PER MEMO — each rotation-memo holder re-reads every archive on a cold start (14 to 15.6 s of CPU each, about 5 per process), though an archive never changes after it is cut"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — where a rotation memo's per-archive result comes from on a cold start
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item M2), from W1-T6191's retention rows and an isolated memo replay"
+  plan_refs: [W1-T6191, W1-T4567, W1-T5062]
+  files: [src/lib/ledger-union.ts, src/lib/action-results.ts, src/lib/follow-up-policy.ts, src/lib/measurement-cadence.ts, src/lib/cost-anomaly.ts, test/a-cold-memo-reads-rotation-digests.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 from read_model.memo_retention rows (W1-T6191, live since 18:02Z): in every serve process, main
+    loads action-results (252 archives), follow-up-policy (407) and measurement-cadence (407), and the views fast and
+    heavy workers each load measurement-cadence (407) again. That is about 5 cold loads per process. cost-anomaly loads
+    407 in its own process. serve.handoff_done shows 70 handoffs in the day.
+    OBSERVED in an isolated replay over the same 407 on-disk archives, one holder per process, with each holder's own
+    reducer: every cold load costs 14.1 to 15.6 s of CPU (an empty-reducer control costs 15.1 s, so this is gunzip and
+    parse, not the reducer). The retained result is small: measurement-cadence 1.1 MiB with its summarizing reducer,
+    follow-up-policy 0.8 MiB, action-results and cost-anomaly about 0.
+    INFERRED: about 5,000 to 7,000 s of CPU a day (0.06 to 0.08 core), concentrated in the first minutes of each process.
+    The triple measurement-cadence retention is about 3 MiB, so the duplication is a CPU problem, not a memory one.
+  design: |
+    (1) createLedgerRotationMemo accepts an optional durable digest store: per holder and reducer version, per archive,
+    a JSON file holding that archive's reduced rows and torn-row count. It is keyed by the archive's name and identity
+    (size and mtime; an archive is immutable once cut) and written atomically (temp then rename).
+    (2) On load, an archive whose digest matches its identity and the holder's reducer version is answered from the
+    digest; any other archive is read as today and its digest written. A digest that is missing, unreadable, corrupt or
+    for another identity or version is never trusted: the archive is read, and the outcome is counted by kind, not
+    erased.
+    (3) Each holder declares a reducer version constant beside memoRetentionHolder, bumped when its reducer changes.
+    (4) Digests live under the instance's state cache directory, bounded to the archives that exist: a digest whose
+    archive is gone is removed on the next load.
+    (5) The retention row gains digest hit and miss counts, so start-up CPU is measured live.
+  acceptance:
+    - claim: "a cold memo with digests present answers exactly the rows a digest-less load answers, reading no archive, and a corrupt, stale-identity or other-version digest falls back to reading that archive"
+      proof: "unit test: test/a-cold-memo-reads-rotation-digests.test.ts"
+    - claim: "each async holder declares a reducer version for its digests"
+      proof: "grep: memoReducerVersion in src/lib/measurement-cadence.ts"
+  falsifier: |
+    Key the digest by archive name alone: a rewritten archive keeps its stale digest and the equivalence test fails.
+    Trust a digest written by another reducer version: the version case answers the old reducer's rows and the test fails.

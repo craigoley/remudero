@@ -83,7 +83,7 @@ import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
@@ -782,8 +782,26 @@ interface Shown {
   credit: ReturnType<BoardProjection["creditRead"]>;
 }
 
-/** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. */
-const dayCostRows = (rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): Array<[string, number]> => windowCostRows(rows, ...utcDayWindowMs(nowMs));
+const dayCostMemo = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; dayStartMs: number; rows: Array<[string, number]> }>();
+let dayCostScans = 0;
+
+/** How many day-cost scans this process has run: the W1-T6253 tests' counting seam. */
+export function dayCostScanCount(): number {
+  return dayCostScans;
+}
+
+/** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. W1-T6253: a rows array whose owner registers a
+ *  generation is scanned once per (generation, UTC day); any other array is scanned on every call. */
+const dayCostRows = (rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): Array<[string, number]> => {
+  const window = utcDayWindowMs(nowMs);
+  const generation = ledgerGenerationOf(rows);
+  const held = generation === undefined ? undefined : dayCostMemo.get(rows);
+  if (held && held.generation === generation && held.dayStartMs === window[0]) return held.rows.slice();
+  dayCostScans++;
+  const scanned = windowCostRows(rows, ...window);
+  if (generation !== undefined) dayCostMemo.set(rows, { generation, dayStartMs: window[0], rows: scanned });
+  return scanned.slice();
+};
 
 /** The legacy side of one shadow sample (view-shadow.ts): what /now shows today, in the view's shape. */
 export interface NowShadowLegacy {

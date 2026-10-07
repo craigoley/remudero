@@ -1,20 +1,18 @@
 // W1-T6064 — the exact Node pin (ADR 0002) moves .nvmrc and deploy/Dockerfile's FROM together, and
-// Dependabot's /deploy docker lane edits only FROM. A same-major bump is synced onto its pull request
-// by a workflow that pushes with the fleet App's token (a GITHUB_TOKEN push starts no new CI run).
+// Dependabot's /deploy docker lane edits only FROM. The daemon's dep-review lane syncs a same-major bump onto
+// its pull request with the App token it already holds (W1-T6258).
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parse } from "yaml";
 import { isDependencyDeclarationPath } from "../src/lib/dep-review.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // @ts-expect-error The head identity gate is an executable .mjs module outside tsconfig.
 import { isDependencyBumpHead } from "../scripts/head-identity-gate.mjs";
 
 const SCRIPT = join(process.cwd(), "scripts", "node-pin-follows-the-image.mjs");
-const WORKFLOW = join(process.cwd(), ".github", "workflows", "node-pin-follows-the-image.yml");
 const DIGEST = `sha256:${"a".repeat(64)}`;
 
 function pinFixture(fromVersion: string, pinned = "24.21.0"): string {
@@ -64,24 +62,12 @@ test("W1-T6064: the synced bump stays a dependency-only head the identity gate a
   }), true);
 });
 
-test("W1-T6064: the workflow syncs only Dependabot's Dockerfile bumps and pushes with the fleet App token", () => {
-  const workflow = parse(readFileSync(WORKFLOW, "utf8")) as {
-    on: { pull_request: { paths: string[] } };
-    jobs: Record<string, { if: string; steps: Array<{ id?: string; if?: string; uses?: string; run?: string; with?: Record<string, string>; env?: Record<string, string> }> }>;
-  };
-  assert.deepEqual(workflow.on.pull_request.paths, ["deploy/Dockerfile"]);
-  const [job] = Object.values(workflow.jobs);
-  assert.ok(job, "one sync job");
-  assert.match(job.if, /github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'/);
-  const steps = job.steps;
-  const syncStep = steps.findIndex((s) => s.run?.includes("node scripts/node-pin-follows-the-image.mjs"));
-  const tokenStep = steps.findIndex((s) => s.uses?.startsWith("actions/create-github-app-token@"));
-  const pushStep = steps.findIndex((s) => s.run?.includes("git push"));
-  assert.ok(syncStep >= 0 && tokenStep > syncStep && pushStep > tokenStep, "sync, then mint, then push");
-  assert.match(readFileSync(WORKFLOW, "utf8"), /uses: actions\/create-github-app-token@[0-9a-f]{40} # v\d/, "the action is pinned by SHA like every other");
-  assert.match(steps[tokenStep]!.if ?? "", /drift/, "no token is minted when the pin is already in sync");
-  assert.match(JSON.stringify(steps[tokenStep]!.with), /secrets\.RMD_FLEET_APP_PRIVATE_KEY/);
-  assert.match(steps[pushStep]!.run!, /steps\.app-token\.outputs\.token|APP_TOKEN/);
-  const guard = steps.find((s) => s.run?.includes("RMD_FLEET_APP_PRIVATE_KEY") && s.run.includes("exit 1"));
-  assert.ok(guard, "a missing Dependabot secret fails the job and names it, never a silent skip");
+// Operator ruling 2026-10-07: the daemon already holds the App token, so nothing may ask for a fleet App key
+// stored as a GitHub secret; W1-T6258 moves the sync into the dep-review lane.
+test("no workflow asks GitHub secrets for the fleet App's key", () => {
+  const dir = join(process.cwd(), ".github", "workflows");
+  const workflows = readdirSync(dir).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(workflows.length > 10, "the census must read the real workflow directory");
+  const asking = workflows.filter((name) => /secrets\.RMD_FLEET_APP_(PRIVATE_KEY|CLIENT_ID)/.test(readFileSync(join(dir, name), "utf8")));
+  assert.deepEqual(asking, []);
 });

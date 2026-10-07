@@ -93,6 +93,7 @@ import { readOperatorReleases } from "./machine-filing-judge.js";
 import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
 import {
   buildLedgerIndex,
+  type LedgerIndex,
   DEFAULT_MAX_TASK_DISPATCHES,
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
@@ -1416,10 +1417,11 @@ function projectPlanOnce(
   ledgerPath: string,
   lines: Array<Record<string, unknown>>,
   now: () => number,
+  ledgerIndex?: LedgerIndex,
 ): { projections?: Map<string, StatusProjection>; unknownReason?: string } {
   if (!plan) return { unknownReason: "plan/tasks.yaml is unreadable — dispatch eligibility cannot be resolved" };
   if (!github) return { unknownReason: "no GitHub gateway configured for this read" };
-  const deriveDeps: DeriveDeps = { ledgerPath, github, readLedger: () => lines, now };
+  const deriveDeps: DeriveDeps = { ledgerPath, github, readLedger: () => lines, now, ...(ledgerIndex ? { ledgerIndex } : {}) };
   let projections: Map<string, StatusProjection> | undefined;
   try {
     projections = projectPlan(plan, deriveDeps);
@@ -1509,11 +1511,13 @@ export function deriveCircuitBrokenBlockers(
   lines: Array<Record<string, unknown>>,
   plan: Plan | undefined,
   projections: Map<string, StatusProjection> | undefined,
+  // W1-T6253: buildStatusBoard's one index for the whole board; omitted, this section builds its own.
+  shared?: LedgerIndex,
 ): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
   // W1-T3523's orphan predicate needs the ledger's newest timestamp. Build the shared index once
   // for this whole board section rather than re-scanning the complete ledger for each task.
-  const index = buildLedgerIndex(lines);
+  const index = shared ?? buildLedgerIndex(lines);
   for (const taskId of distinctDispatchedTaskIds(lines)) {
     if (!isDispatchBreakerTripped(lines, taskId, DEFAULT_MAX_TASK_DISPATCHES, index)) continue;
     const planTask = plan?.tasks.find((t) => t.id === taskId);
@@ -1632,8 +1636,9 @@ function deriveBlockers(
   projections: Map<string, StatusProjection> | undefined,
   github: GitHub | undefined,
   limit: number,
+  index: LedgerIndex,
 ): BlockersSection {
-  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections);
+  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const retired = deriveRetiredBlockers(plan);
   let blockedPrs: BlockedPrBlocker[] = [];
@@ -1705,6 +1710,7 @@ export function deriveQueueHead(
   // W1-T1205: OPTIONAL and TRAILING, so every existing caller — doctorCommand's deliberately network-free call among
   // them — keeps its byte-identical no-exclusion behaviour. `buildStatusBoard` supplies the one real reader.
   hasPushedRunBranch?: (taskId: string) => boolean,
+  shared?: LedgerIndex,
 ): QueueHeadSection {
   if (!plan || !projections || ghUnknownReason) {
     const section: QueueHeadSection = {
@@ -1719,7 +1725,7 @@ export function deriveQueueHead(
   // Keep the per-task breaker callbacks below O(task rows), including W1-T3523's
   // ledger-derived orphan clock. Rebuilding this index inside each callback made /v1/status
   // cross its production-corpus wall-clock bound.
-  const index = buildLedgerIndex(lines);
+  const index = shared ?? buildLedgerIndex(lines);
   const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
   const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id, DEFAULT_MAX_TASK_DISPATCHES, index);
@@ -2262,7 +2268,9 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // W1-T2446: HOISTED from the derived-half block below — LATCHES needs the merge-credit projection the other sections
   // build, to correct the held dispatch-claim row's text. It reads only values already in scope.
   const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
-  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
+  // W1-T6253: one index for the projection and both sections, and none at all while the rows' generation is unchanged.
+  const ledgerIndex = buildLedgerIndex(lines);
+  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now, ledgerIndex);
   const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
 
   // ── LATCHES ──
@@ -2308,13 +2316,13 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit);
+  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit, ledgerIndex);
   // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds, read here rather than shared with it —
   // this is its own, unbatched call site. ONE sweep per render, never one per candidate.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs, (id) =>
-    pushedRunBranchIds.has(id),
+    pushedRunBranchIds.has(id), ledgerIndex,
   );
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =

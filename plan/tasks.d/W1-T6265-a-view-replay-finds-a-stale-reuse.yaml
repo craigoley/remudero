@@ -1,0 +1,43 @@
+- id: W1-T6265
+  title: "A VIEW CHANGE PROVES ITS OUTPUT UNCHANGED BEFORE IT SHIPS — a read-model view replay that diffs a candidate build against an unmodified build and a no-reuse oracle under a controlled clock caught board.ts's incremental contract stale in 25 to 29 steps where the visible body never differed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium  # Rule 19: one concern — an offline replay tool for read-model views; no runtime path changes
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item T1), from the replay that validated PR 9922"
+  plan_refs: [W1-T5050, W1-T5885]
+  files: [scripts/view-replay.ts, test/a-view-replay-finds-a-stale-reuse.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 while validating PR 9922 (workstreams per-task projection reuse): an isolated replay over a
+    private online-backup copy of the read model ran main's unmodified view, an A/A copy, a reuse-disabled control,
+    a falsifier arm with board.ts's incremental contract, and a no-reuse projectPlan oracle, under a simulated clock,
+    through about 100 input changes (GitHub snapshot, credit store, overrides, plan, ledger, clock boundaries,
+    unreadable and missing inputs and their recovery). The falsifier arm went stale in 25 to 29 steps while the
+    visible body never differed; only the canonical projection comparison caught it. Writing the unit tests afterwards
+    found one more case (one gateway that recovers in place). The harness lives outside the repo today
+    (an operator's scratch directory), so the next view change (now@core's 2.5 s snapshot and 2.9 s decisions stages,
+    the next largest costs) starts from nothing.
+  design: |
+    (1) scripts/view-replay.ts: given a read-model store copy, a ledger copy, a board snapshot copy and a plan checkout,
+    replay one view through a scripted list of input changes. Each step runs every arm and compares canonical JSON (sorted
+    keys, Maps as sorted objects) of the materialized body, its sources and its logged rows against the unmodified
+    arm, and each arm's projection map against a no-reuse oracle at the same simulated instant. Date.now and
+    no-argument Date read the simulated clock, and a count of no-argument Date calls reports any leak to real time.
+    (2) Arms are modules named on the command line, so a candidate change is replayed without editing the tool.
+    (3) It refuses to run on anything but a copy: the store path must not be a serving path, and the work root is created
+    by the tool under the given directory.
+  acceptance:
+    - claim: "the replay reports a divergence for an arm whose reuse ignores a changed input while the unmodified and A/A arms agree, and reports none for an arm that re-derives everything"
+      proof: "unit test: test/a-view-replay-finds-a-stale-reuse.test.ts"
+    - claim: "the replay counts no-argument Date calls so a leak to real time is reported"
+      proof: "grep: noArgDates in scripts/view-replay.ts"
+  falsifier: |
+    Compare only the visible body: the stale-reuse arm agrees and the test fails. Let the tool read real time: the
+    no-argument Date count is non-zero and the tool's own check fails.

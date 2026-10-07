@@ -2111,12 +2111,6 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "requires GitHub's pull_request head ref and the head commit selected by that event; a local pre-push checkout cannot establish that PR identity honestly",
   },
   {
-    workflow: "node-pin-follows-the-image.yml",
-    job: "sync",
-    mirrored: false,
-    reason: "runs only on Dependabot's pull requests and pushes with the fleet App token; the pin logic it calls is unit-tested (W1-T6064)",
-  },
-  {
     workflow: "osv-scanner-pr.yml",
     job: "scan-pr",
     mirrored: false,
