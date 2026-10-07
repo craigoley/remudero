@@ -42,7 +42,10 @@ test("test/a-retention-row-names-its-worker-and-holder.test.ts: unchanged counts
   assert.equal(rows[0]!.lane, "fast");
   assert.equal(rows[1]!.lane, "heavy");
   memo.reportRetention("/private/core/state", "other");
-  const costs = createLedgerRotationMemo((rows) => rows, { holder: "now.legacy.costs" });
+  const costs = createLedgerRotationMemo((rows) => rows, { holder: "now.legacy.costs", statKey: () => "fixed" });
+  const costPass = costs.pass({ parseMissing: true });
+  costPass.rotationRecords({ path: "/private/core/state/ledger.1.ndjson", form: "plain" }, () => ({ rows: [{ step: "fixture" }], torn: 0, tornLines: [] }));
+  assert.equal(costPass.complete(), true);
   costs.reportRetention("/private/core/state");
   assert.equal(messages.length, 4);
   assert.equal((messages[2] as Extract<ReadModelWorkerMessage, { type: "log" }>).extra.instance, "other");
@@ -78,7 +81,10 @@ test("a different thread with the same holder, instance and absent lane gets its
   t.after(() => setLedgerMemoRetentionContext(undefined));
   const rows: Record<string, unknown>[] = [];
   const log = (_step: string, extra: Record<string, unknown>) => { rows.push(extra); };
-  const memo = createLedgerRotationMemo((r) => r, { holder: "thread-fixture" });
+  const memo = createLedgerRotationMemo((r) => r, { holder: "thread-fixture", statKey: () => "fixed" });
+  const pass = memo.pass({ parseMissing: true });
+  pass.rotationRecords({ path: "/private/core/state/ledger.1.ndjson", form: "plain" }, () => ({ rows: [{ step: "fixture" }], torn: 0, tornLines: [] }));
+  assert.equal(pass.complete(), true);
   for (const thread of ["views", "projector"]) {
     setLedgerMemoRetentionContext({ thread, log, instances: [{ name: "core", ledgerDir: "/private/core/state" }] });
     memo.reportRetention("/private/core/state");
@@ -91,8 +97,11 @@ test("a different thread with the same holder, instance and absent lane gets its
 
 test("retention is reported only after a sink accepts it and a bare directory contributes only its name", () => {
   setLedgerMemoRetentionContext(undefined);
-  const silent = createLedgerRotationMemo((r) => r, { holder: "silent" });
+  const silent = createLedgerRotationMemo((r) => r, { holder: "silent", statKey: () => "fixed" });
   silent.reportRetention("/private/cache");
+  const pass = silent.pass({ parseMissing: true });
+  pass.rotationRecords({ path: "/private/cache/ledger.1.ndjson", form: "plain" }, () => ({ rows: [{ step: "fixture" }], torn: 0, tornLines: [] }));
+  assert.equal(pass.complete(), true);
   const rows: Record<string, unknown>[] = [];
   silent.reportRetention("/private/cache", undefined, (_step, row) => { rows.push(row); });
   assert.equal(rows[0]!.instance, "cache");
@@ -100,12 +109,38 @@ test("retention is reported only after a sink accepts it and a bare directory co
   const retry = createLedgerRotationMemo((r) => r, { holder: "retry", writeRetention: (_path, row) => {
     if (++attempts === 1) throw new Error("fixture sink unavailable");
     rows.push(row);
-  } });
+  }, statKey: () => "fixed" });
+  const retryPass = retry.pass({ parseMissing: true });
+  retryPass.rotationRecords({ path: "/private/core/state/ledger.1.ndjson", form: "plain" }, () => ({ rows: [{ step: "fixture" }], torn: 0, tornLines: [] }));
+  assert.equal(retryPass.complete(), true);
   assert.throws(() => retry.reportRetention("/private/core/state"), /fixture sink unavailable/);
   retry.reportRetention("/private/core/state");
   retry.reportRetention("/private/core/state");
   assert.equal(attempts, 2);
   assert.equal(rows.length, 2);
+});
+
+test("an empty first retention sample is silent, while a later transition back to empty is reported", () => {
+  setLedgerMemoRetentionContext(undefined);
+  const rows: Array<Record<string, unknown>> = [];
+  const memo = createLedgerRotationMemo((r) => r, {
+    holder: "empty-baseline",
+    statKey: () => "fixed",
+    writeRetention: (_path, row) => rows.push(row),
+  });
+  memo.reportRetention("/private/core/state");
+  memo.reportRetention("/private/core/state");
+  assert.equal(rows.length, 0);
+
+  const loaded = memo.pass({ parseMissing: true });
+  loaded.rotationRecords({ path: "/private/core/state/ledger.1.ndjson", form: "plain" }, () => ({ rows: [{ step: "fixture" }], torn: 0, tornLines: [] }));
+  assert.equal(loaded.complete(), true);
+  memo.reportRetention("/private/core/state");
+  assert.deepEqual(rows.map(({ archives, rows: retained }) => [archives, retained]), [[1, 1]]);
+
+  assert.equal(memo.pass().complete(), true);
+  memo.reportRetention("/private/core/state");
+  assert.deepEqual(rows.map(({ archives, rows: retained }) => [archives, retained]), [[1, 1], [0, 0]]);
 });
 
 test("now legacy reports both named memos and preserves the aggregate retention event", (t) => {

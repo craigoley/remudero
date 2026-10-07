@@ -1046,6 +1046,14 @@ export function createLedgerRotationMemo(
       const key = JSON.stringify([identity.thread, identity.lane, identity.holder, identity.instance]);
       const signature = JSON.stringify(counts);
       if (reported.get(key) === signature) return;
+      // An empty first observation is the baseline, not a retention change worth a ledger write.
+      // If a previously non-empty memo later drains to zero, its changed signature is still emitted.
+      const emptyBaseline = reported.get(key) === undefined && counts.archives === 0 && counts.rows === 0 &&
+        counts.tornRows === 0 && counts.failedArchives === 0;
+      if (emptyBaseline) {
+        reported.set(key, signature);
+        return;
+      }
       const extra = { ...identity, ...counts };
       if (emit) emit("read_model.memo_retention", extra);
       else io.writeRetention!(join(stateDir, LEDGER_FILENAME), { run_id: "memo-retention", task_id: "SERVE", step: "read_model.memo_retention", ...extra });
