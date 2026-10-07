@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { unwrapLowPriority } from "../../src/lib/test-slot.js";
 import type { PreflightSpawn } from "../../src/lib/commit-message.js";
 
 /** Materialize the artifacts a parity fixture's fake spawn claims its coverage child produced. */
@@ -8,6 +9,8 @@ export function coverageParitySpawnResult(
   args: string[],
   opts?: Parameters<PreflightSpawn>[2],
 ): ReturnType<PreflightSpawn> | undefined {
+  // A coverage shard starts under nice/ionice (test-slot.ts); the node argv inside is what CI runs.
+  ({ file, args } = unwrapLowPriority(file, args));
   if (file !== process.execPath) return undefined;
   if (args.includes("--experimental-test-coverage")) {
     const rawDir = opts?.env?.NODE_V8_COVERAGE;
