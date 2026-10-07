@@ -86,7 +86,7 @@
   "scripts/workflow-guard-mutation-baseline.json": 0,
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 137,
-  "src/lib/analytics-route.ts": 270,
+  "src/lib/analytics-route.ts": 278,
   "src/lib/arm-auto-merge.ts": 500,
   "src/lib/autonomy.ts": 90,
   "src/lib/board-review.ts": 244,

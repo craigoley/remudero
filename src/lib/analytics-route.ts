@@ -49,10 +49,11 @@ import { goalObservationFromRow, type GoalObservation } from "./goals.js";
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
-import { LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME } from "./ledger-path.js";
 import { LEDGER_COLD_STORE_DIRNAME } from "./ledger-compact.js";
 import {
   buildAnalyticsTimeSeries,
@@ -69,7 +70,7 @@ import {
 } from "./analytics-breakdowns.js";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { fingerprintLedgerLine, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerFileRangeDigests, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
@@ -681,10 +682,18 @@ const CHECKPOINT_SUCCESS_VERDICTS = new Set(["merged", "already_satisfied"]);
 
 type AnalyticsCheckpointSource = {
   archives: Array<{ name: string; size: number; mtimeMs: number }>;
-  live: { size: number; mtimeMs: number } | null;
+  live: { size: number; mtimeMs: number; ino?: number } | null;
   lastArchive: string | null;
   liveOffset: number;
+  liveAnchor?: LiveAnchor;
 };
+
+/** The live file read: inode, carried prefix, and digest of the bytes before `liveOffset` past that prefix. */
+export type LiveAnchor = { ino: number; prefixBytes: number; prefixSha256: string; tailBytes: number; tailSha256: string };
+
+type LivePosition = { liveStartOffset: number; rotationStart?: { name: string; offset: number } };
+
+const LIVE_ANCHOR_TAIL_BYTES = 4096;
 
 type AnalyticsCheckpointState = {
   goalObservations?: GoalObservation[];
@@ -1845,7 +1854,12 @@ function checkpointSource(stateDir: string): AnalyticsCheckpointSource | undefin
     });
     const livePath = join(stateDir, LEDGER_FILENAME);
     const live = existsSync(livePath) ? statSync(livePath) : null;
-    return { archives, live: live ? { size: live.size, mtimeMs: live.mtimeMs } : null, lastArchive: archives.at(-1)?.name ?? null, liveOffset: live?.size ?? 0 };
+    return {
+      archives,
+      live: live ? { size: live.size, mtimeMs: live.mtimeMs, ino: live.ino } : null,
+      lastArchive: archives.at(-1)?.name ?? null,
+      liveOffset: live?.size ?? 0,
+    };
   } catch {
     // A missing or unreadable source manifest is an explicit non-resumable state; callers must
     // fall back to the full union rather than treating it as a healthy empty source.
@@ -1890,6 +1904,89 @@ function checkpointSourceResumeRefusal(previous: AnalyticsCheckpointSource, curr
   // A compaction that consumed a rotation this fold never read put unread rows behind `afterRotation`.
   if ([...superseded].some(unread)) return "compaction-consumed-unread";
   return undefined;
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function carriedPrefixClaim(livePath: string): { bytes: number; sha256: string } | undefined {
+  try {
+    const carried = JSON.parse(readFileSync(`${livePath}${LEDGER_CARRIED_PREFIX_SUFFIX}`, "utf8")) as { bytes?: unknown; sha256?: unknown };
+    return typeof carried.bytes === "number" && Number.isSafeInteger(carried.bytes) && carried.bytes > 0 && typeof carried.sha256 === "string"
+      ? { bytes: carried.bytes, sha256: carried.sha256 } : undefined;
+  } catch {
+    // deliberate: no readable sidecar is the rotation's own "unknown prefix", which archives the whole file.
+    return undefined;
+  }
+}
+
+export function liveAnchor(stateDir: string, ino: number, offset: number): LiveAnchor | undefined {
+  const livePath = join(stateDir, LEDGER_FILENAME);
+  let fd: number;
+  try {
+    fd = openSync(livePath, "r");
+  } catch {
+    // deliberate: a live file gone since the read leaves no anchor, which the resume names as unanchored.
+    return undefined;
+  }
+  try {
+    if (fstatSync(fd).ino !== ino) return undefined;
+    const read = (start: number, end: number): Buffer => {
+      const bytes = Buffer.alloc(Math.max(0, end - start));
+      return bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, start));
+    };
+    const claim = carriedPrefixClaim(livePath);
+    const prefixBytes = claim !== undefined && claim.bytes <= offset && sha256Hex(read(0, claim.bytes)) === claim.sha256 ? claim.bytes : 0;
+    const tailStart = Math.max(prefixBytes, offset - LIVE_ANCHOR_TAIL_BYTES);
+    const tail = read(tailStart, offset);
+    if (tail.length !== offset - tailStart) return undefined;
+    return {
+      ino,
+      prefixBytes,
+      prefixSha256: prefixBytes > 0 ? claim!.sha256 : sha256Hex(Buffer.alloc(0)),
+      tailBytes: tail.length,
+      tailSha256: sha256Hex(tail),
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** A replaced live file's unread tail opens the first new rotation, at the offset less the carried prefix
+ *  or (archived whole) at the offset, whichever the digests prove; the new live file then reads from 0. */
+async function resumeLivePosition(previous: AnalyticsCheckpointSource, current: AnalyticsCheckpointSource, stateDir: string): Promise<LivePosition | string> {
+  if (previous.live === null || current.live === null) return { liveStartOffset: 0 };
+  const offset = previous.liveOffset;
+  const last = previous.lastArchive;
+  const rotations = current.archives.filter((entry) => last === null || entry.name > last);
+  const anchor = previous.liveAnchor;
+  if (anchor === undefined) {
+    // A checkpoint written before the anchor existed: the old reading, only while nothing can have rotated.
+    return rotations.length === 0 && current.live.size >= offset ? { liveStartOffset: offset } : "live-position-unanchored";
+  }
+  const livePath = join(stateDir, LEDGER_FILENAME);
+  if (current.live.ino === anchor.ino) {
+    const [tail] = await ledgerFileRangeDigests(livePath, "plain", [{ start: offset - anchor.tailBytes, end: offset }]);
+    if (tail === anchor.tailSha256) return { liveStartOffset: offset };
+  }
+  const first = rotations[0];
+  if (first === undefined) {
+    // An empty delta archives nothing: only a fold that stopped at the end of the carried prefix lost nothing.
+    return offset === anchor.prefixBytes ? { liveStartOffset: 0 } : "live-replaced-without-rotation";
+  }
+  const candidates = [
+    { offset, prefix: anchor.prefixBytes > 0 },
+    ...(anchor.prefixBytes > 0 ? [{ offset: offset - anchor.prefixBytes, prefix: false }] : []),
+  ];
+  const ranges = candidates.flatMap((candidate) => [
+    { start: candidate.offset - anchor.tailBytes, end: candidate.offset },
+    { start: 0, end: candidate.prefix ? anchor.prefixBytes : 0 },
+  ]);
+  const digests = await ledgerFileRangeDigests(join(stateDir, first.name), first.name.endsWith(".gz") ? "gzip" : "plain", ranges);
+  const found = candidates.find((candidate, index) =>
+    digests[2 * index] === anchor.tailSha256 && (!candidate.prefix || digests[2 * index + 1] === anchor.prefixSha256));
+  return found === undefined ? "live-rotation-unreconciled" : { liveStartOffset: 0, rotationStart: { name: first.name, offset: found.offset } };
 }
 
 function resumeRefusal(prior: AnalyticsResumePoint | undefined, current: AnalyticsCheckpointSource | undefined, stateDir: string): string | undefined {
@@ -2146,19 +2243,27 @@ export async function scanAnalyticsLedger(
   options: AnalyticsDeriveOptions = {},
 ): Promise<AnalyticsSnapshotReadResult | AnalyticsPartialReadResult> {
   const currentSource = checkpointSource(stateDir);
-  const progressRefused = options.progress === undefined ? undefined : resumeRefusal(options.progress, currentSource, stateDir);
-  const checkpointRefused = resumeRefusal(priorCheckpoint, currentSource, stateDir);
-  const candidates: Array<{ point: AnalyticsResumePoint; mode: "continue" | "resume" }> = [];
-  if (options.progress !== undefined && progressRefused === undefined) candidates.push({ point: options.progress, mode: "continue" });
-  if (priorCheckpoint !== undefined && checkpointRefused === undefined) candidates.push({ point: priorCheckpoint, mode: "resume" });
+  const positionOf = async (point: AnalyticsResumePoint | undefined): Promise<LivePosition | string> => {
+    const refused = resumeRefusal(point, currentSource, stateDir);
+    return refused ?? await resumeLivePosition(point!.source, currentSource!, stateDir);
+  };
+  const progressPosition = options.progress === undefined ? undefined : await positionOf(options.progress);
+  const checkpointPosition = await positionOf(priorCheckpoint);
+  const progressRefused = typeof progressPosition === "string" ? progressPosition : undefined;
+  const checkpointRefused = typeof checkpointPosition === "string" ? checkpointPosition : undefined;
+  const candidates: Array<{ point: AnalyticsResumePoint; mode: "continue" | "resume"; position: LivePosition }> = [];
+  if (options.progress !== undefined && typeof progressPosition === "object") candidates.push({ point: options.progress, mode: "continue", position: progressPosition });
+  if (priorCheckpoint !== undefined && typeof checkpointPosition === "object") candidates.push({ point: priorCheckpoint, mode: "resume", position: checkpointPosition });
   let hydrated: AnalyticsAccumulator | undefined;
   let resumePoint: AnalyticsResumePoint | undefined;
+  let position: LivePosition = { liveStartOffset: 0 };
   let mode: AnalyticsScanReport["mode"] = "full";
   let corrupt = false;
   for (const candidate of candidates) {
     try {
       hydrated = hydrateCheckpointState(candidate.point.state);
       resumePoint = candidate.point;
+      position = candidate.position;
       mode = candidate.mode;
       break;
     } catch {
@@ -2173,10 +2278,6 @@ export async function scanAnalyticsLedger(
   if (currentSource === undefined || (currentSource.archives.length === 0 && currentSource.live === null)) {
     acc.routingTelemetry.sourceUnavailableReason = "ledger-source-missing";
   }
-  const resumeSource = resumePoint === undefined ? undefined : currentSource;
-  const liveOffset = resumePoint !== undefined && resumeSource !== undefined && resumePoint.source.live !== null && resumeSource.live !== null && resumeSource.live.size < resumePoint.source.liveOffset
-    ? 0
-    : resumePoint?.source.liveOffset ?? 0;
   const lastArchive = resumePoint?.source.lastArchive ?? null;
   const rotationsPending = (currentSource?.archives ?? []).filter((entry) => lastArchive === null || entry.name > lastArchive).length;
   // Only the newest window per step seeds a resume; a fingerprint per row held ~700 MB on 4.0M rows.
@@ -2184,13 +2285,16 @@ export async function scanAnalyticsLedger(
   let unreadArchives = resumePoint?.unreadRotations ?? 0;
   let unreadLive = 0;
   let tornLiveStartOffset: number | undefined;
+  let liveRead: { ino?: number; endOffset: number } | undefined;
   let rotationsRead = 0;
   let stoppedAfter: string | undefined;
   const union = openLedgerUnion(stateDir, {
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     signal,
     ...(lastArchive !== null ? { afterRotation: lastArchive } : {}),
-    ...(resumePoint ? { liveStartOffset: liveOffset, dedupeSeed: resumePoint.tail } : {}),
+    ...(resumePoint ? { liveStartOffset: position.liveStartOffset, dedupeSeed: resumePoint.tail } : {}),
+    ...(position.rotationStart !== undefined ? { rotationStartOffset: position.rotationStart } : {}),
+    onLiveRead: (read) => { liveRead = read; },
     onUnreadArchive: () => { unreadArchives += 1; },
     onUnreadLive: () => { unreadLive += 1; },
     onMalformedRow: (finding) => {
@@ -2247,8 +2351,13 @@ export async function scanAnalyticsLedger(
   }
   finishBenchmarkSourceQuality(acc.routingTelemetry, unreadArchives, unreadLive);
   const snapshot = snapshotFromAccumulator(acc, clock.iso(), withJudgeLabels(stateDir, options));
-  const source = checkpointSource(stateDir) ?? currentSource ?? { archives: [], live: null, lastArchive: null, liveOffset: 0 };
+  // The rotations listed BEFORE the read and the live bytes it consumed: anything landing later is unread.
+  const source: AnalyticsCheckpointSource = currentSource === undefined
+    ? { archives: [], live: null, lastArchive: null, liveOffset: 0 }
+    : { ...currentSource, liveOffset: liveRead?.endOffset ?? 0 };
   if (tornLiveStartOffset !== undefined) source.liveOffset = Math.min(source.liveOffset, tornLiveStartOffset);
+  const anchor = liveRead?.ino === undefined ? undefined : liveAnchor(stateDir, liveRead.ino, source.liveOffset);
+  if (anchor !== undefined) source.liveAnchor = anchor;
   const checkpoint: AnalyticsCheckpoint = {
     version: CHECKPOINT_VERSION,
     source,
