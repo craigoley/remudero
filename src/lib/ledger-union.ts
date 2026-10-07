@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { pipeline } from "node:stream/promises";
 import { readFile as nodeReadFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
@@ -956,18 +957,54 @@ export function createLedgerRotationMemo(
     let key = "";
     try {
       key = statKey(entry.path);
-      const raw = await readFile(entry.path);
-      const buf = entry.form === "gzip" ? await gunzipAsync(raw) : raw;
       let rows: Array<Record<string, unknown>> = [];
       let torn = 0;
       const tornLines: string[] = [];
-      for (let at = 0; at < buf.length; ) {
-        const slice: Array<Record<string, unknown>> = [];
-        const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
-        torn += scanned.bad;
-        at = scanned.next;
-        rows = reduce([...rows, ...slice]);
-        await yieldTurn();
+      if (io.readFile) {
+        // Preserve the existing injected-buffer seam; real files use bounded streaming below.
+        const raw = await readFile(entry.path);
+        const buf = entry.form === "gzip" ? await gunzipAsync(raw) : raw;
+        for (let at = 0; at < buf.length; ) {
+          const slice: Array<Record<string, unknown>> = [];
+          const scanned = scanLedgerBuffer(buf, io.pattern, (row) => slice.push(row), at, LEDGER_ROTATION_LOAD_LINES_PER_TURN, (line) => tornLines.push(line));
+          torn += scanned.bad;
+          at = scanned.next;
+          rows = reduce([...rows, ...slice]);
+          await yieldTurn();
+        }
+      } else {
+        const consume = async (input: AsyncIterable<Buffer | string>): Promise<void> => {
+          let slice: Array<Record<string, unknown>> = [];
+          let lines = 0;
+          const flush = async (): Promise<void> => {
+            rows = reduce([...rows, ...slice]);
+            slice = [];
+            lines = 0;
+            await yieldTurn();
+          };
+          for await (const raw of ndjsonLines(input)) {
+            // Match scanLedgerBuffer's LF framing, whitespace, non-object and pattern semantics.
+            if (raw.length === 0) continue;
+            lines++;
+            const line = raw.trim();
+            if (line && (!io.pattern || io.pattern.test(line))) {
+              try {
+                const parsed = parseObject(line);
+                if (parsed !== undefined) slice.push(parsed);
+              } catch {
+                torn++;
+                tornLines.push(line);
+              }
+            }
+            if (lines === LEDGER_ROTATION_LOAD_LINES_PER_TURN) await flush();
+          }
+          if (lines > 0) await flush();
+        };
+        const source = nodeCreateReadStream(entry.path);
+        // pipeline propagates source/decompressor errors and closes both on failure; no partial
+        // memo is installed. Keep the existing failed-marker/inline-retry behavior below.
+        if (entry.form === "gzip") await pipeline(source, createGunzip(), consume);
+        else await pipeline(source, consume);
       }
       memo.set(entry.path, { key, read: { rows, torn, tornLines } });
     } catch {
