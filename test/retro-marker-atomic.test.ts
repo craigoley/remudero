@@ -701,7 +701,7 @@ function setupFakeRetroFixture(
   mkdirSync(harnessHooks);
   const gateCallsPath = join(fakeBinDir, "publication-gate-calls");
   writeFileSync(join(harnessHooks, "pre-push"),
-    `#!/bin/sh\nprintf '%s\\n' 'fixture-owned-harness-gate' >> ${JSON.stringify(gateCallsPath)}\n`, { mode: 0o755 });
+    `#!/bin/sh\nwhile IFS= read -r push_ref; do :; done\nprintf '%s\\n' 'fixture-owned-harness-gate' >> ${JSON.stringify(gateCallsPath)}\n`, { mode: 0o755 });
   const publicationGateCalls = () => existsSync(gateCallsPath)
     ? readFileSync(gateCallsPath, "utf8").trim().split("\n") : [];
 
