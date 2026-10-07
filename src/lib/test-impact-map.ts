@@ -41,6 +41,17 @@ const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
  *  (Moved here from affected-suites.ts by W1-T6083, which re-exports it: the impact arm reads it and
  *  the selector reads the arm, so one of them had to own it.) */
 export function stripComments(content: string, opts: { keepLines?: boolean } = {}): string {
+  return scanSource(content, false, opts.keepLines === true);
+}
+
+/** W1-T6089 — `content` (already comment-free) with every string, template and regex BODY blanked to
+ *  spaces, delimiters and offsets kept: brackets inside a literal can no longer unbalance a walk. */
+export function maskLiterals(content: string): string {
+  return scanSource(content, true, false);
+}
+
+function scanSource(content: string, mask: boolean, keepLines: boolean): string {
+  const literal = (text: string) => (mask && text.length > 1 ? text[0] + text.slice(1, -1).replace(/[^\n]/g, " ") + text.slice(-1) : text);
   let out = "";
   let last = ""; // the last significant (non-space, non-comment) character emitted
   let i = 0;
@@ -55,7 +66,7 @@ export function stripComments(content: string, opts: { keepLines?: boolean } = {
     if (c === "/" && next === "*") {
       const end = content.indexOf("*/", i + 2);
       const stop = end < 0 ? n : end + 2;
-      out += opts.keepLines ? content.slice(i, stop).replace(/[^\n]/g, "") || " " : " ";
+      out += keepLines ?content.slice(i, stop).replace(/[^\n]/g, "") || " " : " ";
       i = stop;
       continue;
     }
@@ -66,7 +77,7 @@ export function stripComments(content: string, opts: { keepLines?: boolean } = {
         else if (c !== "`" && content[j] === "\n") break;
         j += 1;
       }
-      out += content.slice(i, j + 1);
+      out += literal(content.slice(i, j + 1));
       i = j + 1;
       last = c;
       continue;
@@ -82,7 +93,7 @@ export function stripComments(content: string, opts: { keepLines?: boolean } = {
         else if (d === "/" && !inClass) break;
         j += 1;
       }
-      out += content.slice(i, j + 1);
+      out += literal(content.slice(i, j + 1));
       i = j + 1;
       last = "/";
       continue;

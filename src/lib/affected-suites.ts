@@ -22,7 +22,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 
-import { impactArmSelection, stripComments, type ImpactArmInput } from "./test-impact-map.js";
+import { impactArmSelection, maskLiterals, stripComments, type ImpactArmInput } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 
 export { stripComments };
@@ -95,26 +95,63 @@ function specifiers(content: string): string[] {
 }
 
 /** Repo paths a file names outright — `"scripts/x.mjs"`, or `join(ROOT, "scripts", "x.mjs")`: how
- *  a suite reaches a script it spawns or loads by URL rather than imports. */
-function namedPaths(content: string): string[] {
-  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs))["'`]/g)].map((m) => m[1]!);
+ *  a suite reaches a script it spawns or loads by URL rather than imports. `at` is the offset of the
+ *  path's first quote. */
+function namedPaths(content: string): Array<{ path: string; at: number }> {
+  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs))["'`]/g)]
+    .map((m) => ({ path: m[1]!, at: m.index }));
   for (const m of content.matchAll(/["'](src|scripts|bin)["']\s*,\s*((?:["'][\w.-]+["']\s*,\s*)*)["']([\w.-]+\.(?:ts|mjs|js|cjs))["']/g)) {
     const middle = [...m[2]!.matchAll(/["']([\w.-]+)["']/g)].map((p) => p[1]);
-    out.push([m[1], ...middle, m[3]].join("/"));
+    out.push({ path: [m[1], ...middle, m[3]].join("/"), at: m.index });
   }
   // A suite is selected by its own imports, never by being NAMED: a test path in a string is prose.
-  return out.filter((p) => !/\.test\.ts$/.test(p));
+  return out.filter(({ path }) => !/\.test\.ts$/.test(path));
+}
+
+/** Calls that spawn, fork or read the path in their arguments — through an argv array. */
+const PATH_SINKS = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "fork", "runBoundedSuite", "readFileSync", "readFile", "URL"]);
+/** Calls that resolve a repo-relative path against a directory. */
+const PATH_JOINS = new Set(["join", "resolve"]);
+
+/** W1-T6089 — whether the path named at `at` is USED at runtime: it sits in the arguments of a
+ *  PATH_SINKS call (through any argv `[…]`), or is joined onto a RUNTIME directory —
+ *  `join(deps.repoRoot, "src", "run-task.ts")` — which a module does only to touch the file (spawn
+ *  it, hand it to cluster as `exec:`, read it). A rootless `join("src", "x.ts")` is transparent: the
+ *  call around it decides. An enclosing `{` (object literal, block) or the file's top level ends the
+ *  walk: a path held as data in a table, array or constant is never used in place. */
+function usedAtRuntime(masked: string, at: number): boolean {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const c = masked[i]!;
+    if (c === ")" || c === "]" || c === "}") depth += 1;
+    else if (c === "(" || c === "[" || c === "{") {
+      if (depth > 0) depth -= 1;
+      else if (c === "{") return false;
+      else if (c === "(") {
+        const callee = /([\w$]+)\s*$/.exec(masked.slice(Math.max(0, i - 64), i))?.[1] ?? "";
+        if (PATH_SINKS.has(callee)) return true;
+        if (PATH_JOINS.has(callee) && !/^\s*["'`]/.test(masked.slice(i + 1, at + 1))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** The named-path edges `file` contributes to the graph. A src/ path written as a STRING inside a
- *  src/ module is data — authority.ts, config-schema.ts, worktree-sites.ts and
- *  baked-runtime-inputs.ts list src paths in tables — never an import, so it is no src→src edge:
- *  MEASURED 2026-10-06 those 114 string edges made almost every module reach src/run-task.ts and
- *  every src change select ~2,374 suites. A test or script naming a path it spawns or reads keeps
- *  its edge — that read is real. */
+ *  src/ module is usually data — authority.ts, config-schema.ts, worktree-sites.ts and
+ *  baked-runtime-inputs.ts list src paths in tables — never an import: MEASURED 2026-10-06 those 114
+ *  string edges made almost every module reach src/run-task.ts. It stays an edge only when the module
+ *  USES it ({@link usedAtRuntime}): serve-supervisor, operator-mcp and gate-gardener spawn
+ *  src/run-task.ts, measurement-cadence reads it. A test or script naming a path keeps its edge. */
 function namedEdges(file: string, content: string, known: ReadonlySet<string>): string[] {
   const fromSrc = file.startsWith("src/");
-  return namedPaths(content).filter((p) => known.has(p) && !(fromSrc && p.startsWith("src/")));
+  let masked: string | undefined;
+  return namedPaths(content).filter(({ path, at }) => {
+    if (!known.has(path)) return false;
+    if (!fromSrc || !path.startsWith("src/")) return true;
+    masked ??= maskLiterals(content);
+    return usedAtRuntime(masked, at);
+  }).map(({ path }) => path);
 }
 
 /** Resolves a relative specifier from `from` against the known files, TS's `.js` → `.ts` included. */
