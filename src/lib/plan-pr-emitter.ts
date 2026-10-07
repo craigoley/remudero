@@ -361,10 +361,11 @@ function authorBaseRef(cwd: string): string {
 }
 
 function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): number | null {
-  const runTask = fileURLToPath(new URL("../run-task.ts", import.meta.url));
+  // A consumer checkout has no tsx: use rmd's own launcher, but inspect the consumer's HEAD/base.
+  const rmdBin = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
   const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", runTask, "check-proof", proof, "--base", baseRef],
+    rmdBin,
+    ["check-proof", proof, "--base", baseRef],
     {
       cwd,
       encoding: "utf8",
