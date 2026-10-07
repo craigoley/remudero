@@ -73,9 +73,18 @@ import { sendJson } from "./panel-actions.js";
 import { fingerprintLedgerLine, ledgerFileRangeDigests, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
-import { adaptOperatorAgentCapacityRows, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal } from "./operator-agent-capacity.js";
-import { adaptOperatorDecisionRows, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal } from "./operator-agent-decisions.js";
-import { adaptOperatorAgentProofRows, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal } from "./operator-agent-proof.js";
+import {
+  adaptOperatorAgentCapacityRows, emptyOperatorAgentCapacityFold, finishOperatorAgentCapacity, foldOperatorAgentCapacityRow,
+  type OperatorAgentCapacityFold, type OperatorAgentCapacityLedgerRow, type OperatorAgentCapacitySignal,
+} from "./operator-agent-capacity.js";
+import {
+  adaptOperatorDecisionRows, emptyOperatorDecisionFold, finishOperatorDecisions, foldOperatorDecisionRow,
+  type OperatorDecisionFold, type OperatorDecisionLedgerRow, type OperatorAgentDecisionSignal,
+} from "./operator-agent-decisions.js";
+import {
+  adaptOperatorAgentProofRows, emptyOperatorAgentProofFold, finishOperatorAgentProof, foldOperatorAgentProofRow,
+  type OperatorAgentProofFold, type OperatorAgentProofLedgerRow, type OperatorAgentProofSignal,
+} from "./operator-agent-proof.js";
 import { adaptVerdictCalibrationReport, type OperatorAgentTaskOutcomeSignal } from "./operator-agent-outcomes.js";
 import {
   selectOperatorAgentMemoryRow,
@@ -107,10 +116,17 @@ import {
 } from "./benchmark-evidence.js";
 import { ABILITY_MAP_VERSION, abilityObservation, fitAbilityMap, unavailableAbilityMap, type AbilityMap, type AbilityObservation } from "./ability-map.js";
 import { buildEvalCard, EVAL_CARD_VERSION, emptyEvalCardEvidence, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
-import { deriveWorkIntegrity, unavailableWorkIntegrity, WORK_INTEGRITY_VERSION, workIntegrityRow, type WorkIntegrity } from "./work-integrity.js";
 import {
-  deriveJudgeCalibration,
+  emptyWorkIntegrityFold, finishWorkIntegrity, foldWorkIntegrityRow, unavailableWorkIntegrity, WORK_INTEGRITY_VERSION,
+  workIntegrityFoldFromJson, workIntegrityFoldToJson, workIntegrityRow, type WorkIntegrity, type WorkIntegrityFold,
+} from "./work-integrity.js";
+import {
+  emptyJudgeVerdictFold,
   fileJudgeLabelStore,
+  finishJudgeCalibration,
+  foldJudgeVerdictRow,
+  judgeVerdictFoldFromJson,
+  judgeVerdictFoldToJson,
   JUDGE_CALIBRATION_VERSION,
   judgeCalibrationRow,
   loadJudgeLabels,
@@ -118,6 +134,7 @@ import {
   type JudgeCalibration,
   type JudgeLabelsInput,
   type JudgeLabelStore,
+  type JudgeVerdictFold,
 } from "./judge-calibration.js";
 import { isCashSpendProducer, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
@@ -623,21 +640,19 @@ interface AnalyticsAccumulator {
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: RoutingTelemetryAccumulator;
   usage: UsageTelemetryState;
-  /** Sanitized rows retained only for the four operator-agent evidence adapters. */
-  operatorAgentRows: {
-    proof: OperatorAgentProofLedgerRow[];
-    decisions: OperatorDecisionLedgerRow[];
-    capacity: OperatorAgentCapacityLedgerRow[];
-    memory: OperatorAgentMemoryLedgerRow[];
-  };
+  /** The operator-agent evidence adapters' folds, and the newest memory rows. */
+  operatorAgentFolds: OperatorAgentFolds;
+  operatorAgentRows: { memory: OperatorAgentMemoryLedgerRow[] };
   historicalSeries: HistoricalSeriesAccumulator;
   breakdowns: AnalyticsBreakdownAccumulator;
   checkpointHistory: CheckpointHistoryState;
   checkpointBreakdowns: CheckpointBreakdownState;
   checkpointHydrated: boolean;
-  workIntegrityRows: Array<Record<string, unknown>>;
-  judgeCalibrationRows: Array<Record<string, unknown>>;
+  workIntegrity: WorkIntegrityFold;
+  judgeCalibration: JudgeVerdictFold;
 }
+
+type OperatorAgentFolds = { proof: OperatorAgentProofFold; decisions: OperatorDecisionFold; capacity: OperatorAgentCapacityFold };
 
 type CheckpointHistoryBucket = {
   observed: boolean;
@@ -741,10 +756,14 @@ type AnalyticsCheckpointState = {
       count: number;
     }>;
   };
-  operatorAgentRows: Omit<AnalyticsAccumulator["operatorAgentRows"], "memory"> & {
-    /** Optional for checkpoints written before W1-T4001. */
+  operatorAgentRows: {
+    /** Optional for checkpoints written before W1-T4001; the other three are rows a checkpoint before folds kept. */
     memory?: OperatorAgentMemoryLedgerRow[];
+    proof?: OperatorAgentProofLedgerRow[];
+    decisions?: OperatorDecisionLedgerRow[];
+    capacity?: OperatorAgentCapacityLedgerRow[];
   };
+  operatorAgentFolds?: OperatorAgentFolds;
   history: {
     days: Array<[string, CheckpointHistoryBucket]>;
     starts: Array<[string, number]>;
@@ -759,6 +778,8 @@ type AnalyticsCheckpointState = {
   };
   workIntegrityRows?: Array<Record<string, unknown>>;
   judgeCalibrationRows?: Array<Record<string, unknown>>;
+  workIntegrityFold?: Record<string, unknown>;
+  judgeCalibrationFold?: Record<string, unknown>;
 };
 
 export interface AnalyticsCheckpoint {
@@ -902,14 +923,15 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     routingTelemetry: routingTelemetryAccumulator(),
     usage: usageTelemetryState(),
-    operatorAgentRows: { proof: [], decisions: [], capacity: [], memory: [] },
+    operatorAgentFolds: { proof: emptyOperatorAgentProofFold(), decisions: emptyOperatorDecisionFold(), capacity: emptyOperatorAgentCapacityFold() },
+    operatorAgentRows: { memory: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
     checkpointHistory: { days: new Map(), starts: new Map() },
     checkpointBreakdowns: { starts: new Set(), terminals: new Map(), startsWithoutRunId: 0, terminalsWithoutRunId: 0, workCategories: new Map() },
     checkpointHydrated: false,
-    workIntegrityRows: [],
-    judgeCalibrationRows: [],
+    workIntegrity: emptyWorkIntegrityFold(),
+    judgeCalibration: emptyJudgeVerdictFold(),
   };
 }
 
@@ -1573,9 +1595,9 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     if (acc.operatorAgentRows.memory.length > 2_000) {
       acc.operatorAgentRows.memory.splice(0, acc.operatorAgentRows.memory.length - 2_000);
     }
-  } else if (selectedOperatorAgentRow?.family === "proof") acc.operatorAgentRows.proof.push(selectedOperatorAgentRow.row);
-  else if (selectedOperatorAgentRow?.family === "decisions") acc.operatorAgentRows.decisions.push(selectedOperatorAgentRow.row);
-  else if (selectedOperatorAgentRow?.family === "capacity") acc.operatorAgentRows.capacity.push(selectedOperatorAgentRow.row);
+  } else if (selectedOperatorAgentRow?.family === "proof") foldOperatorAgentProofRow(acc.operatorAgentFolds.proof, selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "decisions") foldOperatorDecisionRow(acc.operatorAgentFolds.decisions, selectedOperatorAgentRow.row);
+  else if (selectedOperatorAgentRow?.family === "capacity") foldOperatorAgentCapacityRow(acc.operatorAgentFolds.capacity, selectedOperatorAgentRow.row);
 
   // Assignment/terminal attribution is folded from this SAME union pass. It has its
   // own bounded, join-aware accumulator because an assignment is a policy fact and a terminal
@@ -1583,9 +1605,9 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   accumulateRoutingTelemetryLine(acc.routingTelemetry, line);
   accumulateUsageLine(acc.usage, line);
   const workIntegrityLine = workIntegrityRow(line);
-  if (workIntegrityLine) acc.workIntegrityRows.push(workIntegrityLine);
+  if (workIntegrityLine) foldWorkIntegrityRow(acc.workIntegrity, workIntegrityLine);
   const judgeLine = judgeCalibrationRow(line);
-  if (judgeLine) acc.judgeCalibrationRows.push(judgeLine);
+  if (judgeLine) foldJudgeVerdictRow(acc.judgeCalibration, judgeLine);
 
   const goal = goalObservationFromRow(line);
   if (goal) {
@@ -1708,12 +1730,13 @@ function snapshotFromAccumulator(
       cacheReuseTokens: acc.tokensTotal,
       costModeledUsd,
       taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
-      operatorAgent: buildOperatorAgentProjection({
-        proofRows: acc.operatorAgentRows.proof,
-        decisionRows: acc.operatorAgentRows.decisions,
-        capacityRows: acc.operatorAgentRows.capacity,
-        outcomes: options.operatorAgentOutcomes,
-      }),
+      operatorAgent: {
+        version: "operator-agent-v1",
+        proof: finishOperatorAgentProof(acc.operatorAgentFolds.proof),
+        outcomes: options.operatorAgentOutcomes ?? adaptVerdictCalibrationReport(verdictCalibrationReport([], "")),
+        decisions: finishOperatorDecisions(acc.operatorAgentFolds.decisions),
+        capacity: finishOperatorAgentCapacity(acc.operatorAgentFolds.capacity),
+      },
     }),
     routingTelemetry: snapshotRoutingTelemetry(acc.routingTelemetry),
     benchmarkEvidence: snapshotBenchmarkEvidence(acc.routingTelemetry, nowIso),
@@ -1744,8 +1767,8 @@ function snapshotFromAccumulator(
   });
   Object.defineProperty(out, "cacheReuseTokens", { value: { input: acc.tokensTotal.input, cacheRead: acc.tokensTotal.cacheRead, cacheCreation: acc.tokensTotal.cacheCreation }, enumerable: false, writable: false });
   Object.defineProperty(out, "abilityMap", { value: snapshotAbilityMap(acc.routingTelemetry), enumerable: false, writable: false });
-  Object.defineProperty(out, "workIntegrity", { value: deriveWorkIntegrity(acc.workIntegrityRows, { asOf: nowIso }), enumerable: false, writable: false });
-  const judgeCalibration = deriveJudgeCalibration(acc.judgeCalibrationRows, {
+  Object.defineProperty(out, "workIntegrity", { value: finishWorkIntegrity(acc.workIntegrity, { asOf: nowIso }), enumerable: false, writable: false });
+  const judgeCalibration = finishJudgeCalibration(acc.judgeCalibration, {
     asOf: nowIso,
     labels: options.judgeLabels ?? { unavailable: "no-label-store-supplied" },
   });
@@ -1995,7 +2018,8 @@ function resumeRefusal(prior: AnalyticsResumePoint | undefined, current: Analyti
   if (!(state.goalAccountingVersion === 1 && state.usage?.costAccountingVersion === 1 && state.usage?.cashAccountingVersion === 1 &&
     state.usage?.trialAccountingVersion === 1 && state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION)) return "checkpoint-version";
   if (state.routingTelemetry.benchmarkCounters === undefined || !Array.isArray(state.routingTelemetry.malformedSources) ||
-    !Array.isArray(state.workIntegrityRows) || !Array.isArray(state.judgeCalibrationRows)) return "checkpoint-incomplete";
+    (state.workIntegrityFold === undefined && !Array.isArray(state.workIntegrityRows)) ||
+    (state.judgeCalibrationFold === undefined && !Array.isArray(state.judgeCalibrationRows))) return "checkpoint-incomplete";
   if (current === undefined) return "source-unreadable";
   const last = prior.source.lastArchive;
   const liveMalformed = state.routingTelemetry.malformedSources.some(([, finding]) => finding.form === "live");
@@ -2036,12 +2060,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       stepUps: [...acc.routingTelemetry.stepUpsByKey.values()].map((row) => ({ ...row })),
       preferenceOutcomes: [...acc.routingTelemetry.preferenceOutcomesByKey.values()].map((row) => ({ ...row })),
     },
-    operatorAgentRows: {
-      proof: acc.operatorAgentRows.proof.map((row) => ({ ...row })),
-      decisions: acc.operatorAgentRows.decisions.map((row) => ({ ...row })),
-      capacity: acc.operatorAgentRows.capacity.map((row) => ({ ...row })),
-      memory: acc.operatorAgentRows.memory.map((row) => ({ ...row })),
-    },
+    operatorAgentRows: { memory: acc.operatorAgentRows.memory.map((row) => ({ ...row })) },
+    operatorAgentFolds: JSON.parse(JSON.stringify(acc.operatorAgentFolds)) as OperatorAgentFolds,
     history: {
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
       starts: [...acc.checkpointHistory.starts.entries()],
@@ -2054,8 +2074,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       terminalsWithoutRunId: acc.checkpointBreakdowns.terminalsWithoutRunId,
       workCategories: [...acc.checkpointBreakdowns.workCategories.entries()],
     },
-    workIntegrityRows: acc.workIntegrityRows.map((row) => ({ ...row })),
-    judgeCalibrationRows: acc.judgeCalibrationRows.map((row) => ({ ...row })),
+    workIntegrityFold: workIntegrityFoldToJson(acc.workIntegrity),
+    judgeCalibrationFold: judgeVerdictFoldToJson(acc.judgeCalibration),
   };
 }
 
@@ -2095,12 +2115,13 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
     const key = [row.preferredProvider, row.selectedProvider, row.selectedModel, row.outcome, row.reason ?? ""].join("\0");
     acc.routingTelemetry.preferenceOutcomesByKey.set(key, { ...row });
   }
-  acc.operatorAgentRows = {
-    proof: state.operatorAgentRows.proof.map((row) => ({ ...row })),
-    decisions: state.operatorAgentRows.decisions.map((row) => ({ ...row })),
-    capacity: state.operatorAgentRows.capacity.map((row) => ({ ...row })),
-    memory: (state.operatorAgentRows.memory ?? []).map((row) => ({ ...row })),
-  };
+  acc.operatorAgentRows = { memory: (state.operatorAgentRows.memory ?? []).map((row) => ({ ...row })) };
+  if (state.operatorAgentFolds !== undefined) acc.operatorAgentFolds = JSON.parse(JSON.stringify(state.operatorAgentFolds)) as OperatorAgentFolds;
+  else {
+    for (const row of state.operatorAgentRows.proof ?? []) foldOperatorAgentProofRow(acc.operatorAgentFolds.proof, row);
+    for (const row of state.operatorAgentRows.decisions ?? []) foldOperatorDecisionRow(acc.operatorAgentFolds.decisions, row);
+    for (const row of state.operatorAgentRows.capacity ?? []) foldOperatorAgentCapacityRow(acc.operatorAgentFolds.capacity, row);
+  }
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
   acc.usage = JSON.parse(JSON.stringify(state.usage ?? usageTelemetryState())) as UsageTelemetryState;
@@ -2109,8 +2130,10 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.checkpointBreakdowns.startsWithoutRunId = state.breakdowns.startsWithoutRunId;
   acc.checkpointBreakdowns.terminalsWithoutRunId = state.breakdowns.terminalsWithoutRunId;
   acc.checkpointBreakdowns.workCategories = new Map(state.breakdowns.workCategories);
-  acc.workIntegrityRows = (state.workIntegrityRows ?? []).map((row) => ({ ...row }));
-  acc.judgeCalibrationRows = (state.judgeCalibrationRows ?? []).map((row) => ({ ...row }));
+  if (state.workIntegrityFold !== undefined) acc.workIntegrity = workIntegrityFoldFromJson(state.workIntegrityFold);
+  else for (const row of state.workIntegrityRows ?? []) foldWorkIntegrityRow(acc.workIntegrity, row);
+  if (state.judgeCalibrationFold !== undefined) acc.judgeCalibration = judgeVerdictFoldFromJson(state.judgeCalibrationFold);
+  else for (const row of state.judgeCalibrationRows ?? []) foldJudgeVerdictRow(acc.judgeCalibration, row);
   acc.checkpointHydrated = true;
   return acc;
 }
