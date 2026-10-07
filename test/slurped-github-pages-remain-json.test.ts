@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { test } from "node:test";
 import { ghJson, splitGhHeaderBlock, type GhRateLimitReading } from "../src/lib/github-transport.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const args = ["api", "repos/acme/app/pulls?state=open&per_page=100", "--paginate", "--slurp"];
 function header(remaining: number, newline = "\n") {
@@ -37,17 +36,17 @@ test("slurped GitHub malformed pages still refuse instead of becoming an empty s
 });
 
 test("the default GitHub JSON spawn parses included slurp headers without dropping dedupe evidence", (t) => {
-  const bin = mkdtempSync(join(tmpdir(), "rmd-slurp-default-"));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
   const pages = [[{ body: "Opportunity-Key: acme/app/debt:1" }], []];
   const output = `[${header(10)}${JSON.stringify(pages[0])},${header(9)}[]]`;
-  const script = `#!/bin/sh\nprintf '%s' '${output.replace(/'/g, "'\\''")}'\n`;
-  writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
+  const shim = ghShim([{ when: "--slurp", stdout: output }], { kind: "slurp-default" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const previous = process.env.PATH;
   try {
-    process.env.PATH = `${bin}:${previous ?? ""}`;
+    process.env.PATH = `${shim.dir}:${previous ?? ""}`;
     let limit: GhRateLimitReading | undefined;
     const read = ghJson(args, (value) => { limit = value; });
     assert.deepEqual(read, pages); assert.equal(limit?.remaining, 9);
+    assert.equal(shim.calls().length, 1);
+    assert.match(shim.calls()[0]!, /--slurp -i/);
   } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
 });
