@@ -1337,11 +1337,12 @@ jobs:
     # W1-T1009: HEAVY band. Unlike `ci`, this job runs the whole suite under
     # `--experimental-test-coverage`, and W1-T2430's measurement found every one of THIS job's
     # cancellations died on the `Test with coverage` step below, none on `npx playwright install` —
-    # same band as `ci`, for its own reason and at its own number. The 39m/2340s ceiling holds until
-    # real matrix runs establish a safe lower bound. INVARIANT: it must stay strictly below
-    # ci-gate.yml's WAIT_CAP_SECONDS (2400s), or ci-gate times out first and the misattribution
-    # defect returns intact; re-derive it if that cap is retuned (W1-T312).
-    timeout-minutes: 39
+    # same band as `ci`, for its own reason and at its own number. PR #9943's shard 1 reached the
+    # former 39m ceiling during Test with coverage (37m36s in that step, after setup) before the
+    # suite completed. Give the measured long tail 49m while retaining 16m below ci-gate's 65m
+    # WAIT_CAP_SECONDS. FALSIFIER: test/ci-cache-concurrency-and-job-timeouts.test.ts checks both
+    # the larger bound and its strict relation to the gate cap.
+    timeout-minutes: 49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
