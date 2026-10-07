@@ -15,6 +15,9 @@
     - deploy/recycle-container.sh
     - deploy/entrypoint.sh
     - test/git-author-commissioning.test.ts
+    - test/git-author-commissioning-preflight.test.ts
+    - test/git-author-commissioning-preservation.test.ts
+    - test/git-author-commissioning-failures.test.ts
     - docs/operator-guide.md
   status: queued
   attempts: 0
@@ -67,11 +70,11 @@
     - claim: "the explicit mode commissions a fresh target and replaces a non-empty bad container author plus an already-configured persisted identity, verified from the target checkout"
       proof: "unit test: test/git-author-commissioning.test.ts"
     - claim: "invalid pairs and unknown, ambiguous or mismatched targets refuse before pause, pull, stop, removal or identity writes and leave sibling instances unchanged"
-      proof: "unit test: test/git-author-commissioning.test.ts"
+      proof: "unit test: test/git-author-commissioning-preflight.test.ts"
     - claim: "an ordinary recycle preserves a non-empty outgoing author over conflicting exports, later recycles retain the commissioned pair, and undeclared runtime variables still refuse"
-      proof: "unit test: test/git-author-commissioning.test.ts"
+      proof: "unit test: test/git-author-commissioning-preservation.test.ts"
     - claim: "identity write errors, post-replacement mismatches, local or environment masking and failed or timed-out probes return failure with phase-specific recovery and a value-redacted target audit receipt"
-      proof: "unit test: test/git-author-commissioning.test.ts"
+      proof: "unit test: test/git-author-commissioning-failures.test.ts"
   falsifier: |
     Execute the real recycler with a fixture Docker adapter and the real entrypoint with
     isolated HOME/config and a fixture target repository. Seed conflicting outgoing and
@@ -83,6 +86,10 @@
     write/probe failure and a repository-local masking identity to falsify success reporting.
   note: |
     One lifecycle concern, high blast radius because these scripts own container replacement
-    and boot. Whole-file proof paths intentionally name the future implementation test.
+    and boot. Each criterion names a distinct declared future test file dedicated to its claim:
+    commissioning/replacement, preflight refusal, preservation, or failure reporting.
+    These are filing-head forward references, not proof that the operation is built.
+    The implementation must exercise every case named by each file's corresponding criterion
+    and demonstrate failure at its merge base and success at its head for each proof.
     The harness reserved W1-T6160 for this intake. No existing task is amended or re-decided;
     W1-T3454's normal container-first preservation contract remains binding.
