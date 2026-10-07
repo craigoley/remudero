@@ -1431,6 +1431,7 @@ import {
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
   registerReviewerCheckout,
+  proofChildEnv,
 } from "./lib/review.js";
 import {
   proofQueueAudit,
@@ -17134,17 +17135,19 @@ const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOut
     let spawnError: string | undefined;
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    const home = makeTempDir("proof-home");
     const finish = (status: number | null) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      rmSync(home, { recursive: true, force: true });
       resolve({ status, output: `${stdout}\n${stderr}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
     };
-    // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
-    // the environment synchronously, so clearing it around the call is enough.
+    // The worktree's own runner and suites are WORKER code: they get W1-T6124's proof env and HOME, never the daemon's.
     const child = withoutNodeTestContextEnv(() =>
       spawn(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
         cwd: wt,
+        env: proofChildEnv(home),
         stdio: ["ignore", "pipe", "pipe"],
       }),
     );

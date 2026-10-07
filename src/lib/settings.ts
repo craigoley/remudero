@@ -182,6 +182,16 @@ export function validateWorkerSettings(settings: unknown): void {
       "`sandbox.failIfUnavailable` must be true (never silently run unsandboxed).",
     );
   }
+  // W1-T6157: the installed SDK defaults this to TRUE, and every worker runs under
+  // `bypassPermissions`, which approves the prompt a `dangerouslyDisableSandbox` Bash call
+  // would raise — so an ABSENT key lets a worker leave the sandbox, escaping every denyRead,
+  // denyWrite and the egress allowlist. Absent is refused exactly like true.
+  if (sandbox.allowUnsandboxedCommands !== false) {
+    throw new WorkerSettingsError(
+      "`sandbox.allowUnsandboxedCommands` must be false (absent defaults to true, which lets a " +
+        "worker's dangerouslyDisableSandbox Bash call run outside the sandbox, W1-T6157).",
+    );
+  }
 
   if (sandbox.network !== undefined) {
     const network = sandbox.network;

@@ -29,6 +29,7 @@
     "enabled": true,
     "failIfUnavailable": true,
     "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
     "filesystem": {
       "denyRead": [
         "~/../../.ssh/**",

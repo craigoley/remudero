@@ -110,7 +110,7 @@ test("W1-T913 criterion 1 (run lane, behavioural): the remudero-review=pending P
   const oldClaudeBinOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
   const oldOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   try {
-    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const ledgerPath = join(root, "ledger.ndjson");
     const ghLog = join(root, "gh-calls.log");
 

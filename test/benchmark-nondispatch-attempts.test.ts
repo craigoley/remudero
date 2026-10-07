@@ -217,7 +217,7 @@ test("real cash worker boundary emits a distinct assignment for each walked mode
   clearOpenWeightAbsence();
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const models: string[] = [];
     const final = await benchmarkNonDispatchSpawn("inbox-draft", spawnWorker)({
       cwd: REPO_ROOT,
@@ -258,7 +258,7 @@ test("real cash ladder continues when a fallback telemetry callback throws", asy
   clearOpenWeightAbsence();
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const models: string[] = [];
     const final = await spawnWorker({
       cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded cash request",

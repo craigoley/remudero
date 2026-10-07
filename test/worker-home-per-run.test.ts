@@ -318,7 +318,7 @@ test("sweepStaleWorkerHomes: an injected old `now` reaps nothing — nothing is 
 
 function e2eSpawnWorkerArgs(dir: string, runId: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd: dir,
     permissionMode: "bypassPermissions" as const,
