@@ -8,6 +8,7 @@
  * import, so at a base without test-slot.ts each test fails by its own assertion, not at load.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -188,7 +189,9 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
   assert.ok(["host-scratch", "local"].includes(real.scope), "the real mount probe answers one of the two host rungs");
   const underTest = resolveTestSlotDir({ NODE_TEST_CONTEXT: "child" }, () => true);
   assert.equal(underTest.scope, "test-process");
-  assert.ok(!underTest.dir.startsWith("/mnt/scratch"), "a test process never resolves the host's real scratch");
+  assert.notEqual(underTest.dir, "/mnt/scratch/rmd/test-slots", "a test process never borrows the shared host slot directory");
+  assert.notEqual(underTest.dir, "/tmp/rmd-test-slots", "a test process never borrows the shared fallback slot directory");
+  assert.ok(existsSync(underTest.dir), "test isolation is a real, private directory, even when TMPDIR is on scratch");
 
   // And the coverage run itself takes its slot THERE: the configured dir holds a record mid-shard.
   const root = fixtureRoot();
@@ -207,6 +210,35 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
     if (saved === undefined) delete process.env[TEST_SLOT_DIR_ENV];
     else process.env[TEST_SLOT_DIR_ENV] = saved;
     cleanup(root, dir, ciParity.coverageScratchDir(root));
+  }
+});
+
+test("test-slot isolation follows TMPDIR without sharing another test process's namespace", () => {
+  const probe = `
+    import { existsSync } from 'node:fs';
+    import { resolveTestSlotDir } from './src/lib/test-slot.ts';
+    const first = resolveTestSlotDir();
+    console.log(JSON.stringify({ first, again: resolveTestSlotDir(), exists: existsSync(first.dir) }));
+  `;
+  for (const parent of new Set([tmpdir(), "/tmp"])) {
+    const root = mkdtempSync(join(parent, "rmd-test-slot-tmpdir-"));
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root, NODE_TEST_CONTEXT: "child" };
+      delete env["RMD_TEST_SLOT_DIR"];
+      delete env.NODE_OPTIONS;
+      const read = () => JSON.parse(execFileSync(process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e", probe], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 }));
+      const a = read(), b = read();
+      for (const result of [a, b]) {
+        assert.equal(result.first.scope, "test-process");
+        assert.deepEqual(result.again, result.first, "one process keeps its own stable namespace");
+        assert.equal(dirname(result.first.dir), root, "the caller's TMPDIR volume is preserved");
+        assert.equal(result.exists, true, "the probe observes its real allocated directory");
+      }
+      assert.notEqual(a.first.dir, b.first.dir, "two processes sharing TMPDIR do not share slots");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
