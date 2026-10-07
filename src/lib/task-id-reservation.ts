@@ -1065,7 +1065,7 @@ export function reservationHolderBranch(anchorMessage: string): string | undefin
 
 /** One id's reservation as read from origin: its anchor message, provably no ref, or UNKNOWN. */
 export type ReservationAnchorRead =
-  | { status: "present"; message: string }
+  | { status: "present"; message: string; chain?: string[] }
   | { status: "absent" }
   | { status: "unknown"; reason: string };
 
@@ -1082,10 +1082,14 @@ function anchorShaByRef(listed: GitAnswer): Map<string, string> {
 
 const anchorListArgs = (ids: readonly string[]): string[] => ["ls-remote", "origin", ...ids.map(taskIdReservationRef)];
 const anchorFetchArgs = (id: string): string[] => ["fetch", "--quiet", "--no-tags", "origin", taskIdReservationRef(id)];
-const anchorLogArgs = (sha: string): string[] => ["log", "-1", "--format=%B", sha];
+const anchorLogArgs = (sha: string): string[] => ["log", "--first-parent", "-n", "16", "--format=%B%x00", sha];
 
 function anchorReadFrom(body: GitAnswer): ReservationAnchorRead {
-  return body.status === 0 ? { status: "present", message: body.stdout } : { status: "unknown", reason: body.stderr.trim() };
+  if (body.status !== 0) return { status: "unknown", reason: body.stderr.trim() };
+  const messages = body.stdout.includes("\0") ? body.stdout.split("\0").slice(0, -1) : [body.stdout];
+  const chain = messages.map((message, index) => index === 0 ? message : message.replace(/^\n/, ""));
+  const message = body.stdout.includes("\0") ? `${chain[0] ?? ""}\n` : body.stdout;
+  return { status: "present", message, chain };
 }
 
 /** Reads refs/rmd-id/<id> per id from origin; a failed listing makes EVERY id unknown, never absent. */

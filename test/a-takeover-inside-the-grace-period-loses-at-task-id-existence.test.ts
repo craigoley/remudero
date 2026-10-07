@@ -186,17 +186,18 @@ test("W1-T6025: a chain that cannot be adjudicated keeps the reclaimer as holder
   assert.equal(gate.parseReservationHolderFields("rmd-id holder branch=%zz"), undefined);
 });
 
-test("W1-T6025: a reclaimed head whose parent cannot be read is not re-read as a takeover", () => {
+test("W1-T6025: a head-only readable chain keeps the reclaimer without inventing a parent", () => {
   const calls: string[][] = [];
   const reclaimed = `rmd-id holder branch=${RECLAIMER} source=reclaimed taken_over_from=x`;
   const record = gate.readReservationHolderRecord("origin", scratch(), REF, (args: string[]) => {
     calls.push(args);
     if (args[0] === "fetch") return { status: 0, stdout: "", stderr: "" };
-    if (args.at(-1) === "FETCH_HEAD") return { status: 0, stdout: reclaimed, stderr: "" };
-    return { status: 128, stdout: "", stderr: "bad revision FETCH_HEAD^" };
+    if (args[0] === "log" && args.at(-1) === "FETCH_HEAD") return { status: 0, stdout: `${reclaimed}\0`, stderr: "" };
+    return { status: 128, stdout: "", stderr: "unexpected command" };
   });
-  assert.deepEqual(calls.map((a) => a.at(-1)), [REF, "FETCH_HEAD", "FETCH_HEAD^"]);
-  assert.equal(record.parent, undefined);
+  assert.deepEqual(calls.map((a) => a.at(-1)), [REF, "FETCH_HEAD"]);
+  assert.equal(record.chain.length, 1);
+  assert.deepEqual(gate.adjudicateReservationHolder(record).holder, { status: "known", branch: RECLAIMER });
   assert.deepEqual(record.holder, { status: "known", branch: RECLAIMER });
 });
 
