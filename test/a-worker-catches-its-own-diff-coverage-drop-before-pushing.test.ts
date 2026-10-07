@@ -29,6 +29,9 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+
+usePassThroughProofSandbox();
 
 const TASK_ID = "T-COVERAGE-PRECHECK";
 
