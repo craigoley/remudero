@@ -51,7 +51,7 @@ function selectorTree(): GitRepo {
   return repo;
 }
 
-function ledgerConfig(root: string): Config {
+function cashConfig(root: string): Config {
   return { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } } as Config;
 }
 
@@ -88,7 +88,7 @@ async function runCheckIn(
         return new Response(JSON.stringify(body), { status: 200 });
       },
     },
-    ledgerConfig(root),
+    cashConfig(root),
     { model: "gpt-oss-120b", effort: "low" },
   );
   assert.ok(bodies.length >= 2, "the loop must take a second turn carrying the tool result");
