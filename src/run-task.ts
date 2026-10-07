@@ -21967,7 +21967,7 @@ export function defaultNodePinSyncIo(
         try {
           git(["worktree", "remove", "--force", tree]);
         } catch (error) {
-          void error;
+          void error; // scratch removal below makes the failed worktree cleanup unreachable.
         }
         rmSync(scratch, { recursive: true, force: true });
       }
