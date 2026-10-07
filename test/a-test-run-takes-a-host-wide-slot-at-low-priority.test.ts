@@ -223,7 +223,7 @@ test("test-slot isolation follows TMPDIR without sharing another test process's 
   for (const parent of new Set([tmpdir(), "/tmp"])) {
     const root = mkdtempSync(join(parent, "rmd-test-slot-tmpdir-"));
     try {
-      const env = { ...process.env, TMPDIR: root, NODE_TEST_CONTEXT: "child" };
+      const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root, NODE_TEST_CONTEXT: "child" };
       delete env["RMD_TEST_SLOT_DIR"];
       delete env.NODE_OPTIONS;
       const read = () => JSON.parse(execFileSync(process.execPath,
