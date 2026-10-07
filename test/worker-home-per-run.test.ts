@@ -129,7 +129,7 @@ test("materializeWorkerHome: EACH per-run home independently truncates its OWN i
   }
 });
 
-test("materializeWorkerHome: a per-run home's auth symlinks (.claude/.config/gh/.gitconfig) still resolve to the real HOME, per home", () => {
+test("materializeWorkerHome: a per-run home's auth symlinks (.claude/.gitconfig) still resolve to the real HOME, per home", () => {
   const root = join(tmp(), "worker-home");
   const realHome = tmp();
   const home = perRunWorkerHomeDir(root, "run-auth");
