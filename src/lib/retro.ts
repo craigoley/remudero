@@ -2,6 +2,7 @@
  *  ledger and LEARNINGS into a structured gather a higher-tier Architect worker then synthesises
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
+import { hostWorktreeGit } from "./worktree-git.js";
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
 import { execFileSync } from "node:child_process";
 import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
@@ -4185,7 +4186,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     if (!fetchAttempted) {
       fetchAttempted = true;
       try {
-        execFileSync("git", ["-C", worktreePath, "fetch", "--quiet", "origin", "main"], { stdio: "pipe" });
+        hostWorktreeGit(worktreePath, ["fetch", "--quiet", "origin", "main"], { stdio: "pipe" });
         fetchOk = true;
       } catch {
         fetchOk = false;
@@ -4193,7 +4194,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     }
     if (!fetchOk) return undefined;
     try {
-      return execFileSync("git", ["-C", worktreePath, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+      return hostWorktreeGit(worktreePath, ["show", `origin/main:${relPath}`], { encoding: "utf8" });
     } catch {
       return undefined; // e.g. a brand-new shard not yet on origin/main
     }
@@ -4284,15 +4285,15 @@ export function stampCitationsAndCommit(opts: {
     }
   }
   if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [...stampedIds], refused };
-  execFileSync("git", ["-C", opts.worktreePath, "add", ...touchedRelPaths]);
+  hostWorktreeGit(opts.worktreePath, ["add", ...touchedRelPaths]);
   try {
-    execFileSync("git", ["-C", opts.worktreePath, "diff", "--cached", "--quiet"]);
+    hostWorktreeGit(opts.worktreePath, ["diff", "--cached", "--quiet"]);
     // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
     return { committed: false, stampedIds: [...stampedIds], refused };
   } catch {
     // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
-    execFileSync("git", ["-C", opts.worktreePath, "commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
-    const diff = execFileSync("git", ["-C", opts.worktreePath, "show", "--stat=200", "-p", "HEAD"], {
+    hostWorktreeGit(opts.worktreePath, ["commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
+    const diff = hostWorktreeGit(opts.worktreePath, ["show", "--stat=200", "-p", "HEAD"], {
       encoding: "utf8",
       maxBuffer: 1 << 24,
     });

@@ -1,5 +1,6 @@
 /** Private, metadata-only receipts. The enclosing ledger row owns run/assignment IDs; this
  * envelope deliberately contains neither IDs nor content, and grants no publication rights. */
+import { hostWorktreeGit } from "./worktree-git.js";
 import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
@@ -58,7 +59,7 @@ function pinEvidence(field: BenchmarkRevisionField, input: BenchmarkStackEvidenc
  * Call once at module load: a later fast-forward cannot change the identity of code in memory.
  * A dirty source tree or an untracked module has no defensible commit identity. */
 export function executingHarnessRevision(moduleFile: string,
-  git: (cwd: string, args: string[]) => string = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }),
+  git: (cwd: string, args: string[]) => string = (cwd, args) => hostWorktreeGit(cwd, [...args], { encoding: "utf8" }),
 ): BenchmarkStackEvidence["harnessRevision"] {
   try {
     const root = git(dirname(moduleFile), ["rev-parse", "--show-toplevel"]).trim();

@@ -21,6 +21,7 @@
  * an empty appended listing.
  */
 
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -459,7 +460,7 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
 
 function defaultReadWorktreeHead(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     // W1-T2627: `undefined` is the ABSENT reading, not a swallowed failure. A worktree can
     // legitimately have no resolvable HEAD — freshly added and not yet checked out, or its
@@ -473,7 +474,7 @@ function defaultReadWorktreeHead(worktreePath: string): string | undefined {
 
 function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head: string): boolean | undefined {
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", base, head], { stdio: ["ignore", "pipe", "pipe"] });
     return true;
   } catch (e) {
     // W1-T2627: `git merge-base --is-ancestor` ANSWERS THROUGH ITS EXIT CODE, so a throw here is

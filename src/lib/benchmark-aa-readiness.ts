@@ -20,6 +20,7 @@
  * INVARIANT: a small sample is inconclusive; nothing here declares a winner or adds a minimum-sample floor.
  */
 
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -72,7 +73,7 @@ export function deriveRuntimePins(input: { harnessRevision: BenchmarkStackEviden
     : artifact(head);
   let tool: RuntimePins["revisions"]["toolRevision"] = fromHarness;
   if (head !== null) {
-    const git = input.git ?? ((cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }));
+    const git = input.git ?? ((cwd, args) => hostWorktreeGit(cwd, [...args], { encoding: "utf8" }));
     try { tool = git(input.installRoot, ["status", "--porcelain", "--", "settings", "hooks"]).trim() === "" ? fromHarness : unknown("executing-source-not-clean"); }
     catch (error) {
       const reason = `executing-module-revision-unavailable:${(error as Error).message.slice(0, 80)}`;

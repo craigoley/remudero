@@ -118,6 +118,8 @@ export type HostGitLog = (step: string, extra?: Record<string, unknown>) => void
 export interface HostGitOptions {
   /** Ledger sink for a refusal; the refusal is also written to stderr as one JSON line. */
   log?: HostGitLog;
+  /** A trusted hooks directory standing in for {@link harnessHooksDir} — for a test that must observe WHICH copy ran. */
+  hooksDir?: string;
 }
 
 /** This install's own `hooks/` — the code the daemon ships, never a worktree's tracked copy. */
@@ -154,7 +156,12 @@ function daemonGlobalConfig(env: NodeJS.ProcessEnv): string {
 }
 
 function subcommandOf(args: readonly string[]): string | undefined {
-  return args.find((a) => !a.startsWith("-"));
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "-c" || a === "-C" || a === "--git-dir" || a === "--work-tree") i++; // the option's own value is not the subcommand
+    else if (!a.startsWith("-")) return a;
+  }
+  return undefined;
 }
 
 function readConfigList(configArgs: string[], key: string, env: NodeJS.ProcessEnv): string[] {
@@ -228,7 +235,7 @@ export function hostWorktreeGitPlan(worktreePath: string, args: readonly string[
   env.GIT_CONFIG_GLOBAL = daemonGlobalConfig(process.env);
   env.GIT_PAGER = "cat";
   env.GIT_EDITOR = "true";
-  const hooks = pin !== null && sub !== undefined && HOOKED_SUBCOMMANDS.has(sub) ? harnessHooksDir() : "/dev/null";
+  const hooks = pin !== null && sub !== undefined && HOOKED_SUBCOMMANDS.has(sub) ? (opts.hooksDir ?? harnessHooksDir()) : "/dev/null";
   if (hooks !== "/dev/null" && !existsSync(hooks)) {
     throw new HarnessHooksMissingError(worktreePath, sub ?? "", hooks);
   }

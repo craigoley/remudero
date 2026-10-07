@@ -20,6 +20,7 @@
  * SCOPE IS EXACTLY `review-PR*`. The name pattern is the only filter: `coverage/`, `rmd-*` temp
  * dirs and any hand-cut lane never match it and are never even considered, let alone touched.
  */
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
@@ -202,7 +203,7 @@ function defaultResolveRepoDir(worktreePath: string): string | undefined {
 
 function defaultReadHeadSha(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();

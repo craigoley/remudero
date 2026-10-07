@@ -3735,6 +3735,15 @@ function openWeightContainedPath(cwd: string, candidate: unknown): string {
   return target;
 }
 
+/** W1-T6106: a WRITE target must not be the worktree's own `.git` entry (the pointer file, or anything inside a `.git` directory):
+ *  host git reads it, so a model-written byte there would run as the daemon. Reads are unaffected. */
+function openWeightWritablePath(cwd: string, candidate: unknown): string {
+  const target = openWeightContainedPath(cwd, candidate);
+  const first = relative(realpathSync(cwd), target).split(sep)[0];
+  if (first === ".git") throw new Error("tool path is the worktree's .git entry, which a worker may not write");
+  return target;
+}
+
 function openWeightFiles(root: string, out: string[] = []): string[] {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.name === ".git" || entry.name === "node_modules") continue;
@@ -3767,14 +3776,14 @@ async function executeOpenWeightTool(
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
     case "write_file": {
       if (typeof args.content !== "string") throw new Error("write_file content must be a string");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, args.content, "utf8");
       return { written: relative(realpathSync(cwd), path) };
     }
     case "edit_file": {
       if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       const before = readFileSync(path, "utf8");
       const at = before.indexOf(args.old_string);
       if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {

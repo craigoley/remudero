@@ -1,3 +1,4 @@
+import { hostWorktreeGit } from "./lib/worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./lib/github-transport.js";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
@@ -253,7 +254,7 @@ async function main(): Promise<void> {
   let pushPath = "git push (in-sandbox, HTTPS via gh credential helper)";
   let branchOnOrigin = false;
   try {
-    execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
+    hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch], {
       stdio: "ignore",
     });
     branchOnOrigin = true;

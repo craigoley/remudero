@@ -179,7 +179,7 @@ import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, typ
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { hostWorktreeGit, readWorktreePin, recordWorktreePin, removeWorktreePin } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync, hostWorktreeGitSpawn, readWorktreePin, recordWorktreePin, removeWorktreePin } from "./worktree-git.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -4217,7 +4217,7 @@ export function wireCredentialHelperSocket(
   cwd: string,
   socketPath: string,
   writeConfig: (args: string[]) => void = (args) => {
-    execFileSync("git", ["-C", cwd, "config", "--worktree", ...args]);
+    hostWorktreeGit(cwd, ["config", "--worktree", ...args]);
   },
 ): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
@@ -4237,7 +4237,7 @@ export function wireCredentialHelperSocket(
 /** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5). */
 export function credentialHelperSocketWired(cwd: string, socketPath: string): boolean {
   const read = (...args: string[]): string =>
-    spawnSync("git", ["-C", cwd, "config", "--worktree", ...args], { encoding: "utf8" }).stdout ?? "";
+    hostWorktreeGitSpawn(cwd, ["config", "--worktree", ...args], { encoding: "utf8" }).stdout ?? "";
   const helpers = read("--get-all", "credential.helper").split("\n");
   return read("--get", "credential.useHttpPath").trim() === "true" && helpers[0] === "" && helpers.some((h) => h.includes(`"${socketPath}"`));
 }
@@ -4815,7 +4815,7 @@ export function excludeNodeModulesFromGit(
     const commonDir =
       deps.commonDir ??
       ((wt: string) =>
-        execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+        hostWorktreeGit(wt, ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         }).trim());
@@ -5291,7 +5291,7 @@ export function worktreeAdd(
   );
   // Record the base BEFORE the currency check below: a refusal throws out of this function with no return value, so the
   // record must already be on disk to be attributable (W1-T405).
-  const createdBase = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+  const createdBase = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
   recordWorktreeBase(worktreePath, createdBase);
@@ -5302,7 +5302,7 @@ export function worktreeAdd(
     countBehind: (b, remoteHead) => defaultCountBehind(repoDir, b, remoteHead),
   });
   logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
-  execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+  hostWorktreeGit(worktreePath, ["config", "--worktree", "core.hooksPath", "hooks"]);
   finishWorktreeAdd(repoDir, worktreePath, deps);
   recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
 }
@@ -5404,7 +5404,7 @@ export async function worktreeAddAsync(
     localRefHead = "unreadable";
   }
   await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
-  let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
+  let createdBase = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
   recordWorktreeBase(worktreePath, createdBase);
 
   let remoteHead: string | undefined;
@@ -5429,7 +5429,7 @@ export async function worktreeAddAsync(
     const from = createdBase;
     try {
       await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"]);
-      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead]);
+      await hostWorktreeGitAsync(worktreePath, ["merge", "--ff-only", "--quiet", remoteHead]);
     } catch {
       break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
     }
@@ -5458,11 +5458,11 @@ export async function worktreeAddAsync(
     countBehind: () => behind,
   });
   logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
-  await worktreeGit(["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+  await hostWorktreeGitAsync(worktreePath, ["config", "--worktree", "core.hooksPath", "hooks"]);
 
   let commonDir: string | undefined;
   try {
-    commonDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    commonDir = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
   } catch {
     // Excluding node_modules is best-effort, as in the sync form.
   }

@@ -1,3 +1,4 @@
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { checkCommitMessage, shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
@@ -618,19 +619,19 @@ export function gitAddAndCommitWithRollback(
   const { stdio, log, stepPrefix } = opts;
   let preTree: string | null = null;
   try {
-    preTree = execFileSync("git", ["-C", cwd, "write-tree"], { encoding: "utf8" }).trim();
+    preTree = hostWorktreeGit(cwd, ["write-tree"], { encoding: "utf8" }).trim();
   } catch (e) {
     // No pre-add snapshot to roll back to (e.g. an unmerged index) — record it; the add/commit
     // below still runs, but a refused commit can only log-and-skip its rollback, not restore.
     log(`${stepPrefix}.snapshot.error`, { error: String((e as Error)?.message ?? e) });
   }
-  execFileSync("git", ["-C", cwd, "add", ...addArgs], { stdio });
+  hostWorktreeGit(cwd, ["add", ...addArgs], { stdio });
   try {
-    execFileSync("git", ["-C", cwd, "commit", "-m", commitMessage], { stdio });
+    hostWorktreeGit(cwd, ["commit", "-m", commitMessage], { stdio });
   } catch (commitError) {
     if (preTree !== null) {
       try {
-        execFileSync("git", ["-C", cwd, "read-tree", preTree], { stdio });
+        hostWorktreeGit(cwd, ["read-tree", preTree], { stdio });
       } catch (rollbackError) {
         // (v): the rollback itself failed — this is the exact condition the task exists to
         // surface, so it is recorded rather than left silent. The ORIGINAL commit error is

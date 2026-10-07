@@ -10,6 +10,7 @@
  * state/next-task — the falsifier this module exists to make possible.
  */
 
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,10 +59,10 @@ export function regenerateOrientation(opts: RegenerateOrientationOpts): Regenera
 
   mkdirSync(join(worktreePath, "docs"), { recursive: true });
   writeFileSync(join(worktreePath, REL_PATH), content);
-  execFileSync("git", ["-C", worktreePath, "add", REL_PATH]);
+  hostWorktreeGit(worktreePath, ["add", REL_PATH]);
 
   try {
-    execFileSync("git", ["-C", worktreePath, "diff", "--cached", "--quiet"]);
+    hostWorktreeGit(worktreePath, ["diff", "--cached", "--quiet"]);
     // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
     return { relPath: REL_PATH, content, committed: false };
   } catch {
@@ -72,8 +73,8 @@ export function regenerateOrientation(opts: RegenerateOrientationOpts): Regenera
     // retro that touched ORIENTATION.md, since commitlint lints the whole
     // origin/main..HEAD range, not just this one commit. `chore(plan): ...` matches this
     // repo's existing plan-machinery commit convention and is proven commitlint-clean.
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", "chore(plan): regenerate docs/ORIENTATION.md"]);
-    const diff = execFileSync("git", ["-C", worktreePath, "show", "--stat=200", "-p", "HEAD"], {
+    hostWorktreeGit(worktreePath, ["commit", "-m", "chore(plan): regenerate docs/ORIENTATION.md"]);
+    const diff = hostWorktreeGit(worktreePath, ["show", "--stat=200", "-p", "HEAD"], {
       encoding: "utf8",
       maxBuffer: 1 << 24,
     });

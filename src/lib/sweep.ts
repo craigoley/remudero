@@ -1,3 +1,4 @@
+import { execGitInvocation, hostWorktreeGit, worktreeGitInvocation } from "./worktree-git.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
@@ -1504,7 +1505,7 @@ function defaultDirtyFleetRebaseGit(
   args: readonly string[],
   opts: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding } = {},
 ): string {
-  return execFileSync(file, [...args], {
+  return execGitInvocation(file, [...args], {
     cwd: opts.cwd,
     encoding: opts.encoding ?? "utf8",
     stdio: opts.stdio ?? "pipe",
@@ -1519,7 +1520,7 @@ function defaultPlanRepairGit(
   args: readonly string[],
   opts: { encoding?: BufferEncoding } = {},
 ): string {
-  return execFileSync(file, [...args], { encoding: opts.encoding ?? "utf8", stdio: "pipe" }) as string;
+  return execGitInvocation(file, [...args], { encoding: opts.encoding ?? "utf8", stdio: "pipe" }) as string;
 }
 
 export function rebaseDirtyFleetBranchViaGit(
@@ -1534,7 +1535,7 @@ export function rebaseDirtyFleetBranchViaGit(
   const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
   const ref = `refs/heads/${branch}`;
   const remoteRef = `refs/remotes/origin/${branch}`;
-  const run = (cwd: string, args: readonly string[]): string => git("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" });
+  const run = (cwd: string, args: readonly string[]): string => git("git", cwd === repoDir ? ["-C", repoDir, ...args] : worktreeGitInvocation(cwd, [...args]), { encoding: "utf8", stdio: "pipe" });
   let worktreeCreated = false;
   try {
     mkdirSync(dirname(worktreePath), { recursive: true });
@@ -3774,15 +3775,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 }
                 worktreeAddForBuild(repoDir, worktreePath, input.branch, "origin/main", { log });
                 writeFileSync(join(worktreePath, input.shardRelPath), input.amendedText);
-                planRepairGit("git", ["-C", worktreePath, "add", input.shardRelPath]);
-                planRepairGit("git", [
-                  "-C",
-                  worktreePath,
+                planRepairGit("git", worktreeGitInvocation(worktreePath, ["add", input.shardRelPath]));
+                planRepairGit("git", worktreeGitInvocation(worktreePath, [
                   "commit",
                   "-m",
                   buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
-                ]);
-                const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+                ]));
+                const headSha = planRepairGit("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"])).trim();
                 const body = buildPlanPrBodyImpl({
                   intro: input.prIntro,
                   criteria: [{ claim: input.claim, proof: input.proof }],
@@ -3796,7 +3795,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
                   const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
                   try {
-                    base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
+                    base.origin_main_sha = planRepairGit("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD^"])).trim();
                     const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body });
                     base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
                   } catch (e) {
@@ -4094,7 +4093,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         worktreeAddForBuild(repoDir, worktreePath, branch, "origin/main", { log });
         writeFileSync(join(worktreePath, shardRelPath), flagged);
-        planRepairGit("git", ["-C", worktreePath, "add", shardRelPath]);
+        planRepairGit("git", worktreeGitInvocation(worktreePath, ["add", shardRelPath]));
         const commitMessage = buildPlanPrCommitMessage({
           scope: "plan",
           subject: `flag a stale proof in ${taskId}'s shard for architect repair`,
@@ -4103,8 +4102,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             `inside its own diff — Standing rule 15 reserves the correction to an Architect. This filing ` +
             `adds a comment above the affected criterion; it edits no claim/proof/satisfied_by field.`,
         });
-        planRepairGit("git", ["-C", worktreePath, "commit", "-m", commitMessage]);
-        const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+        planRepairGit("git", worktreeGitInvocation(worktreePath, ["commit", "-m", commitMessage]));
+        const headSha = planRepairGit("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"])).trim();
         const title = `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`;
         const body = buildPlanPrBodyImpl({
           intro:
@@ -5767,7 +5766,7 @@ export function decideFixSuperseded(
 /** W1-T4105 — true when `sha` is already in the fix worktree's own history (the worker pushed it). */
 export function headIsInWorktree(worktreePath: string, sha: string): boolean {
   try {
-    execFileSync("git", ["-C", worktreePath, "merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", sha, "HEAD"], { stdio: "ignore" });
     return true;
   } catch {
     // Not an ancestor (exit 1) or unreadable: either way not provably the worker's own push.
@@ -6901,14 +6900,14 @@ export interface BaselineRatchetWorktreeState {
  */
 export function readBaselineRatchetWorktreeState(worktreePath: string): BaselineRatchetWorktreeState | undefined {
   try {
-    const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim();
-    const tracked = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "-z", "HEAD"], {
+    const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim();
+    const tracked = hostWorktreeGit(worktreePath, ["diff", "--name-only", "-z", "HEAD"], {
       encoding: "utf8",
       stdio: "pipe",
     })
       .split("\0")
       .filter(Boolean);
-    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], {
       encoding: "utf8",
       stdio: "pipe",
     })
@@ -7656,7 +7655,7 @@ export async function renumberPlanPrIds(
     planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
     ghJsonImpl: ghApi = ghJson,
   } = deps;
-  const git = (cwd: string, args: readonly string[]): string => run("git", ["-C", cwd, ...args]);
+  const git = (cwd: string, args: readonly string[]): string => run("git", worktreeGitInvocation(cwd, [...args]));
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
   let cut = false;

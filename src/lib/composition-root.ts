@@ -1,3 +1,4 @@
+import { execGitInvocation, worktreeGitInvocation } from "./worktree-git.js";
 import { execFileSync } from "node:child_process";
 import { realArmDeps, type ArmDeps } from "./arm-auto-merge.js";
 import { realDeployDeps, type DeployDeps, type RealDeployOpts } from "./deployer.js";
@@ -37,7 +38,7 @@ export interface ReviewWorktreeDeps {
 
 type ReviewGitExec = (cmd: string, args: string[], options: { stdio: "pipe" }) => string | Buffer;
 
-function realReviewWorktree(exec: ReviewGitExec = execFileSync): ReviewWorktreeDeps {
+function realReviewWorktree(exec: ReviewGitExec = execGitInvocation): ReviewWorktreeDeps {
   return {
     fetch: (repoDir, prNumber) => {
       exec(
@@ -50,7 +51,7 @@ function realReviewWorktree(exec: ReviewGitExec = execFileSync): ReviewWorktreeD
       exec("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" });
     },
     revParseHead: (worktreePath) =>
-      exec("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
+      exec("git", worktreeGitInvocation(worktreePath, ["rev-parse", "HEAD"]), { stdio: "pipe" }).toString().trim(),
   };
 }
 
