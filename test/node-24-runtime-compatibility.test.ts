@@ -71,8 +71,11 @@ test("W1-T5882: no worker thread is handed process.execArgv", () => {
   // Under Node 24's test runner process.execArgv carries per-process flags (--stack-trace-limit,
   // --tls-cipher-list, ...) that a Worker refuses with ERR_WORKER_INVALID_EXEC_ARGV. A worker that
   // inherits its execArgv (the default) gets the same loader and none of the refusal.
-  const offenders = trackedSources().filter((file) =>
-    /execArgv:\s*process\.execArgv/.test(readFileSync(join(REPO_ROOT, file), "utf8")));
+  const tests = execFileSync("git", ["ls-files", "test"], { cwd: REPO_ROOT, encoding: "utf8" }).split("\n").filter((f) => /\.(ts|mjs)$/.test(f));
+  assert.ok(tests.length > 500, "the census must read the real test tree, not an empty list");
+  // Only a Worker's options count: a probe that records `execArgv: process.execArgv` as data is not one.
+  const offenders = [...trackedSources(), ...tests].filter((file) =>
+    /new Worker\([^;]*?execArgv:\s*process\.execArgv/.test(readFileSync(join(REPO_ROOT, file), "utf8")));
   assert.deepEqual(offenders, []);
 });
 

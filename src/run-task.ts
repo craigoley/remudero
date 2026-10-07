@@ -957,6 +957,8 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  ratifyPrCreateRestArgs,
+  ratifyPrProbeRestArgs,
   reconcileRetroChangesetClaim,
   renderAcceptanceBlock,
   replaceAcceptanceBlock,
@@ -1431,7 +1433,6 @@ import {
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
   registerReviewerCheckout,
-  proofChildEnv,
 } from "./lib/review.js";
 import {
   proofQueueAudit,
@@ -1446,7 +1447,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -2720,6 +2721,7 @@ import {
   worktreeAddAsync,
   worktreeLockIsPidAlive,
   worktreeRemove,
+  worktreeRemoveAsync,
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
@@ -17127,7 +17129,34 @@ const realCoverageChangedFiles = (wt: string): string[] =>
  * timeout/spawn-error mapping are the ones `spawnSync` gave.
  */
 const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
-const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
+const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
+const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
+      resolve(error ? String(stderr).trim().split("\n")[0] || error.message : undefined));
+  });
+const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
+  const home = makeTempDir("proof-home");
+  try {
+    const env: NodeJS.ProcessEnv = { ...proofChildEnv(home), TMPDIR: "/tmp", NODE_V8_COVERAGE: "" };
+    let sandbox: string[];
+    try {
+      sandbox = proofSandboxArgv({ cwd: wt, home });
+    } catch (error) {
+      return { status: null, output: "", timedOut: false, spawnError: coverageSandboxText(error) };
+    }
+    const startFailure = await coverageSandboxStart(status.binary, sandbox, wt, env);
+    if (startFailure !== undefined) return coverageSandboxRefusal(startFailure);
+    const argv = [...sandbox, process.execPath, join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites];
+    return await spawnCoverageChild(status.binary, argv, wt, env, timeoutMs, maxOutputBytes);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+};
+const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -17135,19 +17164,18 @@ const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOut
     let spawnError: string | undefined;
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    const home = makeTempDir("proof-home");
     const finish = (status: number | null) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      rmSync(home, { recursive: true, force: true });
       resolve({ status, output: `${stdout}\n${stderr}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
     };
-    // The worktree's own runner and suites are WORKER code: they get W1-T6124's proof env and HOME, never the daemon's.
+    // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
+    // the environment synchronously, so clearing it around the call is enough.
     const child = withoutNodeTestContextEnv(() =>
-      spawn(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
+      spawn(file, args, {
         cwd: wt,
-        env: proofChildEnv(home),
+        env,
         stdio: ["ignore", "pipe", "pipe"],
       }),
     );
@@ -36166,9 +36194,22 @@ export function retractGardenBranch(o: {
   fetcher: GhApiFetcher;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): "deleted" | "kept_pr_exists" | "kept_unreadable" | "kept_delete_failed" {
+  return runStepsSync(retractGardenBranchSteps(o));
+}
+
+export function retractGardenBranchAsync(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => Promise<string> },
+): Promise<ReturnType<typeof retractGardenBranch>> {
+  return runStepsAsync(retractGardenBranchSteps(o));
+}
+
+function* retractGardenBranchSteps(
+  o: Omit<Parameters<typeof retractGardenBranch>[0], "git"> & { git: (...args: string[]) => string | Promise<string> },
+): Steps<ReturnType<typeof retractGardenBranch>> {
   let existing: ReturnType<typeof probeExistingPlanPr>;
   try {
-    existing = probeExistingPlanPr(o.fetcher, o.owner, o.repo, o.branch);
+    const rows = yield* step(() => o.fetcher(ratifyPrProbeRestArgs(o.owner, o.repo, o.branch)));
+    existing = probeExistingPlanPr(() => rows, o.owner, o.repo, o.branch);
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `pr probe failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_unreadable";
@@ -36178,7 +36219,7 @@ export function retractGardenBranch(o: {
     return "kept_pr_exists";
   }
   try {
-    o.git("push", "-q", "origin", "--delete", o.branch);
+    yield* step(() => o.git("push", "-q", "origin", "--delete", o.branch));
   } catch (e) {
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_delete_failed";
@@ -36197,6 +36238,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const io: GardenLandIo = {
     git,
+    fetcher: opts.fetcher ?? ghJson,
     docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
     preflight: opts.preflight ?? planPrPreflight,
   };
@@ -36214,6 +36256,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
   const io: GardenLandIo = {
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
     preflight: opts.preflight ?? planPrPreflightAsync,
   };
@@ -36221,7 +36264,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     root,
     branch,
     land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
-    dispose: async () => worktreeRemove(opts.repoDir, root),
+    dispose: () => worktreeRemoveAsync(opts.repoDir, root),
   };
 }
 
@@ -36240,6 +36283,7 @@ export interface GardenCheckoutOpts {
 
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
+  fetcher: GhApiFetcher;
   docsIndex: () => unknown;
   preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
@@ -36272,12 +36316,12 @@ function* gardenLandSteps(
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
   if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
-  const fetcher = opts.fetcher ?? ghJson;
   try {
-    return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
+    const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
+    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(opts.owner, opts.repo, create)));
+    return createPlanPrRest(() => row, opts.owner, opts.repo, create).prUrl;
   } catch (e) {
-    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
+    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher: io.fetcher, log: opts.log });
     throw e;
   }
 }

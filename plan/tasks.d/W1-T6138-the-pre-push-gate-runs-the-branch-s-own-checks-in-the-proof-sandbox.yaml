@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: follow-up from W1-T6120 (PR #9788, merged 2026-10-07 while this was filed) and W1-T6124 (PR #9784, open at filing); verified read-only on both heads before filing"
   plan_refs: [W1-T6120, W1-T6124, W1-T6106, W1-T5617, W1-T4901, W1-T3423, W1-T499]
   files: [hooks/pre-push, src/lib/git-push.ts, test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

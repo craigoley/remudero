@@ -1,0 +1,28 @@
+- id: W1-T6175
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — awaiting-review:dependabot PR cost 10.21 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.13
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:awaiting-review:dependabot PR"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-awaiting-review-dependabot-pr.test.ts
+  acceptance:
+    - claim: "awaiting-review:dependabot PR is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6175: flow-awaiting-review-dependabot-pr clears without a person\" in test/flow-awaiting-review-dependabot-pr.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    awaiting-review:dependabot PR cost 10.21 PR-hours; owner review-lane
+    Owner review-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9769: 9.41 PR-hours — dependabot PR — dep-review lane (checks red, review failure)
+    - PR #9766: 0.48 PR-hours — dependabot PR — dep-review lane (checks pending, review success)
+    - PR #9762: 0.30 PR-hours — dependabot PR — dep-review lane (checks green, review none) — mergeability unread this pass; inherited last known "clean" observed 2026-10-07T02:06:01.877Z for this exact head 81df50e (W1-T4470)
+    - PR #9767: 0.26 PR-hours — dependabot PR — dep-review lane (checks pending, review none) — mergeability unread this pass; inherited last known "clean" observed 2026-10-07T02:41:54.430Z for this exact head 4fc17e0 (W1-T4470)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

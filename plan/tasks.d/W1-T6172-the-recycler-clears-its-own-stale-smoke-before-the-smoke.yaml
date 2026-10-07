@@ -1,0 +1,41 @@
+- id: W1-T6172
+  title: "THE RECYCLER CLEARS ITS OWN STALE SMOKE CONTAINER BEFORE THE SMOKE — a remudero-console-daemon-worker-smoke left Created since 2026-10-04T05:21Z made every console smoke fail on a name conflict (docker exit 125) and console refused every recycle until the operator removed it by hand on 10-07T03:11Z, because W1-T5706's leftover removal runs only in the later reclaim step"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-07: console recycle refusals 10-04..10-07 (stale smoke name conflict)"
+  plan_refs: [W1-T5706, W1-T5017, W1-T6062]
+  files: [deploy/recycle-container.sh, test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main: section 5.5 runs `docker container run --rm --name "${SMOKE_NAME}"`
+    with no check for an existing container of that name. W1-T5706's loop over STALE_SMOKE_ROWS
+    (exact-name re-check, non-running only, `docker container rm` without -f) removes a leftover
+    smoke, but only inside the reclaim block, which a refused smoke never reaches. So one Created
+    leftover is self-perpetuating: each smoke fails on the name conflict with exit 125, the recycle
+    exits before the reclaim, and the leftover survives to fail the next one. OBSERVED: console's
+    leftover since 2026-10-04T05:21Z; refusals until the operator's hand `docker rm` at 10-07T03:11Z.
+  design: |
+    Factor W1-T5706's loop into one function (exact name, `--filter name=` re-checked, never `-f`)
+    and call it twice: before `docker container run` in section 5.5 and, as today, before the
+    reclaim. Tiered outcomes before the smoke, each said in words: no leftover, proceed silently; a
+    non-running leftover is removed and the recycle prints "removed leftover <name> (<state>) before
+    the smoke"; a leftover that will not remove, or one that is RUNNING (another smoke in flight is
+    not ours to kill), refuses the recycle naming the container, its state and the `docker rm`
+    remedy, taking the pause off exactly as the smoke-failure path does. No other name is touched.
+  acceptance:
+    - claim: "a Created leftover named exactly ${SMOKE_NAME} is removed before the smoke runs, the recycle says so, and the smoke then passes"
+      proof: 'grep: test("W1-T6172: a created leftover smoke is removed before the smoke and named" in test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts'
+    - claim: "a running container with the smoke's name is never removed; the recycle refuses naming it"
+      proof: 'grep: test("W1-T6172: a running smoke of the same name refuses the recycle untouched" in test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts'
+    - claim: "a container whose name merely contains ${SMOKE_NAME} is left alone"
+      proof: 'grep: test("W1-T6172: a container whose name only contains the smoke name is left alone" in test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts'
+  falsifier: |
+    Leave the removal in the reclaim step only: the stateful fake docker refuses `container run` on
+    the name conflict (exit 125), the recycle refuses, and the first test fails.
