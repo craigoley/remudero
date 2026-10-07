@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
@@ -601,6 +601,192 @@ export async function releaseTriageClaimWithLogging(
     reason: result.reason,
   });
   return result;
+}
+
+// ── THE POST-PR HANDOFF (W1-T6117) ────────────────────────────────────────────────────────────
+// A triage lane pushes its branch and opens a PR, and only SEVERAL network calls later (ownership
+// check, trailer, second push, diff read) writes `pr.opened`; `run.awaiting_external` follows once
+// CI polling starts. A holder that died in that window left a PR no ledger row named. So the lane
+// writes this record BEFORE the push (state `pending`), upgrades it with the PR the instant the
+// create returns (`pr_created`), and deletes it only once the outcome is recorded. The next triage
+// start — which already reclaimed a dead lock through `acquireDrainLock` — finishes whatever the
+// record says was left undone, looking the PR up BY BRANCH and never opening a second one.
+
+/** What the dead lane had reached. `pending`: before the push/create, so a PR may or may not exist.
+ *  `pr_created`: the create returned and `prUrl` is known. */
+export interface TriageHandoffRecord {
+  readonly runId: string;
+  readonly taskId: string;
+  readonly feedbackId: string;
+  readonly branch: string;
+  readonly action?: string;
+  readonly pid: number;
+  readonly host: string;
+  readonly writtenAt: string;
+  readonly state: "pending" | "pr_created";
+  readonly prUrl?: string;
+  readonly prNumber?: number;
+}
+
+export function triageHandoffDir(root: string): string {
+  return join(root, "state", "triage-handoff");
+}
+
+export function triageHandoffPath(root: string, feedbackId: string): string {
+  return join(triageHandoffDir(root), `${feedbackId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+
+/** Atomic (temp + rename): a holder killed mid-write leaves the previous record, never half of one. */
+export function writeTriageHandoff(root: string, rec: TriageHandoffRecord): void {
+  const path = triageHandoffPath(root, rec.feedbackId);
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(rec, null, 2));
+  renameSync(tmp, path);
+}
+
+/** Idempotent. */
+export function completeTriageHandoff(root: string, feedbackId: string): void {
+  try {
+    unlinkSync(triageHandoffPath(root, feedbackId));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+}
+
+/** Every readable record, by file name. `unreadable` names files that did not parse. */
+export function listTriageHandoffs(root: string): { records: TriageHandoffRecord[]; unreadable: string[] } {
+  const dir = triageHandoffDir(root);
+  const records: TriageHandoffRecord[] = [];
+  const unreadable: string[] = [];
+  if (!existsSync(dir)) return { records, unreadable };
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
+    try {
+      const o = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<TriageHandoffRecord>;
+      if (typeof o.runId === "string" && typeof o.taskId === "string" && typeof o.feedbackId === "string" && typeof o.branch === "string")
+        records.push(o as TriageHandoffRecord);
+      else unreadable.push(name);
+    } catch (e) {
+      void e; // named in `unreadable`, which the caller ledgers; the parse error adds nothing
+      unreadable.push(name);
+    }
+  }
+  return { records, unreadable };
+}
+
+export interface TriageHandoffDeps {
+  /** The open PR for `branch`, `undefined` for none. THROWS when the answer is unknowable (a failed
+   *  read must never be taken for "no PR" — that is how a second PR gets opened). */
+  findOpenPr: (branch: string) => { prUrl?: string; prNumber?: number } | undefined;
+  /** Non-plan files in the PR's diff; `undefined` when unreadable. */
+  strayFiles?: (prUrl: string) => string[] | undefined;
+  /** Steps already ledgered under `runId`; `undefined` when the ledger is unreadable. */
+  recordedSteps: (runId: string) => ReadonlySet<string> | undefined;
+  log: (rec: { runId: string; taskId: string }, step: string, extra?: Record<string, unknown>) => void;
+  /** The `run.awaiting_external` step name — passed in, owned by run-task.ts. */
+  awaitingStep: string;
+  claimReserver?: TriageClaimReserverAsync;
+  mergedSubjects?: () => readonly string[];
+  hostname?: () => string;
+}
+
+export interface TriageHandoffRecovery {
+  readonly feedbackId: string;
+  readonly runId: string;
+  readonly outcome: "recovered" | "no_pr" | "stray" | "foreign_host" | "unresolved";
+  readonly prUrl?: string;
+  /** Ledger steps THIS recovery wrote (empty when a prior recovery already had). */
+  readonly wrote: readonly string[];
+  readonly claimReleased: boolean;
+}
+
+/**
+ * Finishes every handoff a dead lane left. Call it holding the triage lock (so no live lane owns
+ * any record). Order matters for crash-safety: ledger rows first, the record deleted LAST, and each
+ * row skipped if `recordedSteps` already has it — a recoverer killed half way is simply re-run.
+ *
+ * The remote claim is NEVER released here on the holder arm: the PR is awaiting CI, which is exactly
+ * when a second host must still be kept off the entry. It goes through {@link releaseTriageClaim}
+ * (so `decideTriageClaimRelease` decides) with only the evidence this recovery can observe — a
+ * merged outcome — and otherwise stays held for the liveness sweep or an operator.
+ */
+export async function recoverTriageHandoffs(root: string, deps: TriageHandoffDeps): Promise<TriageHandoffRecovery[]> {
+  const out: TriageHandoffRecovery[] = [];
+  const thisHost = (deps.hostname ?? hostname)();
+  const { records, unreadable } = listTriageHandoffs(root);
+  for (const name of unreadable)
+    deps.log({ runId: `TRIAGE-handoff-${name}`, taskId: "TRIAGE-handoff" }, "triage.handoff_unresolved", { file: name, reason: "record is not parseable; left in place" });
+  for (const rec of records) {
+    const base = { feedbackId: rec.feedbackId, runId: rec.runId, wrote: [] as string[], claimReleased: false };
+    if (rec.host !== thisHost) {
+      deps.log(rec, "triage.handoff_unresolved", { feedback_id: rec.feedbackId, branch: rec.branch, reason: `written on ${rec.host}; this host cannot prove its pid ${rec.pid} absent` });
+      out.push({ ...base, outcome: "foreign_host" });
+      continue;
+    }
+    let found: { prUrl?: string; prNumber?: number } | undefined;
+    try {
+      found = deps.findOpenPr(rec.branch);
+    } catch (e) {
+      deps.log(rec, "triage.handoff_unresolved", { feedback_id: rec.feedbackId, branch: rec.branch, reason: `PR lookup failed: ${String((e as Error)?.message ?? e)}` });
+      out.push({ ...base, outcome: "unresolved" });
+      continue;
+    }
+    const prUrl = found?.prUrl ?? rec.prUrl;
+    const prNumber = found?.prNumber ?? rec.prNumber;
+    if (prUrl === undefined) {
+      deps.log(rec, "triage.handoff_abandoned", { feedback_id: rec.feedbackId, branch: rec.branch, holder_pid: rec.pid, reason: "no PR exists for the branch; nothing to record" });
+      completeTriageHandoff(root, rec.feedbackId);
+      out.push({ ...base, outcome: "no_pr" });
+      continue;
+    }
+    const recorded = deps.recordedSteps(rec.runId);
+    if (recorded === undefined) {
+      deps.log(rec, "triage.handoff_unresolved", { feedback_id: rec.feedbackId, pr_url: prUrl, reason: "ledger unreadable; cannot write idempotently" });
+      out.push({ ...base, outcome: "unresolved", prUrl });
+      continue;
+    }
+    const stray = deps.strayFiles?.(prUrl);
+    if (stray !== undefined && stray.length > 0) {
+      deps.log(rec, "triage.error", { error: "triage PR is NOT plan-only", stray_files: stray, pr_url: prUrl, recovered: true });
+      completeTriageHandoff(root, rec.feedbackId);
+      out.push({ ...base, outcome: "stray", prUrl });
+      continue;
+    }
+    const wrote = base.wrote;
+    if (!recorded.has("pr.opened")) {
+      // `plan_only` is only claimed when the diff was actually read.
+      deps.log(rec, "pr.opened", { pr_url: prUrl, pr_number: prNumber, plan_only: stray === undefined ? null : true, action: rec.action, recovered: true });
+      wrote.push("pr.opened");
+    }
+    // Only an OPEN PR is awaiting anything; a stale awaiting row on a closed one would mislead the light pass.
+    if (found?.prUrl !== undefined && !recorded.has(deps.awaitingStep)) {
+      deps.log(rec, deps.awaitingStep, { waiting_on: "ci", pr_url: prUrl, recovered: true });
+      wrote.push(deps.awaitingStep);
+    }
+    let claimReleased = false;
+    if (deps.claimReserver !== undefined) {
+      try {
+        const r = await releaseTriageClaim(rec.feedbackId, deps.claimReserver, {
+          outcomeObserved: feedbackOutcomeObserved(deps.mergedSubjects?.() ?? [], rec.feedbackId),
+        });
+        claimReleased = r.release && r.dropped;
+        deps.log(rec, r.release ? "triage.claim_released" : "triage.claim_retained", {
+          feedback_id: rec.feedbackId,
+          ref: triageClaimRef(rec.feedbackId),
+          arm: r.arm,
+          dropped: r.dropped,
+          reason: r.reason,
+          pr_url: prUrl,
+        });
+      } catch (e) {
+        deps.log(rec, "triage.claim_retained", { feedback_id: rec.feedbackId, reason: `claim release decision failed, claim left held: ${String((e as Error)?.message ?? e)}` });
+      }
+    }
+    deps.log(rec, "triage.handoff_recovered", { feedback_id: rec.feedbackId, pr_url: prUrl, branch: rec.branch, holder_pid: rec.pid, state: rec.state, wrote });
+    completeTriageHandoff(root, rec.feedbackId);
+    out.push({ ...base, outcome: "recovered", prUrl, claimReleased });
+  }
+  return out;
 }
 
 /** Marker recording the last fire, so the interval and daily cap survive a daemon restart. */

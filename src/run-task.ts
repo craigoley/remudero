@@ -1472,7 +1472,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, recoverTriageHandoffs, listTriageHandoffs, writeTriageHandoff, completeTriageHandoff, type TriageHandoffDeps, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, triageClaimRef, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -2811,7 +2811,7 @@ import {
   type ClaudeCredentialSeedEvent,
 } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
-import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
+import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type AcquireDrainLockOpts, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   asyncGit,
   checkCliFreshness,
@@ -46986,13 +46986,24 @@ export const TRIAGE_MAX_NEW_TASKS = 3;
 
 export async function triageCommand(
   rest: string[],
-  opts: { spawn?: typeof spawnWorker; config?: Config; overlap?: OverlapWarningDeps } = {},
+  opts: {
+    spawn?: typeof spawnWorker;
+    config?: Config;
+    overlap?: OverlapWarningDeps;
+    /** W1-T6117: forwarded to {@link acquireDrainLock} (a test injects the pid-liveness probe). */
+    lockOpts?: AcquireDrainLockOpts;
+    /** W1-T6117: overrides for the post-PR handoff recovery's I/O. Production passes none. */
+    handoff?: Partial<TriageHandoffDeps>;
+  } = {},
 ): Promise<number> {
   const cfg = opts.config ?? loadConfig();
   const lockPath = triageLockPath(cfg.root);
   let lock: DrainLockHandle;
+  // W1-T6117: what the lock held BEFORE this start — a successful acquire over a lock naming another
+  // pid means that holder was judged stale, and the reclaim is ledgered with the pid evidence.
+  const priorHolder = readDrainLock(lockPath);
   try {
-    lock = acquireDrainLock(lockPath);
+    lock = acquireDrainLock(lockPath, opts.lockOpts);
   } catch (e) {
     if (e instanceof DrainLockError) {
       console.error(triageLockRefusalMessage(e.holder.pid, e.holder.startedAt, lockPath));
@@ -47001,10 +47012,81 @@ export async function triageCommand(
     throw e;
   }
   try {
+    const finished = await recoverTriageHandoffsAtStart(rest, cfg, priorHolder, opts.lockOpts?.isPidAlive ?? defaultIsPidAlive, opts.handoff);
+    if (finished !== undefined) return finished;
     return await triageCommandLocked(rest, { ...opts, config: cfg });
   } finally {
     lock.release();
   }
+}
+
+/**
+ * W1-T6117: runs under the triage lock, BEFORE a new lane starts. Ledgers the lock reclaim (when a
+ * dead holder's lock was taken over) and finishes any post-PR handoff a dead lane left, so the PR
+ * it opened is recorded (`pr.opened`, `run.awaiting_external`) instead of orphaned.
+ *
+ * Returns an exit code only when the REQUESTED feedback entry already has a PR (or its PR cannot be
+ * looked up): starting a fresh lane then would open a SECOND PR for it. `undefined` ⇒ carry on.
+ */
+async function recoverTriageHandoffsAtStart(
+  rest: string[],
+  cfg: Config,
+  priorHolder: ReturnType<typeof readDrainLock>,
+  isPidAlive: (pid: number) => boolean,
+  overrides: Partial<TriageHandoffDeps> = {},
+): Promise<number | undefined> {
+  const ledgerPath = ledgerPathFor(cfg);
+  const logFor = (rec: { runId: string; taskId: string }, step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: rec.runId, task_id: rec.taskId, step, lane: "triage", ...extra });
+  if (priorHolder !== null && priorHolder.pid !== process.pid)
+    logFor({ runId: `TRIAGE-lock-${nextLaneEpochMs()}`, taskId: "TRIAGE-lock" }, "triage.lock_reclaimed", {
+      prior_pid: priorHolder.pid,
+      prior_host: priorHolder.host,
+      prior_started_at: priorHolder.startedAt,
+      // Read AFTER the reclaim: false means the lock was judged stale by identity (pid reuse, a
+      // pre-boot lock) rather than by an absent pid; null, that the pid is another host's.
+      pid_absent: priorHolder.host === hostname() ? !isPidAlive(priorHolder.pid) : null,
+      new_pid: process.pid,
+    });
+  const pending = listTriageHandoffs(cfg.root);
+  if (pending.records.length === 0 && pending.unreadable.length === 0) return undefined;
+
+  let repoDir: string | undefined;
+  const repoDirOnce = () => (repoDir ??= join(cfg.root, "repos", resolveOwnerRepo().repo));
+  const deps: TriageHandoffDeps = {
+    findOpenPr: (branch) => {
+      const { owner, repo } = resolveOwnerRepo();
+      const head = encodeURIComponent(`${owner}:${branch}`).replace(/%2F/g, "/");
+      const out = ghExec(["api", `repos/${owner}/${repo}/pulls?head=${head}&state=open`], { encoding: "utf8" });
+      const first = (JSON.parse(out) as Array<{ html_url?: string; number?: number }>)[0];
+      return first ? { prUrl: first.html_url, prNumber: first.number } : undefined;
+    },
+    strayFiles: (prUrl) => {
+      try {
+        return nonPlanFilesInDiff(ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+      } catch (e) {
+        void e; // unreadable ⇒ undefined, and the recovery then claims no `plan_only` at all
+        return undefined;
+      }
+    },
+    recordedSteps: (runId) => {
+      const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: ["pr.opened", AWAITING_EXTERNAL_LEDGER_STEP], refuseIncomplete: true });
+      if (!read.ok) return undefined;
+      return new Set(read.rows.filter((r) => r.run_id === runId).map((r) => String(r.step)));
+    },
+    log: logFor,
+    awaitingStep: AWAITING_EXTERNAL_LEDGER_STEP,
+    claimReserver: overrides.claimReserver ?? triageClaimReserverAsyncFor(repoDirOnce()),
+    mergedSubjects: () => mergedTriageSubjects(repoDirOnce()),
+    ...overrides,
+  };
+  const recovered = await recoverTriageHandoffs(cfg.root, deps);
+  const parsed = parseTriageArgs(rest);
+  if ("error" in parsed) return undefined; // triageCommandLocked prints the usage error
+  const mine = recovered.find((r) => r.feedbackId === parsed.feedbackId);
+  if (mine === undefined || mine.outcome === "no_pr" || mine.outcome === "foreign_host") return undefined;
+  console.log(`\n### [triage] feedback#${parsed.feedbackId}: a previous lane (${mine.runId}) already opened ${mine.prUrl ?? "a PR"} — ${mine.outcome}; not triaging again`);
+  return mine.outcome === "recovered" ? 0 : 1;
 }
 
 /** The refusal an operator sees when the daemon's rung (or another hand-run) holds the lock. */
@@ -47093,6 +47175,8 @@ async function triageCommandLocked(
   // LOST the claim holds nothing to release.
   let triageClaim: TriageClaimResult | undefined;
   let claimReserver: TriageClaimReserverAsync | undefined;
+  // W1-T6117: set only when the PR is open and CI has no verdict yet — the `finally` then keeps the remote claim.
+  let retainClaimForPendingCi = false;
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -47441,17 +47525,28 @@ async function triageCommandLocked(
       }
     }
 
+    // W1-T6117: WRITE-AHEAD. The record exists BEFORE the first remote effect (the push), so a holder
+    // killed anywhere from here to `pr.opened` leaves a restart something to find the PR by. It is
+    // deleted only at the explicit completion points below — never in the `finally`, which a hard
+    // kill skips and a throw must not use to erase the only trace of a PR it just opened.
+    const handoff = { runId, taskId, feedbackId, branch, action: decision.action, pid: process.pid, host: hostname(), writtenAt: new Date().toISOString() };
+    writeTriageHandoff(config.root, { ...handoff, state: "pending" });
     await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
+    const created = runGhPrCreate(prCreate, branch, log, say);
+    const prUrl = created.prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
+      completeTriageHandoff(config.root, feedbackId);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    // W1-T6117: complete the record the instant the create returns — before the ownership check,
+    // trailer, second push and diff read, which is the window a death used to orphan the PR in.
+    writeTriageHandoff(config.root, { ...handoff, state: "pr_created", prUrl, prNumber: created.prNumber });
 
     // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
     // is actually this triage run's own PR.
@@ -47459,6 +47554,7 @@ async function triageCommandLocked(
     if (ownership) {
       log("verdict", ownership.ledger);
       say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this triage's own branch (${branch})`);
+      completeTriageHandoff(config.root, feedbackId);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
@@ -47484,12 +47580,14 @@ async function triageCommandLocked(
     if (strayFiles.length > 0) {
       log("triage.error", { error: "triage PR is NOT plan-only", stray_files: strayFiles });
       say(`triage PR touched non-plan file(s) (${strayFiles.join(", ")}) — leaving PR OPEN for inspection`);
+      completeTriageHandoff(config.root, feedbackId);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
     if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId)) {
       log("triage.error", { error: "proposed diff missing feedback# provenance" });
       say(`triage PROPOSED but the diff never cites feedback#${feedbackId} — leaving PR OPEN for inspection`);
+      completeTriageHandoff(config.root, feedbackId);
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
@@ -47501,9 +47599,16 @@ async function triageCommandLocked(
     const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
     if (ci !== "green") {
       say(`ci ${ci} — PR left OPEN: ${prUrl}`);
+      // W1-T6117: a PR still AWAITING CI (the wait timed out, or was handed off) has no outcome yet,
+      // so the remote claim stays held — releasing it would let another host triage the same entry
+      // into a second PR. Only a TERMINAL red releases (the `finally` below does it). The handoff
+      // record is kept for a pending PR so a restart can finish its ledger steps.
+      if (ci === "red") completeTriageHandoff(config.root, feedbackId);
+      else retainClaimForPendingCi = true;
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    completeTriageHandoff(config.root, feedbackId); // CI is terminal and green; everything is ledgered
 
     // W1-T963 (empty-diff-triage-merge incident: #2075/#2077/#2078 merged and passed review
     // despite changing nothing). `diff` above is `gh pr diff` — frozen against THIS branch's own
@@ -47583,7 +47688,9 @@ async function triageCommandLocked(
     // Guarded on the ANCHOR rather than on `triageClaim` being set: a lane that refused because
     // the claim was already taken holds nothing, and calling the release there would ask the
     // decision a question it has already answered on the contention path.
-    if (triageClaim?.anchor !== undefined && claimReserver !== undefined)
+    if (retainClaimForPendingCi && triageClaim?.anchor !== undefined)
+      log("triage.claim_retained", { feedback_id: feedbackId, ref: triageClaimRef(feedbackId), reason: "the PR is still awaiting CI; releasing would let another host open a second PR for this entry" });
+    else if (triageClaim?.anchor !== undefined && claimReserver !== undefined)
       await releaseTriageClaimWithLogging(log, feedbackId, claimReserver, triageClaim.anchor);
   }
 }
