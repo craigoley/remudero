@@ -62,7 +62,7 @@ test("workerHomePlan: symlinks map each ALLOWLISTED path from the real HOME into
   assert.equal(plan.symlinks.length, WORKER_HOME_SYMLINKS.length);
   const byRel = Object.fromEntries(plan.symlinks.map((s) => [s.from.replace("/scratch/worker-home/", ""), s]));
   assert.equal(byRel[".claude"].to, "/Users/operator/.claude");
-  assert.equal(byRel[".config/gh"].to, "/Users/operator/.config/gh");
+  assert.equal(byRel[".config/gh"], undefined, "the operator's gh config is never granted back");
   assert.equal(byRel[".gitconfig"].to, "/Users/operator/.gitconfig");
   for (const s of plan.symlinks) {
     assert.ok(s.from.startsWith("/scratch/worker-home/"), "symlink source must live under the redirected HOME");
@@ -131,7 +131,7 @@ test("materializeWorkerHome: truncates a PLANTED alias in the injected workerHom
   }
 });
 
-test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitconfig) resolve UNDER the redirected HOME to the real HOME's paths", () => {
+test("materializeWorkerHome: the auth-path symlinks (.claude, .gitconfig) resolve UNDER the redirected HOME to the real HOME's paths", () => {
   const workerHome = tmp();
   const realHome = tmp();
   try {
@@ -144,7 +144,7 @@ test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitco
 
     materializeWorkerHome({ workerHome, realHome });
 
-    for (const rel of [".claude", join(".config", "gh"), ".gitconfig"]) {
+    for (const rel of [".claude", ".gitconfig"]) {
       const from = join(workerHome, rel);
       const st = lstatSync(from);
       assert.ok(st.isSymbolicLink(), `${rel} must be a symlink under the redirected HOME`);
@@ -152,6 +152,7 @@ test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitco
     }
     // And the content is genuinely reachable through the redirected HOME.
     assert.equal(readFileSync(join(workerHome, ".gitconfig"), "utf8"), "[user]\n\tname = Test\n");
+    assert.equal(existsSync(join(workerHome, ".config", "gh")), false, "the operator's gh config stays out");
   } finally {
     rmSync(workerHome, { recursive: true, force: true });
     rmSync(realHome, { recursive: true, force: true });
@@ -916,7 +917,7 @@ test("worker home: the existing grants are unchanged", () => {
   // ADDING ONE ENTRY MUST NOT DISTURB THE FOUR BESIDE IT. Named explicitly rather than by count,
   // so this states which grants must survive rather than merely how many.
   const rels = WORKER_HOME_SYMLINKS.map((s) => s.relPath);
-  for (const expected of [".claude", ".config/gh", ".gitconfig", "Library/Keychains/login.keychain-db"]) {
+  for (const expected of [".claude", ".gitconfig", "Library/Keychains/login.keychain-db"]) {
     assert.ok(rels.includes(expected), `the pre-existing grant ${expected} must still be present`);
   }
   assert.ok(rels.includes(playwrightCacheRelPath()), "and the new grant is present beside them");

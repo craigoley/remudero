@@ -206,6 +206,19 @@ export function validateWorkerSettings(settings: unknown): void {
     checkKeys(sandbox.filesystem, FILESYSTEM_KEYS, "sandbox.filesystem");
   }
 
+  // The bundled CLI splits a compound command and runs the WHOLE of it unsandboxed when ANY part
+  // matches an exclusion, so `gh --version && <anything>` rode `gh *` out of the sandbox, and
+  // allowUnsandboxedCommands=false does not gate that path. Any entry is an escape, so none is allowed.
+  if (
+    sandbox.excludedCommands !== undefined &&
+    !(Array.isArray(sandbox.excludedCommands) && sandbox.excludedCommands.length === 0)
+  ) {
+    throw new WorkerSettingsError(
+      "`sandbox.excludedCommands` must be absent or empty: the CLI runs a whole compound command " +
+        "unsandboxed when any part of it matches an entry.",
+    );
+  }
+
   // Zero ask rules is load-bearing (a headless worker would hang on a prompt).
   const permissions = settings.permissions;
   if (isObject(permissions) && Array.isArray(permissions.ask) && permissions.ask.length > 0) {

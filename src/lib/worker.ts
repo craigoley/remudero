@@ -6893,8 +6893,8 @@ export function ghPrMergeSquash(prUrl: string): string {
 }
 
 /** Per-spawn sandbox egress broker. The CLI confines sandbox sockets to these listeners;
- * the broker owns the destination policy. CLI model transport and excludedCommands retain
- * their existing boundary. The console is explicitly permitted by the W1-T1289 ruling. */
+ * the broker owns the destination policy. CLI model transport retains
+ * its existing boundary. The console is explicitly permitted by the W1-T1289 ruling. */
 export interface WorkerEgressProxy {
   httpProxyPort: number;
   socksProxyPort: number;

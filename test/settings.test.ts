@@ -23,7 +23,6 @@ const GOOD = {
     autoAllowBashIfSandboxed: true,
     filesystem: { denyRead: ["~/.ssh/**"] },
     network: { allowedDomains: ["github.com"] },
-    excludedCommands: ["gh *"],
   },
 };
 
@@ -95,8 +94,17 @@ const WORKER_SETTINGS_TEMPLATE_PATH = join(
 // real home — see the tests below this file's own W1-T2211 block for the proof.
 const ORIGINAL_DENY_READ_ENTRIES = ["~/../../.ssh/**", "~/../../.aws/**", "~/../../.config/remudero/**"];
 
+/** Denies added AFTER W1-T2211/W1-T2213, each pinned by its own test, so the exact counts below
+ *  keep judging only the entries those two tasks own. The gh config deny is pinned by
+ *  test/a-claude-worker-gh-runs-inside-the-sandbox.test.ts. */
+const LATER_DENY_READ_ENTRIES = ["~/../../.config/gh/**"];
+
 function readWorkerSettingsTemplate(): Record<string, unknown> {
-  return JSON.parse(readFileSync(WORKER_SETTINGS_TEMPLATE_PATH, "utf8"));
+  const parsed = JSON.parse(readFileSync(WORKER_SETTINGS_TEMPLATE_PATH, "utf8"));
+  const later = (e: string) => LATER_DENY_READ_ENTRIES.some((l) => e === l || e === `Read(${l})`);
+  parsed.sandbox.filesystem.denyRead = parsed.sandbox.filesystem.denyRead.filter((e: string) => !later(e));
+  parsed.permissions.deny = parsed.permissions.deny.filter((e: string) => !later(e));
+  return parsed;
 }
 
 test("W1-T2211 ACCEPTANCE 4: the committed worker.json TEMPLATE still validates", () => {
