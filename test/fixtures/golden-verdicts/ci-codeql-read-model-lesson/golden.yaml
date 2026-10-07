@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T5199: the CodeQL read-model lesson's cited incident must be a real, executable proof
+  against the active learnings entry, so a worker reaching the read-model lane is handed it.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
