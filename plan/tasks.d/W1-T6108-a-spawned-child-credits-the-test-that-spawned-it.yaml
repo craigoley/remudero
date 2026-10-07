@@ -42,8 +42,8 @@
   acceptance:
     - claim: "a child spawned by a test writes its coverage under that test's subdirectory and the impact map credits the child's executed blocks to the spawning suite; a suite that only spawns git is not force-selected as a spawner; the merged lcov still counts the child's coverage"
       proof: "unit test: test/a-spawned-child-credits-the-test-that-spawned-it.test.ts"
-    - claim: "the selector still computes the impact arm through the impact map module"
-      proof: 'grep: impactArmSelection( in src/lib/affected-suites.ts'
+    - claim: "the impact map records which suites have their spawned children credited"
+      proof: 'grep: spawnCredited in src/lib/test-impact-map.ts'
   falsifier: |
     Leave NODE_V8_COVERAGE unchanged in the setup: the fixture child's report lands outside the suite's
     subdirectory, is an orphan, and the crediting test fails.
@@ -54,3 +54,5 @@
     how long the shards take. src/lib/test-impact-map.ts is new only relative to origin/main at filing (it
     arrives with #9760), so the call-site lint asks for the grep proof; once W1-T6083 merges that proof
     matches at base too and is stale by construction, and the unit test is the discriminating proof.
+    AMENDED 2026-10-07: the stale `impactArmSelection(` grep (proof-discrimination refused it on #9781)
+    is replaced by `spawnCredited`, which only the build adds.
