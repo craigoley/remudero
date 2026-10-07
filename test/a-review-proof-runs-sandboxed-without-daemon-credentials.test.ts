@@ -34,6 +34,7 @@ const {
   setProofSandboxForTests,
 } = review;
 import { makeTempDir } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const CREDENTIALS: Record<string, string> = {
   GH_TOKEN: "fixture-gh-token",
@@ -122,14 +123,38 @@ test("proofSandboxArgv mounts the checkout, its git dirs and its install, and no
   assert.ok(argv.indexOf(real(gitdir)) > argv.indexOf(real(common)), "the deeper gitdir bind lands over its common dir");
   assert.ok(bind("--ro-bind", install), "the node_modules link target is read-only");
   assert.ok(bind("--ro-bind", workspace), "a workspace package link out of the install is read-only");
-  const masked = (p: string) => argv.some((a, i) => a === "--ro-bind" && argv[i + 1] === "/dev/null" && argv[i + 2] === p);
-  assert.ok(masked(join(real(common), "config")), "a common dir's config (a token-bearing remote) is masked");
-  assert.ok(masked(real(key)), "an App key inside some bind is masked by /dev/null");
+  const maskedBy = (p: string) => argv.find((a, i) => argv[i - 1] === "--ro-bind" && argv[i + 1] === p);
+  assert.ok(maskedBy(join(real(common), "config")) !== undefined, "a common dir's config (a token-bearing remote) is masked");
+  assert.equal(maskedBy(real(key)), "/dev/null", "an App key inside some bind is masked by /dev/null");
   assert.equal(argv.some((a) => a === real(daemonHome) || a.startsWith(`${real(daemonHome)}/`)), false,
     "nothing of the daemon's HOME is mounted");
   const noKey = proofSandboxArgv({ cwd, home, env: { HOME: daemonHome, GH_APP_PRIVATE_KEY_PATH: join(root, "absent.pem") } });
-  assert.equal(noKey.filter((a) => a === "/dev/null").length, 1, "an absent key path needs no mask; only config is");
+  assert.equal(noKey.filter((a) => a === "/dev/null").length, 0, "an absent key path needs no mask");
   assert.throws(() => proofSandboxArgv({ cwd: "/", home }), ProofSandboxUnavailableError);
+});
+
+test("the shared git config is masked by an empty file in the throwaway HOME, never by an unreadable /dev/null", () => {
+  // bwrap mounts binds nodev: a /dev/null over a file reads as EACCES, and git refuses an unreadable config outright.
+  const root = makeTempDir("t6124-config-mask");
+  const common = join(root, "managed", ".git");
+  const gitdir = join(common, "worktrees", "review-PR1");
+  const cwd = join(root, "worktrees", "review-PR1");
+  const home = join(root, "proof-home");
+  for (const d of [gitdir, cwd, home]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(common, "config"), "[remote \"origin\"]\n\turl = https://x-access-token:fixture@github.com/o/r\n");
+  writeFileSync(join(gitdir, "commondir"), "../..\n");
+  writeFileSync(join(cwd, ".git"), `gitdir: ${gitdir}\n`);
+  const real = (p: string) => execFileSync("realpath", [p], { encoding: "utf8" }).trim();
+  const target = join(real(common), "config");
+  const maskOf = (argv: string[]) => argv.find((a, i) => argv[i - 1] === "--ro-bind" && argv[i + 1] === target);
+  const first = maskOf(proofSandboxArgv({ cwd, home, env: {} }));
+  assert.ok(first !== undefined && first !== "/dev/null", "the config is masked by a regular file");
+  assert.ok(first!.startsWith(`${real(home)}/`), "the mask lives in the throwaway HOME its caller removes");
+  assert.equal(readFileSync(first!, "utf8"), "", "the mask is EMPTY: git reads no remote and no error");
+  assert.equal(maskOf(proofSandboxArgv({ cwd, home, env: {} })), first, "a second argv for the same HOME reuses its mask");
+  const fileHome = join(root, "home-is-a-file");
+  writeFileSync(fileHome, "");
+  assert.throws(() => proofSandboxArgv({ cwd, home: fileHome, env: {} }), /ENOTDIR/, "a mask that cannot be made is refused, never skipped");
 });
 
 test("proofCheckoutGitDirs and proofLinkedModuleRoots read each checkout shape", () => {
@@ -300,4 +325,29 @@ test("on Linux with bwrap, a proof cannot read the App key or the daemon's HOME"
   assert.notEqual(seen.key, "read", "the App key file must not be readable from a proof");
   assert.notEqual(seen.home, "read", "the daemon's HOME must not be mounted");
   assert.equal(readFileSync(key, "utf8"), "fixture key, not a real one\n", "control: the key exists outside the sandbox");
+});
+
+test("on Linux with bwrap, a proof's git runs in a review worktree and reads no remote from the shared config", async (t) => {
+  const status = probeProofSandbox();
+  if (status.mode !== "bwrap") {
+    if (process.platform === "darwin") assert.match(status.reason, /Linux-only/, "macOS degrades, by name");
+    t.skip(`bwrap sandbox unavailable here: ${status.reason}`);
+    return;
+  }
+  // The review checkout's shape: a worktree whose common dir (and its config) sits outside the checkout.
+  const managed = gitRepo({ kind: "t6124-git-managed" });
+  managed.addRemote("origin", "https://x-access-token:fixture@github.com/o/r");
+  const cwd = join(makeTempDir("t6124-git-review"), "review-PR1");
+  managed.addWorktree(cwd, "review-pr1");
+  const probe = [
+    "const { spawnSync } = require('node:child_process');",
+    "const git = (...a) => { const r = spawnSync('git', a, { encoding: 'utf8' }); return { status: r.status, out: (r.stdout + r.stderr).trim() }; };",
+    "process.stdout.write(JSON.stringify({ head: git('rev-parse', 'HEAD'), status: git('status', '--porcelain'), url: git('config', '--get', 'remote.origin.url') }));",
+  ].join("\n");
+  setProofSandboxForTests(status);
+  const seen = JSON.parse(await defaultProofSpawner(process.execPath, ["-e", probe], cwd, 30_000)) as Record<string, { status: number; out: string }>;
+  assert.equal(seen.head.status, 0, `git rev-parse must run in the sandboxed worktree: ${seen.head.out}`);
+  assert.equal(seen.status.status, 0, `git status must run in the sandboxed worktree: ${seen.status.out}`);
+  assert.notEqual(seen.url.status, 0, "the shared config's token-bearing remote is not readable");
+  assert.doesNotMatch(seen.url.out, /fixture/, "no part of the remote URL reaches the proof");
 });
