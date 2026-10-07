@@ -31109,6 +31109,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
   readCodeScanningAlerts?: typeof readCodeScanningAlerts;
   alertFix?: typeof alertFixCommand;
   inbox?: typeof inboxCommand;
+  buildBatchedGithub?: typeof buildBatchedGithub;
   feedbackDocket?: typeof runFeedbackDocketRung;
 } = {}): {
   checkIntakeRungs: () => readonly IntakeRungDecision[];
@@ -31116,6 +31117,8 @@ export function buildIntakeRungsDaemonHooks(deps: {
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const { owner, repo } = resolveOwnerRepo();
+  const inboxGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
   const check =
     deps.check ??
     (() => {
@@ -31242,7 +31245,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
         };
       }
       if (rung === "inbox") {
-        const exitCode = await (deps.inbox ?? inboxCommand)([], { config });
+        const exitCode = await (deps.inbox ?? inboxCommand)([], { config, github: inboxGithub });
         return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
       }
       const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -48634,7 +48637,7 @@ export function projectionReadinessAccessors(projection: ReadonlyMap<string, Sta
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-export async function inboxCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48673,7 +48676,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never

@@ -165,6 +165,19 @@ test("the exemption table is shrink-only: every entry states why its calls are b
   assert.deepEqual(Object.keys(LOOP_REACHABLE_EXEMPTIONS), [], "the table may only shrink");
 });
 
+test("unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts — the census refuses an unbatched inboxCommand without an exemption", () => {
+  const fns = topLevelFunctions();
+  assert.ok(loopReachable(fns, "daemonCommand").has("inboxCommand"));
+  assert.ok(!population(fns).includes("inboxCommand"));
+  assert.deepEqual(refusals(fns, LOOP_REACHABLE_EXEMPTIONS), []);
+  const planted = fns.map((f) =>
+    f.name === "inboxCommand" ? { ...f, body: f.body + "\n  const g = ghGateway(owner, repo);" } : f,
+  );
+  assert.deepEqual(refusals(planted, LOOP_REACHABLE_EXEMPTIONS), [
+    "inboxCommand builds ghGateway( and is reachable from the daemon loop (daemonCommand) — use the batched gateway",
+  ]);
+});
+
 /** A `gh` on PATH that logs every invocation: the only way to SEE a synchronous spawn. */
 function withCountingGh<T>(body: (calls: () => string[]) => T): T {
   const shim = ghShim([{ when: "api", stdout: "[]" }], { kind: "t5650-gh" });
