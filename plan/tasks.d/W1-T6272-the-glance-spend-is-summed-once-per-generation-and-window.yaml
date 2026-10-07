@@ -1,0 +1,40 @@
+- id: W1-T6272
+  title: "THE GLANCE SPEND IS SUMMED ONCE PER LEDGER GENERATION AND UTC DAY AND WEEK — every now@core build's board snapshot re-scans the full fact history three times (merged today, day cost, week cost): 12.1% of a warm build's CPU after W1-T6253"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — memoizing computeGlanceSpend on the row generation W1-T6253 registers
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item C1b), from a CPU re-profile of warm now@core builds after W1-T6253"
+  plan_refs: [W1-T6253, W1-T159, W1-T6267]
+  files: [src/lib/glance.ts, test/the-glance-spend-is-summed-once-per-generation-and-window.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 in an isolated replay of the production read model (836,723 fact rows), an in-process CPU
+    profile of 15 warm now@core builds on main 41698683 (which contains W1-T6253) plus PR 9943. Warm build CPU p50 is
+    3.4 s. computeGlanceSpend is 12.1% inclusive: windowCostRows 7.8% self, deriveWeekCostUsd 6.2% and
+    deriveDayCostUsd 5.7% inclusive, plus its own merged-today walk. Each now build calls it once through
+    computeBoardSnapshot over the board projection's whole row array, and walks every row three times.
+    The windows are fixed calendar boundaries (utcDayWindowMs, utcWeekWindowMs), not rolling ones, so the answer is a
+    pure function of the rows and the two window starts. W1-T6253 already registers a generation for the board's row
+    array (ledgerGenerationOf) and memoizes now-view's dayCostRows on it, but not this function.
+  design: |
+    (1) computeGlanceSpend memoizes its result per rows array (a WeakMap, as W1-T6253's dayCostRows does), keyed by
+    the array's registered generation, the UTC day start and the UTC week start. A rows array with no registered
+    generation is computed on every call, exactly as today.
+    (2) A new generation, a new UTC day or a new ISO week recomputes. The held value is returned as a copy, so no
+    caller can mutate another's result.
+    (3) A counting seam (as W1-T6253's dayCostScanCount) lets the test prove one scan per (generation, day, week).
+  acceptance:
+    - claim: "an unchanged generation inside one UTC day and week scans once, a new generation, day or week rescans, an unregistered array scans every call, and every answer equals an unmemoized computeGlanceSpend"
+      proof: "unit test: test/the-glance-spend-is-summed-once-per-generation-and-window.test.ts"
+    - claim: "the glance spend keys its memo on the ledger generation"
+      proof: "grep: ledgerGenerationOf in src/lib/glance.ts"
+  falsifier: |
+    Key the memo on the generation alone: crossing UTC midnight keeps yesterday's spend and the day case fails. Memo an
+    unregistered array: a mutated array answers its old spend and the equality fails.
