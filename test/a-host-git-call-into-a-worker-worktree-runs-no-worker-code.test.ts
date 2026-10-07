@@ -31,10 +31,10 @@ type Leaf = typeof import("../src/lib/worktree-git.js");
 let leaf: Leaf;
 const { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError, worktreeGitCapture, worktreePushExec } = gitPush as typeof gitPush;
 const openWeightWritablePath: typeof provider.openWeightWritablePath = (...a) => provider.openWeightWritablePath(...a);
-const hostWorktreeGit: Leaf["hostWorktreeGit"] = (...a) => leaf.hostWorktreeGit(...a);
+const leafGit: Leaf["hostWorktreeGit"] = (...a) => leaf.hostWorktreeGit(...a);
 const pinnedConfigValue: Leaf["pinnedConfigValue"] = (...a) => leaf.pinnedConfigValue(...a);
-const pinWorktreeGit: Leaf["pinWorktreeGit"] = (...a) => leaf.pinWorktreeGit(...a);
-const recordedWorktreeGitDir: Leaf["recordedWorktreeGitDir"] = (...a) => leaf.recordedWorktreeGitDir(...a);
+const pinLane: Leaf["pinWorktreeGit"] = (...a) => leaf.pinWorktreeGit(...a);
+const recordedGitDir: Leaf["recordedWorktreeGitDir"] = (...a) => leaf.recordedWorktreeGitDir(...a);
 const isPointerRefusal = (e: unknown): boolean => e instanceof leaf.WorktreePointerRefusedError;
 
 let root: string;
@@ -171,10 +171,10 @@ describe("W1-T6106: the worktree's tracked hooks never run on a host commit or p
 describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => {
   it("worktreeAdd records the gitdir it cut, and the leaf pins to it", () => {
     const { wt } = cutLane();
-    const recorded = recordedWorktreeGitDir(wt);
+    const recorded = recordedGitDir(wt);
     assert.ok(recorded, "the base record names a gitdir");
-    assert.equal(pinWorktreeGit(wt).gitDir, recorded);
-    assert.equal(pinWorktreeGit(wt).source, "recorded");
+    assert.equal(pinLane(wt).gitDir, recorded);
+    assert.equal(pinLane(wt).source, "recorded");
   });
 
   it("the control: a raw git -C status in a worktree pointing at the planted gitdir runs its fsmonitor", () => {
@@ -191,7 +191,7 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
     writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("leaf")}\n`);
     const refused = (e: unknown) => isPointerRefusal(e) && /no longer names the gitdir worktreeAdd recorded/.test((e as Error).message);
     const rows: string[] = [];
-    assert.throws(() => hostWorktreeGit(wt, ["diff", "HEAD"], { log: (step) => rows.push(step) }), refused);
+    assert.throws(() => leafGit(wt, ["diff", "HEAD"], { log: (step) => rows.push(step) }), refused);
     assert.deepEqual(rows, ["worktree_git.pointer_refused"], "the refusal writes its row");
     assert.throws(() => commitWorkerEdits(wt, ["d.txt"], "feat(d): never"), refused);
     assert.throws(() => withLiveWritesAllowed(() => gitPushRunBranch(wt)), refused);
@@ -210,8 +210,8 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
     raw(planted, "config", "core.fsmonitor", `sh -c 'touch "${marker("planted-inside")}"'`);
     recordWorktreeBase(wt, raw(wt, "rev-parse", "HEAD").trim());
     writeFileSync(join(wt, ".git"), `gitdir: ${join(planted, ".git")}\n`);
-    assert.equal(recordedWorktreeGitDir(wt), null);
-    assert.throws(() => hostWorktreeGit(wt, ["status"], { log: () => {} }), isPointerRefusal);
+    assert.equal(recordedGitDir(wt), null);
+    assert.throws(() => leafGit(wt, ["status"], { log: () => {} }), isPointerRefusal);
     assert.equal(existsSync(marker("planted-inside")), false);
   });
 
@@ -220,9 +220,9 @@ describe("W1-T6106: a rewritten .git pointer is refused before git runs", () => 
     raw(wt, "config", "--worktree", "core.fsmonitor", `sh -c 'touch "${marker("pinned-fsmonitor")}"'`);
     raw(wt, "config", "--worktree", "credential.helper", "!fixture-credential-helper");
     writeFileSync(join(wt, "e.txt"), "e\n");
-    hostWorktreeGit(wt, ["status", "--porcelain"]);
+    leafGit(wt, ["status", "--porcelain"]);
     assert.equal(existsSync(marker("pinned-fsmonitor")), false, "the leaf disabled core.fsmonitor");
-    assert.ok(hostWorktreeGit(wt, ["config", "--get-all", "credential.helper"]).split("\n").includes("!fixture-credential-helper"),
+    assert.ok(leafGit(wt, ["config", "--get-all", "credential.helper"]).split("\n").includes("!fixture-credential-helper"),
       "the daemon-written credential helper a push authenticates through is still visible to the leaf");
     raw(wt, "status", "--porcelain");
     assert.ok(existsSync(marker("pinned-fsmonitor")), "control: the same config runs through a raw call");
@@ -260,28 +260,28 @@ describe("W1-T6106: the leaf's edges", () => {
 
   it("a plain repository pins to its own .git directory; one whose recorded pointer became a directory is refused", () => {
     const plain = gitRepo({ kind: "t6106-plain" });
-    assert.equal(pinWorktreeGit(plain.dir).source, "git-directory");
-    assert.equal(recordedWorktreeGitDir(plain.dir), null);
+    assert.equal(pinLane(plain.dir).source, "git-directory");
+    assert.equal(recordedGitDir(plain.dir), null);
     plain.cleanup();
     const { wt } = cutLane();
     writeFileSync(join(wt, ".git"), `gitdir: ${join(root, "no-such-gitdir")}\n`);
-    assert.throws(() => pinWorktreeGit(wt, () => {}), /no longer names the gitdir/, "a pointer to nothing is refused");
+    assert.throws(() => pinLane(wt, () => {}), /no longer names the gitdir/, "a pointer to nothing is refused");
     rmSync(join(wt, ".git"));
     mkdirSync(join(wt, ".git"));
-    assert.throws(() => pinWorktreeGit(wt, () => {}), /replaced by a directory/);
+    assert.throws(() => pinLane(wt, () => {}), /replaced by a directory/);
   });
 
   it("an unrecorded pointer to an outside gitdir that does not name the worktree back is refused", () => {
     const { wt } = cutLane();
     recordWorktreeBase(wt, raw(wt, "rev-parse", "HEAD").trim());
     writeFileSync(join(wt, ".git"), `gitdir: ${plantGitDir("no-back")}\n`);
-    assert.throws(() => pinWorktreeGit(wt, () => {}), /does not name this worktree back/);
+    assert.throws(() => pinLane(wt, () => {}), /does not name this worktree back/);
     assert.equal(existsSync(marker("planted-fsmonitor-no-back")), false);
   });
 
   it("a pinned config read answers unset as undefined and refuses to call an unreadable config unset", () => {
     const { wt } = cutLane();
-    const pin = pinWorktreeGit(wt);
+    const pin = pinLane(wt);
     assert.equal(pinnedConfigValue(pin, "remudero.never-set"), undefined);
     writeFileSync(join(pin.gitDir, "config.worktree"), "[core\n\tbroken = \n");
     assert.throws(() => pinnedConfigValue(pin, "core.hooksPath"));
