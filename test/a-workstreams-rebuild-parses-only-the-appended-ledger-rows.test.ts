@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -212,4 +212,13 @@ test("the view rebuilds through a separate live ledger tail for each instance", 
   assert.equal(reads.mock.callCount(), 3, "the unchanged instance reads no bytes");
   assert.equal(reads.mock.calls.at(-1)!.result, Buffer.byteLength(appended));
   assert.equal(reads.mock.calls.at(-1)!.arguments.at(4), Buffer.byteLength('{"instance":"one"}\n'));
+});
+
+test("the live tail opens the ledger once and never tails a symlinked one, falling back to the whole read", (t) => {
+  // CodeQL js/file-system-race: an exists-then-open pair let the entry change between the two calls. The tail's
+  // single O_NOFOLLOW open refuses the symlink (ELOOP), and the tail's own fallback answers with the whole read.
+  const f = fixture(t);
+  writeFileSync(`${f.path}.real`, '{"elsewhere":true}\n');
+  symlinkSync(`${f.path}.real`, f.path);
+  equalOracle(f.path, f.read());
 });
