@@ -50,12 +50,13 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
 const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
   "src/lib/git-push.ts": { count: 4, reason: "seam argv: pushRunBranchSteps/leasedForcePushSteps; the defaults run it through the leaf" },
   "src/run-task.ts": {
-    count: 75,
+    count: 13,
     reason:
-      "2 seam argv in pushFixRound (its exec/capture default to the leaf); the rest NOT YET CONVERTED — " +
-      "runPlanScopedFixRound, commitGeneratorOutputViaGit, buildProofAmendmentGitOps, " +
-      "captureWorktreeSnapshotViaGit, preserveTrackedDirtyPatch, inspectFreshReviewerWorktree and the " +
-      "worktree reads around them",
+      "W1-T6121 converted every worker and reviewer site; what is left is HARNESS-only, each recorded with " +
+      "its function and reason in test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts: " +
+      "2 seam argv in pushFixRound (its exec/capture default to the leaf), the fresh origin/main reviewer " +
+      "tree inspectFreshReviewerWorktree reads, the clone the test-only triageClaimReserverFor and " +
+      "mergedTriageSubjects bind, and the approve worktrees approveCommand/approveBatchCommand write themselves",
   },
   "src/lib/worker.ts": {
     count: 10,
