@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,7 +54,9 @@ function originMainFixture(): string {
   put(root, "docs/knowledge-garden-log.md", LOG_HEAD);
   const case0 = `${KNOWLEDGE_RETIRE_GOLDEN}`;
   mkdirSync(join(root, case0), { recursive: true });
-  copyFileSync(join(REPO_ROOT, case0, "golden.yaml"), join(root, case0, "golden.yaml"));
+  const pinned = readFileSync(join(REPO_ROOT, case0, "golden.yaml"), "utf8");
+  // Seed the earlier pass's single claim even when the repository golden already has two rows.
+  put(root, `${case0}/golden.yaml`, `${pinned.slice(0, pinned.search(/^criteria:[ \t]*$/m))}criteria:\n  - met: true\n    proof_exec: executed_pass\n`);
   put(root, `${case0}/diff.patch`, "diff --git a/learnings/platform.yaml b/learnings/platform.yaml\n");
   put(root, `${case0}/criteria.yaml`, "- claim: old\n  proof: \"grep: old in learnings/platform.yaml\"\n");
   put(root, `${case0}/report.md`, "an earlier pass\n");

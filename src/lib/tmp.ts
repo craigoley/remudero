@@ -39,6 +39,7 @@
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { systemClock } from "./clock.js";
 
 /** Every temp dir rmd creates is named `rmd-<kind>-<random>` under the OS tmp
  * root — the single shared prefix {@link sweepStaleTempDirs} keys on. */
@@ -95,6 +96,8 @@ export interface TempSweepOpts {
   now?: () => number;
   /** Root to scan (tests). Defaults to `os.tmpdir()`. */
   root?: string;
+  /** {@link sweepStaleTempDirsAsync} only: the awaited fs surface (tests). Defaults to `fs.promises`. */
+  fsAsync?: Pick<typeof fs.promises, "readdir" | "stat" | "rm">;
 }
 
 /**
@@ -186,6 +189,54 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
       removed.push(name);
     } catch {
       noteKept(name, ageMs); // a permissions hiccup on one entry never blocks boot
+    }
+  }
+  return { removed, kept, oldestKeptAgeMs };
+}
+
+/**
+ * {@link sweepStaleTempDirs} OFF THE EVENT LOOP: the same predicate, entry for entry — prefix,
+ * directory-only, age ceiling, per-entry best-effort — with every fs call awaited, so a large tmp
+ * root never holds the daemon loop. Never rejects, exactly as the sync sweep never throws.
+ */
+export async function sweepStaleTempDirsAsync(opts: TempSweepOpts = {}): Promise<TempSweepSummary> {
+  const fsa = opts.fsAsync ?? fs.promises;
+  const root = opts.root ?? tmpdir();
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_TEMP_SWEEP_MAX_AGE_MS;
+  const now = opts.now ?? systemClock.now;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  let oldestKeptAgeMs: number | null = null;
+  const noteKept = (name: string, ageMs: number) => {
+    kept.push(name);
+    if (oldestKeptAgeMs === null || ageMs > oldestKeptAgeMs) oldestKeptAgeMs = ageMs;
+  };
+  let entries: string[];
+  try {
+    entries = await fsa.readdir(root);
+  } catch {
+    return { removed, kept, oldestKeptAgeMs }; // unreadable tmp root, as the sync sweep answers
+  }
+  for (const name of entries) {
+    if (!isRmdOwnedTempName(name)) continue;
+    const full = join(root, name);
+    let st: fs.Stats;
+    try {
+      st = await fsa.stat(full);
+    } catch {
+      continue; // vanished between readdir and stat, as the sync sweep skips it
+    }
+    if (!st.isDirectory()) continue;
+    const ageMs = now() - st.mtimeMs;
+    if (ageMs <= maxAgeMs) {
+      noteKept(name, ageMs);
+      continue;
+    }
+    try {
+      await fsa.rm(full, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      noteKept(name, ageMs); // a failed removal is kept and aged, as the sync sweep records it
     }
   }
   return { removed, kept, oldestKeptAgeMs };

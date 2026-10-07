@@ -23,31 +23,31 @@ function source(over: Partial<PrDiffSource> = {}): PrDiffSource {
   };
 }
 
-test("the ordinary path is the API, and the local fallback is not reached", () => {
-  const out = fetchPrDiff("u", "sha", source({ local: () => assert.fail("must not be called") }));
+test("the ordinary path is the API, and the local fallback is not reached", async () => {
+  const out = await fetchPrDiff("u", "sha", source({ local: () => assert.fail("must not be called") }));
   assert.deepEqual(out, { kind: "ok", diff: "API DIFF", source: "api" });
 });
 
-test("a diff over the 300-file cap falls back locally rather than throwing", () => {
-  const out = fetchPrDiff("u", "sha", source({ api: () => { throw new Error(TOO_LARGE); } }));
+test("a diff over the 300-file cap falls back locally rather than throwing", async () => {
+  const out = await fetchPrDiff("u", "sha", source({ api: () => { throw new Error(TOO_LARGE); } }));
   assert.equal(out.kind, "ok");
   assert.deepEqual(out, { kind: "ok", diff: "LOCAL DIFF", source: "local" });
 });
 
-test("the fallback is passed the HEAD SHA, so it compares the PR and not the working tree", () => {
+test("the fallback is passed the HEAD SHA, so it compares the PR and not the working tree", async () => {
   let seen: string | undefined;
-  fetchPrDiff("u", "deadbeef", source({
+  await fetchPrDiff("u", "deadbeef", source({
     api: () => { throw new Error(TOO_LARGE); },
     local: (sha) => { seen = sha; return "LOCAL DIFF"; },
   }));
   assert.equal(seen, "deadbeef");
 });
 
-test("ANY OTHER API failure is REFUSED, never answered from the local checkout", () => {
+test("ANY OTHER API failure is REFUSED, never answered from the local checkout", async () => {
   // The safety property. An auth failure, a rate limit or a deleted PR has no locally-equivalent
   // answer, and a diff computed from whatever this checkout holds would be a fabricated review
   // input. Only the file cap has a real local equivalent.
-  const out = fetchPrDiff("u", "sha", source({
+  const out = await fetchPrDiff("u", "sha", source({
     api: () => { throw new Error("HTTP 401: Bad credentials"); },
     local: () => assert.fail("a non-size failure must not reach the fallback"),
   }));
@@ -55,8 +55,8 @@ test("ANY OTHER API failure is REFUSED, never answered from the local checkout",
   assert.match(String(out.kind === "refused" ? out.reason : ""), /Bad credentials/);
 });
 
-test("when BOTH fail the refusal names the cap and the two remedies — never a bare rethrow", () => {
-  const out = fetchPrDiff("https://github.com/o/r/pull/4510", "sha", source({
+test("when BOTH fail the refusal names the cap and the two remedies — never a bare rethrow", async () => {
+  const out = await fetchPrDiff("https://github.com/o/r/pull/4510", "sha", source({
     api: () => { throw new Error(TOO_LARGE); },
     local: () => { throw new Error("fatal: bad object sha"); },
   }));

@@ -13,6 +13,7 @@ import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { acquireTestSlot, lowPriorityCommand, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -446,7 +447,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -852,8 +853,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[]): string[] {
-  return [
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
+  return testRunArgv([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -869,7 +870,7 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ];
+  ], concurrency);
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -901,6 +902,8 @@ function testWithCoverageShards(
   lcovPath: string,
   scratchDir: string,
   shardRoot: string,
+  slot: TestSlotLease,
+  testSlot: TestSlotOptions,
 ): CiParityLeafResult {
   let retainedCompactBytes = 0;
   let peakBytes = 0;
@@ -933,7 +936,10 @@ function testWithCoverageShards(
     if (testFiles.length === 0) {
       return { ok: false, detail: `FAIL — ${label} duration-balanced test selection returned no files` };
     }
-    const res = spawn(process.execPath, coverageShardArgs(shardRoot, shard, testFiles), {
+    // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
+    slot.refresh();
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    const res = spawn(child.file, child.args, {
       cwd: repoRoot,
       env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
     });
@@ -980,7 +986,7 @@ function testWithCoverageShards(
   peakBytes = Math.max(peakBytes, Number(mergeMetrics[3]));
   return {
     ok: true,
-    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ` +
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ${slot.note}; ` +
       `merged coverage/lcov.info; rawBytes=${rawBytes} compactBytes=${retainedCompactBytes} ` +
       `mergeInputBytes=${mergeMetrics[1]} stagingBytes=${mergeMetrics[2]} peakBytes=${peakBytes}`,
   };
@@ -1041,6 +1047,7 @@ export function testWithCoverageLeaf(
     return Number(stats.bavail * stats.bsize);
   },
   lockDiscriminator?: string,
+  testSlot: TestSlotOptions = {},
 ): CiParityLeafResult {
   const stableScratch = coverageScratchDir(repoRoot);
   const activeTmp = process.env.TMPDIR;
@@ -1058,6 +1065,7 @@ export function testWithCoverageLeaf(
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
+  let slot: TestSlotLease | undefined;
   try {
     const holder: CoverageLockHolder = {
       pid: process.pid, host: hostname(), startedAt: systemClock.iso(),
@@ -1076,8 +1084,11 @@ export function testWithCoverageLeaf(
       scratchDir = realpathSync(stableScratch);
     }
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"));
+    // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
+    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", testSlot);
+    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot);
   } finally {
+    slot?.release();
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
     } else if (!nested) {
@@ -1786,10 +1797,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined) => {
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator));
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot));
       if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
@@ -2073,6 +2084,8 @@ export interface CiParityDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates a fake nested parity fixture from its parent's real coverage lock. Production omits this. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2167,7 +2180,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -3699,6 +3712,8 @@ export interface PreflightCoverageDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates fake coverage-mode fixtures from the parent full gate's real checkout lock. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3768,7 +3783,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 

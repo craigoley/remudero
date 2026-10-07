@@ -6,11 +6,16 @@
   verify: auto
   risk: medium
   band_meaning: blast-radius
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
   # backlog gardener: band=4 evidence=becc088aa91aa00e
   attempts: 0
   note: |
+    OPERATOR RULING 2026-10-06: retire this task as superseded by W1-T5909 (#9428, merged as 874fcd48), which
+    re-arms an ejected PR a bounded number of times per head and then escalates once, and W1-T5956 (#9475,
+    merged as 83c99d0d), which spends no re-arm on an ejection during a GitHub Actions incident. Together they
+    are this record's goal. No other task, dependency or acceptance criterion changes; nothing depends on W1-T4784.
+
     SUPERSEDED 2026-10-06 by W1-T5909 (#9428, merged). This record's premise was wrong for sweep-armed
     PRs: on 2026-10-05 the sweep NEVER re-armed an ejected PR, because its prior-arm memory outvoted
     GitHub's observed disarm (#9392, #9390, #9388 stranded). W1-T5909 now re-arms after a disarm and

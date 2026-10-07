@@ -448,7 +448,7 @@ import {
   workerInstallationScope,
   type OrphanSweepDeps,
 } from "./lib/worker-containment.js";
-import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
+import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
@@ -502,6 +502,7 @@ import {
   type EscalationJudgeVerdict,
   type EscalationDedupKey,
   type EscalationOption,
+  type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
   type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
@@ -1021,12 +1022,15 @@ import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-tr
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
-const workerBoundaryStack: BenchmarkStackEvidence = {
+import { captureImportedModule } from "./lib/prevention-source-evidence.js";
+const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./lib/prevention-source-evidence.js").ImportedModuleEvidence } = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
+workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
@@ -1241,12 +1245,13 @@ import {
 } from "./lib/emissions.js";
 import {
   cloneReapRoots,
-  defaultOpenFileCount,
+  defaultOpenFileCountAsync,
   reapStaleClones,
+  reapStaleClonesAsync,
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
+import { activeWorkerProbes, type ObjectReapDeps, type ObjectReapResult, reapGitObjectsAsync } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -2313,7 +2318,8 @@ export function buildSweepEffects(
                 ? `merge-base worktree unavailable: ${baseProof.baseWorktreeFailure}`
                 : "merge-base proof evidence is unavailable";
           } else {
-            const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
+            // Awaited and bounded: a read killed at its bound throws naming it, into the fallback below.
+            const diff = await ghPrDiffAsync(pr.prUrl);
             const discriminated = await discriminateReviewReuseAsync({
               prior,
               diff,
@@ -2784,6 +2790,7 @@ import {
   materializeWorkerHome,
   perRunWorkerHomeDir,
   sweepStaleWorkerHomes,
+  sweepStaleWorkerHomesAsync,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
@@ -2885,8 +2892,8 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { fetchPrDiff } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
+import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -3961,16 +3968,95 @@ export function syncPlanFromOrigin(
   // merged view) to the bytes directly, so the returned Plan is deep-equal to what the temp-file
   // round trip produced; only the LABEL in an error message changes, from a temp path nobody
   // could look up to the `origin/main:<path>` the bytes actually came from.
-  const shards = readOriginShardsAtRef(repoDir, dirname(relPath));
+  return syncedPlanFromBlobs(relPath, blob, readOriginShardsAtRef(repoDir, dirname(relPath)), staleDispatch, opts.quarantine);
+}
+
+/** The merge both plan syncs end in: the monolith and its shards, labelled by the origin/main path they came from. */
+function syncedPlanFromBlobs(
+  relPath: string,
+  blob: string,
+  shards: Array<{ relPath: string; text: string }>,
+  staleDispatch: boolean,
+  quarantine: ((quarantined: QuarantinedTask[]) => void) | undefined,
+): SyncedPlan {
   const blobs = [
     { label: `origin/main:${relPath}`, text: blob },
     ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
   ];
-  if (!opts.quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
+  if (!quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
   // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
   const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
-  opts.quarantine(quarantined);
+  quarantine(quarantined);
   return { plan, staleDispatch };
+}
+
+/** BACKSTOP, per git call of the awaited plan sync (fetch, show, ls-tree, cat-file). MEASURED 2026-10-06: the
+ *  sync shard read held the daemon loop 3.4 s; a call still running at five minutes is hung, not slow. */
+export const PLAN_SYNC_GIT_TIMEOUT_MS = 300_000;
+
+/** An awaited plan-sync git call killed at its bound. Never read as "no shards": the sync refuses, naming it. */
+export class PlanSyncGitTimeoutError extends RmdError {
+  constructor(args: readonly string[], timeoutMs: number) {
+    super("git", GENERIC_EXIT_CODE, `git ${args[0]} timed out after ${timeoutMs}ms and was killed`, { verb: args[0], timeoutMs });
+    this.name = "PlanSyncGitTimeoutError";
+  }
+}
+
+/** {@link GitRunner}, awaited. */
+export type GitRunnerAsync = (args: string[], stdin?: string) => Promise<string>;
+
+/** The real {@link GitRunnerAsync}: `git -C <repoDir>` off the loop, `stdin` piped, SIGTERM then SIGKILL past its
+ *  bound, which rejects with {@link PlanSyncGitTimeoutError}; any other failure rejects with git's own error. */
+export function planSyncGitRunnerAsync(
+  repoDir: string,
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
+): GitRunnerAsync {
+  const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+        clearTimeout(timer);
+        if (timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
+        return err ? reject(err) : resolve(stdout);
+      });
+      // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
+}
+
+/**
+ * {@link syncPlanFromOrigin} through awaited, bounded git, for the daemon's dispatch lanes: the same fetch, the same
+ * `origin/main` blob, the same shard read and merge. A call killed at its bound refuses as a {@link GitFetchError}
+ * naming the timeout (`allowStale` still proceeds past a fetch that failed that way, as it does past any other).
+ */
+export async function syncPlanFromOriginAsync(
+  repoDir: string,
+  relPath: string,
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync } = {},
+): Promise<SyncedPlan> {
+  const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
+  let staleDispatch = false;
+  try {
+    await runGit(["fetch", "--quiet", "origin"]);
+  } catch (err) {
+    if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
+    staleDispatch = true;
+  }
+  let blob: string;
+  try {
+    blob = await runGit(["show", `origin/main:${relPath}`]);
+  } catch (err) {
+    throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
+  }
+  const shards = await readOriginShardsAtRefAsync(repoDir, dirname(relPath), runGit);
+  return syncedPlanFromBlobs(relPath, blob, shards, staleDispatch, opts.quarantine);
 }
 
 /** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
@@ -4006,20 +4092,67 @@ export function readOriginShardsAtRef(
   const shardRelDir = join(planRelDir, "tasks.d");
   let shardListing: string;
   try {
-    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+    shardListing = runGit(shardListingArgs(ref, shardRelDir));
   } catch {
     shardListing = "";
   }
-  const shardRelPaths = shardListing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+  const shardRelPaths = shardPathsFromListing(shardListing);
   if (shardRelPaths.length === 0) return [];
   let texts: string[];
   try {
     texts = readBlobsAtRef(runGit, ref, shardRelPaths);
   } catch (err) {
-    throw new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+    throw shardReadFailure(ref, shardRelDir, repoDir, err);
+  }
+  return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
+}
+
+function shardListingArgs(ref: string, shardRelDir: string): string[] {
+  return ["ls-tree", "--name-only", ref, `${shardRelDir}/`];
+}
+
+function shardPathsFromListing(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+}
+
+function shardReadFailure(ref: string, shardRelDir: string, repoDir: string, err: unknown): GitFetchError {
+  return new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+}
+
+/**
+ * {@link readOriginShardsAtRef} through an awaited runner: the same listing, the same one `cat-file --batch` and
+ * framing (`readBlobsAtRef` parses the bytes the awaited call returned). ONE DIFFERENCE, on purpose: a listing
+ * killed at its bound throws {@link GitFetchError} naming it, where the sync read's catch would call it no shards
+ * and silently drop every shard task from the dispatched plan.
+ */
+export async function readOriginShardsAtRefAsync(
+  repoDir: string,
+  planRelDir: string,
+  runGit: GitRunnerAsync = planSyncGitRunnerAsync(repoDir),
+  ref = "origin/main",
+): Promise<Array<{ relPath: string; text: string }>> {
+  const shardRelDir = join(planRelDir, "tasks.d");
+  let shardListing: string;
+  try {
+    shardListing = await runGit(shardListingArgs(ref, shardRelDir));
+  } catch (err) {
+    if (err instanceof PlanSyncGitTimeoutError) throw new GitFetchError(`git ls-tree ${ref}:${shardRelDir}/ failed in ${repoDir}: ${err.message}`);
+    // No tasks.d/ at the ref (or a ref-dir lookup miss) is the no-shards case, exactly as the sync read reads it.
+    shardListing = "";
+  }
+  const shardRelPaths = shardPathsFromListing(shardListing);
+  if (shardRelPaths.length === 0) return [];
+  let texts: string[];
+  try {
+    const request = shardRelPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+    const raw = await runGit(["cat-file", "--batch"], request);
+    // readBlobsAtRef builds this same request; any drift hands it no bytes, and it fails loud naming the first path.
+    texts = readBlobsAtRef((_args, stdin) => (stdin === request ? raw : ""), ref, shardRelPaths);
+  } catch (err) {
+    throw shardReadFailure(ref, shardRelDir, repoDir, err);
   }
   return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
 }
@@ -4093,28 +4226,58 @@ export function syncPlanOrRefuse(
     const synced = opts.planSnapshot
       ? opts.planSnapshot({ allowStale: opts.allowStale })
       : syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine });
-    if (synced.staleDispatch) {
-      opts.log("git.stale_dispatch", { stale_dispatch: true });
-      opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
-    }
-    return synced;
+    return announceStaleDispatch(synced, opts);
   } catch (e) {
-    if (e instanceof GitFetchError) {
-      opts.log("git_fetch_failed", { reason: e.message, allow_stale: opts.allowStale });
-      const hint = opts.allowStale ? "" : " (pass --allow-stale to proceed on the last-fetched refs)";
-      opts.say(`REFUSED: ${e.message}${hint}`);
-      return { error: e.message };
-    }
-    throw e;
+    if (!(e instanceof GitFetchError)) throw e;
+    return refusePlanSync(e, opts);
   }
 }
 
-/** The daemon's per-lane plan sync: {@link syncPlanFromOrigin} with its quarantine, so a bad shard or duplicate id that
- *  boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
-export function quarantiningPlanSync(
+/** {@link syncPlanOrRefuse} for runTask, awaited: no `planSnapshot` ⇒ {@link syncPlanFromOriginAsync}; a supplied one
+ *  may answer sync or awaited. The same announcement, the same refusal, the same rethrow of anything else. */
+export async function syncPlanOrRefuseAsync(
+  planPath: string,
+  opts: Omit<Parameters<typeof syncPlanOrRefuse>[1], "planSnapshot"> & {
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+  },
+): Promise<SyncedPlan | { error: string }> {
+  const repoDir = dirname(dirname(planPath));
+  const relPath = relative(repoDir, planPath);
+  try {
+    const synced = await (opts.planSnapshot
+      ? opts.planSnapshot({ allowStale: opts.allowStale })
+      : syncPlanFromOriginAsync(repoDir, relPath, { allowStale: opts.allowStale, quarantine: opts.quarantine }));
+    return announceStaleDispatch(synced, opts);
+  } catch (e) {
+    if (!(e instanceof GitFetchError)) throw e;
+    return refusePlanSync(e, opts);
+  }
+}
+
+type PlanSyncReporting = Pick<Parameters<typeof syncPlanOrRefuse>[1], "allowStale" | "log" | "say">;
+
+function announceStaleDispatch(synced: SyncedPlan, opts: PlanSyncReporting): SyncedPlan {
+  if (synced.staleDispatch) {
+    opts.log("git.stale_dispatch", { stale_dispatch: true });
+    opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
+  }
+  return synced;
+}
+
+/** A {@link GitFetchError} becomes the named refusal (anything else is the caller's to rethrow). */
+function refusePlanSync(e: GitFetchError, opts: PlanSyncReporting): { error: string } {
+  opts.log("git_fetch_failed", { reason: e.message, allow_stale: opts.allowStale });
+  const hint = opts.allowStale ? "" : " (pass --allow-stale to proceed on the last-fetched refs)";
+  opts.say(`REFUSED: ${e.message}${hint}`);
+  return { error: e.message };
+}
+
+/** The daemon's per-lane plan sync: {@link syncPlanFromOriginAsync} with its quarantine, so a bad shard or duplicate id
+ *  that boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
+export function quarantiningPlanSyncAsync(
   quarantine: (quarantined: QuarantinedTask[]) => void,
-): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan {
-  return (repoDir, relPath, opts) => syncPlanFromOrigin(repoDir, relPath, { ...opts, quarantine });
+): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan> {
+  return (repoDir, relPath, opts) => syncPlanFromOriginAsync(repoDir, relPath, { ...opts, quarantine });
 }
 
 /**
@@ -4147,23 +4310,26 @@ export function quarantiningPlanSync(
  * every lane identically, and a shared `staleDispatch` still prints the WARNING for every lane,
  * exactly as if each had fetched for itself.
  */
-export function createPlanSyncCoalescer(
+export function createPlanSyncCoalescer<R extends SyncedPlan | Promise<SyncedPlan> = SyncedPlan>(
   planPath: string,
-  /** Injectable {@link syncPlanFromOrigin} — a test wraps the real function with a call
-   *  counter to prove the coalescing (real git, real parse, just observed); production never
-   *  overrides this. */
-  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan = syncPlanFromOrigin,
+  /** Injectable {@link syncPlanFromOrigin}. The daemon passes {@link quarantiningPlanSyncAsync}: every lane of a tick
+   *  then shares ONE awaited sync's promise, created by the first lane in the same synchronous `.map()`. */
+  syncFn: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => R = syncPlanFromOrigin as (
+    repoDir: string,
+    relPath: string,
+    opts: { allowStale?: boolean },
+  ) => R,
 ): {
-  sync: (opts: { allowStale?: boolean }) => SyncedPlan;
+  sync: (opts: { allowStale?: boolean }) => R;
 } {
   const repoDir = dirname(dirname(planPath));
   const relPath = relative(repoDir, planPath);
-  let pending: { key: string; result?: SyncedPlan; error?: unknown } | undefined;
+  let pending: { key: string; result?: R; error?: unknown } | undefined;
   return {
     sync(opts) {
       const key = opts.allowStale ? "stale" : "strict";
       if (!pending || pending.key !== key) {
-        const slot: { key: string; result?: SyncedPlan; error?: unknown } = { key };
+        const slot: { key: string; result?: R; error?: unknown } = { key };
         try {
           slot.result = syncFn(repoDir, relPath, { allowStale: opts.allowStale });
         } catch (e) {
@@ -4182,7 +4348,7 @@ export function createPlanSyncCoalescer(
         });
       }
       if (pending.error !== undefined) throw pending.error;
-      return pending.result as SyncedPlan;
+      return pending.result as R;
     },
   };
 }
@@ -7511,10 +7677,9 @@ async function runReview(args: {
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
   // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
-  const diffOutcome = fetchPrDiff(prUrl, headSha, {
-    api: (u) => String(ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })),
-    local: (sha) => execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
-  });
+  // Both reads awaited and bounded (MEASURED 2026-10-06: the sync read held the daemon loop); a read killed at its
+  // bound is a named refusal below, never a hang.
+  const diffOutcome = await fetchPrDiff(prUrl, headSha, prDiffSourceAsync(repoRoot));
   if (diffOutcome.kind === "refused") {
     // The pending status remains unsatisfied. Record a named refusal and return a withheld
     // result so both the CLI and sweep can retry or escalate without losing this attempt.
@@ -10051,15 +10216,20 @@ export function fixWorkerReceipt(
   log: (step: string, extra?: Record<string, unknown>) => void,
   workerRunId: string,
   work: BenchmarkWorkInput = {},
+  repair?: RepairReceiptContext,
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  joinFields: () => Record<string, unknown>;
   ledgerFields: (result: WorkerResult) => Record<string, unknown>;
 } {
   let assignment: WorkerSelectionAssignment | undefined;
   let receiptFailure: string | undefined;
+  const repairFields = repairReceiptFields(repair);
+  const joinFields = () => ({ ...repairFields, worker_run_id: workerRunId,
+    ...(assignment ? { selection_assignment_id: assignment.id } : {}) });
   const receipt = benchmarkRunLedgerLogger((step, fields) => {
     try {
-      log(step, { ...fields, worker_run_id: workerRunId, worker_rung: "fix" });
+      log(step, { ...fields, ...repairFields, worker_run_id: workerRunId, worker_rung: "fix" });
     } catch (error) {
       receiptFailure ??= `${step}-ledger-write-failed`;
       throw error;
@@ -10091,13 +10261,14 @@ export function fixWorkerReceipt(
     const assignmentId = result.selectionAssignmentId ?? assignment?.id;
     return {
       ...fields,
+      ...repairFields,
       worker_run_id: workerRunId,
       ...(assignmentId ? { selection_assignment_id: assignmentId } : { selection_assignment_unavailable_reason: "assignment-not-observed" }),
       ...(assignment ? { requested_model: assignment.requested.model, selected_model: assignment.selected.model } : {}),
       ...(receiptFailure ? { benchmark_receipt_unavailable_reason: receiptFailure } : {}),
     };
   };
-  return { spawn: receipted, ledgerFields };
+  return { spawn: receipted, ledgerFields, joinFields };
 }
 
 /**
@@ -10694,6 +10865,7 @@ export async function runFixRung(opts: {
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
+    escalationIssues?: AsyncIssueGateway;
     ledgerPath: string;
     /** W1-T5535: the fix rows the routing learner folds. Defaults to the cached async ledger-union read. */
     readFixRoutingRows?: (stateDir: string, nowMs: number) => Promise<Array<Record<string, unknown>>>;
@@ -11100,7 +11272,7 @@ export async function runFixRung(opts: {
         const detail = `The blocked_review FIX RUNG (W1-T76, W1-T2652) observed local worktree content on ${opts.branch} before spending strike ${strikes + 1}: ${foreignTree.reason}. The rung did not observe an author for this content and will not reset, stash, clean, commit or push it. Observed porcelain paths: ${JSON.stringify(foreignTree.porcelainPaths)}. Observed diffstat: ${JSON.stringify(foreignTree.diffstat)}. Other registered worktrees on this branch: ${JSON.stringify(foreignTree.otherWorktrees)}.`;
         const issueUrl = await escalateWithJudge(
           { class: "BLOCKED", taskId: opts.taskId, runId: opts.runId, headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), summary: `fix rung standing down — foreign worktree content before round 1 — ${opts.prUrl}`, detail, options: [{ label: "discard", detail: "remove the foreign local content, then re-run the fix rung against a clean materialized worktree." }, { label: "adopt", detail: "confirm this local content is intentional and should be preserved before resuming the fix rung." }], recommendation: "discard" },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", { site: "rung.foreign_tree", strike: strikes + 1, reason: preStrikeStandDown.reason, issue_url: issueUrl });
         deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`);
@@ -11144,7 +11316,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "yield",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.strike",
@@ -11580,7 +11752,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "revert",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
         deps.log("fix.stood_down", {
           site: "rung.scope",
@@ -11678,7 +11850,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "hand-fix",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
@@ -11752,7 +11924,7 @@ export async function runFixRung(opts: {
             ],
             recommendation: "split",
           },
-          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
         );
       // W1-T3166: async for the same reason as escalateInstrumentEntangled — its escalation is
       // now judged. Both return sites await; the outcome is unchanged.
@@ -11798,7 +11970,9 @@ export async function runFixRung(opts: {
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
         // is read, never incremented, on this whole path) but it is still a real subprocess and
         // must never be allowed to hang the rung forever.
-        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, "prerequisite", systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+        const prerequisiteWorkerId = fixWorkerRunId(opts.runId, "prerequisite", systemClock.now());
+        const prerequisiteReceipt = fixWorkerReceipt(deps.spawn, deps.log, prerequisiteWorkerId, fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+          { prUrl: opts.prUrl, roundId: prerequisiteWorkerId });
         const spawnOutcome = await spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, dispatchArgs, { runId: opts.runId, taskId: opts.taskId });
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
         const prerequisiteUrl = prerequisiteWorker ? parseReport(workerTranscript(prerequisiteWorker))?.prUrl : undefined;
@@ -12179,7 +12353,8 @@ export async function runFixRung(opts: {
     }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
-    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+    const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+      { prUrl: opts.prUrl, roundId });
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
@@ -12320,7 +12495,8 @@ export async function runFixRung(opts: {
     if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
-      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
+      const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+        { prUrl: opts.prUrl, roundId });
       const asked = await spawnFixWorkerBounded(
         { ...deps, spawn: askReceipt.spawn },
         {
@@ -12452,6 +12628,7 @@ export async function runFixRung(opts: {
       if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
+        ...fixReceipt.joinFields(),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
@@ -12827,7 +13004,7 @@ export async function runFixRung(opts: {
               ],
               recommendation: "hand-fix",
             },
-            { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+            { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
           );
           deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
           deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
@@ -13069,7 +13246,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("review.decision_conflict_escalated", { strike: strikes, review_decision_digest: digest, issue_url: issueUrl });
       return { outcome: "escalated", review, strikes, retriggers, reason: "review_decision_conflict", issueUrl };
@@ -13149,7 +13326,7 @@ export async function runFixRung(opts: {
           ],
           recommendation: "re-judge",
         },
-        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+        { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
@@ -13213,7 +13390,7 @@ export async function runFixRung(opts: {
         ],
         recommendation: "hand-fix",
       },
-      { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+      { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
     );
     deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted" });
     deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
@@ -13304,7 +13481,7 @@ export async function runFixRung(opts: {
           ],
       recommendation: "hand-fix",
     },
-    { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+    { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
   );
   const exhaustionReason = stillConflicted
     ? "merge_conflict_unresolved"
@@ -16079,7 +16256,7 @@ async function runTask(
      * caller (`rmd run-task`, `rmd wipe-test`, every existing test) — `runTask` fetches and
      * loads for itself exactly as it always has.
      */
-    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan;
+    planSnapshot?: (o: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
     /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
      *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
      *  task the projection already reports merged refuses at zero cost, verdict
@@ -16372,7 +16549,7 @@ async function runTask(
   if (opts.skipGitSync) {
     plan = loadPlan(planPath);
   } else {
-    const synced = syncPlanOrRefuse(planPath, {
+    const synced = await syncPlanOrRefuseAsync(planPath, {
       allowStale: opts.allowStale ?? false,
       log,
       say,
@@ -17778,7 +17955,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
   // worktree reaper above, all three already run ARMED wherever they run today, so this needs
   // no dry-run flag of its own — see logDiskReclaimRung.
-  logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
+  await logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -19332,6 +19509,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
+          escalationIssues: ghIssueGatewayAsync(owner, task.repo),
           ledgerPath,
           log: (s, extra) => log(s, extra),
           say,
@@ -34483,39 +34661,69 @@ export function logCloneReapSurvey(
   } = {},
 ): CloneReapSummary | null {
   try {
-    const readPolicy =
-      deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
-    const policyBlock = readPolicy();
-    // W1-T2694 (design (ii)): after the `enabled` read above, before this rung's own reap call
-    // below. A refusal forces `enabled: false` (dry-run only) rather than skipping the survey
-    // outright — the SAFE direction for a rung whose armed state DELETES, per design (v)'s "can
-    // only refuse, never widen".
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("scratchReap", policyBlock, SCRATCH_REAP_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "scratchReap", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const { maxAgeHours } = policyBlock;
-    const reap = deps.reap ?? reapStaleClones;
-    const roots = (deps.roots ?? cloneReapRoots)();
-    const summary = reap(roots, {
-      dryRun: !enabled,
-      maxAgeMs: maxAgeHours * 60 * 60 * 1000,
-    });
-    const actionable = summary.candidates.filter(
-      (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
-    );
-    log("daemon.clone_reap", {
-      dry_run: summary.dryRun,
-      reaped: summary.reaped.length,
-      bytes_reclaimed: summary.bytesReclaimed,
-      candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
-      dispositions: tallyDispositions(summary.candidates),
-      roots_surveyed: roots.length,
-    });
-    return summary;
+    const plan = cloneReapPlan(config, log, deps);
+    const summary = (deps.reap ?? reapStaleClones)(plan.roots, plan.opts);
+    return logCloneReapRow(log, summary, plan.roots.length);
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
   }
+}
+
+/** {@link logCloneReapSurvey} OFF THE EVENT LOOP: the same policy read, ratification pin, roots and
+ *  ledger line, with the survey and reap awaited ({@link reapStaleClonesAsync}). */
+export async function logCloneReapSurveyAsync(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap"> & { reap?: typeof reapStaleClonesAsync } = {},
+): Promise<CloneReapSummary | null> {
+  try {
+    const plan = cloneReapPlan(config, log, deps);
+    const summary = await (deps.reap ?? reapStaleClonesAsync)(plan.roots, plan.opts);
+    return logCloneReapRow(log, summary, plan.roots.length);
+  } catch {
+    return null; // best-effort, exactly like the sync survey — never blocks the dispatch
+  }
+}
+
+/** The policy read and roots both clone-reap surveys share, so they cannot drift. */
+function cloneReapPlan(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: Omit<NonNullable<Parameters<typeof logCloneReapSurvey>[2]>, "reap">,
+): { roots: string[]; opts: { dryRun: boolean; maxAgeMs: number } } {
+  const readPolicy =
+    deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
+  const policyBlock = readPolicy();
+  // W1-T2694 (design (ii)): after the `enabled` read above, before this rung's own reap call
+  // below. A refusal forces `enabled: false` (dry-run only) rather than skipping the survey
+  // outright — the SAFE direction for a rung whose armed state DELETES, per design (v)'s "can
+  // only refuse, never widen".
+  const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+  const pin = ratificationPinCheck("scratchReap", policyBlock, SCRATCH_REAP_CONTRACT_VERSION, pins);
+  if (!pin.fire) log("rung.unratified", { rung: "scratchReap", diff: pin.diff });
+  const enabled = pin.fire && policyBlock.enabled;
+  const roots = (deps.roots ?? cloneReapRoots)();
+  return { roots, opts: { dryRun: !enabled, maxAgeMs: policyBlock.maxAgeHours * 60 * 60 * 1000 } };
+}
+
+/** The one `daemon.clone_reap` line both surveys write. */
+function logCloneReapRow(
+  log: (step: string, fields: Record<string, unknown>) => void,
+  summary: CloneReapSummary,
+  rootsSurveyed: number,
+): CloneReapSummary {
+  const actionable = summary.candidates.filter(
+    (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
+  );
+  log("daemon.clone_reap", {
+    dry_run: summary.dryRun,
+    reaped: summary.reaped.length,
+    bytes_reclaimed: summary.bytesReclaimed,
+    candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
+    dispositions: tallyDispositions(summary.candidates),
+    roots_surveyed: rootsSurveyed,
+  });
+  return summary;
 }
 
 /**
@@ -34593,6 +34801,14 @@ export function logWorktreeReapBootSurvey(
   }
 }
 
+/** The rung's default sweeps: each the awaited twin of the sync sweep it replaced, so none of them
+ *  walks a tree or reads a ledger on the daemon loop. Exported so a test pins the identity. */
+export const DISK_RECLAIM_DEFAULT_SWEEPS = {
+  sweepTempDirs: sweepStaleTempDirsAsync,
+  reapClonesSurvey: logCloneReapSurveyAsync,
+  sweepWorkerHomes: sweepStaleWorkerHomesAsync,
+} as const;
+
 /**
  * W1-T411 — the disk-reclaim RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
  * `runTaskBody` beside `pruneStaleRuns` and W1-T406's {@link logWorktreeReapBootSurvey}. Three
@@ -34634,25 +34850,30 @@ export function logWorktreeReapBootSurvey(
  * Deps are injectable and appended LAST so no positional caller shifts; the default path calls
  * the real sweeps against their real roots/policy.
  */
-export function logDiskReclaimRung(
+export async function logDiskReclaimRung(
   config: Config,
   log: (step: string, fields: Record<string, unknown>) => void,
   deps: {
-    sweepTempDirs?: typeof sweepStaleTempDirs;
-    reapClonesSurvey?: typeof logCloneReapSurvey;
-    cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
-    sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
+    sweepTempDirs?: (opts?: TempSweepOpts) => TempSweepSummary | Promise<TempSweepSummary>;
+    reapClonesSurvey?: (
+      ...a: Parameters<typeof logCloneReapSurveyAsync>
+    ) => CloneReapSummary | null | Promise<CloneReapSummary | null>;
+    cloneReapDeps?: Parameters<typeof logCloneReapSurveyAsync>[2];
+    sweepWorkerHomes?: (
+      ...a: Parameters<typeof sweepStaleWorkerHomes>
+    ) => ReturnType<typeof sweepStaleWorkerHomes> | Promise<ReturnType<typeof sweepStaleWorkerHomes>>;
     workerHomeRoot?: () => string;
     /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
      *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
-    reapObjects?: typeof reapGitObjects;
+    reapObjects?: (repoDir: string, inflightDir: string, deps: ObjectReapDeps) => ObjectReapResult | Promise<ObjectReapResult>;
     objectRepoDir?: () => string;
     objectInflightDir?: () => string;
     objectPolicy?: () => { enabled: boolean };
     ratifications?: Ratifications;
     /** W1-T4022: the real `lsof`-backed probe (src/lib/clone-reaper.ts) — a test can still inject
-     *  its own; production leaves this unset and gets {@link defaultOpenFileCount}, never the
-     *  fail-closed `() => 1` object-reaper.ts falls back to when NOTHING supplies a counter. */
+     *  its own; production leaves this unset and gets the AWAITED, bounded
+     *  {@link defaultOpenFileCountAsync}, never the fail-closed `() => 1` object-reaper.ts falls back
+     *  to when NOTHING supplies a counter. */
     objectOpenFileCount?: (dir: string) => number;
     /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
     objectStreakPath?: () => string;
@@ -34660,21 +34881,22 @@ export function logDiskReclaimRung(
     /** 2026-10-06: the daemon's own checkout, reaped as a second repo with its own streak. */
     objectDaemonCheckoutDir?: () => string;
   } = {},
-): {
+): Promise<{
   tempDirsRemoved: number;
   clonesReaped: number;
   cloneBytesReclaimed: number;
   workerHomesRemoved: number;
   objectsPruned: number;
   objectsWouldPrune: number;
-} {
-  const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
-  const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
-  const sweepWorkerHomes = deps.sweepWorkerHomes ?? sweepStaleWorkerHomes;
+}> {
+  // AWAITED (2026-10-06): every sweep's default is the off-loop twin of the sync sweep it replaced.
+  const sweepTempDirs = deps.sweepTempDirs ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepTempDirs;
+  const reapClonesSurvey = deps.reapClonesSurvey ?? DISK_RECLAIM_DEFAULT_SWEEPS.reapClonesSurvey;
+  const sweepWorkerHomes = deps.sweepWorkerHomes ?? DISK_RECLAIM_DEFAULT_SWEEPS.sweepWorkerHomes;
 
   let tempDirsRemoved = 0;
   try {
-    tempDirsRemoved = sweepTempDirs().removed.length;
+    tempDirsRemoved = (await sweepTempDirs()).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -34685,7 +34907,7 @@ export function logDiskReclaimRung(
     // Suppressed logger: logCloneReapSurvey already best-effort-catches internally, but an
     // injected `reapClonesSurvey` test double could still throw — belt-and-suspenders so this
     // guard behaves identically to the other two.
-    const summary = reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
+    const summary = await reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
     clonesReaped = summary?.reaped.length ?? 0;
     cloneBytesReclaimed = summary?.bytesReclaimed ?? 0;
   } catch {
@@ -34695,7 +34917,7 @@ export function logDiskReclaimRung(
   let workerHomesRemoved = 0;
   try {
     const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
-    workerHomesRemoved = sweepWorkerHomes(root, { stateRoot: config.root }).removed.length;
+    workerHomesRemoved = (await sweepWorkerHomes(root, { stateRoot: config.root })).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -34753,16 +34975,18 @@ export function logDiskReclaimRung(
         : []),
     ];
     for (const { repo, dir, streakPath } of repos) {
-      const r = (deps.reapObjects ?? reapGitObjects)(dir, inflight, {
+      // AWAITED (2026-10-06): the sync prune held the daemon loop 161 s; this one is bounded and off it.
+      const r = await (deps.reapObjects ?? reapGitObjectsAsync)(dir, inflight, {
         dryRun: !enabled,
         // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
         // falls back to when nothing supplies a counter.
-        openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
+        ...(deps.objectOpenFileCount ? { openFileCount: deps.objectOpenFileCount } : { openFileCountAsync: defaultOpenFileCountAsync }),
         streakPath,
         ownInflightLock: deps.objectOwnInflightLock,
         ...activeWorkerProbes(inflight),
       });
-      objectsPruned += r.pruned;
+      // An unknown yield adds nothing: the decision row below names it, and a sum cannot.
+      if (r.pruned !== "unknown") objectsPruned += r.pruned;
       objectsWouldPrune += r.wouldPrune ?? 0;
       // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
       // that decides whether arming this rung is worth anything, and it is unreadable unless the
@@ -34773,6 +34997,9 @@ export function logDiskReclaimRung(
           reason: r.refusedBecause,
           consecutive_refusals: r.consecutiveRefusals,
           refusing_since: r.refusingSinceIso,
+          // Named outcomes, never a reading: a handle probe killed at its bound, an unread count.
+          ...(r.handleProbe ? { handle_probe: r.handleProbe } : {}),
+          ...(r.looseBefore === "unknown" ? { loose_before: r.looseBefore } : {}),
         }]);
       } else if (r.carriedBy !== undefined) {
         // WHICH BARRIER CARRIED IT: `quiet` (both held) or `expiry` (the store was busy).
@@ -34787,6 +35014,9 @@ export function logDiskReclaimRung(
           locks_reclaimed: r.locks?.reclaimed,
           locks_kept: r.locks?.kept,
           locks_failed: r.locks?.failed,
+          // Armed rows only: a prune killed at its bound is named, never read as a completed one.
+          ...(enabled ? { prune_outcome: r.pruneTimedOutAfterMs !== undefined ? "timed_out" : "completed" } : {}),
+          prune_timed_out_after_ms: r.pruneTimedOutAfterMs,
         }]);
       }
     }
@@ -36801,7 +37031,7 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSync(reportPlanQuarantine));
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSyncAsync(reportPlanQuarantine));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -37853,7 +38083,7 @@ export async function daemonCommand(
               recommendation: "fix and resume",
             },
             {
-              issues: ghIssueGateway(target.owner, target.repo),
+              issues: ghIssueGatewayAsync(target.owner, target.repo),
               ledgerPath,
               runId,
               judge:

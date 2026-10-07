@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9374 stuck dirty ('why were merge conflicts not auto-handled on 9374? fix them and then fix the root cause')"
   plan_refs: [W1-T5864, W1-T78, W1-T3579, W1-T5900, W1-T2548]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -49,7 +49,24 @@ export interface SelectorShadowFailure {
   file: string;
   floor: SelectorShadowVerdict;
   narrow?: SelectorShadowVerdict;
+  /** The file's own retry in its shard (scripts/select-affected-suites.mjs's retryOutcomes). */
+  retry?: "recovered" | "failed";
+  /** Set once, when the gardener stores the observation: evidence read then that the diff did not cause it. */
+  unattributed?: "base_red" | "flake_history";
 }
+
+/** Why a missed failure is not charged to the selector. A miss counts only when the diff plausibly
+ *  caused it; each reason is a signal the data already records, never an inference:
+ *  - retry_recovered: the file's own retry in that shard passed (W1-T4398 pass two did not name it).
+ *  - base_red: main's own CI failed the file at the run's base sha (W1-T5409's reader).
+ *  - flake_history: a coverage shard's retry recovered the file in a run inside the live window.
+ *  - mass: the run missed more than SELECTOR_SHADOW_MASS_FAILURE_FILES distinct files (W1-T5350).
+ *  An environmental signature (timeout, ENOSPC, a killed runner) is not among them: the kept job-log
+ *  evidence does not record one. */
+export type SelectorShadowUnattributedReason = "retry_recovered" | "base_red" | "flake_history" | "mass";
+
+const SELECTOR_SHADOW_RETRY_OUTCOMES = new Set(["recovered", "failed"]);
+const SELECTOR_SHADOW_STORED_REASONS = new Set(["base_red", "flake_history"]);
 
 export interface SelectorShadowRecord {
   fullRun: boolean;
@@ -65,6 +82,11 @@ export interface SelectorShadowMiss {
   prNumber?: number;
   selection: "floor" | "narrow";
   file: string;
+}
+
+/** A miss the gate does not charge to the selector, with the reason the operator can audit. */
+export interface SelectorShadowUnattributedMiss extends SelectorShadowMiss {
+  reason: SelectorShadowUnattributedReason;
 }
 
 export interface SelectorShadowSelectionReport {
@@ -89,7 +111,10 @@ export interface SelectorShadowReport {
   narrow: SelectorShadowSelectionReport;
   /** W1-T5952: flake verdicts per selection, outside each selection's `failures`. */
   flakes: { floor: number; narrow: number };
+  /** Attributed misses only: each one blocks the flip. */
   misses: SelectorShadowMiss[];
+  /** Missed failures the diff did not plausibly cause, outside each selection's `failures`. */
+  unattributed: { floor: number; narrow: number; misses: SelectorShadowUnattributedMiss[] };
   verdict: "misses" | "insufficient" | "ready";
   reason: string;
 }
@@ -119,10 +144,11 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
           !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
           (row.narrowSize !== undefined && f.narrow === undefined) ||
           (row.narrowSize === undefined && f.narrow !== undefined) ||
-          (row.fullRun && f.floor !== "selected")) {
+          (row.fullRun && f.floor !== "selected") || (f.retry !== undefined && !SELECTOR_SHADOW_RETRY_OUTCOMES.has(f.retry as string))) {
         throw new Error("selector shadow: invalid failure verdict");
       }
-      return { file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow }) };
+      return { file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow }),
+        ...(f.retry === undefined ? {} : { retry: f.retry as "recovered" | "failed" }) };
     });
     records.push({ fullRun: row.fullRun, floorSize: row.floorSize as number,
       ...(row.narrowSize === undefined ? {} : { narrowSize: row.narrowSize as number }), failures });
@@ -501,7 +527,19 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
   } };
 }
 
-type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "flakes" | "misses">;
+type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "flakes" | "misses" | "unattributed">;
+
+/** The reason a missed failure is unattributed, or undefined when the diff plausibly caused it. The
+ *  stored reason wins; the retry and mass reasons are re-derived from the row, so they also apply to
+ *  observations stored before attribution existed. */
+export function selectorShadowUnattributedReason(
+  failure: SelectorShadowFailure, run: Pick<SelectorShadowObservation, "failures">,
+): SelectorShadowUnattributedReason | undefined {
+  if (failure.unattributed !== undefined) return failure.unattributed;
+  if (failure.retry === "recovered") return "retry_recovered";
+  const missedFiles = new Set(run.failures.filter((f) => f.floor === "missed" || f.narrow === "missed").map((f) => f.file));
+  return missedFiles.size > SELECTOR_SHADOW_MASS_FAILURE_FILES ? "mass" : undefined;
+}
 
 function foldSelectorShadowObservations(observations: readonly SelectorShadowObservation[], fullSuiteSize: number): SelectorShadowFold {
   const floorVerdicts: Array<"selected" | "missed"> = [];
@@ -510,28 +548,40 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
   const narrowSizes: number[] = [];
   const misses: SelectorShadowMiss[] = [];
   const flakes = { floor: 0, narrow: 0 };
+  const unattributed: SelectorShadowFold["unattributed"] = { floor: 0, narrow: 0, misses: [] };
   let recovered = 0;
   for (const run of observations) {
     floorSizes.push(run.fullRun ? fullSuiteSize : run.floorSize);
     if (run.narrowSize !== undefined) narrowSizes.push(run.narrowSize);
     recovered += run.recovered;
     for (const failure of run.failures) {
-      if (failure.floor === "flake") flakes.floor += 1;
-      else floorVerdicts.push(failure.floor);
-      if (failure.narrow === "flake") flakes.narrow += 1;
-      else if (failure.narrow !== undefined) narrowVerdicts.push(failure.narrow);
+      const reason = selectorShadowUnattributedReason(failure, run);
       for (const selection of ["floor", "narrow"] as const) {
-        if (failure[selection] === "missed") misses.push({
+        const verdict = failure[selection];
+        if (verdict === undefined) continue;
+        if (verdict === "flake") {
+          flakes[selection] += 1;
+          continue;
+        }
+        const miss = verdict === "missed" ? {
           runId: run.runId, headSha: run.headSha,
           ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
           ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
           selection, file: failure.file,
-        });
+        } : undefined;
+        // An unattributed miss is neither a selection nor a miss: it leaves the gate's arithmetic.
+        if (miss !== undefined && reason !== undefined) {
+          unattributed[selection] += 1;
+          unattributed.misses.push({ ...miss, reason });
+          continue;
+        }
+        (selection === "floor" ? floorVerdicts : narrowVerdicts).push(verdict);
+        if (miss !== undefined) misses.push(miss);
       }
     }
   }
   return {
-    runsComplete: observations.length, recovered, flakes, misses,
+    runsComplete: observations.length, recovered, flakes, misses, unattributed,
     floor: selectionReport(floorVerdicts, floorSizes, fullSuiteSize),
     narrow: selectionReport(narrowVerdicts, narrowSizes, fullSuiteSize),
   };
@@ -544,7 +594,7 @@ function selectorShadowVerdict(fold: SelectorShadowFold, runsIncomplete?: number
     fold.narrow.failures < SELECTOR_SHADOW_MIN_FAILURES || fold.narrow.medianSize === null
       ? "insufficient" : "ready";
   const reason = verdict === "misses"
-    ? `${fold.misses.length} missed failure(s); repair their selector edges before W1-T4406`
+    ? `${fold.misses.length} diff-attributed missed failure(s); repair their selector edges before W1-T4406`
     : verdict === "ready"
       ? `${fold.narrow.failures} failures across ${fold.runsComplete} complete runs with zero misses; W1-T4406 may be reviewed for narrowing`
       : `need ${SELECTOR_SHADOW_MIN_FAILURES} narrow-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs${runsIncomplete === undefined ? "" : ", zero incomplete runs"} and a measured narrow size`;
@@ -587,8 +637,11 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
   for (const entry of row.failures as unknown[]) {
     const f = entry as Record<string, unknown> | null;
     if (!f || typeof f.file !== "string" || !isSelectorShadowVerdict(f.floor) || (f.narrow !== undefined && !isSelectorShadowVerdict(f.narrow)) ||
-        (row.full_run && f.floor !== "selected")) return undefined;
-    failures.push({ file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow as SelectorShadowVerdict }) });
+        (row.full_run && f.floor !== "selected") || (f.retry !== undefined && !SELECTOR_SHADOW_RETRY_OUTCOMES.has(f.retry as string)) ||
+        (f.unattributed !== undefined && !SELECTOR_SHADOW_STORED_REASONS.has(f.unattributed as string))) return undefined;
+    failures.push({ file: f.file, floor: f.floor, ...(f.narrow === undefined ? {} : { narrow: f.narrow as SelectorShadowVerdict }),
+      ...(f.retry === undefined ? {} : { retry: f.retry as "recovered" | "failed" }),
+      ...(f.unattributed === undefined ? {} : { unattributed: f.unattributed as "base_red" | "flake_history" }) });
   }
   return {
     runId: row.ci_run_id, headSha: row.head_sha,
@@ -754,10 +807,13 @@ async function replaySelectorShadowRun(replay: SelectorShadowReplay, select: Non
   if (selection.record.fullRun) return { reason: "full_run", detail: selection.reasons[0] };
   const [record] = parseSelectorShadowLines(`AFFECTED-SUITES-SHADOW: ${JSON.stringify(selection.record)}`);
   const { id: runId, ...identity } = run;
+  // The recomputed selection knows nothing of the run's retries; each file keeps its recorded outcome.
+  const retryOf = new Map(reading.observation.failures.flatMap((f) => f.retry === undefined ? [] : [[f.file, f.retry] as const]));
   return {
     runId, ...identity, source: "replay", fullRun: false, floorSize: record!.floorSize,
     ...(record!.narrowSize === undefined ? {} : { narrowSize: record!.narrowSize }),
-    failures: record!.failures, recovered: reading.observation.recovered,
+    failures: record!.failures.map((f) => retryOf.has(f.file) ? { ...f, retry: retryOf.get(f.file)! } : f),
+    recovered: reading.observation.recovered,
   };
 }
 
@@ -828,6 +884,7 @@ export interface SelectorShadowAccumulatedReport extends SelectorShadowReport {
  *  store. An incomplete window run is counted, never stored, and never resets the verdict. */
 async function accumulateSelectorShadow(
   deps: GardenerDeps, readings: readonly SelectorShadowReading[], window: SelectorShadowReport, replay: SelectorShadowReplay | undefined,
+  attribute: (observation: SelectorShadowObservation) => Promise<SelectorShadowObservation>,
 ): Promise<SelectorShadowAccumulatedReport> {
   const stored = readSelectorShadowObservations(deps.stateDir);
   const all = new Map(stored.observations.map((o) => [o.runId, o]));
@@ -845,7 +902,7 @@ async function accumulateSelectorShadow(
     try {
       const replayed = [...all.values()].filter((o) => o.source === "replay").length;
       const result = await replaySelectorShadowHistory(deps, replay, new Set(all.keys()), replayed);
-      for (const observation of result.observations) append(observation);
+      for (const observation of result.observations) append(await attribute(observation));
       replayPass = result.pass;
     } catch (error) {
       deps.log("selector-shadow.replay_failed", { error: errorText(error) });
@@ -989,19 +1046,67 @@ export function selectorShadowFlakeLedger(log: GardenerDeps["log"]): (runId: num
   };
 }
 
+/** The evidence a pass reads once to attribute its observations' misses. */
+export interface SelectorShadowAttributionEvidence {
+  /** Files a coverage shard's retry recovered in any run of the live window (W1-T4398). */
+  recoveredInWindow: ReadonlySet<string>;
+  mainFailures?: SelectorShadowMainFailures;
+}
+
+/** Stamp each still-charged missed failure the diff did not plausibly cause: retry-recovered in the
+ *  window → flake_history, failing on main at the run's base → base_red. Main is read only when a
+ *  non-mass run still has a charged miss, through the memoized reader the W1-T5350 guard shares. */
+export async function attributeSelectorShadowObservation(
+  observation: SelectorShadowObservation, evidence: SelectorShadowAttributionEvidence,
+): Promise<SelectorShadowObservation> {
+  const charged = (f: SelectorShadowFailure): boolean =>
+    (f.floor === "missed" || f.narrow === "missed") && selectorShadowUnattributedReason(f, observation) === undefined;
+  if (!observation.failures.some(charged)) return observation;
+  let red = new Set<string>();
+  const needsBase = observation.failures.some((f) => charged(f) && !evidence.recoveredInWindow.has(f.file));
+  if (needsBase && evidence.mainFailures !== undefined && observation.baseSha !== undefined) {
+    try {
+      red = new Set((await evidence.mainFailures(observation.baseSha)) ?? []);
+    } catch {
+      // Unread base: the miss stays charged (conservative); withoutMassFailures ledgers base_unread.
+      red = new Set();
+    }
+  }
+  const failures = observation.failures.map((f): SelectorShadowFailure => {
+    if (!charged(f)) return f;
+    if (evidence.recoveredInWindow.has(f.file)) return { ...f, unattributed: "flake_history" };
+    return red.has(f.file) ? { ...f, unattributed: "base_red" } : f;
+  });
+  return { ...observation, failures };
+}
+
+/** One main-CI read per base sha per pass: attribution and the W1-T5350 guard share it. */
+function memoizedMainFailures(mainFailures: SelectorShadowMainFailures | undefined): SelectorShadowMainFailures | undefined {
+  if (mainFailures === undefined) return undefined;
+  const reads = new Map<string, Promise<readonly string[] | undefined>>();
+  return (baseSha) => {
+    let read = reads.get(baseSha);
+    if (read === undefined) {
+      read = Promise.resolve().then(() => mainFailures(baseSha));
+      reads.set(baseSha, read);
+    }
+    return read;
+  };
+}
+
 /** W1-T5350: group the unseen misses by CI run. A run whose distinct missed files exceed K, or whose
  *  missed file also fails in main's own CI at the run's base sha, files nothing: one
  *  `selector-shadow.mass_failure_skipped` row names it, and its miss keys are marked seen so the next
  *  pass does not read them as new. A run with no readable base result is judged by K alone. */
-async function withoutMassFailures(
+async function withoutMassFailures<M extends SelectorShadowMiss>(
   deps: GardenerDeps,
-  unseen: readonly SelectorShadowMiss[],
+  unseen: readonly M[],
   seen: Set<string>,
   mainFailures: SelectorShadowMainFailures | undefined,
-): Promise<SelectorShadowMiss[]> {
-  const byRun = new Map<number, SelectorShadowMiss[]>();
+): Promise<M[]> {
+  const byRun = new Map<number, M[]>();
   for (const miss of unseen) byRun.set(miss.runId, [...(byRun.get(miss.runId) ?? []), miss]);
-  const kept: SelectorShadowMiss[] = [];
+  const kept: M[] = [];
   for (const [runId, misses] of byRun) {
     const files = [...new Set(misses.map((m) => m.file))];
     const { headSha, baseSha } = misses[0]!;
@@ -1060,12 +1165,40 @@ export async function runSelectorShadowGardener(
     const held = edges[file] ?? [];
     if (!held.includes(edge)) edges[file] = [...held, edge].slice(-SELECTOR_SHADOW_EDGES_KEPT);
   };
-  const readings = readRuns().map((run) => selectorShadowReading(run));
+  const runs = readRuns();
+  const main = memoizedMainFailures(mainFailures);
+  const evidence: SelectorShadowAttributionEvidence = {
+    recoveredInWindow: new Set(runs.flatMap((run) => selectorShadowRecoveredFlakes(run.log).map((flake) => flake.file))),
+    ...(main === undefined ? {} : { mainFailures: main }),
+  };
+  const attribute = (observation: SelectorShadowObservation) => attributeSelectorShadowObservation(observation, evidence);
+  const readings: SelectorShadowReading[] = [];
+  for (const run of runs) {
+    const reading = selectorShadowReading(run);
+    readings.push(reading.kind === "complete" ? { kind: "complete", observation: await attribute(reading.observation) } : reading);
+  }
   const report = selectorShadowWindowReport(readings, selectorShadowFullSuiteSize(deps.repoRoot));
   // W1-T5925: the verdict folds every stored observation; filing below still reads this window's misses.
-  const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay);
-  deps.log("selector-shadow.report", { ...accumulated, misses: accumulated.misses.slice(0, 20) });
-  const unseen = await withoutMassFailures(deps, report.misses.filter((m) => !seen.has(selectorShadowMissKey(m))), seen, mainFailures);
+  const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay, attribute);
+  deps.log("selector-shadow.report", {
+    ...accumulated, misses: accumulated.misses.slice(0, 20),
+    unattributed: { ...accumulated.unattributed, misses: accumulated.unattributed.misses.slice(0, 20) },
+  });
+  // The W1-T5350 guard still sees every unseen miss, so a mass or base run is skipped whole as before;
+  // an unattributed miss it keeps is ledgered with its reason and never files a repair shard.
+  const candidates = [...report.misses, ...report.unattributed.misses].filter((m) => !seen.has(selectorShadowMissKey(m)));
+  const unseen: SelectorShadowMiss[] = [];
+  for (const miss of await withoutMassFailures(deps, candidates, seen, main)) {
+    if (!("reason" in miss)) {
+      unseen.push(miss);
+      continue;
+    }
+    seen.add(selectorShadowMissKey(miss));
+    deps.log("selector-shadow.miss_unattributed", {
+      ci_run_id: miss.runId, head_sha: miss.headSha, file: miss.file, selection: miss.selection, reason: miss.reason,
+      ...(miss.prNumber === undefined ? {} : { pr: miss.prNumber }),
+    });
+  }
   // The plan is read only when there is something new to place, never on an idle pass.
   const planned = new Map<string, { id: string; retired: boolean; structural: boolean }>();
   const statusOf = new Map<string, string | undefined>();

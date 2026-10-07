@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (#9528 lost its build)"
   plan_refs: [W1-T117, W1-T356, W1-T2402]
   files: [src/run-task.ts, test/the-orphan-sweep-never-kills-a-worker-of-a-run-this-daemon-is-running.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

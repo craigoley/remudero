@@ -34,7 +34,8 @@ export interface AffectedSelection {
    *  suites naming a changed SYMBOL or one of its src/ callers. MEASURED 2026-09-24: 582 suites
    *  import src/run-task.ts, which imports ~195 modules, so a module-level graph reaches ~90% of
    *  suites from most src/ changes; symbol-level reach is where selectivity could come from, and
-   *  the shadow record says whether it is safe. Absent when no symbol source was supplied. */
+   *  the shadow record says whether it is safe. Suites naming a changed file by path stay in it.
+   *  Absent when no symbol source was supplied. */
   narrow?: string[];
   /** W1-T4462 — suites counted in `suites`/`narrow` ONLY because they failed recently: no changed
    *  test, import-graph reach, symbol reach, or path-reading arm claims them — recentFailures is
@@ -59,6 +60,8 @@ export interface AffectedSuitesInput {
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
 const SUITE = /^test\/.*\.test\.ts$/;
+/** Where a changed declaration can name a symbol other suites reach: never test/. */
+const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
 const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 
@@ -154,6 +157,17 @@ function namedPaths(content: string): string[] {
   return out.filter((p) => !/\.test\.ts$/.test(p));
 }
 
+/** The named-path edges `file` contributes to the graph. A src/ path written as a STRING inside a
+ *  src/ module is data — authority.ts, config-schema.ts, worktree-sites.ts and
+ *  baked-runtime-inputs.ts list src paths in tables — never an import, so it is no src→src edge:
+ *  MEASURED 2026-10-06 those 114 string edges made almost every module reach src/run-task.ts and
+ *  every src change select ~2,374 suites. A test or script naming a path it spawns or reads keeps
+ *  its edge — that read is real. */
+function namedEdges(file: string, content: string, known: ReadonlySet<string>): string[] {
+  const fromSrc = file.startsWith("src/");
+  return namedPaths(content).filter((p) => known.has(p) && !(fromSrc && p.startsWith("src/")));
+}
+
 /** Resolves a relative specifier from `from` against the known files, TS's `.js` → `.ts` included. */
 function resolve(from: string, spec: string, known: ReadonlySet<string>): string | undefined {
   if (!spec.startsWith(".")) return undefined;
@@ -181,12 +195,14 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const all = [...input.files.keys()].filter((f) => CODE_FILE.test(f));
   const known = new Set([...all, ...files]);
   const importers = new Map<string, Set<string>>();
+  const changedSet = new Set(files);
+  // Suites that name a changed file by path (spawn it, read it): a one-hop read the narrow arm keeps.
+  const pathNamers = new Set<string>();
   for (const file of all) {
     const content = stripComments(input.files.get(file)!);
-    const deps_ = [
-      ...specifiers(content).map((s) => resolve(file, s, known)),
-      ...namedPaths(content).filter((p) => known.has(p)),
-    ];
+    const named = namedEdges(file, content, known);
+    if (SUITE.test(file) && named.some((p) => changedSet.has(p))) pathNamers.add(file);
+    const deps_ = [...specifiers(content).map((s) => resolve(file, s, known)), ...named];
     for (const dep of deps_) {
       if (dep === undefined || dep === file) continue;
       if (!importers.has(dep)) importers.set(dep, new Set());
@@ -220,7 +236,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   };
   if (input.symbolSuites) {
     const changedTests = files.filter((f) => SUITE.test(f));
-    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders]);
+    const narrowStructural = new Set([...changedTests, ...input.symbolSuites, ...pathReaders, ...pathNamers]);
     const narrow = new Set([...narrowStructural, ...recent]);
     selection.narrow = [...narrow].filter((s) => SUITE.test(s)).sort();
     selection.recentOnly.narrow = selection.narrow.filter((s) => !narrowStructural.has(s));
@@ -228,8 +244,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   return selection;
 }
 
-/** Top-level declaration names whose lines a unified diff (`git diff -U0`) touches, per file. A
- *  removed-only hunk names the declaration at its position in the new file. */
+/** Top-level declaration names whose lines a unified diff (`git diff -U0`) touches, per SOURCE file
+ *  (src/, scripts/, bin/). A removed-only hunk names the declaration at its position in the new file.
+ *  A changed TEST file's declarations are never symbols: the suite selects itself, and its locals
+ *  (`const one`, `base`) are namesakes of nothing — MEASURED 2026-10-06, `one` alone named 2,210
+ *  suites. */
 export function changedSymbols(diffText: string, readFile: (path: string) => string): string[] {
   const DECL = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/;
   const symbols = new Set<string>();
@@ -238,7 +257,7 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
   for (const line of diffText.split("\n")) {
     const header = /^\+\+\+ b\/(.+)$/.exec(line);
     if (header) {
-      file = CODE_FILE.test(header[1]!) ? header[1] : undefined;
+      file = CODE_FILE.test(header[1]!) && SYMBOL_SOURCE.test(header[1]!) ? header[1] : undefined;
       try {
         lines = file ? readFile(file).split("\n") : [];
       } catch (err) {
@@ -263,6 +282,21 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
     }
   }
   return [...symbols].sort();
+}
+
+/** The changed src/, scripts/ and bin/ CODE files whose hunks in `diffText` name no declaration —
+ *  an import-only edit, a deleted module. The narrow arm reaches a module only through the symbols
+ *  it changed, so for one of these it reaches nothing, and a caller must run the floor instead. */
+export function symbollessSourceFiles(changed: readonly string[], diffText: string, readFile: (path: string) => string): string[] {
+  const sections = new Map<string, string>();
+  for (const section of diffText.split(/^(?=diff --git )/m)) {
+    const header = /^\+\+\+ b\/(.+)$/m.exec(section);
+    const removed = /^--- a\/(.+)$/m.exec(section);
+    const path = header?.[1] ?? removed?.[1];
+    if (path !== undefined) sections.set(path, (sections.get(path) ?? "") + section);
+  }
+  return changed.filter((f) => CODE_FILE.test(f) && SYMBOL_SOURCE.test(f) &&
+    changedSymbols(sections.get(f) ?? "", readFile).length === 0);
 }
 
 /** Reads the selector's input from `repoRoot`: git's tracked code files and their contents, and
@@ -322,12 +356,17 @@ export interface ShadowFailure {
   file: string;
   floor: "selected" | "missed" | "flake";
   narrow?: "selected" | "missed" | "flake";
+  /** The file's own W1-T4398 retry in this shard: "recovered" when pass two did not fail it again.
+   *  Absent when no retry ran or its outcome could not be read. */
+  retry?: "recovered" | "failed";
 }
 
 /** W1-T4404 (ii) — the SHADOW RECORD for one full run: for every file that really failed, whether
  *  each selection would have run it. A full-run selection runs everything, so it misses nothing.
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
-export function shadowRecord(selection: AffectedSelection, failedFiles: readonly string[]): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
+export function shadowRecord(
+  selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
+): { fullRun: boolean; floorSize: number; narrowSize?: number; failures: ShadowFailure[] } {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
@@ -345,6 +384,7 @@ export function shadowRecord(selection: AffectedSelection, failedFiles: readonly
       file,
       floor: verdict(floor, recentOnlyFloor, file),
       ...(narrow ? { narrow: verdict(narrow, recentOnlyNarrow, file) } : {}),
+      ...(Object.hasOwn(retried, file) ? { retry: retried[file] } : {}),
     })),
   };
 }

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.14
   status: queued
@@ -27,3 +27,14 @@
     - PR #9553: 1.03 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9553
     - PR #9181: 0.76 PR-hours — checks green, remudero-review owner proven dead — re-running the review lane on #9181
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are limited to src/lib/sweep.ts and one new test file. The description doesn't show any secrets, auth, deletion, merge/deploy policy, or irreversible action."
+      - "The task aims to have an existing flow blocker clear itself automatically. It has a grep-verifiable acceptance test, and the PR still goes through CI and review."
+      - "The family has no track record (0 merged, 0 declined), so this is neutral rather than concerning. No bounded change view was supplied, so I can't check anything beyond the description and file list."
+      - "Judging a \"remudero-review owner proven dead\" condition could touch review-policy behavior. The description gives no sign that it changes review policy, only that it clears a stuck state."
+    judged_at: "2026-10-06T22:29:49.740Z"
+    pin: "8af293b6d779676abfe0d3ec4ae7d3c8f6b73f4244ee329cdb4e04bedc0b1674"

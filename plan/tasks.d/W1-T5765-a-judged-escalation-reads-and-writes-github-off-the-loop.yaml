@@ -11,8 +11,7 @@
   origin: "operator session 2026-10-04: watch log 22:21Z, W1-T5283 (#9169) follow-up (escalateWithJudge and other escalate callers still sync)"
   plan_refs: [W1-T5283, W1-T349, W1-T5689, W1-T5741, W1-T5742]
   files: [src/lib/escalate.ts, src/run-task.ts, test/a-judged-escalation-reads-and-writes-github-off-the-loop.test.ts]
-  status: queued
-  priority: 2
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main 9c38366f. src/lib/escalate.ts `escalateAsync`/`tryEscalateAsync`
@@ -38,3 +37,5 @@
   falsifier: |
     Keep runStepsSync: the loop-tick counter reads 0 while the fake gateway call is pending and the
     test fails.
+  note: |
+    CREDIT 2026-10-06 (hand flip): shipped as #9726 (head run-W1-T5765-1791326362572, merged 2026-10-06T23:39Z as 0951f0756). rmd plan-reconcile names it WINDOW-SHORT (merged outside its credit scan windows) and asks for a hand flip in a plan-only PR, which this is.

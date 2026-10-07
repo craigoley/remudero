@@ -11,7 +11,7 @@
   origin: "operator continuation 2026-10-06: retained actual failed full author at 964d04b18bcbb4072112e8d0492baf9fdb4f0cb0; explicit six-fixture repair, PR9547 identity correction"
   plan_refs: [W1-T5882, W1-T5930]
   files: [test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts, test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts, test/clone-reaper.test.ts, test/event-driven-semantic-review.test.ts, test/review-skips-spawn-on-plan-only.test.ts, test/worker.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

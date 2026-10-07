@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05/06: follow-ups found while building the stall fixes ('ensure all follow ups are being addressed')"
   plan_refs: [W1-T1223, W1-T5920, W1-T5534]
   files: [src/lib/ledger.ts, test/a-spent-check-requeue-survives-ledger-rotation.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

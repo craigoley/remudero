@@ -1,0 +1,41 @@
+- id: W1-T6087
+  title: "THE CENSUS ADMISSION AND ROSTER ARE CHECKED FROM ONE SCAN, AND NO CENSUS SUITE RE-RUNS ANOTHER — the-census-admission-set-is-derived-not-enumerated (46 s) and the-census-roster-is-named-not-numbered (18-24 s) assert the same CENSUS_POPULATION both ways, the admission file re-runs enforcement-data-carveout in a nested child to re-measure it, and both it and fast-gate-admits-the-census-class (28 s) run the real admitted census suites through runPreflightFast"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the census population's own tests, consolidated into one scan and one real run
+  band_meaning: span
+  origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, redundancy item 2 and ranked item 6)"
+  plan_refs: [W1-T2643, W1-T2644, W1-T2478, W1-T5693]
+  files: [test/the-census-admission-set-is-derived-not-enumerated.test.ts, test/the-census-roster-is-named-not-numbered.test.ts, test/fast-gate-admits-the-census-class.test.ts, scripts/test-tier-manifest.json, scripts/census-precheck-parity-baseline.json, test/the-gate-admission-population-is-checked-from-one-scan.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main. CENSUS_SUITE_ROSTER is CENSUS_POPULATION re-exported (the roster file's
+    own third test says so), and both files check the population against FAST_GATE_STEPS in both directions,
+    run the live recognizer over the tree, and pin enforcement-data-carveout as REFUSED for cost. The
+    admission file's "re-measured HERE" test spawns `node --test ... test/enforcement-data-carveout.test.ts`
+    (17 s nested) to prove a cost the population already records; the roster file's "runPreflightFast over
+    ONLY the roster's admitted projection" and fast-gate-admits-the-census-class's real-spawn test both run
+    the admitted census suites for real, which CI then runs again as ordinary suites. MEASURED
+    (research-coverage): ~40-60 s per preflight; W1-T5693 also names roster and fast-gate-admits as red
+    echoes under load.
+  design: |
+    One new suite, test/the-gate-admission-population-is-checked-from-one-scan.test.ts, holds the
+    population assertions both files make today, computed from ONE recognizer scan shared by its tests; the
+    two old files are deleted, their unique assertions moved, not dropped (list each moved title in the PR). Both old files are rows of
+    scripts/census-precheck-parity-baseline.json, which only shrinks: drop their two rows. The new file's name
+    carries no census/ratchet/baseline token, so listRuleSuites does not read it as a new rule suite.
+    The cost refusal of enforcement-data-carveout is asserted from the recorded duration in
+    scripts/test-tier-manifest.json, never by spawning it. The real runPreflightFast over the admitted
+    census steps stays in exactly ONE place (fast-gate-admits-the-census-class), and the new suite asserts
+    that no other test file calls runPreflightFast with census steps or spawns a census suite.
+  acceptance:
+    - claim: "the admission, roster and both-directions FAST_GATE_STEPS checks pass from one shared recognizer scan in one suite; the enforcement-data-carveout cost refusal is read from the recorded manifest duration, and no test file other than fast-gate-admits-the-census-class runs the admitted census suites for real"
+      proof: "unit test: test/the-gate-admission-population-is-checked-from-one-scan.test.ts"
+  falsifier: |
+    Leave the roster file's runPreflightFast test in place: the single-real-run check names it and fails.

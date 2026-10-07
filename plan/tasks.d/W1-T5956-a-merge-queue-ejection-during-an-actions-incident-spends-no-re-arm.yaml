@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: found while keeping the board green after the stall fixes shipped"
   plan_refs: [W1-T5909, W1-T5939, W1-T5941, W1-T5940]
   files: [src/lib/sweep.ts, test/a-merge-queue-ejection-during-an-actions-incident-spends-no-re-arm.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
