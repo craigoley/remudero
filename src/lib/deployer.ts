@@ -946,6 +946,25 @@ export function pgrepFailureMeansZero(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { status?: unknown }).status === 1;
 }
 
+/** The worker command lines probeIdle counts — host `pgrep -f` and the container read alike. */
+const WORKER_PROCESS_PATTERN = "claude --output-format|codex exec";
+
+/** W1-T6260 — workers in ONE container's `docker top <c> -eo pid,ppid,args` table, each counted
+ *  once: a match whose parent also matches (codex's musl binary under its node wrapper) is the
+ *  same worker. `undefined` when no process row was read — a running container always has one. */
+export function countContainerWorkers(top: string): number | undefined {
+  const rows = top
+    .split("\n")
+    .slice(1)
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null);
+  if (rows.length === 0) return undefined;
+  const re = new RegExp(WORKER_PROCESS_PATTERN);
+  const matched = rows.filter((m) => re.test(m[3]));
+  const pids = new Set(matched.map((m) => m[1]));
+  return matched.filter((m) => !pids.has(m[2])).length;
+}
+
 /** Does this `readdirSync` failure mean the directory genuinely holds no locks? ENOENT does — a
  *  directory never created holds none. EACCES, ENOTDIR, EIO and EMFILE do not: the directory may
  *  be full of locks nobody could count. */
@@ -2502,11 +2521,26 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // is precisely what {@link daemonIsIdle} calls quiet.
       const unreadable: string[] = [];
       let workers = 0;
-      try {
-        workers = exec("pgrep", ["-f", "claude --output-format|codex exec"]).split("\n").filter(Boolean).length;
-      } catch (err) {
-        if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
-        workers = 0; // pgrep exits 1 when there are no matches
+      // W1-T6260: deploy-run runs ON THE HOST, so pgrep sees every instance's workers; the
+      // launcher's named container scopes the count to this instance. Unnamed ⇒ single-instance.
+      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER;
+      if (container) {
+        let counted: number | undefined;
+        try {
+          counted = countContainerWorkers(exec("docker", ["top", container, "-eo", "pid,ppid,args"]));
+        } catch {
+          // Deliberate: container down or docker unreachable is UNKNOWN (unreadable below), never zero.
+          counted = undefined;
+        }
+        if (counted === undefined) unreadable.push("workers");
+        workers = counted ?? 0;
+      } else {
+        try {
+          workers = exec("pgrep", ["-f", WORKER_PROCESS_PATTERN]).split("\n").filter(Boolean).length;
+        } catch (err) {
+          if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
+          workers = 0; // pgrep exits 1 when there are no matches
+        }
       }
       const countLocks = (dir: string, signal: string): number => {
         try {
