@@ -36,5 +36,7 @@
   origin: feedback#fb-1789382557136-8e0974
   plan_refs: ["§7B"]
   files: [src/lib/plan-architect.ts, src/run-task.ts, src/lib/ops.ts, test/planner-terminal-state.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=44a8b09c472572d5
   attempts: 0
