@@ -87,6 +87,7 @@
         "lease-is-not-a-supersession-guard",
         "light-gates-pre-push-ratchets",
         "lint-plan-refuses-before-pr",
+        "prompt-surface-gate-learning-path-evidence",
         "remudero-review-refusals-repaired-by-hand",
         "required-check-poster",
         "rerun-the-job-not-the-run",
