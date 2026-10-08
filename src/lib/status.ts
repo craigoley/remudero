@@ -873,6 +873,12 @@ export function readMergeCreditedTaskIds(
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, ledgerFs);
+  const fsDeps = statusLedgerUnionFsDeps(ledgerFs, opts);
+  // A rotation is written once, so its credit rows are parsed once and answered from a memo; an unmemoized
+  // or changed rotation is parsed inline, exactly as before. Each open PR's resequence check
+  // (buildOpenPrViews) used to re-parse the whole corpus per PR. Its own memo, not the async scan's: a
+  // memo this warmed would let that scan skip the load that gives the event loop its turn.
+  const pass = syncCreditScanMemo.pass({ parseMissing: true });
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -885,9 +891,13 @@ export function readMergeCreditedTaskIds(
       readLiveRecords: () => live,
       onRecord: take,
       satisfied: done,
+      rotationRecords: pass.rotationRecords,
     },
-    statusLedgerUnionFsDeps(ledgerFs, opts),
+    fsDeps,
   );
+  // Pruning keeps only the rotations this pass touched, so prune only after a walk that touched every
+  // listed rotation: never after an early stop or a cap, and never over an injected directory listing.
+  if (fsDeps === undefined && !done() && (cap === undefined || read.archiveCount <= cap)) pass.complete();
   // `complete: false` means candidates are unresolved: new merges nothing has credited yet, or ids a cap hid.
   const complete = wanted.size === 0 ? true : outstanding <= 0;
   // W1-T3019: `budgetExhausted` separates "a CAP hid files we never opened" (absence UNPROVEN) from "the
@@ -897,6 +907,7 @@ export function readMergeCreditedTaskIds(
 }
 
 const creditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+const syncCreditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
 
 export async function readMergeCreditedTaskIdsAsync(
   path: string,
