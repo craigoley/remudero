@@ -1,0 +1,40 @@
+- id: W1-T6529
+  title: "A planner worker (rmd plan --mode=create) can reserve durable task ids and then vanish — no terminal ledger state, no shards, no PR, and peek reports FINISHED with no tail"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OBSERVED in run PLAN-create-1789382437531: it reserved W1-T3559 through W1-T3563 and created
+    its worktree at origin/main, then produced no task shards, no plan PR and no terminal plan success or
+    failure ledger row. rmd peek reported FINISHED with no tail. A control-plane operation consumed durable ids
+    and disappeared, leaving them ambiguous: neither used nor released, so the operator cannot tell whether a
+    retry duplicates or loses work.
+    Rule 19 / #588 merits: one integration falsifier spans plan-architect, run-task and ops to prove
+    a failed planner run records its terminal state, preserves reclaim-safe ids across retry, and
+    surfaces that same state despite a GitHub read failure; this invariant is unsatisfiable piecewise."
+  design: |
+    TERMINAL-STATE CONTRACT FOR EVERY PLANNER WORKER (create, clarify, expand). Each run writes exactly one of
+    three ledger states: started (durable, written BEFORE ids are reserved), succeeded (carries the artifact
+    or PR and the ids actually used), or failed (carries a CLASSIFIED cause, e.g. spawn-failed, empty-output,
+    no-shards, push-failed, plus the reserved ids and an explicit outcome: retry-safe or reclaim-safe).
+    A started row with no terminal row and a dead worker is reconciled to failed by the sweep, never left open.
+    RESERVED IDS ARE NEVER AMBIGUOUS. On failed, the reserved ids are released or recorded as reclaimable so a
+    retry reuses them (no duplicates) and no id is lost; on succeeded they are marked used.
+    STATUS SURFACING. The terminal state shows in rmd status and rmd peek from the LEDGER, so a planner run
+    with no tail shows its classified failure. The read must not depend on a broad paginated GitHub call: a
+    GitHub read failure degrades that one row to unknown, it does not fail the whole board.
+    FAULT INJECTION. Tests inject a worker-spawn failure and an output failure (zero shards written) and
+    assert: a terminal failed row exists, the reserved ids are reclaim-safe, a retry succeeds with the same ids
+    and no duplicate or lost task, and status renders the row when the GitHub read throws.
+    NOT IN SCOPE: changing the id format or the mint (see W1-T278)."
+  acceptance:
+    - claim: "one integration falsifier drives plan-architect through run-task with injected spawn and zero-shard failures, proves each writes a classified failed terminal ledger row with reclaim-safe reserved ids, retries with the same ids without duplicate or lost work, and reads that same terminal state through ops status despite a GitHub read failure"
+      proof: "unit test: test/planner-terminal-state.test.ts"
+  risk: high
+  origin: feedback#fb-1789382557136-8e0974
+  plan_refs: ["§7B"]
+  files: [src/lib/plan-architect.ts, src/run-task.ts, src/lib/ops.ts, test/planner-terminal-state.test.ts]
+  status: queued
+  attempts: 0
