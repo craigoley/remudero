@@ -2675,6 +2675,15 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   },
 };
 
+/** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
+export const CODEX_NOTIONAL_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  ...OPENWEIGHT_PRICES,
+  // https://developers.openai.com/api/docs/models/gpt-6-sol
+  "gpt-6-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.2, readAt: "2026-10-08" },
+  // https://developers.openai.com/api/docs/models/gpt-5.6-sol
+  "gpt-5.6-sol": { inputUsdPerMillion: 4, outputUsdPerMillion: 20, cachedInputUsdPerMillion: 0.4, readAt: "2026-10-08" },
+};
+
 /** Separate protocol and provider, but the same atomic cash allowance. */
 export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
   inputUsdPerMillion: 4, outputUsdPerMillion: 20,
@@ -2908,11 +2917,11 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
  * BASE rate, so a codex row stops reading as free beside Claude's notional price. Never billed: the subscription
  * charges no per-request dollar, so this rides `notional_cost_usd` and `costUsd` stays 0 for every budget and cap.
  * Base rate because the tokens are a SESSION sum, and the long-context tier prices a single request. Codex input
- * includes its cached input. `undefined`, never 0, for a model {@link OPENWEIGHT_PRICES} does not price.
+ * includes its cached input. `undefined`, never 0, for a model {@link CODEX_NOTIONAL_PRICES} does not price.
  */
 export function codexNotionalCostUsd(model: string, tokens: { input: number; output: number; cacheRead: number }): number | undefined {
-  if (!Object.hasOwn(OPENWEIGHT_PRICES, model)) return undefined;
-  const price = openWeightPriceFor(model);
+  if (!Object.hasOwn(CODEX_NOTIONAL_PRICES, model)) return undefined;
+  const price = CODEX_NOTIONAL_PRICES[model];
   const cached = Math.min(tokens.input, tokens.cacheRead);
   return ((tokens.input - cached) * price.inputUsdPerMillion +
     cached * (price.cachedInputUsdPerMillion ?? price.inputUsdPerMillion) +

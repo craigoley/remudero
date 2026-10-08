@@ -287,8 +287,9 @@ export interface RunSummary {
   type: string;
   startTs: string;
   verdict: string;
-  costUsd: number;
-  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free. */
+  /** Absent when the run has no complete price; an observed zero remains 0. */
+  costUsd?: number;
+  /** `none` when the run has no complete price, including an unpriced Codex receipt. */
   costSource?: "none";
   numTurns: number;
   prUrl?: string;
@@ -404,12 +405,14 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       .reduce((s, l) => s + outputTokensOf(l), 0);
     // W1-T5526: with no verdict line, the worker's own DONE_STEPS rows price the run — never a probe,
     // cost.anomaly, risk_judge or budget.warning row, which came first on every live settled run.
-    const workerCostRows = lines.filter(
-      (l) => l.step && DONE_STEPS.has(l.step) && (typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
-    );
-    const costUsd = verdictLine
-      ? typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
-      : workerCostRows.reduce((s, l) => s + costOf(l), 0);
+    const workerCostRows = lines.filter((l) => l.step && DONE_STEPS.has(l.step));
+    const workerCosts = workerCostRows.map((l) => l.provider === "codex" ? notionalSpendUsd(l)
+      : typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number" ? costOf(l) : undefined);
+    const pricedWorkers = workerCosts.filter((cost): cost is number => cost !== undefined);
+    const price = verdictLine
+      ? verdictLine.provider === "codex" ? notionalSpendUsd(verdictLine)
+        : typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : undefined
+      : workerCosts.length > 0 && pricedWorkers.length === workerCosts.length ? pricedWorkers.reduce((sum, cost) => sum + cost, 0) : undefined;
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
@@ -426,8 +429,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
       ...(typeof mergeTs === "string" ? { mergeTs } : {}),
-      costUsd,
-      ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
+      ...(price === undefined ? { costSource: "none" as const } : { costUsd: price }),
       numTurns,
       outputTokens,
       prUrl,
@@ -456,12 +458,22 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
   return runs;
 }
 
+/** A total needs every run's price; missing receipts cannot lower calibration averages. */
+function totalRunCost(runs: RunSummary[]): number | null {
+  return runs.some((r) => r.costUsd === undefined) ? null : round(runs.reduce((sum, r) => sum + r.costUsd!, 0));
+}
+
+function costCell(cost: number | null | undefined): string {
+  return cost == null ? "unknown cost" : "$" + cost.toFixed(3);
+}
+
 /** Calibration aggregate for one task type — the numbers mounts.yaml (W1-T5) needs. */
 export interface TypeCalibration {
   type: string;
   runs: number;
-  totalCostUsd: number;
-  avgCostUsd: number;
+  /** Null when any run is unpriced, so an incomplete sum never reads as a total. */
+  totalCostUsd: number | null;
+  avgCostUsd: number | null;
   avgTurns: number;
   merged: number;
 }
@@ -476,13 +488,13 @@ export function aggregateByType(runs: RunSummary[]): TypeCalibration[] {
   }
   const out: TypeCalibration[] = [];
   for (const [type, rs] of byType) {
-    const totalCost = rs.reduce((s, r) => s + r.costUsd, 0);
+    const totalCost = totalRunCost(rs);
     const totalTurns = rs.reduce((s, r) => s + r.numTurns, 0);
     out.push({
       type,
       runs: rs.length,
-      totalCostUsd: round(totalCost),
-      avgCostUsd: round(totalCost / rs.length),
+      totalCostUsd: totalCost,
+      avgCostUsd: totalCost === null ? null : round(totalCost / rs.length),
       avgTurns: round(totalTurns / rs.length),
       merged: rs.filter((r) => r.verdict === "merged").length,
     });
@@ -501,8 +513,9 @@ export const MIN_TURN_COVERAGE_FOR_PER_MERGE = 0.5;
 export interface ClassCalibration {
   taskClass: string;
   runs: number;
-  totalCostUsd: number;
-  avgCostUsd: number;
+  /** Null when any run is unpriced, so an incomplete sum never reads as a total. */
+  totalCostUsd: number | null;
+  avgCostUsd: number | null;
   avgTurns: number;
   merged: number;
   mergeRate: number;
@@ -552,7 +565,7 @@ export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]):
   }
   const out: ClassCalibration[] = [];
   for (const [taskClass, rs] of byClass) {
-    const totalCost = rs.reduce((s, r) => s + r.costUsd, 0);
+    const totalCost = totalRunCost(rs);
     const totalTurns = rs.reduce((s, r) => s + r.numTurns, 0);
     const totalOutputTokens = rs.reduce((s, r) => s + (r.outputTokens ?? 0), 0);
     const merged = rs.filter((r) => r.verdict === "merged").length;
@@ -564,8 +577,8 @@ export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]):
     out.push({
       taskClass,
       runs: rs.length,
-      totalCostUsd: round(totalCost),
-      avgCostUsd: round(totalCost / rs.length),
+      totalCostUsd: totalCost,
+      avgCostUsd: totalCost === null ? null : round(totalCost / rs.length),
       avgTurns: round(totalTurns / rs.length),
       merged,
       mergeRate: round(merged / rs.length),
@@ -591,7 +604,7 @@ export interface ModelClassWeeklyBurn {
   runs: number;
   turnsThisWeek: number;
   /** Imputed-dollar context only (clause c) — never the share driver. */
-  costUsdThisWeek: number;
+  costUsdThisWeek: number | null;
   /** `turnsThisWeek` over every resolved model's turns this week; `0` for an empty week rather
    *  than a divide-by-zero. The cross-file invariant this task ratifies. */
   shareOfWeeklyBurn: number;
@@ -623,12 +636,12 @@ export function aggregateWeeklyBurnByModelClass(runs: RunSummary[], mounts: Moun
   const out: ModelClassWeeklyBurn[] = [];
   for (const [model, rs] of byModel) {
     const turns = rs.reduce((s, r) => s + r.numTurns, 0);
-    const cost = rs.reduce((s, r) => s + r.costUsd, 0);
+    const cost = totalRunCost(rs);
     out.push({
       model,
       runs: rs.length,
       turnsThisWeek: turns,
-      costUsdThisWeek: round(cost),
+      costUsdThisWeek: cost,
       shareOfWeeklyBurn: totalTurns === 0 ? 0 : round(turns / totalTurns),
     });
   }
@@ -753,7 +766,7 @@ export interface ShippedRecord {
   taskId: string;
   runId: string;
   prUrl: string;
-  costUsd: number;
+  costUsd?: number;
   numTurns: number;
   source: "ledger" | "github";
   mergeTs?: string;
@@ -855,7 +868,7 @@ export function shippedSince(
         taskId: r.taskId,
         runId: r.runId,
         prUrl: r.prUrl,
-        costUsd: r.costUsd,
+        ...(r.costUsd === undefined ? {} : { costUsd: r.costUsd }),
         numTurns: r.numTurns,
         source: "ledger",
         ...(mergeTs !== undefined ? { mergeTs } : {}),
@@ -884,7 +897,7 @@ export function shippedSince(
         taskId: r.taskId,
         runId: r.runId,
         prUrl: pr.url,
-        costUsd: r.costUsd,
+        ...(r.costUsd === undefined ? {} : { costUsd: r.costUsd }),
         numTurns: r.numTurns,
         source: "github",
         ...(mergeTs !== undefined ? { mergeTs } : {}),
@@ -948,7 +961,7 @@ function ledgerOnlyShipped(runs: RunSummary[], sinceTs?: string): ShippedRecord[
   return runs
     .filter((r): r is RunSummary & { prUrl: string } => r.verdict === "merged" && typeof r.prUrl === "string" &&
       (!sinceTs || (r.mergeTs !== undefined && Date.parse(r.mergeTs) > Date.parse(sinceTs))))
-    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const,
+    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, ...(r.costUsd === undefined ? {} : { costUsd: r.costUsd }), numTurns: r.numTurns, source: "ledger" as const,
       ...(r.mergeTs !== undefined ? { mergeTs: r.mergeTs } : {}) }));
 }
 
@@ -2034,7 +2047,7 @@ export function buildGather(opts: {
 /** Render the calibration table (markdown) — printed by --dry-run and fed to the Architect. */
 export function calibrationTable(byType: TypeCalibration[]): string {
   const rows = byType.map(
-    (t) => `| ${t.type} | ${t.runs} | ${t.merged} | $${t.avgCostUsd.toFixed(3)} | ${t.avgTurns} | $${t.totalCostUsd.toFixed(3)} |`,
+    (t) => `| ${t.type} | ${t.runs} | ${t.merged} | ${costCell(t.avgCostUsd)} | ${t.avgTurns} | ${costCell(t.totalCostUsd)} |`,
   );
   return [
     "| task_type | runs | merged | avg $ | avg turns | total $ |",
@@ -2058,7 +2071,7 @@ function perMergeCell(value: number | null, turnCoverage: number): string {
 export function classCalibrationTable(byClass: ClassCalibration[]): string {
   const rows = byClass.map(
     (c) =>
-      `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | $${c.avgCostUsd.toFixed(3)} | ${c.avgTurns} | $${c.totalCostUsd.toFixed(3)} | ` +
+      `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | ${costCell(c.avgCostUsd)} | ${c.avgTurns} | ${costCell(c.totalCostUsd)} | ` +
       `${c.totalOutputTokens} | ${c.mergeSource} (n=${c.mergedForDenominator}) | ` +
       `${perMergeCell(c.turnsPerMerge, c.turnCoverage)} | ` +
       `${perMergeCell(c.outputTokensPerMerge, c.turnCoverage)} |`,
@@ -2074,7 +2087,7 @@ export function classCalibrationTable(byClass: ClassCalibration[]): string {
  *  the capable model's weekly cap? */
 export function modelClassWeeklyBurnTable(byModel: ModelClassWeeklyBurn[]): string {
   const rows = byModel.map(
-    (m) => `| ${m.model} | ${m.runs} | ${m.turnsThisWeek} | ${(m.shareOfWeeklyBurn * 100).toFixed(1)}% | $${m.costUsdThisWeek.toFixed(3)} |`,
+    (m) => `| ${m.model} | ${m.runs} | ${m.turnsThisWeek} | ${(m.shareOfWeeklyBurn * 100).toFixed(1)}% | ${costCell(m.costUsdThisWeek)} |`,
   );
   return [
     "| model | runs | turns this week | share of weekly burn | $ this week (context only) |",
@@ -2090,7 +2103,7 @@ export function renderGather(g: RetroGather): string {
   const shippedLines = g.shipped.length
     ? g.shipped.map(
         (s) =>
-          `- ${s.taskId} → ${s.prUrl} · $${s.costUsd.toFixed(3)} · ${s.numTurns} turns` +
+          `- ${s.taskId} → ${s.prUrl} · ${costCell(s.costUsd)} · ${s.numTurns} turns` +
           (s.annotation ? ` · (${s.annotation})` : ""),
       )
     : g.githubUnavailable
@@ -2138,7 +2151,7 @@ export function renderGather(g: RetroGather): string {
       : []),
     "## Merged since marker (keyed by Remudero-Task)",
     ...(g.mergedSince.length
-      ? g.mergedSince.map((r) => `- ${r.taskId} → ${r.prUrl ?? "(no pr)"} · $${r.costUsd.toFixed(3)} · ${r.numTurns} turns`)
+      ? g.mergedSince.map((r) => `- ${r.taskId} → ${r.prUrl ?? "(no pr)"} · ${costCell(r.costUsd)} · ${r.numTurns} turns`)
       : ["- (none)"]),
     "",
     "## SHIPPED since marker (W1-T51 — ledger ∪ GitHub-derived trailered merges, ownership-asserted)",

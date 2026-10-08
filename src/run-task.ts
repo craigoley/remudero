@@ -13947,6 +13947,7 @@ export interface WorkerErrorVerdict {
  * absent means "not written"; `null` means "checked, no worker ran" (P48).
  */
 export function terminalVerdictFields(r: WorkerResult | null): {
+  provider?: WorkerResult["provider"];
   model: string | null;
   served_model: string | null;
   routed_model?: string;
@@ -13954,6 +13955,7 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   tokens?: WorkerResult["tokens"];
   worker_duration_ms?: number;
   total_cost_usd?: number;
+  notional_cost_usd?: number;
   /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
   spend_role?: "restated";
   success?: boolean;
@@ -13968,11 +13970,13 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   return {
     model: r.model,
     served_model: r.servedModel ?? null,
+    ...(r.provider ? { provider: r.provider } : {}),
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
     tokens: r.tokens,
     ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
     total_cost_usd: r.costUsd,
+    ...(r.provider === "codex" && r.notionalCostUsd !== undefined ? { notional_cost_usd: r.notionalCostUsd } : {}),
     spend_role: "restated",
     success,
   };
