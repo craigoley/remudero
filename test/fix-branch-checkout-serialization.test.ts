@@ -744,6 +744,9 @@ test("W1-T3822: an untracked path remains a no-touch decline before dirty recove
     mkdirSync(join(root, "worktrees"), { recursive: true });
     execFileSync("git", ["-C", repoDir, "worktree", "add", "--quiet", ownerPath, branch]);
     writeFileSync(join(ownerPath, "untracked.txt"), "must remain\n");
+    // W1-T6355: untracked paths ALONE on an ended run's owner are now released; tracked work
+    // beside them is what keeps this a no-touch decline.
+    writeFileSync(join(ownerPath, "seed.txt"), "tracked edit\n");
     const remoteSha = sha(repoDir, `origin/${branch}`);
     const snapshot = captureRegisteredFixOwnerSnapshot({
       repoDir,
