@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5621 (#9125) follow-ups"
   plan_refs: [W1-T5621, W1-T3142, W1-T308, W1-T2549]
   files: [src/lib/review.ts, test/a-fence-inside-an-html-comment-does-not-hide-the-acceptance-block.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

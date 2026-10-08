@@ -20,8 +20,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T5521 declares the sweep's two plan-PR rungs' loop-lag bounds: one declaring file and two sites.
 // The off-loop proof runner's kill bound declares its elapsed-time assertion: one file, one site.
 // The object reaper's off-loop prune bound declares its elapsed-time assertion: one file, one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 33;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 53;
+// #10092 replaced the end-of-run daemon-loop test's wall-clock bound with a deterministic witness: one file, one site fewer.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 32;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 52;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

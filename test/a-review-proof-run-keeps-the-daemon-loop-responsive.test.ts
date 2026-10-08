@@ -17,7 +17,6 @@ import {
   resetBrowserPreflightForTests,
   resolveNameFilteredCandidatesAsync,
 } from "../src/lib/review.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { discriminateReviewReuse, discriminateReviewReuseAsync } from "../src/lib/sweep.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -75,16 +74,32 @@ async function runBrowserProof(dir: string): Promise<void> {
   assert.equal(await execWhitelistedProofAsync(proof, dir, 2_000, async () => browserTap), "pass");
 }
 
-test("W1-T4772: a timer keeps firing while a review proof child runs", async () => {
+test("W1-T4772: a timer keeps firing while a review proof child runs, witnessed after child readiness", async () => {
   const dir = fixture();
   try {
+    // The child cannot pass until this process's timer acknowledges its readiness.
+    // Unlike a total review-duration deadline, this proves progress DURING the real
+    // proof child, not ticks during toolchain startup or unrelated review work.
+    // Keep a ten-second bound after readiness; the production proof timeout is unchanged.
     writeFileSync(join(dir, "test", "timer.test.ts"),
       'import { test } from "node:test";\n' +
-      'test("async review timer proof", async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });\n');
+      'import { existsSync, writeFileSync } from "node:fs";\n' +
+      'test("async review timer proof", async () => {\n' +
+      '  writeFileSync("child-ready", "ready", { flag: "wx" });\n' +
+      '  await new Promise((resolve, reject) => {\n' +
+      '    const bound = setTimeout(() => { clearInterval(poll); reject(new Error("parent timer made no progress after child readiness")); }, 10_000);\n' +
+      '    const poll = setInterval(() => {\n' +
+      '      if (existsSync("parent-progress")) { clearInterval(poll); clearTimeout(bound); resolve(); }\n' +
+      '    }, 20);\n' +
+      '  });\n' +
+      '});\n');
     const criteria = [{ claim: "the async review timer proof runs", proof: "unit test: test/timer.test.ts" }];
     let ticks = 0;
-    const started = Date.now();
-    const timer = setInterval(() => { ticks++; }, 20);
+    const timer = setInterval(() => {
+      if (!existsSync(join(dir, "child-ready"))) return;
+      ticks++;
+      if (ticks === 5) writeFileSync(join(dir, "parent-progress"), "five parent ticks after child readiness", { flag: "wx" });
+    }, 20);
     try {
       const verdict = await judgeReviewAsync(criteria, {
         diff: "diff --git a/src/new.ts b/src/new.ts\n+export const newValue = 1;\n",
@@ -95,8 +110,8 @@ test("W1-T4772: a timer keeps firing while a review proof child runs", async () 
     } finally {
       clearInterval(timer);
     }
-    assert.ok(ticks >= 5, `expected the daemon timer to fire during the proof child; saw ${ticks} ticks`);
-    assertWallClockBound(Date.now() - started, 10_000, "the bounded proof fixture took too long");
+    assert.ok(ticks >= 5, `expected the daemon timer to fire after proof child readiness; saw ${ticks} ticks`);
+    assert.equal(readFileSync(join(dir, "parent-progress"), "utf8"), "five parent ticks after child readiness");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: PR watch, test-slow-shard (2/2) red on four fleet PRs"
   plan_refs: [W1-T2811]
   files: [src/lib/ledger-union.ts, test/a-landed-rotation-is-read-without-new-loop-work.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -788,7 +788,7 @@ interface CodexModelListResult {
  */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+  balanced: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
   frontier: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;

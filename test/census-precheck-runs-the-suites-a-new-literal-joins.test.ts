@@ -121,7 +121,9 @@ test("W1-T5692: the CLI supplies head and merge-base readers to the triggered su
   try {
     mkdirSync(join(repo.dir, "src", "lib"), { recursive: true });
     writeFileSync(join(repo.dir, SOURCE), 'log("sweep.existing", {});');
-    repo.git("add", "src");
+    mkdirSync(join(repo.dir, "test"));
+    writeFileSync(join(repo.dir, SPEND), "// suite supplied through the injected runner\n");
+    repo.git("add", "src", "test");
     repo.git("commit", "--quiet", "-m", "base source");
     repo.git("switch", "--quiet", "-c", "work");
     writeFileSync(join(repo.dir, SOURCE), 'log("sweep.plan_round.worker", { total_cost_usd: 3 });');
@@ -131,12 +133,16 @@ test("W1-T5692: the CLI supplies head and merge-base readers to the triggered su
     assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], {
       admitted: () => [],
       runSuites: ({ root, files }: { root: string; files: string[] }) => {
-        assert.equal(root, repo.dir);
         runs.push(files);
-        return [SPEND];
+        if (root === repo.dir) {
+          assert.equal(readFileSync(join(root, SOURCE), "utf8"), 'log("sweep.plan_round.worker", { total_cost_usd: 3 });');
+          return [SPEND];
+        }
+        assert.equal(readFileSync(join(root, SOURCE), "utf8"), 'log("sweep.existing", {});');
+        return [];
       },
     }), 1);
-    assert.deepEqual(runs, [STEPS]);
+    assert.deepEqual(runs, [STEPS, [SPEND]]);
     assert.ok(errors.some((line) => line.includes("census:spend; declare SPEND_STEP_ROLES in src/lib/spend-rows.ts")));
   } finally {
     repo.cleanup();
