@@ -149,7 +149,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.
-    receipt.gitTopology = { state: 'unknown' };
+    receipt.gitTopology = { state: 'unknown', reads: [] };
     const inside = git(['rev-parse', '--is-inside-work-tree']).trim();
     if (inside !== 'true') {
       if (inside === 'false') receipt.gitTopology.state = 'not-worktree';
@@ -157,9 +157,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     const commonValue = (key, boolean = false) => {
       const result = run('git', ['config', '--local', ...(boolean ? ['--type=bool'] : []), '--get', key]);
+      receipt.gitTopology.reads.push({ key, status: result.status, signal: result.signal ?? null,
+        error: result.error?.message ?? null });
       if (result.error || result.signal || ![0, 1].includes(result.status) ||
           (result.status === 1 && result.stdout?.trim())) {
-        throw new Error(`shared Git ${key} is unreadable: ${result.error?.message ?? result.stderr ?? result.signal}`);
+        const reason = result.error?.message ?? (result.signal ? `signal ${result.signal}`
+          : result.stderr?.trim() || `exit ${result.status}`);
+        throw new Error(`shared Git ${key} is unreadable: ${reason}`);
       }
       if (result.status === 1) return undefined;
       const value = result.stdout.trim();

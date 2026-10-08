@@ -129,7 +129,25 @@ test('author preflight preserves unreadable or ambiguous Git topology as refusal
     assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
     assert.equal(selected, false);
     assert.equal(f.receipt().gitTopology.state, 'unknown');
+    assert.deepEqual(f.receipt().gitTopology.reads, [{ key: 'core.bare', status: result.status,
+      signal: result.signal, error: 'error' in result ? result.error.message : null }]);
     assert.match(f.receipt().error, /shared Git core.bare is (unreadable|ambiguous)/);
+    assert.deepEqual(f.receipt().steps, []);
+  }
+});
+
+test('author preflight never admits an ambiguous working-tree read as a safe Git topology', () => {
+  for (const stdout of ['', 'false\ntrue\n', 'unavailable\n']) {
+    const f = fixture();
+    let selected = false;
+    const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) =>
+      file === 'git' && args.includes('--is-inside-work-tree')
+        ? { status: 0, stdout, stderr: '', signal: null, pid: 0, output: [] }
+        : spawnSync(file, args, opts)) as typeof spawnSync;
+    assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
+    assert.equal(selected, false);
+    assert.equal(f.receipt().gitTopology.state, 'unknown');
+    assert.deepEqual(f.receipt().gitTopology.reads, []);
     assert.deepEqual(f.receipt().steps, []);
   }
 });
