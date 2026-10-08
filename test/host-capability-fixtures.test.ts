@@ -363,6 +363,17 @@ const DECLARED: readonly Declared[] = [
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",
+    file: "the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts",
+    key: "/usr/bin/stat",
+    count: 1,
+    reason:
+      "The Linux launcher requests GNU stat -c %Y, which BSD stat cannot execute. This fixture owns that " +
+      "observation with a Node shim reading real file mtimes, and tests that changing the file changes the " +
+      "reported timestamp. The single system-stat fallback is only for other flags; no watchdog timestamp " +
+      "or healthy verdict is invented, and the production predicate remains unchanged on both platforms.",
+  },
+  {
+    kind: "platform-tool",
     file: "fleet-heartbeat.test.ts",
     key: "/usr/bin/date",
     count: 1,

@@ -1,0 +1,59 @@
+- id: W1-T6593
+  title: "A corrected categorized worker refusal rejoins dispatch instead of keeping its independent-failure latch forever"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator-authorized follow-ups 2026-10-08; measured console T100 refusal after its contract repair auto-merged"
+  plan_refs: [W1-T4838, W1-T2910, W1-T3978, "console CONSOLE-T100", "console PR #2025", "console PR #2026"]
+  files: [src/lib/refusal-amendment.ts, src/lib/status.ts, src/lib/daemon.ts, src/lib/sweep.ts, src/run-task.ts, test/a-corrected-worker-refusal-rejoins-dispatch.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08: console #2025 publishes the missing AgentView contract and #2026
+    corrects T100's file scope while preserving a pure shared facade. Both auto-merged with
+    required checks and semantic review green. The daemon loaded the amended plan but its
+    fresh status projection still reports independentFailureBlocked=true and needsHuman=true.
+    The old no_pr verdict contains a closed, categorized REFUSED block, but is also tagged
+    harness_commit_refused because an intentional refusal had no COMMIT_MESSAGE. The durable
+    refusal hold's contract revision is 2becbc97; the amended parsed contract is ab2de516.
+    W1-T4838's revision-aware admission hold releases, but latestIndependentFailureBlock has
+    no current task-contract input and keeps the separate harness/independent latch. A bounded
+    three-form union from October 6 20:00Z contains the original starts and terminal verdicts
+    and the amendment receipt, but no later T100 start. T99 has a different branch-gap failure
+    and must not be released by this remedy. Closing an issue alone fixes neither latch.
+  design: |
+    Rejoin the existing categorized-refusal and revision-aware admission mechanism with the
+    durable status/selector latch. Reuse extractRefusal and preDispatchContractRevision; do not
+    add another refusal dialect, publisher, generic reset command or disk read on the hot loop.
+    Preserve source-run identity and the contract that was refused. Only a verified categorized
+    refusal whose relevant contract changed earns one normal dispatch, with a durable reason
+    receipt; an unchanged record, comment-only amendment, unrelated plan reload, unreadable
+    source or ordinary task failure stays held. The retry's run.start spends that opportunity,
+    and a new refusal holds its own new contract. Projection and real daemon admission must
+    agree. Keep all gates, operator holds, dependency checks and worker ownership unchanged.
+    Recover the already-stuck historical T100 case from its real refusal/hold evidence through
+    the same path, without rewriting old verdicts or fabricating a successful run. Avoid import
+    cycles; use the existing boundary's supplied facts where importing its parser would cycle.
+  acceptance:
+    - claim: "a corrected categorized refusal earns one real selector opportunity"
+      proof: 'grep: test("a corrected categorized worker refusal rejoins dispatch once" in test/a-corrected-worker-refusal-rejoins-dispatch.test.ts'
+    - claim: "ordinary failures and unverified contract changes remain held"
+      proof: 'grep: test("ordinary failures and unverified refusal contracts remain held" in test/a-corrected-worker-refusal-rejoins-dispatch.test.ts'
+  falsifier: |
+    Remove the revision-aware release: a real persisted T100-shaped refusal with its corrected
+    task remains excluded by the native selector. Release every no_pr or every plan change:
+    ordinary task failures, unchanged/comment-only contracts and unreadable evidence must fail
+    their controls. Repeat a pass, then supply retry run.start and a new refusal: no second free
+    opportunity may appear for the same contract. Test the real persisted default and its
+    failed-read arms, not only a fake eligibility callback.
+  note: |
+    Native minter reserved refs/rmd-id/W1-T6593 for codex/daemon-recovery-filings-oct8.
+    The subject sweep inspected 148 fetched heads, with existing W1-T4838 and admission-repair
+    mechanisms as positive controls; no open PR owns this missing post-amendment rejoin.
+    This filing is not completion, a worker assignment, or permission to remove rollout holds.
