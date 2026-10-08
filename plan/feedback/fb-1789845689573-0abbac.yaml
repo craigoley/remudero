@@ -19,8 +19,21 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10186
+summary:
+  headline: Stop treating live analytics signals as failed historical charts
+  what_happened: The console shows seven equal Trend cards, but only five have
+    historical data. Queue and provider readings are live signals, while outcome
+    and work-category breakdowns are absent.
+  decision: Approve a mobile- and desktop-first redesign that separates historical
+    trends from live signals and clearly explains missing breakdowns.
+  options:
+    - label: Proceed with redesign
+      consequence: Keep all seven sourced scalar cards; show only historical series in
+        Trends and live readings with an awaiting-history state.
+    - label: Keep the current layout
+      consequence: Live readings and absent breakdowns may continue to look like
+        failed or unavailable charts.
 expansion: null
 submission_key: null
 thread_id: null
