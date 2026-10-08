@@ -1,0 +1,16 @@
+- id: W1-T6561
+  title: "REPAIR THE SELECTOR EDGE INTO test/mkdtemp-allowlist-rekey.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/mkdtemp-allowlist-rekey.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 37807221647 for PR #10137 at f35ab425bc3be39b4b28114eb074a22bf26ca8c8: src/lib/drain.ts, test/the-drain-reads-the-ledger-once-per-pass.test.ts -> test/mkdtemp-allowlist-rekey.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the floor selector includes test/mkdtemp-allowlist-rekey.test.ts when this edge is exercised"
+      proof: "grep: test/mkdtemp-allowlist-rekey\\.test\\.ts in src/lib/affected-suites.ts"
