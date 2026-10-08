@@ -21,3 +21,8 @@ Each section is one pass of the gate gardener (W1-T4116).
 
 - refresh scripts/learnings-budget-baseline.json#measuredChars: The recorded measuredChars is 33162; the corpus measures 31786.
 - refresh scripts/learnings-budget-baseline.json#measuredActiveEntries: The recorded measuredActiveEntries is 60; the corpus measures 59.
+
+## Pass 2026-10-08T23:01:41.356Z
+
+- refresh scripts/learnings-budget-baseline.json#measuredChars: The recorded measuredChars is 31786; the corpus measures 35468.
+- refresh scripts/learnings-budget-baseline.json#measuredActiveEntries: The recorded measuredActiveEntries is 59; the corpus measures 66.

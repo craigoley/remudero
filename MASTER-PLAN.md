@@ -4956,6 +4956,41 @@ loop-continuation ships with the daemon MVP.
 `escalations.list/answer` — a **projection of the same contract (§7A)**, never a parallel API. Exposed
 over tailnet HTTPS → claude.ai custom connector; bearer token, read vs. write scopes.
 
+### Canonical console analytics: historical trends and current signals
+
+Proposed plan amendment; origin: feedback#fb-1789845689573-0abbac.
+
+The captured 2026-09-19 report describes seven equal Trend cards even though only five metric
+families have retained historical evidence. This is reported consumer evidence, not a fresh live
+verification by this intake. The data boundary is already specified by W1-T3807, W1-T3808 and
+W1-T3809, the successors to W1-T3802, W1-T3804 and W1-T3805. The remaining change is the analytics
+information architecture in `craigoley/remudero-console`, which owns app.remudero.com under the
+2026-09-15 and 2026-09-16 DECISIONS rulings. This amendment does not reopen console ownership or
+file daemon UI work.
+
+The canonical analytics page shall retain all seven scalar decision cards, each with its source
+and as-of timestamp. Trends shall contain only metric families backed by retained historical
+sources; the five ledger-backed families keep explicit coverage and interval gaps. A temporary
+source failure must retain its actual state rather than remove the affected historical family.
+`queue.pending` and `provider.allowance.remaining` belong in a compact Current signals surface,
+with their independent live readings, source and as-of data. Their history is awaiting collection,
+not a failed chart; no live scalar may be extrapolated into historical points.
+
+Outcome and work-category breakdowns shall show available evidence normally. Absent breakdowns
+shall use a concise source-backed empty state instead of a large grid of unavailable cards.
+Stale, unauthorized, unavailable and not-collected remain distinct throughout these surfaces;
+measured zero and measured empty remain distinct from missing evidence. Preserve existing URL
+filters, reload/back-navigation behavior and drilldown targets.
+
+Consumer implementation shall use the console repository's own plan and instruction files, and
+validate the complete filtered and drilldown flow with Playwright at phone and desktop viewports,
+including narrow-screen overflow and fixtures for the distinct source states. Coordinate against
+W1-T3807/W1-T3808/W1-T3809 contracts without making their landing a prerequisite: render honest
+absence against current responses and exercise richer retained evidence through fixtures. Do not
+fabricate data, add queue/provider history collection, or change core producers to satisfy a
+layout. This amendment records the consumer requirement; it does not claim a consumer task has
+been filed or the redesign has shipped.
+
 ## 7B. Feedback intake: the Architect's front door
 
 Today the harness has **no front door**: every piece of operator feedback goes chat with an external

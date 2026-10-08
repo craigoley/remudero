@@ -238,7 +238,8 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
       childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
       refresh: verifyParent, release: verifyParent } };
   } catch (error) {
-    return { rejected: `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}` };
+    const reason = `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}`;
+    return { rejected: reason };
   }
 }
 
