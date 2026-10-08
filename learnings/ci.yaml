@@ -10,7 +10,8 @@
 
 - id: required-check-poster
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire required-check-poster
+  lifecycle: superseded
   files: [src/lib/review.ts, src/lib/status.ts, ".github/**"]
   fact: >-
     A required check must be posted by the ORCHESTRATOR unconditionally, not solely by a worker: a
