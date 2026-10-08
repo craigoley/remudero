@@ -1,0 +1,33 @@
+- id: W1-T6495
+  title: "THE CADENCE CHILD MEASURES THE DAEMON'S CONFIG — src/measurement-cadence-child.ts calls buildMeasurementCadenceDaemonHooks() with no arguments, so the child re-resolves config from $HOME; the daemon passes the config it resolved, and a daemon run with any other config (an instance, an override, a test root) would measure a different root out of process"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the cadence child runs against the same config root as the daemon that started it
+  band_meaning: span
+  origin: "operator session 2026-10-08: W1-T5723 (#10105) coverage fix review"
+  plan_refs: [W1-T5723]
+  files: [src/measurement-cadence-child.ts, src/lib/measurement-cadence.ts, test/the-cadence-child-measures-the-daemons-config.test.ts, "src/lib/config-schema.ts"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main after #10105: the child entry runs
+    `measurementCadenceChildMain(statePath, runId, buildMeasurementCadenceDaemonHooks().runMeasurementCadence)` — no
+    `config` — while the in-process path received the daemon's resolved Config. childMeasurementCadenceSpawn passes
+    the flag, state path and run id only. Any daemon whose config is not the default $HOME one (consumer instances
+    sharing an image, an explicit config root) gets a child that measures the wrong ledger and state.
+  design: |
+    Carry the daemon's config identity to the child: pass the resolved config root (or path) on the spawn — argv or
+    an env var the child reads — and have the child load exactly that config and hand it to
+    buildMeasurementCadenceDaemonHooks({ config }). Refuse (failed state row) when the named root is unreadable,
+    instead of silently falling back to $HOME.
+  acceptance:
+    - claim: "a child spawned for a non-default config root measures that root, not $HOME's"
+      proof: 'grep: test("W1-T6495: the cadence child loads the config root it was spawned for" in test/the-cadence-child-measures-the-daemons-config.test.ts'
+  falsifier: |
+    Keep the argument-less hook build: a child spawned with a temp config root still reads $HOME's config and the
+    test fails.

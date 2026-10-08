@@ -268,6 +268,10 @@ export async function readCoverageShardLogsAsync(
 const SELECTOR_SHADOW_JOB_MARK = "SELECTOR-SHADOW-JOB: conclusion=";
 const FLAKE_RETRY_FILES = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
 const FLAKE_RETRY_RECOVERED = /^(?:\S+Z )?FLAKE-RETRY-RECOVERED: /;
+/** W1-T6406: test-with-retry.mjs's per-attempt headline, which names the failing tests. Only the two
+ *  attempt headlines are kept — not "declined retry" or "tracked-tree dirt", which name no retry outcome. */
+const FLAKE_RETRY_HEADLINE = /^(?:\S+Z )?FLAKE-RETRY: (first attempt failed|retry ALSO failed) — (.+)$/;
+const FLAKE_NO_NAME = "(no test name parsed from output)";
 
 /** The only job-log lines this gardener keeps: the shadow record, the explicit fast-lane skip, the
  *  job verdict, and test-with-retry.mjs's own retry/recovery lines (anchored at the log timestamp, so
@@ -275,13 +279,18 @@ const FLAKE_RETRY_RECOVERED = /^(?:\S+Z )?FLAKE-RETRY-RECOVERED: /;
 function isSelectorShadowEvidenceLine(line: string): boolean {
   return line.includes("AFFECTED-SUITES-SHADOW: ") || line.startsWith(SELECTOR_SHADOW_JOB_MARK) ||
     (line.includes("W1-T2428 fast-lane: class=") && line.includes("skipping Test with coverage")) ||
-    FLAKE_RETRY_FILES.test(line) || FLAKE_RETRY_RECOVERED.test(line);
+    FLAKE_RETRY_FILES.test(line) || FLAKE_RETRY_RECOVERED.test(line) || FLAKE_RETRY_HEADLINE.test(line);
 }
 
 interface ShardEvidence {
   conclusion?: string;
   retried: string[];
   recovered: boolean;
+  /** W1-T6406: the retry ran and ALSO failed — the case that reds a PR. */
+  alsoFailed: boolean;
+  /** Test titles the first attempt / the failed retry named. */
+  firstTitles: string[];
+  failedTitles: string[];
 }
 
 /** Per-shard verdicts and retry evidence from `coverage-shard (k/8)\t`-prefixed lines. */
@@ -292,11 +301,21 @@ function shardEvidence(log: string): Map<number, ShardEvidence> {
     if (!prefix) continue;
     const shard = Number(prefix[1]);
     const body = prefix[2]!;
-    const entry = shards.get(shard) ?? { retried: [], recovered: false };
+    const entry = shards.get(shard) ?? { retried: [], recovered: false, alsoFailed: false, firstTitles: [], failedTitles: [] };
     if (body.startsWith(SELECTOR_SHADOW_JOB_MARK)) entry.conclusion = body.slice(SELECTOR_SHADOW_JOB_MARK.length);
     const files = FLAKE_RETRY_FILES.exec(body);
     if (files) entry.retried.push(...files[1]!.split(", ").map((f) => f.trim()).filter(Boolean));
     if (FLAKE_RETRY_RECOVERED.test(body)) entry.recovered = true;
+    const headline = FLAKE_RETRY_HEADLINE.exec(body);
+    if (headline) {
+      const titles = headline[2]!.trim() === FLAKE_NO_NAME ? [] : headline[2]!.split(", ").map((t) => t.trim()).filter(Boolean);
+      if (headline[1] === "retry ALSO failed") {
+        entry.alsoFailed = true;
+        entry.failedTitles.push(...titles);
+      } else {
+        entry.firstTitles.push(...titles);
+      }
+    }
     shards.set(shard, entry);
   }
   return shards;
@@ -308,6 +327,34 @@ export function selectorShadowRecoveredFlakes(log: string): Array<{ shard: numbe
   const out: Array<{ shard: number; file: string }> = [];
   for (const [shard, entry] of shardEvidence(log)) {
     if (entry.recovered && entry.conclusion === "success") for (const file of entry.retried) out.push({ shard, file });
+  }
+  return out.sort((a, b) => a.shard - b.shard || a.file.localeCompare(b.file));
+}
+
+/** W1-T6406: one retried test file in one shard, with how its retry ended. `titles` is set only when
+ *  the shard retried exactly that one file, since the headline names tests without their file. */
+export interface SelectorShadowFlake {
+  shard: number;
+  file: string;
+  retryOutcome?: "recovered" | "also_failed";
+  titles?: string[];
+}
+
+/** The run a flake was read from: what the flake-incident gardener groups by PR and diffs by sha. */
+export interface SelectorShadowFlakeRun { prNumber?: number; headSha: string; baseSha?: string }
+
+export type SelectorShadowFlakeSink = (runId: number, flakes: SelectorShadowFlake[], run?: SelectorShadowFlakeRun) => void;
+
+/** Every retried file the logs show, recovered or not (W1-T6406). A shard whose retry also failed is
+ *  reported for each file it retried, since the log does not say which of them failed again. */
+export function selectorShadowFlakeEvidence(log: string): SelectorShadowFlake[] {
+  const out: SelectorShadowFlake[] = [];
+  for (const [shard, entry] of shardEvidence(log)) {
+    const outcome = entry.alsoFailed ? "also_failed" : entry.recovered && entry.conclusion === "success" ? "recovered" : undefined;
+    if (outcome === undefined) continue;
+    const named = outcome === "also_failed" && entry.failedTitles.length > 0 ? entry.failedTitles : entry.firstTitles;
+    const titles = entry.retried.length === 1 ? [...new Set(named)] : [];
+    for (const file of entry.retried) out.push({ shard, file, retryOutcome: outcome, ...(titles.length > 0 ? { titles } : {}) });
   }
   return out.sort((a, b) => a.shard - b.shard || a.file.localeCompare(b.file));
 }
@@ -363,8 +410,8 @@ export async function readSelectorShadowRunsAsync(
     freshLogsPerPass?: number;
     warn?: (message: string) => void;
     writeCache?: (path: string, contents: string) => void;
-    /** Each newly complete run's retry-recovered test files, reported exactly once. */
-    onFlakes?: (runId: number, flakes: Array<{ shard: number; file: string }>) => void;
+    /** Each newly complete run's retried test files, reported exactly once, with the run's PR and shas. */
+    onFlakes?: SelectorShadowFlakeSink;
   } = {},
 ): Promise<SelectorShadowRun[]> {
   const readJson = io.readJson ?? ghJsonAsync;
@@ -431,7 +478,15 @@ export async function readSelectorShadowRunsAsync(
     if (io.cachePath) {
       const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS || explicitlySkippedRun(log);
       // Reported once: a complete run is cached and never fetched again, so its flakes are never recounted.
-      if (complete) io.onFlakes?.(run.id, selectorShadowRecoveredFlakes(log));
+      // W1-T6406: no reader-version bump — a run cached before this change was already reported, and
+      // re-reading it would ledger its recovered files twice.
+      if (complete) {
+        io.onFlakes?.(run.id, selectorShadowFlakeEvidence(log), {
+          headSha: run.headSha,
+          ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
+          ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
+        });
+      }
       cached[key] = { headSha: run.headSha, log, fetchedAt: clock.now(), complete, readerVersion: SELECTOR_SHADOW_READER_VERSION };
       try {
         writeCache(io.cachePath, JSON.stringify(cached) + "\n");
@@ -451,7 +506,7 @@ export async function readSelectorShadowRunsAsync(
 
 /** Fetch the changed side of the exact PR-run comparison only when a miss needs a task. */
 export async function readSelectorShadowChangedPaths(
-  owner: string, repo: string, miss: SelectorShadowMiss,
+  owner: string, repo: string, miss: Pick<SelectorShadowMiss, "baseSha" | "headSha">,
   readJson: (args: string[]) => unknown = ghJsonAsync,
 ): Promise<string[]> {
   if (!miss.baseSha) return [];
@@ -1092,12 +1147,22 @@ export function selectorShadowPlanTasks(repoRoot: string): SelectorShadowPlanTas
   return loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks;
 }
 
-/** One `test.flake_retry` ledger row per retry-recovered file: the test gardener's retier-flaker
- *  input (W1-T4112), which test-with-retry.mjs writes only into a CI runner's own discarded state. */
-export function selectorShadowFlakeLedger(log: GardenerDeps["log"]): (runId: number, flakes: Array<{ shard: number; file: string }>) => void {
-  return (runId, flakes) => {
+/** One `test.flake_retry` ledger row per retried file: the test gardener's retier-flaker input
+ *  (W1-T4112), which test-with-retry.mjs writes only into a CI runner's own discarded state. W1-T6406
+ *  adds what the flake-incident gardener groups on — the PR, the shas its changed files are read from,
+ *  the test titles when the log names them, and whether the retry recovered or also failed. */
+export function selectorShadowFlakeLedger(log: GardenerDeps["log"]): SelectorShadowFlakeSink {
+  return (runId, flakes, run) => {
     for (const flake of flakes) {
-      log("test.flake_retry", { file: flake.file, headline: "recovered on retry", ci_run_id: runId, shard: flake.shard, source: "selector-shadow" });
+      const outcome = flake.retryOutcome ?? "recovered";
+      log("test.flake_retry", {
+        file: flake.file, headline: outcome === "recovered" ? "recovered on retry" : "retry also failed",
+        ci_run_id: runId, shard: flake.shard, source: "selector-shadow", retry_outcome: outcome,
+        ...(run === undefined ? {} : { head_sha: run.headSha }),
+        ...(run?.baseSha === undefined ? {} : { base_sha: run.baseSha }),
+        ...(run?.prNumber === undefined ? {} : { pr_numbers: [run.prNumber] }),
+        ...(flake.titles === undefined ? {} : { titles: flake.titles }),
+      });
     }
   };
 }

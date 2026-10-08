@@ -29,6 +29,7 @@ import { startLivenessPulse } from "./liveness-pulse.js";
 
 import type {
   CiLearningCadenceRunResult,
+  MeasurementCadenceChildRunner,
   MeasurementCadenceDecision,
   MeasurementCadenceRunResult,
   WipeTestCadenceDecision,
@@ -813,6 +814,35 @@ export type DaemonFreshness =
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
+/** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
+function startMeasurementCadenceChild(
+  runner: MeasurementCadenceChildRunner,
+  fire: boolean,
+  reason: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  let outcome: ReturnType<MeasurementCadenceChildRunner["start"]>;
+  try {
+    outcome = runner.start({ fire });
+  } catch (e) {
+    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e), flow: "child" });
+    return;
+  }
+  if (outcome.kind === "none") return;
+  log("measurement_cadence.child", {
+    outcome: outcome.kind, run_id: outcome.runId, pid: outcome.pid, attempt: outcome.attempt, reason,
+    previous_run_id: outcome.previous?.runId, previous_pid: outcome.previous?.pid,
+    previous_rule: outcome.previous?.rule, previous_detail: outcome.previous?.detail,
+  });
+  if (!outcome.settled) return;
+  detachSweepAction(
+    outcome.settled
+      .then((result) => log("measurement_cadence.ran", buildMeasurementCadenceRow(result)))
+      .catch((e) => log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e), run_id: outcome.runId })),
+    { actionKind: "measurement-cadence", taskId: "DAEMON" },
+  );
+}
+
 function isPendingFreshness(read: DaemonFreshness | Promise<DaemonFreshness> | undefined): read is Promise<DaemonFreshness> {
   return read instanceof Promise;
 }
@@ -1015,6 +1045,8 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  /** W1-T6358: renews the breaker gate's ledger snapshot; forwarded into tick selection and every lane refill. */
+  beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
    * composition root. Missing/unreadable state returns an empty map and therefore fails open. */
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
@@ -1210,6 +1242,9 @@ export interface DaemonDeps {
    *  itself. The write path is default-off: the default cadence runs every verb report-only, and
    *  never files a task or mints an id (Law 5). Best-effort (W1-T1259). */
   runMeasurementCadence?: () => Promise<MeasurementCadenceRunResult>;
+  /** W1-T5723: when present the cadence runs as a child process instead of `runMeasurementCadence`,
+   *  and a boot adopts a live child rather than starting another. */
+  measurementCadenceChild?: MeasurementCadenceChildRunner;
   /** The digest's own cadence rung. Its own policy row on its own marker file, separate from the measurement row so
    * the two can never drag each other, while reusing the same pure decision function. Optional (W1-T2277). */
   checkDigestCadence?: () => MeasurementCadenceDecision;
@@ -3839,7 +3874,10 @@ export async function runDaemon(
       } catch (e) {
         log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
       }
-      if (decision?.fire) {
+      const cadenceChild = deps.measurementCadenceChild;
+      if (cadenceChild && !detachedActionInFlight("measurement-cadence") && (decision?.fire || cadenceChild.pending())) {
+        startMeasurementCadenceChild(cadenceChild, decision?.fire === true, decision?.reason, log);
+      } else if (decision?.fire) {
         // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
         // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
         // inline await here cost the review lane this cadence's whole duration — measured
@@ -3847,7 +3885,7 @@ export async function runDaemon(
         // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
         // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
         // bought the loop nothing. Same shape as `ci-learning` below, guard included.
-        if (deps.runMeasurementCadence && detachedActionInFlight("measurement-cadence")) {
+        if ((deps.runMeasurementCadence || cadenceChild) && detachedActionInFlight("measurement-cadence")) {
           log("measurement_cadence.already_detached", {
             reason: decision.reason,
             refusal: "measurement-cadence action already in flight",
@@ -4525,6 +4563,7 @@ export async function runDaemon(
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.());
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.

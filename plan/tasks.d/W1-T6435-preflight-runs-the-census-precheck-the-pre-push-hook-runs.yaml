@@ -1,0 +1,32 @@
+- id: W1-T6435
+  title: "PREFLIGHT RUNS THE CENSUS PRECHECK THE PRE-PUSH HOOK RUNS — hooks/pre-push runs scripts/census-precheck.mjs, but nothing installs that hook in an operator or agent clone and `rmd preflight` never calls the precheck, so hand-built PRs pass preflight and red a census in CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-08: #10108 passed rmd preflight and failed host-capability-fixtures in CI"
+  plan_refs: [W1-T5616, W1-T5663, W1-T4108]
+  files: [src/lib/ci-parity.ts, test/preflight-runs-the-pre-push-precheck.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08: #10108's new test added a git-commit-shaped string; `rmd preflight` (27 checks) PASSED and CI's
+    ci-shard (4/8) failed test/host-capability-fixtures.test.ts ("UNDECLARED host-capability fixture: unidentified-commit").
+    scripts/census-precheck.mjs (~:633) triggers exactly that census for a test adding a HOST_CAPABILITY_RE line, but it
+    runs only from hooks/pre-push (:199-201, `node scripts/census-precheck.mjs --base origin/main`). A fresh clone has no
+    core.hooksPath (package.json has no prepare/postinstall installing hooks; only fleet worktrees get one, via
+    src/lib/worker.ts ~:5212), and FAST_GATE_STEPS (src/lib/ci-parity.ts ~:3082) has no census-precheck step. Every
+    operator- and agent-built PR on 2026-10-08 pushed without the precheck.
+  design: |
+    Add a FAST_GATE_STEPS entry that runs `scripts/census-precheck.mjs --base origin/main` exactly as hooks/pre-push does,
+    so `rmd preflight` reports its violations (or `unmeasured`, never a silent pass) by name. Keep the hook unchanged.
+  acceptance:
+    - claim: "rmd preflight's fast gate runs the same census precheck the pre-push hook runs"
+      proof: 'grep: test("W1-T6435: preflight runs the census precheck the pre-push hook runs" in test/preflight-runs-the-pre-push-precheck.test.ts'
+  falsifier: |
+    Leave FAST_GATE_STEPS unchanged: the test finds no census-precheck step and fails.

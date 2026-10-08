@@ -1,9 +1,12 @@
 import { reconcilePlan } from "./plan-reconcile.js";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
+import { validateConfig, type Config } from "./config.js";
+import { validateConfigShape } from "./config-schema.js";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport, type RuleSignature } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
@@ -44,7 +47,7 @@ import {
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -3390,4 +3393,232 @@ export function fileCiLearningShards(
     held.add(d.findingId); // two identical drafts in ONE firing file once
   }
   return { filed, skipped, refused };
+}
+
+// ── W1-T5723: the cadence runs in a child process ───────────────────────────────────────────
+// In-process, its synchronous work froze the daemon loop (one 365.7 s block, 2026-10-08) and a
+// restart killed it. The daemon only starts the child and reads its result row from the state file.
+
+/** BACKSTOP: the child's V8 heap cap, the garden child's figure (W1-T5365). */
+export const MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB = 2048;
+/** BACKSTOP: a dead child's run gets this many attempts in all, then is discarded. */
+export const MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS = 2;
+const MEASUREMENT_CADENCE_CHILD_NICENESS = 10;
+/** The child entry's first argument; without it the entry module does nothing on import. */
+export const MEASUREMENT_CADENCE_CHILD_FLAG = "--measurement-cadence-child";
+const MEASUREMENT_CADENCE_CHILD_POLL_MS = 5_000;
+
+export interface MeasurementCadenceChildState {
+  runId: string;
+  pid: number;
+  attempt: number;
+  startedAt: string;
+  status: "running" | "done" | "failed" | "discarded";
+  result?: MeasurementCadenceRunResult;
+  error?: string;
+}
+
+/** Start one child for `runId`; returns its pid. */
+export type MeasurementCadenceChildSpawn = (runId: string, statePath: string) => number;
+
+export type MeasurementCadenceChildOutcome =
+  | { kind: "none" }
+  | {
+      kind: "started" | "adopted" | "restarted" | "discarded";
+      runId: string;
+      pid: number;
+      attempt: number;
+      /** The dead run this outcome replaced or dropped, and the rule that decided it. */
+      previous?: { runId: string; pid: number; rule: "restart_once" | "discard" | "unreadable"; detail?: string };
+      /** Settles with the child's result row; absent for a discard that started nothing. */
+      settled?: Promise<MeasurementCadenceRunResult>;
+    };
+
+export interface MeasurementCadenceChildRunner {
+  /** Whether the state file holds a run the daemon has not settled (alive or dead). */
+  pending(): boolean;
+  start(opts: { fire: boolean }): MeasurementCadenceChildOutcome;
+}
+
+type ChildStateRead = { kind: "absent" } | { kind: "unreadable"; error: string } | { kind: "ok"; state: MeasurementCadenceChildState };
+
+function readChildState(path: string): ChildStateRead {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", error: String((e as Error)?.message ?? e) };
+  }
+  try {
+    const state = JSON.parse(text) as MeasurementCadenceChildState;
+    if (typeof state?.runId !== "string" || typeof state.pid !== "number") return { kind: "unreadable", error: "malformed state" };
+    return { kind: "ok", state };
+  } catch (e) {
+    return { kind: "unreadable", error: String((e as Error)?.message ?? e) };
+  }
+}
+
+function writeChildState(path: string, state: MeasurementCadenceChildState): void {
+  writeAtomic(path, `${JSON.stringify(state)}\n`);
+}
+
+/** `kill(pid, 0)`: EPERM still means a live process owned by someone else. */
+export function measurementCadenceChildAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // ESRCH is no such process; EPERM is a live process under another uid.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export function measurementCadenceChildRunner(opts: {
+  statePath: string;
+  spawn: MeasurementCadenceChildSpawn;
+  isAlive?: (pid: number) => boolean;
+  newRunId?: () => string;
+  clock?: Clock;
+  pollMs?: number;
+}): MeasurementCadenceChildRunner {
+  const isAlive = opts.isAlive ?? measurementCadenceChildAlive;
+  const clock = opts.clock ?? systemClock;
+  const newRunId = opts.newRunId ?? (() => `MEASUREMENT-CADENCE-CHILD-${clock.now()}`);
+  const pollMs = opts.pollMs ?? MEASUREMENT_CADENCE_CHILD_POLL_MS;
+
+  const settle = (runId: string, pid: number): Promise<MeasurementCadenceRunResult> =>
+    new Promise((resolve, reject) => {
+      const look = () => {
+        const read = readChildState(opts.statePath);
+        const state = read.kind === "ok" && read.state.runId === runId ? read.state : undefined;
+        if (state?.status === "done" && state.result) return resolve(state.result);
+        if (state?.status === "failed") return reject(new Error(`measurement cadence child ${runId} failed: ${state.error ?? "no error recorded"}`));
+        if (state?.status === "running" && isAlive(pid)) return void setTimeout(look, pollMs).unref?.();
+        reject(new Error(`measurement cadence child ${runId} (pid ${pid}) exited without a result`));
+      };
+      look();
+    });
+
+  const launch = (runId: string, attempt: number): { pid: number; settled: Promise<MeasurementCadenceRunResult> } => {
+    const pid = opts.spawn(runId, opts.statePath);
+    writeChildState(opts.statePath, { runId, pid, attempt, startedAt: clock.iso(), status: "running" });
+    return { pid, settled: settle(runId, pid) };
+  };
+
+  const startFresh = (previous?: NonNullable<Extract<MeasurementCadenceChildOutcome, { runId: string }>["previous"]>): MeasurementCadenceChildOutcome => {
+    const runId = newRunId();
+    const { pid, settled } = launch(runId, 1);
+    return { kind: "started", runId, pid, attempt: 1, previous, settled };
+  };
+
+  return {
+    pending: () => {
+      const read = readChildState(opts.statePath);
+      return read.kind === "ok" && read.state.status === "running";
+    },
+    start: ({ fire }) => {
+      const read = readChildState(opts.statePath);
+      if (read.kind === "unreadable") {
+        const previous = { runId: "unknown", pid: -1, rule: "unreadable" as const, detail: read.error };
+        return fire ? startFresh(previous) : { kind: "discarded", runId: "unknown", pid: -1, attempt: 0, previous };
+      }
+      const state = read.kind === "ok" && read.state.status === "running" ? read.state : undefined;
+      if (!state) return fire ? startFresh() : { kind: "none" };
+      if (isAlive(state.pid)) {
+        return { kind: "adopted", runId: state.runId, pid: state.pid, attempt: state.attempt, settled: settle(state.runId, state.pid) };
+      }
+      if (state.attempt < MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS) {
+        const attempt = state.attempt + 1;
+        const { pid, settled } = launch(state.runId, attempt);
+        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once" } };
+      }
+      writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}` });
+      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const };
+      return fire ? startFresh(previous) : { kind: "discarded", runId: state.runId, pid: state.pid, attempt: state.attempt, previous };
+    },
+  };
+}
+
+/** The child's body: run the cadence and record its result row against `runId`. */
+export async function measurementCadenceChildMain(
+  statePath: string,
+  runId: string,
+  run: () => Promise<MeasurementCadenceRunResult>,
+): Promise<number> {
+  const recorded = (): MeasurementCadenceChildState => {
+    const read = readChildState(statePath);
+    return read.kind === "ok" && read.state.runId === runId
+      ? read.state
+      : { runId, pid: process.pid, attempt: 1, startedAt: systemClock.date().toISOString(), status: "running" };
+  };
+  try {
+    const result = await run();
+    writeChildState(statePath, { ...recorded(), status: "done", result });
+    return 0;
+  } catch (e) {
+    writeChildState(statePath, { ...recorded(), status: "failed", error: String((e as Error)?.message ?? e) });
+    return 1;
+  }
+}
+
+/** W1-T6495: carries the daemon's `Config` (JSON) to the child; env not argv, as it can hold a relay token. */
+export const MEASUREMENT_CADENCE_CHILD_CONFIG_ENV = "RMD_MEASUREMENT_CADENCE_CHILD_CONFIG";
+
+/** The config the daemon named, or `undefined` if none. A named config that is unreadable THROWS: no $HOME fallback. */
+export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Config | undefined {
+  const raw = env[MEASUREMENT_CADENCE_CHILD_CONFIG_ENV];
+  if (raw === undefined || raw === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} is not readable JSON: ${String((e as Error)?.message ?? e)}`);
+  }
+  try {
+    const config = validateConfigShape(parsed, MEASUREMENT_CADENCE_CHILD_CONFIG_ENV);
+    validateConfig(config);
+    return config;
+  } catch (e) {
+    throw new Error(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} names an invalid config: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
+export function measurementCadenceChildRun(
+  env: NodeJS.ProcessEnv,
+  build: (config: Config | undefined) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
+): () => Promise<MeasurementCadenceRunResult> {
+  return async () => build(namedMeasurementCadenceChildConfig(env)).runMeasurementCadence();
+}
+
+/** The production spawn: `<entry> --measurement-cadence-child <statePath> <runId>` on this node and loader, detached so a
+ *  daemon restart leaves it running, heap-capped and niced like a garden child. */
+export function childMeasurementCadenceSpawn(opts: {
+  entry: string;
+  execPath?: string;
+  execArgv?: readonly string[];
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  config?: Config;
+  heapLimitMb?: number;
+  spawnChild?: typeof spawn;
+  setPriority?: (pid: number, priority: number) => void;
+}): MeasurementCadenceChildSpawn {
+  return (runId, statePath) => {
+    const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${opts.heapLimitMb ?? MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
+    const child = (opts.spawnChild ?? spawn)(opts.execPath ?? process.execPath, argv, {
+      cwd: opts.cwd,
+      env: opts.config ? { ...(opts.env ?? process.env), [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : (opts.env ?? process.env),
+      detached: true,
+      stdio: "ignore",
+    });
+    if (child.pid === undefined) throw new Error("measurement cadence child did not start");
+    child.unref();
+    try {
+      (opts.setPriority ?? osSetPriority)(child.pid, MEASUREMENT_CADENCE_CHILD_NICENESS);
+    } catch (e) {
+      process.stderr.write(`${JSON.stringify({ step: "measurement_cadence.child_priority_degraded", error: String((e as Error)?.message ?? e) })}\n`);
+    }
+    return child.pid;
+  };
 }

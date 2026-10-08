@@ -1,0 +1,59 @@
+- id: W1-T6594
+  title: "Host backup and scratch maintenance keep their real safety paths on the Mac default Bash"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator-authorized follow-ups 2026-10-08; real Mac Bash 3.2 host-maintenance fixtures"
+  plan_refs: [W1-T3837, W1-T6002, W1-T5513]
+  files: [deploy/host-update.sh, deploy/rmd-host-cleanup.sh, test/host-maintenance-shell-portability.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED with the real /bin/bash 3.2.57, a task-local flock executable and canonical
+    TMPDIR: the existing backup and scratch preservation suites run 15 tests, pass 13 and fail
+    two. The verified Azure off-host recovery reaches snapshot retention, then command
+    substitution reports syntax error near unexpected token newline at the case pattern's
+    closing parenthesis. Whole-script bash -n passes, so this is an executed path, not a
+    global parse failure. Scratch maintenance separately exits under nounset when the local
+    SCRATCH_LIVE_REPOS array is empty. The real modern Bash control passes these paths.
+    No production cleanup was invoked. W1-T3837 owns GNU/BSD file metadata, and W1-T6002
+    owns six other fixture repairs; neither owns these two default-shell runtime defects.
+  design: |
+    Repair only the two incompatible Bash constructs. Keep snapshot verification, exact
+    owned-name/tag retention, newest snapshot protection and failed/unreadable receipt states
+    intact. Preserve the scratch unit's whole-unit validation, unpushed-commit and loose-bundle
+    archival, active container/process/lender holds, unknown-probe refusals and dry-run behavior.
+    Empty repository membership is a healthy case, not permission to skip unit safety checks.
+    Do not disable nounset, install or require another system Bash, weaken a preservation check,
+    alter retention ages or invoke real host maintenance as validation.
+    Add real script execution in isolated temporary fixture roots with explicitly named shell
+    executables. Exercise /bin/bash on the affected Mac plus a real modern Bash control; a
+    runner lacking Bash 3.2 must say that historical shell is unverified rather than presenting
+    a modern shell as equivalent. Keep a positive control proving the off-host retention arm
+    and empty-member scratch arm actually executed. Test owned versus foreign snapshot names,
+    failure receipts, dry-run non-mutation and preservation before removal. No repository code
+    or credential is evaluated from production state; all external commands use fixture ports.
+  acceptance:
+    - claim: "off-host snapshot maintenance executes safely through the real named shells"
+      proof: 'grep: test("off-host retention executes on the real host shells without broadening its deletion set" in test/host-maintenance-shell-portability.test.ts'
+    - claim: "empty scratch membership does not abort or bypass preservation"
+      proof: 'grep: test("empty scratch membership preserves whole-unit safety on the real host shells" in test/host-maintenance-shell-portability.test.ts'
+  falsifier: |
+    Restore each incompatible construct separately: its real Bash 3.2 regression must fail,
+    while the restored implementation passes. Mutate owned-name filtering and preservation
+    ordering separately and require the corresponding safety assertions to fail. A syntax-only
+    bash -n result or a platform skip is not proof the previously failing paths executed.
+  note: |
+    Native next-task-id reserved refs/rmd-id/W1-T6594 for codex/host-script-portability-oct8,
+    advancing past the held W1-T6593 without deleting any reservation. Measured source at
+    93caadc01; the relevant two scripts remain byte-identical at refreshed 4d8decb1b.
+    The prior 148-head subject sweep found existing portability owners but no open owner for
+    these constructs. This filing is separate from the feedback bridge and changes no script.
+    System Bash 3.2 remains supported; a modern task-local shell is validation infrastructure,
+    not a production repair or evidence that the Mac's default maintenance path is healthy.

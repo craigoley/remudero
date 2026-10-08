@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: Sol 6.1 adoption audit (operator: 'we should add Sol 6.1 everywhere')"
   plan_refs: []
   files: [src/lib/worker-provider.ts, test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts, test/the-balanced-codex-fallback-leads-with-sol-6-1.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

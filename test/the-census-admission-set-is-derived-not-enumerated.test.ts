@@ -405,6 +405,9 @@ test("runPreflightFast: mocked end-to-end over all FAST_GATE_STEPS, no spawn cal
     if (step.runner === "rule-checks") {
       assert.equal(call.file, process.execPath, "the rule-checks entry uses its exact per-suite Node runner");
       assert.deepEqual(call.args, ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"]);
+    } else if (step.runner === "census-precheck") {
+      assert.equal(call.file, process.execPath, "the census-precheck entry runs the pre-push hook's own Node command");
+      assert.deepEqual(call.args, ["scripts/census-precheck.mjs", "--base", "origin/main"]);
     } else {
       assert.equal(call.file, "npm", "every package-script FAST_GATE_STEPS spawn is an `npm run --silent <script>` call");
       assert.deepEqual(call.args, ["run", "--silent", step.script]);

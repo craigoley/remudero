@@ -141,7 +141,7 @@ test("W1-T4111: a retirement is only ever proposed for operator review", () => {
   writeFileSync(join(root, "state", "PLAN_OFF-merge"), "");
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const spec = planGardenSpec(deps(root, landed));
-  // Every class this gardener has writes `retirement:`, so every class is a person's call.
+  // Every class this gardener has changes a task's standing (retired, merged or credited done), so every class is a person's call.
   assert.deepEqual(Object.keys(spec.review ?? {}).sort(), [...PLAN_GARDEN_CLASSES].sort());
   const pass = runGarden(spec, deps(root, landed));
   assert.deepEqual(pass.plan?.actions.map((a) => a.target).sort(), ["W1-T2", "W1-T3"]);
@@ -151,7 +151,9 @@ test("W1-T4111: a retirement is only ever proposed for operator review", () => {
   assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The plan gardener's `retire` changes are judged by whether this PR merges: /);
   assert.doesNotMatch(landed[0]!.body, /draft|held for|not queued for auto-merge/i);
   assert.match(readFileSync(join(root, "plan", "tasks.d", "W1-T2-x.yaml"), "utf8"), /retirement: retired\n {2}# plan gardener: retire W1-T2 — It depends on W1-T1/);
-  assert.match(readFileSync(join(root, "plan", "tasks.d", "W1-T3-x.yaml"), "utf8"), /retirement: closed/);
+  const landedShard = readFileSync(join(root, "plan", "tasks.d", "W1-T3-x.yaml"), "utf8");
+  assert.match(landedShard, /status: done\n {2}# plan gardener: retire W1-T3 commit [0-9a-f]+ — /, "a landed task is done, its reason in the marker");
+  assert.doesNotMatch(landedShard, /retirement:/, "a built task carries no retirement");
   // The class is judged by the operator's decision alone: open waits, merged credits.
   writeFileSync(join(root, "plan", "tasks.d", "W1-T5-x.yaml"), shard({ id: "W1-T5", title: "new work" }));
   runGarden(spec, { ...deps(root, landed, () => "open") });

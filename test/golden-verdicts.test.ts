@@ -273,6 +273,30 @@ test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-pus
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — TEST-SLOW-SHARD LESSON: the cited incident executes and the test lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-test-slow-shard-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "test/new-slow-suite.test.ts";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "test-slow-shard-single-suite-at-a-time"));
+});
+
+test("GOLDEN — ANALYZE JAVASCRIPT-TYPESCRIPT LESSON: the cited proof executes and affected lanes receive the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-analyze-javascript-typescript-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6154.yaml", "src/run-task.ts", "test/new-census.test.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "analyze-javascript-typescript-gate-pre-push-steps"), taskFile);
+  }
+});
+
 test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task authors and its proof executes", () => {
   const { verdict, golden } = judgeCase("ci-prompt-surface-lesson");
   assert.equal(golden.violation, "none");

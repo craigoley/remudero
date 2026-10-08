@@ -13,10 +13,25 @@ raw: "Root planner incident: rmd plan --mode=create run
   reserved IDs and the operator can retry without duplicate or lost work."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10140
+summary:
+  headline: Make planner runs terminal, visible, and safe to retry
+  what_happened: The planner reserved five task IDs and created a worktree, then
+    finished without task shards, a plan PR, or a success or failure record. The
+    operator cannot tell what happened or safely retry without risking lost or
+    duplicated work.
+  decision: Require every planner worker to durably record its start and a
+    terminal result, expose that result in status, and make failures classified
+    and safe to retry or reclaim.
+  options:
+    - label: Implement the terminal-state contract
+      consequence: Operators can see each run’s outcome and retry failed work without
+        ambiguous reservations.
+    - label: Keep the current behavior
+      consequence: Runs may still consume task IDs and disappear without a usable outcome.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

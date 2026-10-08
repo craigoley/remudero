@@ -662,6 +662,93 @@ host_tmpdir_on_scratch
 HOST_TMPDIR
 }
 
+render_watchdog_tick_snapshot() {
+  cat <<'WATCHDOG_TICK_SNAPSHOT'
+# W1-T6361: cache only successful healthy ticks; unreadable probes always take the full path.
+WATCHDOG_SNAPSHOT="$STATE_DIR/state/watchdog-tick-snapshot"
+WATCHDOG_PROBE_OK=0
+WATCHDOG_VERDICT_READ=0
+WATCHDOG_UNCHANGED_TICKS=0
+WATCHDOG_REMOTE=""
+WATCHDOG_INSTALL=""
+WATCHDOG_CONTAINER=""
+WATCHDOG_LEDGER_MTIME=""
+
+watchdog_healthy() {
+  [ "$PROGRESS_ACTION" = none ] || return 1
+  case "$PROGRESS_STATE" in PROGRESSING|IDLE) return 0 ;; *) return 1 ;; esac
+}
+
+watchdog_save_snapshot() {
+  local tmp
+  [ "$WATCHDOG_PROBE_OK" = 1 ] && watchdog_healthy || return 0
+  [ ! -e "$STATE_DIR/state/DEPLOY_REQUESTED" ] || return 0
+  [ -n "$WATCHDOG_LEDGER_MTIME" ] || return 0
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || return 0
+  tmp="$(mktemp "$WATCHDOG_SNAPSHOT.XXXXXX")" || return 0
+  if (umask 077; printf 'v1|%s|%s|%s|%s|%s|%s\n' "$WATCHDOG_REMOTE" "$WATCHDOG_INSTALL" \
+      "$WATCHDOG_CONTAINER" "$PROGRESS_STATE" "$WATCHDOG_LEDGER_MTIME" "$WATCHDOG_UNCHANGED_TICKS" > "$tmp") &&
+     mv -f "$tmp" "$WATCHDOG_SNAPSHOT"; then :
+  else rm -f "$tmp" 2>/dev/null || true; fi
+}
+
+watchdog_unchanged_tick() {
+  local container="$1" remote ref extra record version sha head identity verdict mtime ticks
+  WATCHDOG_PROBE_OK=0
+  [ ! -e "$STATE_DIR/state/DEPLOY_REQUESTED" ] || return 1
+  if ! remote="$(git -C "$CHECKOUT" ls-remote --exit-code origin refs/heads/main 2>/dev/null)"; then return 1; fi
+  read -r WATCHDOG_REMOTE ref extra <<< "$remote"
+  [ "$ref" = refs/heads/main ] && [ -z "$extra" ] || return 1
+  case "$WATCHDOG_REMOTE" in ''|*[!0-9a-f]*) return 1 ;; esac
+  if ! WATCHDOG_INSTALL="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)"; then return 1; fi
+  case "$WATCHDOG_INSTALL" in ''|*[!0-9a-f]*) return 1 ;; esac
+  if ! WATCHDOG_CONTAINER="$(docker inspect "$container" --format '{{.Id}} {{.State.Status}} {{.RestartCount}} {{.State.StartedAt}}' 2>/dev/null)"; then return 1; fi
+  case "$WATCHDOG_CONTAINER" in *' running '*) : ;; *) return 1 ;; esac
+  WATCHDOG_LEDGER_MTIME="$(stat -c '%Y' "$STATE_DIR/state/ledger.ndjson" 2>/dev/null || true)"
+  case "$WATCHDOG_LEDGER_MTIME" in ''|*[!0-9]*) WATCHDOG_LEDGER_MTIME="" ;; esac
+  WATCHDOG_PROBE_OK=1
+  record="$(cat "$WATCHDOG_SNAPSHOT" 2>/dev/null)" || return 1
+  case "$record" in *$'\n'*) return 1 ;; esac
+  IFS='|' read -r version sha head identity verdict mtime ticks extra <<< "$record"
+  [ "$version" = v1 ] && [ -z "$extra" ] && [ "$sha" = "$WATCHDOG_REMOTE" ] &&
+    [ "$head" = "$WATCHDOG_INSTALL" ] && [ "$identity" = "$WATCHDOG_CONTAINER" ] || return 1
+  case "$verdict" in PROGRESSING|IDLE) : ;; *) return 1 ;; esac
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ticks" in 0|1|2) : ;; *) return 1 ;; esac
+  PROGRESS_STATE="$verdict"; PROGRESS_ACTION=none
+  WATCHDOG_UNCHANGED_TICKS=$((ticks + 1))
+  # Ledger pulses can advance during a stalled sweep: read the real verdict at least every 15 min.
+  if [ "$WATCHDOG_UNCHANGED_TICKS" -ge 3 ] || [ -z "$WATCHDOG_LEDGER_MTIME" ] ||
+     [ "$WATCHDOG_LEDGER_MTIME" -le "$mtime" ]; then
+    read_progress_verdict
+    WATCHDOG_VERDICT_READ=1
+    WATCHDOG_UNCHANGED_TICKS=0
+    watchdog_healthy || return 1
+  fi
+  watchdog_save_snapshot
+  echo "rmd-relaunch: $container unchanged and healthy -- skipping checkout and deploy work."
+  return 0
+}
+WATCHDOG_TICK_SNAPSHOT
+}
+
+# Core only: recreate an ABSENT remudero-serve/cloudflared (deploy/edge-heal.sh). On EXIT, so every
+# clean tick path reaches it and serve-container.sh can read the App env off a just-revived daemon.
+render_edge_heal() {
+  case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
+  cat <<'EDGE_HEAL'
+edge_heal_on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
+    RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh" ||
+      echo "rmd-relaunch: edge heal incomplete; the next tick re-asks." >&2
+  fi
+  return "$rc"
+}
+trap edge_heal_on_exit EXIT
+EDGE_HEAL
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -757,6 +844,8 @@ if [ "\${1:-}" = "--check-crash-loop" ]; then
   crash_loop_signature "\${2:-\$REVIVAL_LOG}"
   exit 0
 fi
+
+$(render_edge_heal)
 
 # W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
 #
@@ -883,6 +972,8 @@ $(render_deploy_code_refresh)
 
 $(render_progress_watchdog_ladder)
 
+$(render_watchdog_tick_snapshot)
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -915,6 +1006,9 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # revival path below, after this very return, so a host that recovered stopped reviving and never
   # reached it. This is the one place the script observes the daemon HEALTHY.
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
+  rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
+  WATCHDOG_UNCHANGED_TICKS=0
   # CONVERGENCE IS LAST AND ONLY WHEN HEALTHY. A DOWN host needs reviving, not tidying, so nothing
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
@@ -922,7 +1016,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
     # W1-T5688: THE VERDICT IS READ BEFORE refresh_deploy_code, whose \`|| exit 0\` ends every tick
     # with workers in flight -- exactly the ticks a wedged daemon produces.
-    read_progress_verdict
+    [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
     [ "\$PROGRESS_STATE" = CRASH_LOOP ] || rm -f "\$WATCHDOG_HOLD" 2>/dev/null || true
     note_progress_verdict
     if recycle_on_verdict '${CONTAINER_NAME}'; then exit 0; fi
@@ -936,15 +1030,27 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    (cd "\$STATE_DIR/remudero" && \\
+    if watchdog_deploy_out="\$(cd "\$STATE_DIR/remudero" && \\
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR") || \\
+      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      printf '%s\\n' "\$watchdog_deploy_out"
+      # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
+      case "\$watchdog_deploy_out" in *'### rmd deploy-run — no-op: up-to-date ('*)
+        WATCHDOG_INSTALL="\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
+        [ "\$WATCHDOG_INSTALL" != "\$WATCHDOG_REMOTE" ] || watchdog_save_snapshot
+        ;;
+      esac
+    else
+      printf '%s\\n' "\$watchdog_deploy_out"
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
+    fi
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
   fi
   exit 0
 fi
+
+rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
 
 # REFUSE AGAINST AN UNMOUNTED STATE ROOT -- the 2026-09-05 fleet-wipe failure mode.
 if ! findmnt -no TARGET /mnt/rmd >/dev/null 2>&1; then

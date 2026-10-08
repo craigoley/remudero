@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
   CODEX_WORKER_STDERR_MAX_BYTES,
-  CODEX_WORKER_STDOUT_MAX_BYTES,
+  CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
   CodexToolchainBlockedError,
   isCodexWorkerOutputLimitError,
   ProviderCapacityBlockedError,
@@ -921,9 +921,9 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
   }
 });
 
-test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained process exactly once", async () => {
+test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained process exactly once", { timeout: 5000 }, async () => {
   for (const [stream, limitBytes] of [
-    ["stdout", CODEX_WORKER_STDOUT_MAX_BYTES],
+    ["stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES],
     ["stderr", CODEX_WORKER_STDERR_MAX_BYTES],
   ] as const) {
     const stdin = new PassThrough();
@@ -957,7 +957,7 @@ test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained
         },
         { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } },
       );
-      (stream === "stdout" ? stdout : stderr).write("x".repeat(limitBytes + 1));
+      (stream === "stdout" ? stdout : stderr).write(Buffer.alloc(limitBytes + 1, "x"));
       await assert.rejects(resultPromise, (error: unknown) => {
         assert.ok(isCodexWorkerOutputLimitError(error));
         assert.equal(error.stream, stream);
@@ -972,7 +972,7 @@ test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained
   }
 });
 
-test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provider.test.ts", async () => {
+test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provider.test.ts", { timeout: 5000 }, async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -1001,9 +1001,10 @@ test("W1-T3787 event bytes distinguish retained JSONL kinds in test/worker-provi
     stdout.write('{"type":"thread.started","thread_id":"bounded"}\n');
     stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"kept"}}\n');
     stdout.write('{"type":"turn.started"');
-    stdout.write("x".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + 1));
+    stdout.write(Buffer.alloc(CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES + 1, "x"));
     await assert.rejects(resultPromise, (error: unknown) => {
       assert.ok(isCodexWorkerOutputLimitError(error));
+      assert.equal(error.limitBytes, CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES);
       assert.ok(error.eventBytesByKind["thread.started"] > 0);
       assert.deepEqual(error.event_bytes_by_kind, error.eventBytesByKind);
       assert.ok(error.eventBytesByKind["item.completed:agent_message"] > 0);

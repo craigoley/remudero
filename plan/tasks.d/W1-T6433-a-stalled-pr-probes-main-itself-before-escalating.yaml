@@ -1,0 +1,33 @@
+- id: W1-T6433
+  title: "A STALLED PR PROBES MAIN ITSELF BEFORE ESCALATING — W1-T6405's fixed-on-main check acts only when the fix rung already recorded a probe at main's current tip for those test files, so a PR that stalls before the fix rung reaches it still escalates 'unknown signature'"
+  repo: remudero
+  depends_on: [W1-T6405]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-08: W1-T6405 builder's stated gap (#10110)"
+  plan_refs: [W1-T6405, W1-T78, W1-T2671]
+  files: [src/lib/sweep.ts, test/a-stalled-pr-probes-main-itself-before-escalating.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-08 on origin/main after #10110 (W1-T6405): reportStuckStage (src/lib/sweep.ts ~:12675-12709) calls
+    fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) (~:7481), and reproductionCache is
+    probeCacheFromLedger(ledgerLines) (~:12913) — only probes the FIX RUNG already ran (~:14915-14925). A PR that
+    stalls own-red while the fix rung never probed its failing files at the current main tip finds no cached probe,
+    so it still escalates "DIAGNOSIS: unknown signature" — the shape of #10043/#10072/#10075 on 2026-10-08.
+  design: |
+    In reportStuckStage, for an own-red stage on a head behind main whose failing test files have NO cached probe at
+    the current main tip, run the same bounded reproduction probe the fix rung uses (same seam, same cache key,
+    ledgered the same way) for those files before deciding; then apply W1-T6405's existing fixed-on-main refresh
+    path. One probe per (main tip, file) through the shared cache, so the stalled-stage rung never re-probes what
+    the fix rung measured. A probe that cannot run keeps today's escalation, naming why.
+  acceptance:
+    - claim: "an own-red stalled PR with no cached probe probes main itself, and refreshes instead of escalating when main already passes its failing tests"
+      proof: 'grep: test("W1-T6433: a stalled PR with no cached probe probes main itself and refreshes when main fixed it" in test/a-stalled-pr-probes-main-itself-before-escalating.test.ts'
+  falsifier: |
+    Keep the cache-only check: the fixture's stalled PR with no recorded probe escalates "unknown signature" and the
+    test fails.

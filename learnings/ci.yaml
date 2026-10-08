@@ -136,6 +136,42 @@
   src: "ci-learning:8551:ci-shard (1/8)"
   cited: "2026-10-08"
 
+- id: test-slow-shard-single-suite-at-a-time
+  subsystem: ci
+  lifecycle: active
+  files: ["test/**", "scripts/test-tier-manifest.json", ".github/workflows/ci.yml", package.json]
+  fact: >-
+    When verifying test changes or the slow-tier runner, run one full test suite at a time. Do not
+    background or parallelize `node --test` runs; the deny floor refuses concurrent full-suite
+    runs. For focused verification, run one test file or use `--test-name-pattern`. The coverage
+    preflight runs its shards sequentially; let it finish before starting another full suite.
+  evidence: >-
+    The test-slow-shard (1/2) gate refused nine pull requests recorded as
+    ci-learning:9362:test-slow-shard (1/2) (9362, 9379, 9382, 9386, 9396, 9415, 9520, 9527, 9649),
+    and each was repaired. The task's deny-floor constraint identifies overlapping full-suite
+    runs as a refusal condition; this entry directs test authors to serialize full runs and use
+    single-file or name-pattern runs for focused checks. Individual PR failure logs were not
+    available to establish a more specific shared cause.
+  src: "ci-learning:9362:test-slow-shard (1/2)"
+  cited: "2026-10-08"
+
+- id: analyze-javascript-typescript-gate-pre-push-steps
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/codeql.yml", ".github/workflows/ci-gate.yml", "plan/tasks.d/**", src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, "test/**"]
+  fact: >-
+    The Analyze (javascript-typescript) gate is the CodeQL job that ci-gate.yml requires. Before the
+    first push, run `npm run --silent rule15-precheck` if the diff touches plan/, and run
+    `rmd census-membership` for the census suites a src or test change can move, then run the suites
+    it names. Do not wait for the hosted gate to find these; it refuses the same way each time.
+  evidence: >-
+    The Analyze (javascript-typescript) gate refused six pull requests (9362, 9379, 9624, 9703, 9704,
+    9712) in one window, and each was repaired after the refusal. The repairs touched plan/tasks.d
+    shards and learnings entries. Recon did not read the six failure logs, so the shared cause is not
+    verified; this entry names the pre-push steps that cover the surfaces those repairs touched.
+  src: "ci-learning:9362:Analyze (javascript-typescript)"
+  cited: "2026-10-08"
+
 - id: commitlint-pr-title-lane
   subsystem: ci
   lifecycle: active

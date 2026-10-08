@@ -1,0 +1,49 @@
+- id: W1-T6372
+  title: "REPORT WHERE THE ONE HOST-WIDE GITHUB READ WINDOW IS NOT ONE — github-transport.ts and hooks/deny-floor.sh rule 9 document a single host-wide gh-last-read stamp, but the fleet's containers and each review worker keep their own, so the 180 s floor paces host-side sessions only; this task documents the divergence and changes no enforcement"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low  # Rule 19: one concern — a written account of the read window's actual scope; no source or config change
+  band_meaning: span
+  origin: "operator session 2026-10-07/08: the GitHub read cadence scope check (report-only, per the operator)"
+  plan_refs: [W1-T3297, W1-T1066]
+  files:
+    - plan/tasks.d/W1-T6372-report-where-the-host-wide-github-read-window-is-not-one.yaml
+    - docs/recon/github-read-window-scope.md
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07 22:30Z (host inspection, file metadata only):
+    - The documented scope: github-transport.ts reads `${RMD_GH_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/remudero/
+      gh-last-read`, shared with hooks/deny-floor.sh rule 9 (lock `$stamp.lock`); config.ts calls per-worker stamps a
+      fixed defect, and RMD_GH_CACHE_HOME is the host-wide override.
+    - Serve, daemon, console-daemon and site-daemon run in containers with HOME=/home/node and no host ~/.cache mount, so
+      each keeps a container-local stamp.
+    - Review workers keep per-worker stamps under the state volume's worker-homes (one per reviewed PR), each with its own
+      .cache/remudero/gh-last-read.
+    So the "host-wide" window covers host-side sessions only; the fleet's own reads are paced per container and per
+    worker.
+  design: |
+    A recon, no change to enforcement, configuration, stamps or receipts. Write docs/recon/github-read-window-scope.md:
+    (1) every process class that reads GitHub, the stamp path it resolves and why (environment, HOME, mounts), from the
+    source and the compose/deploy configuration; (2) whether each class's reads share any window with the others;
+    (3) the options to make the window one per host (a shared mount, RMD_GH_CACHE_HOME set fleet-wide, a broker), each with
+    its failure mode; (4) a recommendation for the operator, who decides whether to change enforcement.
+  acceptance:
+    - claim: "the recon lists every GitHub-reading process class with the stamp path it resolves and whether it shares the host window, and recommends without changing enforcement"
+      proof: "grep: stamp path in docs/recon/github-read-window-scope.md"
+  falsifier: |
+    A process class missing from the list, or a recommendation applied to configuration in this task, fails human
+    verification.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The declared scope is a recon report and plan record, explicitly without enforcement changes.; on the change's description/files alone, no diff was read — The supplied text asserts separate stamp windows but supplies no resolved paths or supporting observations; its acceptance proof checks only for “stamp path,” which cannot verify the claimed process census or sharing relationships.; on the change's description/files alone, no diff was read — The gates explicitly require HIGH when the finding cannot be verified from what is shown; that condition applies to the supplied evidence."
+    judged_at: "2026-10-08T14:11:31.657Z"
+    pin: "a1fdb142d10da56fb76c17e7d4f241c00ccb66822456f077a323753e34b25449"

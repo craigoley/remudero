@@ -288,7 +288,8 @@ export interface RunSummary {
   startTs: string;
   verdict: string;
   costUsd: number;
-  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free. */
+  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free.
+   *  W1-T5664: also `none` when a codex verdict or worker row carries no notional price. */
   costSource?: "none";
   numTurns: number;
   prUrl?: string;
@@ -404,12 +405,20 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       .reduce((s, l) => s + outputTokensOf(l), 0);
     // W1-T5526: with no verdict line, the worker's own DONE_STEPS rows price the run — never a probe,
     // cost.anomaly, risk_judge or budget.warning row, which came first on every live settled run.
+    // W1-T5664: a codex row's cash is 0 by construction, so it is priced at its notional; an
+    // unpriced codex row leaves the run unknown (`costSource: "none"`), never a free run.
     const workerCostRows = lines.filter(
-      (l) => l.step && DONE_STEPS.has(l.step) && (typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
+      (l) => l.step && DONE_STEPS.has(l.step) &&
+        (l.provider === "codex" || typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
     );
-    const costUsd = verdictLine
-      ? typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
-      : workerCostRows.reduce((s, l) => s + costOf(l), 0);
+    const workerCosts = workerCostRows.map((l) => (l.provider === "codex" ? notionalSpendUsd(l) : costOf(l)));
+    const price = verdictLine
+      ? verdictLine.provider === "codex" ? notionalSpendUsd(verdictLine)
+        : typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
+      : workerCostRows.length > 0 && workerCosts.every((c) => c !== undefined)
+        ? workerCosts.reduce((s: number, c) => s + (c ?? 0), 0)
+        : undefined;
+    const costUsd = price ?? 0;
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
@@ -427,7 +436,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       verdict: credit ? "merged" : observedVerdict,
       ...(typeof mergeTs === "string" ? { mergeTs } : {}),
       costUsd,
-      ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
+      ...(price === undefined ? { costSource: "none" as const } : {}),
       numTurns,
       outputTokens,
       prUrl,
