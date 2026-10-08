@@ -966,6 +966,7 @@ export interface OpenWeightContextWindow {
 }
 
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  "claude-haiku-5-5": { totalTokens: 1_000_000, readAt: "2026-10-07" },
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
   // A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
@@ -2626,7 +2627,18 @@ export interface OpenWeightPrice {
   readAt: string;
 }
 
+/** Haiku's whole-request tier includes uncached input, cache reads and cache creation.
+ *  Reserve the dearer one-hour cache-write rate; actual Azure invoice cost remains separate. */
+export const FOUNDRY_HAIKU_PRICE: OpenWeightPrice = {
+  inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, cachedInputUsdPerMillion: 0.01,
+  cacheWriteUsdPerMillion: 0.2, reservationInputUsdPerMillion: 0.2,
+  longContext: { thresholdInputTokens: 100_000, inputUsdPerMillion: 0.5, outputUsdPerMillion: 2.5,
+    cachedInputUsdPerMillion: 0.05, cacheWriteUsdPerMillion: 1, reservationInputUsdPerMillion: 1 },
+  readAt: "2026-10-07",
+};
+
 export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
   "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
@@ -2675,13 +2687,14 @@ export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
  * same discipline as the Opus row, so a later cache_control cannot undercount.
  */
 export const FOUNDRY_SONNET_PRICE: OpenWeightPrice = {
-  inputUsdPerMillion: 2, outputUsdPerMillion: 10,
-  reservationInputUsdPerMillion: 4, readAt: "2026-09-29",
+  inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1,
+  reservationInputUsdPerMillion: 4, readAt: "2026-10-07",
 };
 
 /** The deployment -> price table the Foundry Claude adapter serves. A deployment absent from it is
  *  not a Foundry Claude deployment, and the adapter refuses it. */
 export const FOUNDRY_CLAUDE_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   "claude-opus-5-5": FOUNDRY_OPUS_PRICE,
   "claude-sonnet-5-5": FOUNDRY_SONNET_PRICE,
 };
@@ -2762,6 +2775,7 @@ export function openWeightResponseFormatField(
 }
 
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  "claude-haiku-5-5": null,
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
   // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
@@ -4129,11 +4143,10 @@ function foundryClaudeEndpoint(env: NodeJS.ProcessEnv, label: string): string {
   return new URL("v1/messages", `${url.toString().replace(/\/$/, "")}/`).toString();
 }
 
-/** Cache-read USD per million, per Foundry Claude deployment. Opus's is 0.05x its input rate;
- *  Sonnet's is the more conservative 0.1x, so an unmeasured ratio can only over-charge. */
+/** Published cache-read USD per million for legacy flat-rate Foundry Claude deployments. */
 const FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION: Readonly<Record<string, number>> = {
   "claude-opus-5-5": 0.2,
-  "claude-sonnet-5-5": 0.2,
+  "claude-sonnet-5-5": 0.1,
 };
 
 function foundryClaudeUsageUsd(deployment: string, usage: {
@@ -4141,11 +4154,13 @@ function foundryClaudeUsageUsd(deployment: string, usage: {
   cache_read_input_tokens?: number; cache_creation_input_tokens?: number;
 }): number {
   const price = openWeightPriceFor(deployment);
+  const inputTokens = usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  const rate = price.longContext && inputTokens > price.longContext.thresholdInputTokens ? price.longContext : price;
   // Price cache writes at the dearer 1h rate so a later cache_control cannot undercount.
-  return (usage.input_tokens * price.inputUsdPerMillion +
-    (usage.cache_read_input_tokens ?? 0) * (FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION[deployment] ?? price.inputUsdPerMillion) +
-    (usage.cache_creation_input_tokens ?? 0) * (price.reservationInputUsdPerMillion ?? price.inputUsdPerMillion) +
-    usage.output_tokens * price.outputUsdPerMillion) / 1_000_000;
+  return (usage.input_tokens * rate.inputUsdPerMillion +
+    (usage.cache_read_input_tokens ?? 0) * (rate.cachedInputUsdPerMillion ?? FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION[deployment] ?? rate.inputUsdPerMillion) +
+    (usage.cache_creation_input_tokens ?? 0) * (rate.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) +
+    usage.output_tokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 function validFoundryTokenCount(value: unknown): value is number {
@@ -4157,7 +4172,7 @@ export async function spawnFoundryClaudeWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
-  const label = selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
+  const label = selection.model === "claude-haiku-5-5" ? "Haiku" : selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let turns = 0;
@@ -4174,7 +4189,7 @@ export async function spawnFoundryClaudeWorker(
   let pending: { requestId: string; reservedUsd: number } | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
-    if (!isFoundryClaudeDeployment(selection.model) || args.cashSqueezed !== true) {
+    if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
       throw new Error(`cash ${label} requires an actual blocked-subscription squeeze`);
     }
     if (args.capabilityGrant) {
@@ -4208,7 +4223,7 @@ export async function spawnFoundryClaudeWorker(
       const requestId = `${requestPrefix}-${turns}`;
       const reservation = reserveOpenWeightBudget(config, {
         requestId, deployment: selection.model, requestBodyBytes: Buffer.byteLength(body, "utf8"),
-        atIso: clock.iso(), squeezed: true,
+        atIso: clock.iso(), squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
       pending = { requestId, reservedUsd: reservation.reservedUsd };
@@ -4270,6 +4285,7 @@ export async function spawnFoundryClaudeWorker(
       const calls = payload.content.filter((block) => block.type === "tool_use");
       if (calls.length === 0) {
         if (payload.stop_reason !== "end_turn") throw new Error(`cash ${label} ended without a complete turn (${String(payload.stop_reason)})`);
+        if (!text.trim()) throw new Error(`cash ${label} ended with no visible text`);
         return reconcileBoundedProviderAttempt(openWeightResult({
           model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,

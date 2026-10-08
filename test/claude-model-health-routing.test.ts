@@ -110,13 +110,13 @@ test("candidate ladders are complete same-capability policy and an explicit pin 
   const root = mkdtempSync(join(tmpdir(), "rmd-health-mounts-"));
   try {
     const duplicate = raw.replace(
-      "[claude-haiku-4-5-20251001]",
-      "[claude-haiku-4-5-20251001, claude-haiku-4-5-20251001]",
+      "[claude-haiku-5-5, claude-haiku-4-5-20251001]",
+      "[claude-haiku-5-5, claude-haiku-5-5]",
     );
     writeFileSync(join(root, "duplicate.yaml"), duplicate);
     assert.throws(() => loadMounts(join(root, "duplicate.yaml")), MountsError);
 
-    const aliasCandidate = raw.replace("[claude-haiku-4-5-20251001]", "[haiku]");
+    const aliasCandidate = raw.replace("[claude-haiku-5-5, claude-haiku-4-5-20251001]", "[haiku]");
     writeFileSync(join(root, "alias.yaml"), aliasCandidate);
     assert.throws(() => loadMounts(join(root, "alias.yaml")), /supported concrete Claude model id/);
 

@@ -51,6 +51,7 @@
 # rank, so adding/renaming a model is a config edit HERE, not a code change.
 tiers:
   haiku: 1
+  claude-haiku-5-5: 1
   sonnet: 2
   opus: 3
   claude-opus-5: 4
@@ -109,6 +110,7 @@ capabilities:
     # declared alongside the Claude ones rather than in a parallel table that the invariant would
     # not read (measured 2026-09-16).
     haiku: economy
+    claude-haiku-5-5: economy
     sonnet: balanced
     opus: frontier
     # terra answers for a frontier seat under squeeze; luna is a balanced peer of sonnet.
@@ -126,7 +128,7 @@ capabilities:
     claude-sonnet-4-5-20250929: balanced
     claude-haiku-4-5-20251001: economy
   claude_candidates:
-    economy:  [claude-haiku-4-5-20251001]
+    economy:  [claude-haiku-5-5, claude-haiku-4-5-20251001]
     balanced: [claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929]
     frontier: [claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101]
   # gpt-5.5 IS BEING DECOMMISSIONED (operator notice, 2026-09-14), so it is demoted to a TRAILING
@@ -268,9 +270,10 @@ capabilities:
     # So `balanced` leading with nano is not a preference, it is the only thing that can run; the
     # trailing gpt-oss there is unreachable for that lane and is kept only for a smaller caller.
     economy:
-      low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
-      medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
-      high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
+      # Haiku 5.5 is an economy fallback; per-task trials must earn promotion ahead of these winners.
+      low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
+      medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
+      high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
     # Sol 6.1 trails balanced cheap candidates as a bounded Responses fallback; no economy promotion.
     # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
     # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
