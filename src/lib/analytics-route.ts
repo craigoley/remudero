@@ -2327,12 +2327,12 @@ export async function scanAnalyticsLedger(
           ? finding.resumeOffset : Math.min(tornLiveStartOffset, finding.resumeOffset);
       }
     },
-    onAcceptedRecord: (row, raw) => {
+    onAcceptedRecord: (row, raw, fingerprint) => {
       const step = str(row.step);
       if (!step) return;
       const window = acceptedByStep.get(step) ?? [];
       if (window.length === 0) acceptedByStep.set(step, window);
-      window.push(raw);
+      window.push(fingerprint ?? fingerprintLedgerLine(raw));
       if (window.length >= 2 * MAX_RETAINED_LINES_PER_STEP) window.splice(0, window.length - MAX_RETAINED_LINES_PER_STEP);
     },
     stopAfterRotation: (path) => {
@@ -2348,7 +2348,7 @@ export async function scanAnalyticsLedger(
   }
   signal?.throwIfAborted();
   const accepted = [...acceptedByStep.entries()].flatMap(([step, window]) =>
-    window.slice(-MAX_RETAINED_LINES_PER_STEP).map((raw) => ({ step, fingerprint: fingerprintLedgerLine(raw) })));
+    window.slice(-MAX_RETAINED_LINES_PER_STEP).map((fingerprint) => ({ step, fingerprint })));
   const scan: AnalyticsScanReport = {
     mode,
     ...(reason !== undefined ? { reason } : {}),
