@@ -123,6 +123,7 @@ const CONVERTED = [
   "preserveStagedFixOwnerResidue", "readFixOwnerResidue", "readTrackedDirtyOwnerPatch", "preserveTrackedDirtyPatch",
   "resetTrackedDirtyFixOwner", "checkoutFixHeadRef", "createFixRungWorktree", "triageCommandLocked", "planCommand",
   "defaultShardGitRunner",
+  "mainRepairDiffStat", "REAL_MAIN_REPAIR_REVERT_DEPS",
 ] as const;
 
 /** Raw git sites and leaf calls per top-level declaration of `text`. */
@@ -392,4 +393,3 @@ describe("W1-T6121: a worktree read through run-task's own functions never follo
     assert.equal(existsSync(marker("planted-fsmonitor-result")), false);
   });
 });
-

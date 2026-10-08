@@ -51395,7 +51395,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, taskId: strin
 }
 
 async function mainRepairDiffStat(worktreePath: string, sha: string): Promise<string> {
-  const { stdout } = await baseReproductionExecFile("git", ["-C", worktreePath, "show", "--stat", "--format=", sha], {
+  const stdout = await hostWorktreeGitAsync(worktreePath, ["show", "--stat", "--format=", sha], {
     timeout: 30_000,
     maxBuffer: 1 << 22,
   });
@@ -51465,12 +51465,12 @@ export async function dispatchMainRepairFixRun(
 }
 
 const REAL_MAIN_REPAIR_REVERT_DEPS: Pick<AlertFixDispatchDeps, "worktreeAdd" | "worktreeRemove"> & {
-  git: (args: string[]) => Promise<string>;
+  git: (worktreePath: string, args: string[]) => Promise<string>;
   gh: (args: string[]) => Promise<unknown>;
 } = {
   worktreeAdd: worktreeAddAsync,
   worktreeRemove,
-  git: async (args) => String((await baseReproductionExecFile("git", args, { timeout: 120_000, maxBuffer: 1 << 24 })).stdout),
+  git: (worktreePath, args) => hostWorktreeGitAsync(worktreePath, args, { timeout: 120_000, maxBuffer: 1 << 24 }),
   gh: (args) => ghJsonAsync(args),
 };
 
@@ -51495,7 +51495,7 @@ export async function openMainRepairRevertPr(
   const worktreePath = join(worktreesDir(config), request.branch);
   const short = request.offendingSha.slice(0, 12);
   const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : short;
-  const git = (...args: string[]) => deps.git(["-C", worktreePath, ...args]);
+  const git = (...args: string[]) => deps.git(worktreePath, args);
   try {
     await deps.worktreeAdd(repoDir, worktreePath, request.branch, "origin/main", { log });
     try {

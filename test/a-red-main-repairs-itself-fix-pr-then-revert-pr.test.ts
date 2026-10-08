@@ -545,9 +545,9 @@ function revertDeps(fail?: "revert" | "diff" | "abort"): NonNullable<Parameters<
     removed,
     worktreeAdd: () => {},
     worktreeRemove: (_repo, path) => void removed.push(path),
-    git: async (args) => {
-      gitCalls.push(args);
-      const verb = args.slice(2).join(" ");
+    git: async (worktreePath, args) => {
+      gitCalls.push([worktreePath, ...args]);
+      const verb = args.join(" ");
       if (fail && verb.startsWith("revert --no-commit")) throw new Error("CONFLICT (content): src/x.ts");
       if (verb.startsWith("diff --name-only")) {
         if (fail === "diff") throw new Error("index locked");
@@ -570,7 +570,8 @@ test("the revert PR is a revert commit on its own branch, pushed there and opene
     const request = revertRequest();
     const result = await openMainRepairRevertPr("o", "r", w.config, request, w.ledgerPath, "DAEMON-T6403", deps);
     assert.deepEqual(result, { prUrl: REVERT_PR });
-    const verbs = deps.gitCalls.map((args) => args.slice(2));
+    assert.ok(deps.gitCalls.every(([path]) => path === join(w.root, "worktrees", request.branch)));
+    const verbs = deps.gitCalls.map((args) => args.slice(1));
     assert.deepEqual(verbs[0], ["revert", "--no-commit", OFFENDING]);
     assert.equal(verbs[1]![0], "commit");
     assert.match(verbs[1]![2]!, /^revert\(main\): undo #10092 \(769d80530000\)/);
@@ -604,7 +605,7 @@ test("a revert that does not apply is aborted and returned with its conflicting 
     assert.ok("refused" in result);
     assert.deepEqual(result.conflictingPaths, ["src/x.ts", "test/x.test.ts"]);
     assert.match(result.refused, /did not apply/);
-    assert.ok(deps.gitCalls.some((args) => args.slice(2).join(" ") === "revert --abort"));
+    assert.ok(deps.gitCalls.some((args) => args.slice(1).join(" ") === "revert --abort"));
     assert.equal(deps.ghCalls.length, 0, "no PR is opened for a revert that did not apply");
     const unreadable = await openMainRepairRevertPr("o", "r", w.config, revertRequest(), w.ledgerPath, "DAEMON-T6403", revertDeps("diff"));
     assert.ok("refused" in unreadable && /conflicting paths unreadable/.test(unreadable.conflictingPaths[0]!));

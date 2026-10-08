@@ -48,6 +48,7 @@ const KNOWN_GAP =
 
 /** Each step the scan finds that the gardener deliberately does not read, and why. */
 const EXEMPT: Readonly<Record<string, string>> = {
+  "main.repair.pr_unreadable": A_LANE_RUN_ID,
   // The five W1-T5526 removed from the read, and the other cost-only rows.
   "cost.anomaly": DONE_STEPS_PRICE_THE_RUN,
   "containment.probe": DONE_STEPS_PRICE_THE_RUN,
@@ -295,6 +296,23 @@ test("closed review skips preserve the config gardener's gathered runs", () => {
     assert.equal(gathered[0]!.costUsd, 2);
     assert.deepEqual(gatherRuns(rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)))), gathered);
   }
+});
+
+test("main-repair PR read failures do not create a config gardener worker run", () => {
+  const worker: LedgerRecord[] = [
+    { run_id: "worker", task_id: "T-1", step: "run.start", type: "implement" },
+    { run_id: "worker", step: "implement.done", cost_usd: 2, num_turns: 3 },
+    { run_id: "worker", step: "pr.opened", pr_url: "https://github.com/fixture/repo/pull/1" },
+  ];
+  const diagnostic: LedgerRecord = {
+    run_id: "DAEMON-1", step: "main.repair.pr_unreadable",
+    pr_url: "https://github.com/fixture/repo/pull/2", error: "transport unavailable",
+  };
+  const rows = [...worker, diagnostic];
+  assert.deepEqual(gatherRuns(rows), gatherRuns(worker));
+  assert.deepEqual(gatherRuns(rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)))), gatherRuns(rows));
+  const withStart = gatherRuns([{ run_id: diagnostic.run_id, step: "run.start" }, diagnostic]);
+  assert.equal(withStart[0]!.prUrl, diagnostic.pr_url, "a daemon run.start would invalidate the exemption");
 });
 
 test("the census reads each write idiom and ignores an unpriced or total-only row", () => {
