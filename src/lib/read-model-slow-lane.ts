@@ -51,7 +51,7 @@ export interface SlowLaneConfig {
   /** The credit-edge unit's inputs (account-usage.ts); absent, the lane records no credit edge. */
   accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   /** The analytics unit's instances, each by the state dir holding its ledger; it runs only while the analytics view is switched on. */
-  analytics?: { instances: Array<{ name: string; stateDir: string }>; intervalMs?: number; timeoutMs?: number };
+  analytics?: { instances: Array<{ name: string; stateDir: string; repository?: string }>; intervalMs?: number; timeoutMs?: number };
   intervalMs?: number;
 }
 
@@ -194,7 +194,7 @@ function analyticsUnit(
   const attempted = new Map<string, number>();
   const checkpoints = new Map<string, AnalyticsCheckpoint | undefined>();
   let running = false;
-  const refreshOne = async (instance: { name: string; stateDir: string }): Promise<void> => {
+  const refreshOne = async (instance: { name: string; stateDir: string; repository?: string }): Promise<void> => {
     const started = clock.now();
     attempted.set(instance.name, started);
     const controller = new AbortController();
@@ -210,7 +210,7 @@ function analyticsUnit(
       controller.signal.throwIfAborted();
       if (snapshot.benchmarkEvidence?.reason === "ledger-source-unreadable") throw new Error("the ledger could not be read");
       checkpoints.set(instance.name, checkpoint);
-      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot) } });
+      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot, instance.repository) } });
       log("analytics.source_snapshot_built", { instance: instance.name, ms: clock.now() - started, asOf: snapshot.asOf });
     } catch (error) {
       const message = String((error as Error)?.message ?? error);

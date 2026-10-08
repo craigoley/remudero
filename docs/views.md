@@ -458,6 +458,26 @@ also the view's shadow side. The console's `RMD_CONTROL_REPO_INSTANCES` and
 `RMD_CONTROL_ANALYTICS_INSTANCES` retire only after the `agent`, `analytics` and `usage` views fold
 every instance in core (CONSOLE-T102).
 
+### Cached analytics details
+
+`analytics.data.instances[]` optionally carries `repository`, captured from the server's configured
+instance/registry identity when the snapshot was made. Old snapshots with no identity stay unreported;
+neither an instance name nor a historical ledger label supplies one.
+
+Each warm instance also carries an additive `details` envelope (`analytics-details-v1`). `reported`
+means the same-as-of `console-signals-v1` and `usage-v1` source rows were read; it is not a metric
+validation or freshness verdict. Consumers validate the nested projection's own version and schema.
+The instance's `analytics:<instance>` source governs snapshot freshness, including failures on either
+detail source. `usage: null` is uncollected, never zero subscription use. No live provider/queue values
+or private agent memory are fabricated or transported in these details.
+
+Snapshots missing a companion row, with mismatched times, unsupported/corrupt bodies or over-budget
+details explicitly name an unavailable reason without erasing the instance's metrics. Details are
+parsed only when their source as-of keys change; there is no request-time ledger scan or provider call.
+The optional signal/usage payload is capped at 256 KiB per instance and 1.5 MiB across the response,
+leaving space under the console's existing 2 MiB view ceiling. Later over-budget instances retain their
+metrics and identity but get a visible details refusal, not silent truncation or a complete-spend claim.
+
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 
 The console's hops (stream relay, refetch, render) are measured into core's own ledger

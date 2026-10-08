@@ -7362,11 +7362,331 @@ components:
                 required: [instanceId]
                 properties:
                   instanceId: {type: string}
+                  repository:
+                    type: string
+                    maxLength: 240
+                    description: Registry/config identity captured in the persisted snapshot; absent on older snapshots, never guessed from ledger rows.
                   metrics:
                     type: array
                     items:
                       $ref: "#/components/schemas/AnalyticsViewMetric"
                   reason: {type: string}
+                  details:
+                    $ref: "#/components/schemas/AnalyticsStoredDetails"
+
+    AnalyticsStoredDetails:
+      description: >
+        Additive analytics-details-v1 transport over matching committed signals and usage rows.
+        Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers
+        validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported
+        bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults.
+      oneOf:
+        - type: object
+          required: [version, state, asOf, payloadBytes, signals, usage]
+          properties:
+            version: {type: string, enum: [analytics-details-v1]}
+            state: {type: string, enum: [reported]}
+            asOf: {type: string, format: date-time}
+            payloadBytes: {type: integer, minimum: 0}
+            signals:
+              type: object
+              required: [version, timeSeries, spend, routingTelemetry]
+              properties:
+                version: {type: string, enum: [console-signals-v1]}
+                timeSeries: {type: array, items: {$ref: "#/components/schemas/AnalyticsStoredSeries"}}
+                spend:
+                  type: object
+                  required: [cash]
+                  properties:
+                    cash: {$ref: "#/components/schemas/AnalyticsStoredCashSpend"}
+                routingTelemetry: {$ref: "#/components/schemas/AnalyticsStoredRouting"}
+            usage:
+              description: null means usage was not collected; it is not a fabricated zero-cost reading.
+              oneOf:
+                - {type: "null"}
+                - {$ref: "#/components/schemas/AnalyticsStoredUsage"}
+        - type: object
+          required: [version, state, asOf, reason]
+          properties:
+            version: {type: string, enum: [analytics-details-v1]}
+            state: {type: string, enum: [unavailable]}
+            asOf: {type: [string, "null"]}
+            reason: {type: string}
+
+    AnalyticsStoredSeries:
+      type: object
+      required: [id, name, window, bucketWidth, aggregation, points]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        window: {type: string}
+        bucketWidth: {type: string}
+        aggregation: {type: string}
+        coverage: {type: string, enum: [observed, not-collected]}
+        comment: {type: string}
+        points:
+          type: array
+          items:
+            type: object
+            required: [t]
+            properties:
+              t: {type: string}
+              value: {type: [number, "null"]}
+              gap: {type: boolean}
+              note: {type: string}
+              unpricedRows: {type: integer, minimum: 0}
+
+    AnalyticsStoredCashSpend:
+      type: object
+      required: [state, unit, asOf, coverage, windows]
+      properties:
+        state: {type: string, enum: [observed, not-collected]}
+        unit: {type: string, enum: [usd]}
+        asOf: {type: [string, "null"]}
+        coverage: {type: string}
+        reason: {type: string}
+        windows:
+          type: array
+          items:
+            type: object
+            required: [name, days, fromDay, toDay, usd, rows, complete]
+            properties:
+              name: {type: string, enum: [7d, 30d]}
+              days: {type: integer}
+              fromDay: {type: string}
+              toDay: {type: string}
+              usd: {type: number}
+              rows: {type: integer}
+              unpricedRows: {type: integer}
+              complete: {type: boolean}
+              reason: {type: string}
+
+    AnalyticsStoredRouting:
+      type: object
+      required: [version, evidenceState, assignmentsObserved, terminalResultsObserved, terminalResultsWithoutAssignment, assignmentsWithoutTerminalResult, buckets, daily, stepUps, preferenceOutcomes]
+      properties:
+        version: {type: string, enum: [routing-v1]}
+        evidenceState: {type: string, enum: [observed, not-collected-in-retained-ledger]}
+        assignmentsObserved: {type: integer}
+        terminalResultsObserved: {type: integer}
+        terminalResultsWithoutAssignment: {type: integer}
+        assignmentsWithoutTerminalResult: {type: integer}
+        buckets:
+          type: array
+          items:
+            type: object
+            required: [provider, assignedModel, taskType, routingRule, assignments, terminalResults, successes, failures, totalTokens, totalDurationMs, totalCostUsd, fallbackReasons]
+            properties:
+              provider: {type: string}
+              assignedModel: {type: string}
+              taskType: {type: string}
+              routingRule: {type: string}
+              assignments: {type: integer}
+              terminalResults: {type: integer}
+              successes: {type: integer}
+              failures: {type: integer}
+              totalTokens: {type: number}
+              totalDurationMs: {type: number}
+              totalCostUsd: {type: number}
+              unpricedCostRows: {type: integer}
+              fallbackReasons:
+                type: array
+                items: {type: object, required: [reason, count], properties: {reason: {type: string}, count: {type: integer}}}
+        daily:
+          type: array
+          items:
+            type: object
+            required: [day, terminalResults, totalTokens, totalCostUsd]
+            properties:
+              day: {type: string}
+              terminalResults: {type: integer}
+              totalTokens: {type: number}
+              totalCostUsd: {type: number}
+              unpricedCostRows: {type: integer}
+        stepUps:
+          type: object
+          required: [total, byStep, byTargetModel]
+          properties:
+            total: {type: integer}
+            byStep:
+              type: array
+              items: {type: object, required: [step, count], properties: {step: {type: string, enum: [implement.step_up, fix.step_up]}, count: {type: integer}}}
+            byTargetModel:
+              type: array
+              items: {type: object, required: [model, count], properties: {model: {type: string}, count: {type: integer}}}
+        preferenceOutcomes:
+          type: array
+          items:
+            type: object
+            required: [preferredProvider, selectedProvider, selectedModel, outcome, count]
+            properties:
+              preferredProvider: {type: string}
+              selectedProvider: {type: string}
+              selectedModel: {type: string}
+              outcome: {type: string, enum: [kept, bypassed]}
+              reason: {type: string}
+              count: {type: integer}
+
+    AnalyticsStoredUsage:
+      type: object
+      required: [version, asOf, coverage, subscriptions, cash, routing]
+      properties:
+        version: {type: string, enum: [usage-v1, usage-v2]}
+        asOf: {type: [string, "null"]}
+        coverage:
+          type: object
+          required: [from, to, note]
+          properties:
+            from: {type: [string, "null"]}
+            to: {type: [string, "null"]}
+            note: {type: string}
+        subscriptions:
+          type: array
+          items:
+            type: object
+            required: [provider, state, windows]
+            properties:
+              provider: {type: string}
+              state: {type: string, enum: [observed, stale, not-collected]}
+              windows: {type: array, items: {$ref: "#/components/schemas/AnalyticsStoredUsageWindow"}}
+        cash:
+          type: object
+          required: [unit, state, coverage, windows, byModel24h, series]
+          properties:
+            unit: {type: string, enum: [usd]}
+            state: {type: string, enum: [observed, not-collected]}
+            coverage: {type: string}
+            windows:
+              type: array
+              items:
+                type: object
+                required: [name, usd, rows, complete]
+                properties:
+                  name: {type: string, enum: [1h, 24h, today-utc, 7d, 30d]}
+                  usd: {type: number}
+                  rows: {type: integer}
+                  unpricedRows: {type: integer}
+                  complete: {type: boolean}
+                  reason: {type: string}
+            byModel24h:
+              type: array
+              items: {type: object, required: [model, usd, unpricedRows], properties: {model: {type: string}, usd: {type: number}, unpricedRows: {type: integer}}}
+            series:
+              type: array
+              items: {type: object, required: [hour, usd, rows, unpricedRows], properties: {hour: {type: string}, usd: {type: number}, rows: {type: integer}, unpricedRows: {type: integer}}}
+        routing:
+          type: object
+          required: [state, assignmentsObserved, decisionsObserved, recent, aggregates, experiments]
+          properties:
+            state: {type: string, enum: [observed, not-collected]}
+            assignmentsObserved: {type: integer}
+            decisionsObserved: {type: integer}
+            recent: {type: array, items: {$ref: "#/components/schemas/AnalyticsStoredUsageAssignment"}}
+            aggregates:
+              type: object
+              required: [last24h, last7d]
+              properties:
+                last24h: {$ref: "#/components/schemas/AnalyticsStoredUsageAggregate"}
+                last7d: {$ref: "#/components/schemas/AnalyticsStoredUsageAggregate"}
+            experiments: {type: array, items: {$ref: "#/components/schemas/AnalyticsStoredUsageExperiment"}}
+
+    AnalyticsStoredUsageWindow:
+      type: object
+      required: [name, kind, durationMs, usedPercent, remainingPercent, limitPercent, resetsAt, asOf, source, state, burn, projectedExhaustionAt, exhaustsBeforeReset, series]
+      properties:
+        name: {type: string}
+        kind: {type: string, enum: [5h, weekly, other]}
+        durationMs: {type: [number, "null"]}
+        usedPercent: {type: number}
+        remainingPercent: {type: number}
+        limitPercent: {type: [number, "null"]}
+        resetsAt: {type: [string, "null"]}
+        asOf: {type: string}
+        source: {type: string, enum: [ledger, live-status]}
+        state: {type: string, enum: [observed, stale]}
+        burn:
+          type: object
+          required: [lastHourPercent, last24hPercent, ratePercentPerHour]
+          properties:
+            lastHourPercent: {type: [number, "null"]}
+            last24hPercent: {type: [number, "null"]}
+            ratePercentPerHour: {type: [number, "null"]}
+        projectedExhaustionAt: {type: [string, "null"]}
+        exhaustsBeforeReset: {type: [boolean, "null"]}
+        series:
+          type: array
+          items: {type: object, required: [hour, usedPercent, maxUsedPercent, samples], properties: {hour: {type: string}, usedPercent: {type: number}, maxUsedPercent: {type: number}, samples: {type: integer}}}
+
+    AnalyticsStoredUsageAssignment:
+      type: object
+      required: [id, ts, runId, taskId, lane, requested, selected, rule, ruleSource, capability, considered, headroomPercent, reservePercent, cashWhileSubscriptionHadRoom, assignmentsInRun, markers]
+      properties:
+        id: {type: string}
+        ts: {type: string}
+        runId: {type: [string, "null"]}
+        taskId: {type: [string, "null"]}
+        lane: {type: [string, "null"]}
+        requested: {type: object, required: [model, effort], properties: {model: {type: string}, effort: {type: string}}}
+        selected: {type: object, required: [provider, model, effort], properties: {provider: {type: string}, model: {type: string}, effort: {type: string}}}
+        rule: {type: string}
+        ruleSource: {type: string, enum: [decision, legacy-mode]}
+        capability: {type: [string, "null"]}
+        considered:
+          type: array
+          items: {type: object, required: [provider, eligible, selected], properties: {provider: {type: string}, model: {type: string}, eligible: {type: boolean}, selected: {type: boolean}, reason: {type: string}}}
+        headroomPercent: {type: object, additionalProperties: {type: [number, "null"]}}
+        reservePercent: {type: [number, "null"]}
+        cashWhileSubscriptionHadRoom: {type: boolean}
+        assignmentsInRun: {type: integer}
+        markers: {type: object, additionalProperties: {type: string}}
+
+    AnalyticsStoredUsageAggregate:
+      type: object
+      required: [windowHours, total, cashWhileSubscriptionHadRoom, byModel, byTier, byRule, byProvider, rows]
+      properties:
+        windowHours: {type: number}
+        total: {type: integer}
+        cashWhileSubscriptionHadRoom: {type: integer}
+        byModel:
+          type: array
+          items: {type: object, required: [provider, model, count, sharePercent], properties: {provider: {type: string}, model: {type: string}, count: {type: integer}, sharePercent: {type: number}}}
+        byTier:
+          type: array
+          items: {type: object, required: [tier, count, sharePercent], properties: {tier: {type: string}, count: {type: integer}, sharePercent: {type: number}}}
+        byRule:
+          type: array
+          items: {type: object, required: [rule, count, sharePercent], properties: {rule: {type: string}, count: {type: integer}, sharePercent: {type: number}}}
+        byProvider:
+          type: array
+          items: {type: object, required: [provider, count, sharePercent], properties: {provider: {type: string}, count: {type: integer}, sharePercent: {type: number}}}
+        rows:
+          type: array
+          items: {type: object, required: [provider, model, tier, rule, count], properties: {provider: {type: string}, model: {type: string}, tier: {type: string}, rule: {type: string}, count: {type: integer}}}
+
+    AnalyticsStoredUsageExperiment:
+      type: object
+      required: [marker, value, provider, model, runs, assignments, terminals, successes, successRatePercent, meanAssignmentsPerRun, meanDurationMs, costUsd, unpricedTerminals, meanCostPerTerminalUsd]
+      properties:
+        trialId: {type: string}
+        trialArm: {type: string}
+        reason: {type: string}
+        reasonFull: {type: string}
+        reasonState: {type: string, enum: [observed, not-collected, too-large]}
+        reasonAsOf: {type: string}
+        marker: {type: string}
+        value: {type: string}
+        provider: {type: string}
+        model: {type: string}
+        runs: {type: integer}
+        assignments: {type: integer}
+        terminals: {type: integer}
+        successes: {type: integer}
+        successRatePercent: {type: [number, "null"]}
+        meanAssignmentsPerRun: {type: number}
+        meanDurationMs: {type: [number, "null"]}
+        costUsd: {type: number}
+        unpricedTerminals: {type: integer}
+        meanCostPerTerminalUsd: {type: [number, "null"]}
 
     ReadModelStatusView:
       type: object
