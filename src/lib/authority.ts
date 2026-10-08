@@ -398,6 +398,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "NOT wrapped by live-write-guard.ts's assertLiveWriteAllowed — the table names this gap rather than closing it " +
       "(design note v: no gate moves in this task). postReviewStatusGuarded is the only call path run-task.ts uses (its own doc).",
   },
+  // ── src/lib/ci-escalation-judge.ts ───────────────────────────────────────────────────────
+  {
+    id: "post-ci-judge-status",
+    action: "POST the always-success `remudero/ci-judge` commit status carrying suites a judge ADDS to a PR's CI selection",
+    module: "src/lib/ci-escalation-judge.ts",
+    symbol: "judgeCiEscalation -> productionCiJudgePorts(...).post",
+    boundary: "gh-status-post",
+    gate: "sweep-rung",
+    ledgerSteps: ["ci_judge.judged"],
+    verb: "rmd daemon (after each sweep)",
+    note:
+      "W1-T4407: off while state/CI_JUDGE_OFF exists; one post per PR head. Its state is always success, so it never " +
+      "gates a merge, and its content can only widen what CI runs. NOT wrapped by assertLiveWriteAllowed.",
+  },
   {
     id: "post-review-pr-comment",
     action: "submit a PR review with review evidence",
