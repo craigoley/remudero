@@ -1,5 +1,5 @@
 /**
- * THREE CENSUSES, ASKED BEFORE THE PUSH, WITH NO TEST RUNNER.
+ * CENSUS COUNTS AND SUITES, ASKED BEFORE THE PUSH.
  *
  * A census walks a whole population and names none of a caller's symbols, so the `git grep
  * <symbol>` sweep an author runs cannot find one this diff breaks. MEASURED in one session
@@ -17,9 +17,10 @@
  * W1-T5617 PARTLY REVERSES W1-T3225 for the census-admitted suites: `CENSUS_ADMITTED_MEMBERS`
  * (src/lib/ci-parity.ts) names suites measured under the fast-gate census bound, and only `rmd
  * preflight` ran them, which no worker has run since W1-T464. A diff joining one's `walks` population
- * now RUNS those suites, once, in one `node --test` child with every GIT_* variable stripped (the
+ * now RUNS those suites in a `node --test` child with every GIT_* variable stripped (the
  * W1-T3224 mechanism behind the damage W1-T3225 recorded), bounded, and read from its TAP. They run
- * on this tree only, so unlike the counts below a suite main already fails refuses here too.
+ * on head; failing suites run again in a detached merge-base worktree borrowing node_modules.
+ * Only head-red/base-green refuses; an unrunnable base is not measured (W1-T5663).
  *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
  * base with `--base`, and a finding blocks only when the base did not already carry it (or this
@@ -29,7 +30,8 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -751,10 +753,40 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
   };
 }
 
-function gitOut(root, args) {
-  const res = git(args, { cwd: root });
+function gitOut(root, args, options = {}) {
+  const res = git(args, { cwd: root, ...options });
   if (res.status !== 0) throw new Error(`git ${args[0]}: ${(res.stderr || "no diagnostic").trim()}`);
   return res.stdout;
+}
+
+function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
+  const failing = [...new Set(runSuites({ root, files }))];
+  if (failing.length === 0) return [];
+  const temporary = mkdtempSync(join(tmpdir(), "rmd-census-base-"));
+  const baseRoot = join(temporary, "tree");
+  // Hook GIT_* variables must not redirect worktree administration to the pushing checkout.
+  const options = { env: Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])) };
+  let added = false;
+  try {
+    gitOut(root, ["worktree", "add", "--detach", baseRoot, mergeBase], options);
+    added = true;
+    if (!existsSync(join(baseRoot, "node_modules"))) {
+      symlinkSync(join(existsSync(join(root, "node_modules")) ? root : SCRIPT_REPO, "node_modules"), join(baseRoot, "node_modules"), "dir");
+    }
+    for (const file of failing) {
+      if (!existsSync(join(baseRoot, file))) throw new Error(`merge-base suite ${file} is absent`);
+    }
+    const baseFailing = new Set(runSuites({ root: baseRoot, files: failing }));
+    return failing.filter((file) => !baseFailing.has(file));
+  } catch (e) {
+    throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
+  } finally {
+    try {
+      if (added) gitOut(root, ["worktree", "remove", "--force", baseRoot], options);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }
 }
 
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
@@ -801,7 +833,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       changed,
       ...readers,
       loadMembers: () => admitted(root),
-      runSuites: (files) => runSuites({ root, files }),
+      runSuites: (files) => runCausedCensusSuites({ root, files, mergeBase, runSuites }),
     });
     violations.push(...suites.violations);
     if (suites.unmeasured !== null) unmeasured.push(`census suites NOT MEASURED - ${suites.unmeasured}`);
