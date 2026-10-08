@@ -3562,13 +3562,10 @@ export async function measurementCadenceChildMain(
   }
 }
 
-/** W1-T6495: the env var that carries the daemon's resolved `Config` (JSON) to the child. An env var, not argv:
- *  the config can hold a relay token and argv is world-readable through `ps`. */
+/** W1-T6495: carries the daemon's `Config` (JSON) to the child; env not argv, as it can hold a relay token. */
 export const MEASUREMENT_CADENCE_CHILD_CONFIG_ENV = "RMD_MEASUREMENT_CADENCE_CHILD_CONFIG";
 
-/** The config the daemon named for this child, or `undefined` when none was named (a hand-run child, which
- *  resolves its own). A named config that does not parse or validate THROWS: the child must never fall back to
- *  `$HOME`'s config and measure a different root than the daemon that spawned it. */
+/** The config the daemon named, or `undefined` if none. A named config that is unreadable THROWS: no $HOME fallback. */
 export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Config | undefined {
   const raw = env[MEASUREMENT_CADENCE_CHILD_CONFIG_ENV];
   if (raw === undefined || raw === "") return undefined;
@@ -3587,8 +3584,7 @@ export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Conf
   }
 }
 
-/** The child's cadence run: build the hooks over the daemon's named config (resolved inside the run, so a bad
- *  named config lands as a `failed` state row rather than an uncaught throw before any row is written). */
+/** Resolved inside the run so a bad named config lands as a `failed` state row. */
 export function measurementCadenceChildRun(
   env: NodeJS.ProcessEnv,
   build: (config: Config | undefined) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
@@ -3604,7 +3600,6 @@ export function childMeasurementCadenceSpawn(opts: {
   execArgv?: readonly string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
-  /** W1-T6495: the daemon's resolved config, handed to the child so it measures the same root. */
   config?: Config;
   heapLimitMb?: number;
   spawnChild?: typeof spawn;
