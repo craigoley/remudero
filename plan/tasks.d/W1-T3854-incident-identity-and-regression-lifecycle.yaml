@@ -12,7 +12,7 @@
   origin: "research:issue-triage-and-regression-2026-09-20"
   plan_refs: ["W1-T2558", "W1-T3179", "W1-T3852", "§7B"]
   files: [src/lib/panel-graph.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED in the current plan: local dedup arms already exist for cost anomalies, escalations,

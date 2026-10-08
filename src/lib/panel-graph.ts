@@ -1298,6 +1298,239 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
   };
 }
 
+// ── Product-level incident identity and lifecycle (W1-T3854) ───────────────
+//
+// A follow-up to the activity projection above, not a second feed and not a replacement for the
+// transport-specific dedup arms (cost anomalies, escalations, reviews, proposals) nor for the SRE
+// lane's own filing/fix state machine in incident-lifecycle.ts. It answers one question: which
+// observations are the SAME failure, so the operator reads one card while the ledger keeps every
+// row. Grouping only ever hides duplicate CARDS: every observation stays on its group.
+
+export const INCIDENT_IDENTITY_VERSION = "incident-identity-v1" as const;
+
+export type IncidentLifecycleState = "new" | "active" | "resolved" | "regressed" | "snoozed" | "unmeasurable";
+
+/** The named causal discriminator: the field that says WHY two failures are one. Exactly one value groups. */
+export type IncidentDiscriminator = { name: string; values: ReadonlyArray<string> };
+
+export type IncidentObservation = {
+  /** The evidence row's own id — never rewritten or dropped. */
+  id: string;
+  observedAt: string;
+  instance?: string;
+  repository?: string;
+  failureClass?: string;
+  /** Task or operation scope. */
+  scope?: string;
+  /** Source revision/release the observation was made at. Carried, but NOT part of the key (see below). */
+  release?: string;
+  discriminator?: IncidentDiscriminator;
+  /** Display only: a title is never an identity input. */
+  title?: string;
+};
+
+export type IncidentUngroupableReason =
+  | "discriminator-unavailable"
+  | "discriminator-ambiguous"
+  | "failure-class-unavailable"
+  | "scope-unavailable"
+  | "observed-at-unavailable";
+
+export type IncidentIdentity =
+  | {
+      version: typeof INCIDENT_IDENTITY_VERSION;
+      grouped: true;
+      key: string;
+      parts: { instance: string; failureClass: string; scope: string; discriminator: { name: string; value: string } };
+    }
+  | { version: typeof INCIDENT_IDENTITY_VERSION; grouped: false; key: string; reason: IncidentUngroupableReason };
+
+function incidentField(value: unknown, max = 200): string | undefined {
+  return boundedActivityText(value, max);
+}
+
+/**
+ * The identity of one observation. Derived only from bounded semantic fields — instance/repository,
+ * failure class, scope and the named causal discriminator — never from a title. A missing or ambiguous
+ * input yields an UNGROUPABLE identity keyed on the observation's own id, so it stays a card of its own.
+ *
+ * Release is deliberately not a key part: a resolved incident must be able to regress in a NEWER release,
+ * which a release-keyed identity would instead open as an unrelated incident. It rides on the
+ * observation and on the resolution, where regression reads it.
+ */
+export function incidentIdentity(observation: IncidentObservation): IncidentIdentity {
+  const own = `ungroupable:${observation.id}`;
+  const ungroupable = (reason: IncidentUngroupableReason): IncidentIdentity => ({ version: INCIDENT_IDENTITY_VERSION, grouped: false, key: own, reason });
+  if (activityTimestamp(observation.observedAt) === undefined) return ungroupable("observed-at-unavailable");
+  const failureClass = incidentField(observation.failureClass);
+  if (!failureClass) return ungroupable("failure-class-unavailable");
+  const scope = incidentField(observation.scope, 160);
+  if (!scope) return ungroupable("scope-unavailable");
+  const name = incidentField(observation.discriminator?.name, 80);
+  const values = (observation.discriminator?.values ?? []).map((v) => incidentField(v, 200)).filter((v): v is string => v !== undefined);
+  if (!name || values.length === 0) return ungroupable("discriminator-unavailable");
+  if (new Set(values).size > 1) return ungroupable("discriminator-ambiguous");
+  const instance = incidentField(observation.instance) ?? incidentField(observation.repository) ?? "local";
+  const parts = { instance, failureClass, scope, discriminator: { name, value: values[0]! } };
+  const digest = createHash("sha256").update(JSON.stringify([INCIDENT_IDENTITY_VERSION, instance, failureClass, scope, name, values[0]])).digest("hex").slice(0, 16);
+  return { version: INCIDENT_IDENTITY_VERSION, grouped: true, key: `incident:v1:${digest}`, parts };
+}
+
+/** A ledger row as an incident observation: only a failing row that NAMES its class and cause is groupable. */
+export function incidentObservationFromLedgerRow(row: Record<string, unknown>, index: number): IncidentObservation | undefined {
+  const failureClass = incidentField(row.failure_class);
+  const observedAt = activityTimestamp(row.ts);
+  if (!failureClass || !observedAt) return undefined;
+  const cause = incidentField(row.cause_key);
+  const repository = activityRepository(row);
+  const release = incidentField(row.release) ?? incidentField(row.head_sha);
+  const scope = activityTaskId(row);
+  const step = incidentField(row.step, 120);
+  return {
+    id: incidentField(row.id, 160) ?? incidentField(row.event_id, 160) ?? `ledger:${index}:${step ?? "event"}:${observedAt}`,
+    observedAt,
+    failureClass,
+    ...(repository ? { repository } : {}),
+    ...(scope ? { scope } : {}),
+    ...(release ? { release } : {}),
+    ...(cause ? { discriminator: { name: "cause_key", values: [cause] } } : {}),
+    ...(step ? { title: step } : {}),
+  };
+}
+
+export type IncidentGroup = {
+  identity: IncidentIdentity;
+  key: string;
+  /** EVERY observation of this group, oldest first — grouping never deletes or rewrites evidence. */
+  observations: ReadonlyArray<IncidentObservation>;
+  count: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+};
+
+/**
+ * Collapse observations into one group per identity. Ungroupable observations each stay a group of one.
+ * Total: the groups' observations are exactly the input, so no card count can lose an evidence row.
+ */
+export function groupIncidentObservations(observations: ReadonlyArray<IncidentObservation>): IncidentGroup[] {
+  const byKey = new Map<string, { identity: IncidentIdentity; rows: IncidentObservation[] }>();
+  observations.forEach((observation, index) => {
+    const identity = incidentIdentity(observation);
+    // An ungroupable id may repeat across rows; the position keeps those cards separate too.
+    const key = identity.grouped ? identity.key : `${identity.key}#${index}`;
+    const entry = byKey.get(key);
+    if (entry) entry.rows.push(observation);
+    else byKey.set(key, { identity, rows: [observation] });
+  });
+  return [...byKey.entries()].map(([key, { identity, rows }]) => {
+    const sorted = rows.slice().sort((a, b) => (Date.parse(a.observedAt) || 0) - (Date.parse(b.observedAt) || 0));
+    return {
+      identity,
+      key,
+      observations: sorted,
+      count: sorted.length,
+      firstObservedAt: sorted[0]!.observedAt,
+      lastObservedAt: sorted[sorted.length - 1]!.observedAt,
+    };
+  });
+}
+
+/** What shipped the fix: a resolution that cites nothing is not honoured. */
+export type IncidentResolutionRef = { kind: "commit" | "pr" | "receipt"; ref: string };
+
+export type IncidentResolution = {
+  cites?: IncidentResolutionRef;
+  resolvedAt: string;
+  release?: string;
+  /** Observations the resolver already saw: replaying one of these never reopens the incident. */
+  coveredObservationIds?: ReadonlyArray<string>;
+};
+
+/** At least one trigger is required; a snooze with none is rejected rather than lasting forever. */
+export type IncidentSnooze = {
+  snoozedAt: string;
+  /** Time trigger: visible again once `now` reaches this instant. */
+  until?: string;
+  /** Free-text condition; the caller's evaluator reports it in `conditionMet`. */
+  condition?: string;
+  conditionMet?: boolean;
+  /** New-activity trigger: an observation newer than `snoozedAt` makes it visible again. */
+  reopenOnNewActivity?: boolean;
+};
+
+export type IncidentLifecycleRecord = {
+  key: string;
+  acknowledgedAt?: string;
+  resolution?: IncidentResolution;
+  snooze?: IncidentSnooze;
+};
+
+export type IncidentProjection = {
+  version: typeof INCIDENT_IDENTITY_VERSION;
+  key: string;
+  state: IncidentLifecycleState;
+  reason: string;
+  /** False only while a valid snooze is holding the card back; the record is preserved either way. */
+  visible: boolean;
+  group: IncidentGroup;
+  /** The observation that reopened a resolved incident, when it regressed. */
+  regressedBy?: string;
+  regressedInRelease?: string;
+};
+
+function incidentMs(value: string | undefined): number | undefined {
+  const iso = activityTimestamp(value);
+  return iso === undefined ? undefined : Date.parse(iso);
+}
+
+/** Project one group's lifecycle state from its observations and the operator's record. Pure; reads `now` once. */
+export function projectIncidentLifecycle(group: IncidentGroup, record: IncidentLifecycleRecord | undefined, now: number): IncidentProjection {
+  const base = (state: IncidentLifecycleState, reason: string, extra: Partial<IncidentProjection> = {}): IncidentProjection =>
+    ({ version: INCIDENT_IDENTITY_VERSION, key: group.key, state, reason, visible: state !== "snoozed", group, ...extra });
+  if (!group.identity.grouped) return base("unmeasurable", `ungroupable: ${group.identity.reason}`);
+  const own = record && record.key === group.key ? record : undefined;
+  const resolution = own?.resolution;
+  if (resolution) {
+    const resolvedMs = incidentMs(resolution.resolvedAt);
+    if (!resolution.cites || !incidentField(resolution.cites.ref)) return base("unmeasurable", "resolution-uncited");
+    if (resolvedMs === undefined) return base("unmeasurable", "resolution-time-unavailable");
+    const covered = new Set(resolution.coveredObservationIds ?? []);
+    const newer = group.observations.find((o) => !covered.has(o.id) && (incidentMs(o.observedAt) ?? -Infinity) > resolvedMs);
+    if (newer) return base("regressed", "newer-event-than-resolution", { regressedBy: newer.id, ...(newer.release ? { regressedInRelease: newer.release } : {}) });
+    return base("resolved", `resolved-by-${resolution.cites.kind}:${resolution.cites.ref}`);
+  }
+  const snooze = own?.snooze;
+  const snoozeMs = incidentMs(snooze?.snoozedAt);
+  const untilMs = incidentMs(snooze?.until);
+  const hasTrigger = snooze !== undefined && (untilMs !== undefined || incidentField(snooze.condition) !== undefined || snooze.reopenOnNewActivity === true);
+  const open = own?.acknowledgedAt !== undefined ? base("active", "acknowledged") : base("new", "no-lifecycle-record");
+  if (snooze === undefined) return open;
+  if (!hasTrigger || snoozeMs === undefined) return { ...open, reason: `${open.reason}; snooze-rejected: ${hasTrigger ? "snoozed-at-unavailable" : "no-trigger"}` };
+  if (untilMs !== undefined && now >= untilMs) return base("active", "snooze-expired");
+  if (snooze.conditionMet === true) return base("active", "snooze-condition-met");
+  if (snooze.reopenOnNewActivity === true && group.observations.some((o) => (incidentMs(o.observedAt) ?? -Infinity) > snoozeMs)) {
+    return base("active", "snooze-new-activity");
+  }
+  return base("snoozed", "snooze-trigger-pending");
+}
+
+/** Ledger rows -> grouped, lifecycle-projected incidents, newest activity first. Ungroupable rows stay visible. */
+export function projectOperatorActivityIncidents(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  records: ReadonlyArray<IncidentLifecycleRecord>,
+  now: number,
+): IncidentProjection[] {
+  const observations: IncidentObservation[] = [];
+  ledgerLines.forEach((row, index) => {
+    const observation = incidentObservationFromLedgerRow(row, index);
+    if (observation) observations.push(observation);
+  });
+  const byKey = new Map(records.map((r) => [r.key, r] as const));
+  return groupIncidentObservations(observations)
+    .map((group) => projectIncidentLifecycle(group, byKey.get(group.key), now))
+    .sort((a, b) => (Date.parse(b.group.lastObservedAt) || 0) - (Date.parse(a.group.lastObservedAt) || 0));
+}
+
 // ── Per-section filed/merged counts (W1-T376) ──────────────────────────────────────────────
 //
 // plan_refs is polymorphic — a ref is one of five kinds; only the section-shaped ones resolve

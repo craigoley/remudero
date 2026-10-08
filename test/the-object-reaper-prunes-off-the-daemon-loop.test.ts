@@ -16,14 +16,13 @@ import { deflateSync } from "node:zlib";
 // Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
 import * as reaperLib from "../src/lib/object-reaper.js";
-import * as runTaskMod from "../src/run-task.js";
+import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const { LOOSE_OBJECT_FLOOR, OBJECT_PRUNE_EXPIRY, reapGitObjects } = reaperLib;
 const reapGitObjectsAsync: typeof reaperLib.reapGitObjectsAsync = (...a) => reaperLib.reapGitObjectsAsync(...a);
-const logDiskReclaimRung = (...a: Parameters<typeof runTaskMod.logDiskReclaimRung>) => runTaskMod.logDiskReclaimRung(...a);
 
 const scratch = (label: string) => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${label}-`));
 
@@ -102,38 +101,29 @@ test("the awaited object prune keeps a timer firing while its git prune is pendi
   assert.ok(ticks >= 10, `the loop must keep servicing timers while the prune runs (ticked ${ticks})`);
 });
 
-test("a prune past its bound is killed and the decision row names the timeout", async () => {
-  const store = gitRepo({ kind: "reaper-bound" });
+test("a maintenance child past its bound is killed and its ledger row names the timeout", async () => {
+  const store = gitRepo({ kind: "maintenance-bound" });
   const rows: Array<[string, Record<string, unknown>]> = [];
+  const statePath = join(store.dir, "maintenance.json");
   const started = Date.now();
   await withGitScript(
-    () => "exec sleep 30",
-    () => logDiskReclaimRung({ root: scratch("reaper-bound-root") } as never, (s, f) => rows.push([s, f]), {
-      sweepTempDirs: () => ({ removed: [] }) as never,
-      reapClonesSurvey: () => ({ reaped: [], bytesReclaimed: 0 }) as never,
-      sweepWorkerHomes: () => ({ removed: [] }) as never,
-      workerHomeRoot: () => "/nowhere",
-      objectPolicy: () => ({ enabled: true }),
-      ratifications: new Map(),
-      objectRepoDir: () => store.dir,
-      objectInflightDir: () => scratch("reaper-bound-inflight"),
-      objectOpenFileCount: () => 0,
-      // The REAL awaited reap and its REAL bounded prune; only the probes and the bound are pinned.
-      reapObjects: (dir, inflight, d) => reapGitObjectsAsync(dir, inflight, {
-        ...d,
-        listWorktrees: () => [],
-        looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1,
-        listProcesses: () => [],
-        pruneTimeoutMs: 300,
+    (realGit) => `if [ "$3" = "maintenance" ]; then exec sleep 30; fi\nexec '${realGit}' "$@"`,
+    () => reaperLib.runRepositoryMaintenance(store.dir, statePath,
+      { ...loadDefaultPolicy().values.objectReap, timeoutMs: 300 }, (s, f) => rows.push([s, f]), {
+        context: () => ({ activeLanes: 0, disk: "healthy" }), random: () => 0,
       }),
-    }),
   );
-  assertWallClockBound(Date.now() - started, 15_000, "the hung prune is killed at its bound, not waited out");
-  const decision = rows.find(([s]) => s === "run.disk_reclaim.objects_decision")?.[1];
-  assert.ok(decision, `the armed pass writes its decision row (rows: ${JSON.stringify(rows.map(([s]) => s))})`);
-  assert.equal(decision.prune_outcome, "timed_out", "a killed prune is named, never read as a completed one");
-  assert.equal(decision.prune_timed_out_after_ms, 300);
-  assert.equal(decision.carried_by, "quiet");
+  assertWallClockBound(Date.now() - started, 15_000, "the hung maintenance child is killed at its bound");
+  const failure = rows.find(([s]) => s === "repository_maintenance.fail")?.[1];
+  assert.ok(failure, JSON.stringify(rows));
+  assert.equal(failure.outcome, "fail");
+  assert.equal(failure.kind, "incremental");
+  assert.match(String(failure.reason), /^timeout:/);
+  assert.equal(rows.some(([s]) => s === "repository_maintenance.complete"), false);
+  const state = reaperLib.readMaintenanceState(statePath);
+  assert.equal(state.failures, 1);
+  assert.equal(state.lastOutcome, "fail");
+  assert.ok(state.nextEligibleAt > Date.now(), "the timed-out child enters durable backoff");
 });
 
 test("the awaited and sync reaps answer identically on a real store with loose objects past the expiry", async () => {

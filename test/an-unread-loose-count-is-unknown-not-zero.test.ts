@@ -2,18 +2,19 @@
  * A success-shaped zero: the awaited `git count-objects` (src/lib/object-reaper.ts) read an
  * unreadable count as 0. After a prune, `pruned = looseBefore - 0` then credited the prune with
  * every object it was given — even one killed at its bound, whose row still said `timed_out`. An
- * unread count is now the named {@link UNKNOWN_COUNT}: the decision row carries it, and no pruned
- * figure is computed from it. Driven through the REAL default count, with `git` shadowed on PATH.
+ * unread count stays unknown in the retained reaper. The cadence controller defers an unreadable
+ * pre-survey and fails an unreadable post-survey without reporting a zero. Both default paths are
+ * driven with `git` shadowed on PATH.
  */
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 // Namespace imports: this file must LOAD on a base without the new symbols.
 import * as reaperLib from "../src/lib/object-reaper.js";
-import * as runTaskMod from "../src/run-task.js";
+import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -46,13 +47,6 @@ const countFailsAfterPrune = (marker: string) => (realGit: string) =>
     `exec ${realGit} "$@"`,
   ].join("\n");
 
-const noSweeps = {
-  sweepTempDirs: () => ({ removed: [] }) as never,
-  reapClonesSurvey: () => ({ reaped: [], bytesReclaimed: 0 }) as never,
-  sweepWorkerHomes: () => ({ removed: [] }) as never,
-  workerHomeRoot: () => "/nowhere",
-};
-
 const quiet = { openFileCount: () => 0, listWorktrees: () => [], listProcesses: () => [] };
 
 test("an unreadable count after the prune leaves pruned unknown, never looseBefore minus zero", async () => {
@@ -66,29 +60,35 @@ test("an unreadable count after the prune leaves pruned unknown, never looseBefo
   assert.equal(r.carriedBy, "quiet");
 });
 
-test("the decision row carries pruned unknown and the rung sums no figure from it", async () => {
+test("an unreadable post-maintenance count fails verification without inventing a reclaimed figure", async () => {
   const store = gitRepo({ kind: "count-row" });
   const marker = join(scratch("count-row-mark"), "pruned");
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = await withGitScript(countFailsAfterPrune(marker), () =>
-    runTaskMod.logDiskReclaimRung({ root: scratch("count-row-root") } as never, (s, f) => rows.push([s, f]), {
-      ...noSweeps,
-      objectPolicy: () => ({ enabled: true }),
-      ratifications: new Map(),
-      objectRepoDir: () => store.dir,
-      objectInflightDir: () => scratch("count-row-inflight"),
-      objectOpenFileCount: () => 0,
-      reapObjects: (dir, inflight, d) => reaperLib.reapGitObjectsAsync(dir, inflight, { ...d, listWorktrees: () => [], listProcesses: () => [] }),
-    }),
+  const statePath = join(store.dir, "maintenance.json");
+  await withGitScript((realGit) => [
+    'case "$3" in',
+    `maintenance) touch '${marker}'; exit 0 ;;`,
+    `count-objects) if [ -f '${marker}' ]; then echo 'count probe failed' >&2; exit 1; fi; echo 'count: 6000'; echo 'size: 12'; exit 0 ;;`,
+    'esac',
+    `exec '${realGit}' "$@"`,
+  ].join("\n"), () =>
+    reaperLib.runRepositoryMaintenance(store.dir, statePath, loadDefaultPolicy().values.objectReap,
+      (s, f) => rows.push([s, f]), { context: () => ({ activeLanes: 0, disk: "healthy" }) }),
   );
-  const decision = rows.find(([s]) => s === "run.disk_reclaim.objects_decision")?.[1];
-  assert.ok(decision, `the armed pass writes its decision row (rows: ${JSON.stringify(rows.map(([s]) => s))})`);
-  assert.equal(decision.pruned, "unknown");
-  assert.equal(decision.prune_outcome, "completed");
-  assert.equal(out.objectsPruned, 0, "an unknown yield adds nothing to the summed figure");
+  const failure = rows.find(([s]) => s === "repository_maintenance.fail")?.[1];
+  assert.ok(failure, JSON.stringify(rows));
+  assert.equal(failure.loose_before, 6000);
+  assert.equal(failure.loose_after, undefined, "an unread count is never presented as zero");
+  assert.equal(failure.bytes_after, undefined);
+  assert.match(String(failure.reason), /post-survey unreadable: count probe failed/);
+  assert.equal(rows.some(([s]) => s === "repository_maintenance.complete"), false);
+  const state = reaperLib.readMaintenanceState(statePath);
+  assert.equal(state.lastOutcome, "fail");
+  assert.equal(state.failures, 1);
+  assert.ok(state.nextEligibleAt > Date.now());
 });
 
-test("an unreadable count before the prune skips, named unknown, and the declined row carries it", async () => {
+test("an unreadable pre-maintenance count defers without treating the store as empty", async () => {
   const store = gitRepo({ kind: "count-before" });
   const direct = await withGitScript(
     (realGit) => `if [ "$3" = "count-objects" ]; then exit 1; fi\nexec ${realGit} "$@"`,
@@ -100,21 +100,23 @@ test("an unreadable count before the prune skips, named unknown, and the decline
   assert.doesNotMatch(String(direct.refusedBecause), /below the/, "an unread count is not reported as below the floor");
 
   const rows: Array<[string, Record<string, unknown>]> = [];
+  const statePath = join(store.dir, "maintenance.json");
+  const attempted = join(store.dir, "maintenance-attempted");
   await withGitScript(
-    (realGit) => `if [ "$3" = "count-objects" ]; then exit 1; fi\nexec ${realGit} "$@"`,
-    () =>
-      runTaskMod.logDiskReclaimRung({ root: scratch("count-before-root") } as never, (s, f) => rows.push([s, f]), {
-        ...noSweeps,
-        objectPolicy: () => ({ enabled: true }),
-        ratifications: new Map(),
-        objectRepoDir: () => store.dir,
-        objectInflightDir: () => scratch("count-before-rung-inflight"),
-        objectOpenFileCount: () => 0,
-      }),
+    (realGit) => `case "$3" in\ncount-objects) echo 'count unavailable' >&2; exit 1 ;;\nmaintenance) touch '${attempted}'; exit 0 ;;\nesac\nexec '${realGit}' "$@"`,
+    () => reaperLib.runRepositoryMaintenance(store.dir, statePath, loadDefaultPolicy().values.objectReap,
+      (s, f) => rows.push([s, f]), { context: () => ({ activeLanes: 0, disk: "healthy" }) }),
   );
-  const declined = rows.find(([s]) => s === "run.disk_reclaim.objects_declined")?.[1];
-  assert.ok(declined, `the skip is ledgered (rows: ${JSON.stringify(rows.map(([s]) => s))})`);
-  assert.equal(declined.loose_before, "unknown");
+  const deferred = rows.find(([s]) => s === "repository_maintenance.defer")?.[1];
+  assert.ok(deferred, JSON.stringify(rows));
+  assert.equal(deferred.loose_before, undefined);
+  assert.match(String(deferred.reason), /count unavailable/);
+  assert.equal(rows.some(([s]) => s === "repository_maintenance.start"), false);
+  assert.equal(existsSync(attempted), false, "the real maintenance child never ran");
+  const state = reaperLib.readMaintenanceState(statePath);
+  assert.equal(state.lastOutcome, "defer");
+  assert.equal(state.failures, 0);
+  assert.equal(state.nextEligibleAt, 0, "the due episode is retained");
 });
 
 test("the default count answers unknown, not 0, when git count-objects fails", async () => {

@@ -146,6 +146,38 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   try {
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
     if (process.versions.node !== pinnedNode) throw new Error(`Node ${pinnedNode} required; got ${process.versions.node}`);
+    // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
+    // A suite can enable it midway through validation and poison every sibling checkout.
+    // Admit the topology, never migrate an operator's shared Git configuration here.
+    receipt.gitTopology = { state: 'unknown', reads: [] };
+    const inside = git(['rev-parse', '--is-inside-work-tree']).trim();
+    if (inside !== 'true') {
+      if (inside === 'false') receipt.gitTopology.state = 'not-worktree';
+      throw new Error('a readable Git working tree is required before author selection or validation');
+    }
+    const commonValue = (key, boolean = false) => {
+      const result = run('git', ['config', '--local', ...(boolean ? ['--type=bool'] : []), '--get', key]);
+      receipt.gitTopology.reads.push({ key, status: result.status, signal: result.signal ?? null,
+        error: result.error?.message ?? null });
+      if (result.error || result.signal || ![0, 1].includes(result.status) ||
+          (result.status === 1 && result.stdout?.trim())) {
+        const reason = result.error?.message ?? (result.signal ? `signal ${result.signal}`
+          : result.stderr?.trim() || `exit ${result.status}`);
+        throw new Error(`shared Git ${key} is unreadable: ${reason}`);
+      }
+      if (result.status === 1) return undefined;
+      const value = result.stdout.trim();
+      if (boolean && !['true', 'false'].includes(value)) throw new Error(`shared Git ${key} is ambiguous`);
+      return value;
+    };
+    const bare = commonValue('core.bare', true), worktree = commonValue('core.worktree');
+    receipt.gitTopology.sharedCoreBare = bare ?? 'absent';
+    receipt.gitTopology.sharedCoreWorktree = worktree === undefined ? 'absent' : 'present';
+    if (bare === 'true' || worktree !== undefined) {
+      receipt.gitTopology.state = 'hazardous-common-config';
+      throw new Error('shared Git core.bare=true or core.worktree requires an owned, idle worktreeConfig migration before author validation; this gate does not change shared configuration');
+    }
+    receipt.gitTopology.state = 'safe';
     if (git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
       throw new Error('commit the author tree first; an uncommitted or untracked change is not covered by its HEAD receipt');
     }

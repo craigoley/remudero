@@ -1,0 +1,33 @@
+- id: W1-T6322
+  title: Grandfather the W1-T3688 proof-discrimination finding with a reviewed baseline row, citing W1-T3722 as the superseding task
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=0b4fc85f2c80fec5
+  attempts: 0
+  files:
+    - scripts/proof-discrimination-baseline.json
+  acceptance:
+    - claim: scripts/proof-discrimination-baseline.json gains exactly one grandfather row for W1-T3688. The row names src/lib/drain.ts, states that the credited behaviour already existed correctly on main before the task was filed, and cites W1-T3722 as the superseding task.
+      proof: "grep: W1-T3688 in scripts/proof-discrimination-baseline.json"
+    - claim: The proof-discrimination check passes for W1-T3688 through the reviewed baseline row. No source file is edited to satisfy it, and no other task's baseline row is added, removed or changed.
+      proof: "unit test: proof-discrimination accepts a task that has a reviewed baseline grandfather row"
+    - claim: The baseline row cannot be used as a blanket exemption. The check still fails a task that has no row, and a row whose task id does not match the task under check does not exempt it.
+      proof: "unit test: proof-discrimination still fails a task with no matching baseline row"
+  origin: followup:DAEMON-1789993989826:2026-09-21T13:07:59.084Z:0
+  rationale: >-
+    From the 2026-09-21 follow-up on https://github.com/craigoley/remudero/pull/6389, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: `proof-discrimination` cannot pass for W1-T3688 while scoped to
+    `src/lib/drain.ts` — the behaviour it credits already existed correctly on `main` before this
+    task was filed (confirmed independently by two separate rounds now). The real remedy is an
+    Architect-level call: either a reviewed grandfather row in
+    `scripts/proof-discrimination-baseline.json`, or resolving W1-T3688 as superseded by W1-T3722
+    (its own plan record already half-acknowledges this — see the prior `implement` round's
+    Follow-up on retiring/amending the shard). — from W1-T3688 (run DAEMON-1789993989826,
+    https://github.com/craigoley/remudero/pull/6389)

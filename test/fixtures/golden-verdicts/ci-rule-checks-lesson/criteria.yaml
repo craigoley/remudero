@@ -1,0 +1,2 @@
+- claim: the lane that trips the rule-checks gate is reached by a matched learnings entry rather than prose no dispatched worker reads
+  proof: "grep: ci-learning:9276:rule-checks in learnings/ci.yaml"
