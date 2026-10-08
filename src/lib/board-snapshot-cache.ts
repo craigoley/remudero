@@ -12,6 +12,83 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const OPEN_SNAPSHOT_SCHEMA = 1;
 export const OPEN_SNAPSHOT_RESAVE_MS = 60_000;
 
+/** CADENCE: successful board reads are rolled up every five minutes (W1-T4480). */
+export const BOARD_REFRESH_ROLLUP_MS = 5 * 60_000;
+type BoardLog = (event: string, extra?: Record<string, unknown>) => void;
+type BoardRefreshCounts = {
+  fetch_ok: Record<string, number>;
+  fetch: Record<string, { n: number; rest_calls: number; bytes: number; truncated: number }>;
+  snapshot_unchanged: Record<string, number>;
+};
+const emptyRefreshCounts = (): BoardRefreshCounts => ({ fetch_ok: {}, fetch: {}, snapshot_unchanged: {} });
+const pendingRefreshRollups = new Set<{ flush(): void }>();
+process.once("exit", () => { for (const rollup of pendingRefreshRollups) rollup.flush(); });
+const refreshRollups = new WeakMap<BoardLog, ReturnType<typeof createBoardRefreshRollup>>();
+
+/** Share one window across the gateways and snapshot caches writing to the same ledger. */
+export function boardRefreshRollup(log?: BoardLog): ReturnType<typeof createBoardRefreshRollup> | undefined {
+  if (!log) return undefined;
+  let rollup = refreshRollups.get(log);
+  if (!rollup) {
+    rollup = createBoardRefreshRollup(log);
+    refreshRollups.set(log, rollup);
+  }
+  return rollup;
+}
+
+function createBoardRefreshRollup(log: BoardLog) {
+  let counts = emptyRefreshCounts();
+  let start: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (): void => {
+    timer ??= setTimeout(() => {
+      timer = undefined;
+      flush();
+      if (start !== undefined) arm();
+    }, BOARD_REFRESH_ROLLUP_MS);
+    timer.unref();
+  };
+  const begin = (): void => {
+    start ??= Date.now();
+    pendingRefreshRollups.add(rollup);
+    arm();
+  };
+  const flush = (): void => {
+    if (start === undefined) return;
+    try {
+      log("board_gateway.rollup", { window_start: fixedClock(start).iso(), window_end: fixedClock(Date.now()).iso(), ...counts });
+    } catch (error) {
+      console.error(`board_gateway.rollup: flush failed, counts retained: ${String(error)}`);
+      return;
+    }
+    counts = emptyRefreshCounts();
+    start = undefined;
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    pendingRefreshRollups.delete(rollup);
+  };
+  const rollup = {
+    flush,
+    fetchOk(channel: string): void {
+      begin();
+      counts.fetch_ok[channel] = (counts.fetch_ok[channel] ?? 0) + 1;
+    },
+    fetch(half: string, mode: string, restCalls: number, bytes: number, truncated: boolean): void {
+      begin();
+      const row = counts.fetch[`${half}/${mode}`] ??= { n: 0, rest_calls: 0, bytes: 0, truncated: 0 };
+      row.n++;
+      row.rest_calls += restCalls;
+      row.bytes += bytes;
+      row.truncated += Number(truncated);
+    },
+    snapshotUnchanged(channel: string): void {
+      begin();
+      counts.snapshot_unchanged[channel] = (counts.snapshot_unchanged[channel] ?? 0) + 1;
+    },
+  };
+  return rollup;
+}
+
 const defaultIo: BoardSnapshotIo = {
   stat(path) {
     const st = fs.statSync(path);
@@ -217,6 +294,8 @@ export function readOpenBoardSnapshot(
 export function createBoardSnapshotCache(root: string, owner: string, repo: string, options: SnapshotOptions = {}): BoardSnapshotCache {
   const io = options.io ?? defaultIo;
   const emit = options.log ?? (() => {});
+  const rollup = boardRefreshRollup(options.log);
+  const unchangedWritten = new Set<string>();
   const repository = `${owner}/${repo}`;
   const path = boardSnapshotPath(root, owner, repo);
   const maxBytes = options.bounds?.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -232,6 +311,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     bytes: number,
     reason?: keyof SnapshotReasons,
   ): void => {
+    if (event === "board_snapshot.committed" || event.endsWith("_refused")) unchangedWritten.delete(channel);
     emit(event, {
       schema: SNAPSHOT_SCHEMA,
       repository,
@@ -365,7 +445,11 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
 
     if (channel === "closed" ? sameVersions(state.closed, rows as readonly BoardPrRest[]) : sameVersions(state.issues, rows as readonly BoardIssueRest[])) {
-      log("board_snapshot.unchanged", channel, rows.length, 0);
+      rollup?.snapshotUnchanged(channel);
+      if (!unchangedWritten.has(channel)) {
+        log("board_snapshot.unchanged", channel, rows.length, 0);
+        unchangedWritten.add(channel);
+      }
       return true;
     }
 
