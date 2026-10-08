@@ -1007,8 +1007,13 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
   // `present: false` is the whole point of this early return carrying metadata at all. The empty array itself
   // is unchanged, so no existing consumer moves.
   if (!ledgerFs.existsSync(path)) return withReadMeta(out, 0, false);
+  return parseLedgerContent(path, ledgerFs.readFileSync(path, "utf8"), onTorn);
+}
+
+function parseLedgerContent(path: string, content: string, onTorn?: (raw: string) => void): LedgerLines {
+  const out: Array<Record<string, unknown>> = [];
   let torn = 0;
-  for (const raw of ledgerFs.readFileSync(path, "utf8").split("\n")) {
+  for (const raw of content.split("\n")) {
     const l = raw.trim();
     if (!l) continue;
     try {
@@ -1020,6 +1025,33 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
     }
   }
   return withReadMeta(out, torn, true);
+}
+
+/** W1-T6358: one fd read a selection pass shares; absent is `identity: undefined`, other errors propagate. */
+export interface LedgerSnapshot {
+  identity: string | undefined;
+  content: string;
+  lines: LedgerLines;
+  index: LedgerIndex;
+}
+
+export function readLedgerSnapshot(path: string): LedgerSnapshot {
+  let fd: number;
+  try {
+    fd = fs.openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const lines = withReadMeta([], 0, false);
+    return { identity: undefined, content: "", lines, index: buildLedgerIndex(lines) };
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const content = fs.readFileSync(fd, "utf8");
+    const lines = parseLedgerContent(path, content);
+    return { identity: `${stat.dev}:${stat.ino}`, content, lines, index: buildLedgerIndex(lines) };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** The two ways a {@link readLedgerLines} call can be answered, and the only two a caller may declare. Neither
@@ -1900,14 +1932,15 @@ export function evaluateDispatchBreakerDetailed(
     maxDispatches?: number;
     ledgerFs?: LedgerFsDeps;
     openHeadBranches?: OpenHeadBranchesSource;
+    snapshot?: Pick<LedgerSnapshot, "lines" | "index">;
   } = {},
 ): DispatchBreakerDetail {
   const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — the dispatch breaker wants the newest rows only.
-  const lines = readLedgerLines(ledgerPath, ledgerFs);
+  const lines = opts.snapshot?.lines ?? readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
-  const index = buildLedgerIndex(lines);
+  const index = opts.snapshot?.index ?? buildLedgerIndex(lines);
   const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
@@ -2001,7 +2034,7 @@ export function evaluateDispatchBreakerCorroboratedDetailed(
   taskId: string,
   cache: DispatchBreakerCache,
   openHeadBranches: OpenHeadBranchesSource,
-  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps; snapshot?: Pick<LedgerSnapshot, "lines" | "index"> } = {},
 ): DispatchBreakerDetail {
   return evaluateDispatchBreakerDetailed(ledgerPath, taskId, cache, { ...opts, openHeadBranches });
 }

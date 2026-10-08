@@ -399,6 +399,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
+  envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_OPERATOR_IDENTITY_PATH", "Names the read-only mounted file holding serve's operator identity when config.json has none.", ["src/lib/operator-identity-file.ts"]),
   envEntry("RMD_OPERATOR_MCP_URL", "Selects the existing control-server origin used by the operator MCP bridge.", ["src/lib/operator-mcp.ts"]),
