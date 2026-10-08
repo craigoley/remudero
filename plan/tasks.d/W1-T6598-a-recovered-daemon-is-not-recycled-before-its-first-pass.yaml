@@ -1,0 +1,47 @@
+- id: W1-T6598
+  title: "A SUCCESSFUL STALL RECYCLE IS RECYCLED AGAIN BEFORE THE NEW DAEMON'S FIRST PASS — the progress verdict ages progress from the newest sweep.pass/review.posted/verdict.merged row across every generation, so a fresh boot inherits the dead generation's hours-old evidence and reads STALLED at once; and the launcher's 30-min recycle gap is stamped when an attempt STARTS, so a recycle that spent its 3000 s drain wait leaves no gap behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when the watchdog may recycle a generation that a recycle just started
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-08: the 21:17Z double recycle after the core daemon recovery"
+  plan_refs: [W1-T5688, W1-T5687, W1-T5651]
+  files: [src/lib/progress-watchdog.ts, deploy/install-host-units.sh, test/fixtures/azure-host-units/rmd-relaunch.sh, test/a-recovered-daemon-is-not-recycled-before-its-first-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 on the Azure host (the watchdog journal, the ledger, state/watchdog-recycle-at):
+    - 20:45:44Z: a STALLED tick stamped watchdog-recycle-at and started recycle-container.sh. Its drain wait ran about 31
+      min; at 21:16:17Z an operator-approved SIGTERM let it finish, and it recycled successfully at about 21:16:59Z
+      (daemon 4bdd4131bfaa, daemon.boot 21:17:10Z).
+    - 21:17:08Z, 9 s later: the next tick read STALLED again (newest progress row 18:26:11Z, from the dead generation), and
+      the gap had expired (31.4 min since the start stamp, WATCHDOG_RECYCLE_GAP_S 1800). It recycled the 30-s-old daemon,
+      which had not finished its first pass, into b8d6635a1b8e. 4bdd had started a worktree.add that was cut off and left
+      an orphan worktree. No in-flight worker was lost this time; nothing in the design prevented it.
+    - b8d6 wrote its first sweep.pass about 94 s after daemon.boot, ahead of the next tick, so the loop ended. The two
+      earlier boots took 136 s and 2,395 s, so a slow first pass would have been recycled again every tick.
+  design: |
+    REUSE THE EXISTING VERDICT AND LAUNCHER; NO SECOND WATCHDOG.
+    (1) Generation-aware stall evidence: progress-watchdog already reads daemon.boot rows (for CRASH_LOOP). A daemon.boot
+    newer than the newest progress row starts a generation, and that generation's stall age is measured from its own boot (generationBootMs),
+    not from the previous generation's last progress row.
+    (2) Bounded startup allowance: a booted generation with no progress row is STALLED once its own age passes the existing
+    STALL_RECYCLE_AFTER_MS. The allowance is that existing bound, never open-ended; a generation that never makes progress
+    is recycled. CRASH_LOOP (boots without daemon.boot) is unchanged and still wins.
+    (3) Cooldown that cannot expire inside the attempt: the launcher keeps its stamp before the attempt (no retry in the
+    same tick) and stamps watchdog-recycle-at again when the attempt ENDS, ok or refused. So WATCHDOG_RECYCLE_GAP_S runs
+    from the attempt's end, and a 3000 s drain wait cannot consume it.
+  acceptance:
+    - claim: "replaying the observed sequence: an attempt stamped at T that ends ok at T+31 min, then a daemon.boot, then a tick 9 s later with the newest progress row hours old, does NOT recycle; the same new generation with no progress row past STALL_RECYCLE_AFTER_MS after its own boot DOES read STALLED/recycle; a crash-looping generation still reads CRASH_LOOP; and an attempt's end stamp holds the next recycle for WATCHDOG_RECYCLE_GAP_S after the attempt ends, ok or refused"
+      proof: "unit test: test/a-recovered-daemon-is-not-recycled-before-its-first-pass.test.ts"
+    - claim: "the verdict ages a generation from its own boot"
+      proof: "grep: generationBootMs in src/lib/progress-watchdog.ts"
+  falsifier: |
+    Age progress across generations again: the 9 s tick recycles and the first assertion fails. Make the allowance unbounded
+    (no recycle without a progress row): the stalled-new-generation assertion fails. Stamp only at the start: the
+    end-stamp gap assertion fails.
