@@ -87,6 +87,7 @@
         "lease-is-not-a-supersession-guard",
         "light-gates-pre-push-ratchets",
         "lint-plan-refuses-before-pr",
+        "prompt-surface-gate-learning-path-evidence",
         "required-check-poster",
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",

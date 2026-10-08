@@ -273,6 +273,17 @@ test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-pus
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task authors and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-prompt-surface-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T6335-the-prompt-surface-gate-gate-refused-7-pull-requests-in-this-window-and.yaml";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "prompt-surface-gate-learning-path-evidence"));
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
