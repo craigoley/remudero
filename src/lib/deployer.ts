@@ -810,7 +810,13 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       satisfied: i.daemonAlive === true ? true : undefined,
     };
   }
-  if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
+  // W1-T6282 — A PUBLISHED IMAGE PENDING ON THE TICK IS AN IMAGE RECYCLE on every path that deploys it,
+  // not only the default fleet's: core runs DEPLOY_AUTO, so its 2026-10-07T21:17:25Z decision carried no
+  // `recycle` and runDeployCycle idle-gated it on boot-settling instead of handing it to the drain.
+  const pendingImage = i.imageDriftOnly === true && imageStale && i.imagePublished === true
+    ? ({ recycle: "image" } as const)
+    : {};
+  if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}`, ...pendingImage };
   // IMAGE DRIFT RECYCLES ITSELF (operator ruling 2026-09-22: restarts that big changes need happen
   // automatically). Mounted source already goes live through the daemon's own freshness restart, so
   // the human gate below was holding back only the rarest and most necessary recycle. Still
@@ -857,7 +863,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       reason: `auto: ${why}, but the new image is ${i.imagePublished === false ? "not published yet" : "of unknown publication"} — waiting for the build`,
     };
   }
-  if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
+  if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}`, ...pendingImage };
   return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
 }
 

@@ -2,6 +2,28 @@
 
 ## Decision
 
+**2026-10-07 Haiku 5.5 switch.** Claude subscription economy aliases resolve to
+`claude-haiku-5-5`, with Haiku 4.5 retained as the same-capability health fallback. Cash economy
+retains OSS 120B, nano and both Luna generations ahead of Haiku; balanced and frontier ordering
+stays unchanged. Foundry Haiku may run ordinary economy work; Opus/Sonnet still require an actual
+blocked-subscription squeeze. Every Foundry turn uses the existing atomic fleet cash allowance,
+the fixed $25 UTC daily ceiling and the unchanged shared Claude $5 normal/$10 squeezed sublimit.
+
+The [Haiku release](https://www.anthropic.com/claude-haiku-5-5) prices input/output at
+$0.10/$0.50 per million through 100,000 prompt tokens and $0.50/$2.50 above it. The threshold
+includes uncached input, cache reads and cache creation; the higher tier applies to the whole
+request. Reservations use a conservative byte ceiling and one-hour cache-write price, while
+settlement prices each turn independently. These are usage-based estimates, not an Azure invoice.
+Sonnet 5.5's published cache-read rate is now $0.10 per million. Thinking blocks are parsed by
+type; an empty visible answer or failed local tool is a failure, never a completed chain.
+
+New `haiku55-vs-luna6-low`, `-medium` and `-high` subscription epochs start October 7 with daily
+review and at least 20 tasks per arm. They join only when both actual concrete candidates are
+eligible; existing assignment, served-identity, crossover, lineage and missing-evidence rules
+still apply. Synthetic cash bakeoffs against OSS/nano/Luna are separate experiments and must
+reserve inside the fleet allowance before transport. No cash candidate is promoted from a
+list-price comparison or an insufficient sample, and public trial release stays separately held.
+
 **2026-10-02 Sol 6.1 switch.** `gpt-6.1-sol` now leads every subscription balanced and frontier
 Sol seat. `gpt-6-sol` and `gpt-5.6-sol` trail for account availability and supported effort fallback.
 Claude keeps frontier preference; economy keeps Luna/Spark. No effort or subscription share changes.

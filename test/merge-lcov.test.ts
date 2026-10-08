@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,6 +75,29 @@ function runMerger(output: string, ...rawDirectories: string[]): string {
     { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
   );
 }
+
+function writeOverLimitManifest(file: string): void {
+  writeFileSync(file, '');
+  // The reader fstats the real byte cap before JSON parsing; holes preserve that stimulus
+  // without creating a 64-MiB string and materializing its payload in every scoped run.
+  truncateSync(file, 64 * 1024 ** 2 + 1);
+}
+
+test('an oversized coverage manifest is sparse but still hits the real byte bound', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-sparse-coverage-bound-'));
+  const manifest = join(root, 'coverage-corpus-1-0000000000000.json');
+  const output = join(root, 'merged.info');
+  try {
+    writeOverLimitManifest(manifest);
+    const info = statSync(manifest);
+    assert.equal(info.size, 64 * 1024 ** 2 + 1, 'the real production limit remains crossed');
+    assert.throws(() => runMerger(output, root), /coverage file byte bound/);
+    assert.equal(readdirSync(root).includes('merged.info'), false, 'rejected input publishes no LCOV');
+    assert.ok(info.blocks * 512 <= 64 * 1024, 'over-limit fixture must not materialize its logical payload');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function runCompactor(output: string, ...rawDirectories: string[]): string {
   return execFileSync(
@@ -246,7 +269,7 @@ test('chunked coverage refuses incomplete, mixed, unsafe and corrupt corpora bef
     reject(() => manifest(value => { value.reportCount += 1; value.rawFileCount += 1; }), /process-report count mismatch/);
     reject(() => manifest(value => { value.rawFileCount = 0; }), /invalid chunked coverage manifest/);
     reject(() => writeFileSync(join(compact, manifestName), 'null'), /invalid chunked coverage manifest/);
-    reject(() => writeFileSync(join(compact, manifestName), ' '.repeat(64 * 1024 ** 2 + 1)), /coverage file byte bound/);
+    reject(() => writeOverLimitManifest(join(compact, manifestName)), /coverage file byte bound/);
     reject(() => chunk('reportChunks', null), /invalid coverage chunk contents/);
     for (const sourceMap of [null, [], 'invalid']) {
       reject(() => chunk('mapChunks', { format: 'rmd-v8-coverage-corpus-v2', sourceMaps: [sourceMap] }), /invalid compact source map/);

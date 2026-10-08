@@ -78,6 +78,20 @@ test("W1-T4404: the selector includes callers and path-reading suites of a chang
   assert.ok(real.suites.length > 100, "a module every suite's tmp helper imports reaches many suites");
 });
 
+test("the claims-check suite is selected for each recorded plan-validation edge", () => {
+  const claimsCheck = "test/claims-check.test.ts";
+  const files = new Map([...Object.entries(TREE), [claimsCheck, ""]]);
+  for (const changed of [
+    "src/lib/plan.ts",
+    "src/run-task.ts",
+    "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(selection.suites.includes(claimsCheck), `${changed} must select ${claimsCheck}`);
+    assert.ok(selection.reasons.includes(`${claimsCheck}: reads a changed file by path`), changed);
+  }
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);
