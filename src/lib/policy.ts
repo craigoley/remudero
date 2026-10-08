@@ -203,12 +203,17 @@ export interface PolicyValues {
   worktreeReapBoot: {
     enabled: boolean;
   };
-  /** W1-T3092: the object reaper rung inside `logDiskReclaimRung`. SHIPPED OFF: while false the
-   *  rung SURVEYS — it runs every quiet probe and reports what a prune WOULD remove, spawning
-   *  nothing. Same posture as `worktreeReapBoot` and `scratchReap`, and for the same reason: this
-   *  rung DELETES. Why: docs/forensics/policy.md#objectreap. */
+  /** Autonomous maintenance cadence. `enabled` remains readable for legacy policy consumers;
+   *  the controller uses the cadence/load/retry limits without an arming ceremony. */
   objectReap: {
     enabled: boolean;
+    intervalMs: number;
+    probeIntervalMs: number;
+    timeoutMs: number;
+    backoffMs: number;
+    maxBackoffMs: number;
+    maxFailures: number;
+    maxActiveLanes: number;
   };
   /** W1-T2568: the GitHub-event wake's bounded recent-delivery dedup window (`github-event-wake.ts`'s
    *  `createDeliveryDedupStore`) — distinct `X-GitHub-Delivery` ids remembered before eviction.
@@ -349,6 +354,13 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "scratchReap.maxAgeHours": "lifted",
   "worktreeReapBoot.enabled": "net-new",
   "objectReap.enabled": "net-new",
+  "objectReap.intervalMs": "net-new",
+  "objectReap.probeIntervalMs": "net-new",
+  "objectReap.timeoutMs": "net-new",
+  "objectReap.backoffMs": "net-new",
+  "objectReap.maxBackoffMs": "net-new",
+  "objectReap.maxFailures": "net-new",
+  "objectReap.maxActiveLanes": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
   "githubEventWake.checkSettleMs": "net-new",
   "githubEventWake.semanticCheckMode": "net-new",
@@ -880,14 +892,22 @@ export function validatePolicy(raw: unknown): Policy {
   }
   const worktreeReapBootEnabled = booleanField("worktreeReapBoot.enabled", worktreeReapBootRaw.enabled, origin);
 
-  // W1-T3092: same shape as worktreeReapBoot above — a MISSING or non-boolean block is a LOUD
-  // failure, never a default. A block that defaulted to true on absence would arm a destructive
-  // git operation by omission, which is the one way this must never become enabled.
+  // Keep legacy policy validation; the cadence's numeric limits are independent of arming.
   const objectReapRaw = raw.objectReap;
   if (!isPlainObject(objectReapRaw)) {
     throw new PolicyError("policy.yaml: 'objectReap' must be a mapping.");
   }
   const objectReapEnabled = booleanField("objectReap.enabled", objectReapRaw.enabled, origin);
+  const maintenanceDefaults = { intervalMs: 86400000, probeIntervalMs: 60000, timeoutMs: 300000,
+    backoffMs: 60000, maxBackoffMs: 3600000, maxFailures: 3, maxActiveLanes: 1 };
+  const maintenancePolicy = Object.fromEntries(Object.entries(maintenanceDefaults).map(([key, fallback]) => [key,
+    objectReapRaw[key] === undefined ? fallback : numberField(`objectReap.${key}`, objectReapRaw[key], origin, bounds),
+  ])) as typeof maintenanceDefaults;
+  if (maintenancePolicy.intervalMs < 86400000 || maintenancePolicy.probeIntervalMs <= 0 ||
+      maintenancePolicy.timeoutMs <= 0 || maintenancePolicy.backoffMs <= 0 ||
+      maintenancePolicy.maxBackoffMs < maintenancePolicy.backoffMs || maintenancePolicy.maxFailures < 1 ||
+      !Number.isInteger(maintenancePolicy.maxFailures) || !Number.isInteger(maintenancePolicy.maxActiveLanes) ||
+      maintenancePolicy.maxActiveLanes < 0) throw new PolicyError("policy.yaml: invalid objectReap maintenance limits");
 
   // Optional, same absent-means-default shape as sweepWallClockBoundMs/fixSpawnWallClockBoundMs
   // above — only a present row is validated, so a typo in an opted-in row still fails loud.
@@ -962,7 +982,7 @@ export function validatePolicy(raw: unknown): Policy {
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
       worktreeReapBoot: { enabled: worktreeReapBootEnabled },
-      objectReap: { enabled: objectReapEnabled },
+      objectReap: { enabled: objectReapEnabled, ...maintenancePolicy },
       githubEventWake: {
         dedupCapacity: githubEventWakeDedupCapacity,
         checkSettleMs: githubEventWakeCheckSettleMs,

@@ -1,14 +1,10 @@
 /**
- * OPERATOR RULING 2026-10-06, "prune on expiry alone". The armed object reaper refused 58 ticks in a
- * row (state/object-reap-refusal-streak.json) while the managed checkout held 51,865 loose objects and
- * the daemon's own checkout 141,536, because a working fleet always has a registered worktree or an
- * inflight lock. Those two quiet arms no longer refuse: the prune runs with its 24h expiry and the
- * decision row names the barrier that carried it. An open handle under `.git` still refuses. Stale
- * maintenance leftovers (`objects/maintenance.lock`, `gc.pid`) are reclaimed before the prune, and the
- * daemon's own checkout is reaped as a second repo.
+ * Production now uses the cadence controller: live workers defer full GC and each real store has
+ * its own decision and retry state. Retained legacy exports are tested directly for the historical
+ * expiry barrier, open-handle refusal and stale-lock handling; dispatch never invokes those exports.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync, existsSync, symlinkSync, readdirSync, readFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +15,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { runLockPath } from "../src/lib/worker.js";
 import {
   defaultListProcesses,
+  readMaintenanceState,
   LOOSE_OBJECT_FLOOR,
   OBJECT_PRUNE_EXPIRY,
   objectReapDecision,
@@ -27,18 +24,9 @@ import {
   STALE_MAINTENANCE_LOCK_AGE_MS,
   type ObjectReapDeps,
 } from "../src/lib/object-reaper.js";
-import { logDiskReclaimRung } from "../src/run-task.js";
+import { runRepositoryMaintenanceRung } from "../src/run-task.js";
 
 const scratch = (label: string) => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${label}-`));
-
-const noSweeps = {
-  sweepTempDirs: () => ({ removed: [] }) as never,
-  reapClonesSurvey: () => ({ reaped: [], bytesReclaimed: 0 }) as never,
-  sweepWorkerHomes: () => ({ removed: [] }) as never,
-  workerHomeRoot: () => "/nowhere",
-  objectPolicy: () => ({ enabled: true }),
-  ratifications: new Map(),
-};
 
 /** A store with a `.git` dir; nothing about it is busy unless a test says so. */
 function store(): string {
@@ -55,45 +43,34 @@ const busy: ObjectReapDeps = {
   listProcesses: () => [],
 };
 
-test("registered worktrees and inflight locks with no open git handle still prune, and the row says expiry carried it", async () => {
-  // Through the REAL rung and the REAL worktree listing and active-worker probes: a registered worktree
-  // whose run lock names this live process, and another task's live inflight lock.
-  const fixture = gitRepo();
-  const wt = join(scratch("expiry-wt"), "lane");
+test("live workers defer full maintenance and preserve the marker and due episode", async () => {
+  const root = scratch("maintenance-busy-root");
+  const fixture = gitRepo({ kind: "maintenance-busy-store" });
+  const wt = join(scratch("maintenance-busy-wt"), "lane");
   fixture.addWorktree(wt, "lane");
   writeFileSync(runLockPath(wt), JSON.stringify({ pid: process.pid, run_id: "W1-TX-1", startedAt: new Date().toISOString() }));
-  const inflight = scratch("expiry-inflight");
+  mkdirSync(join(root, "repos"));
+  symlinkSync(fixture.dir, join(root, "repos", "remudero"), "dir");
+  const inflight = join(root, "state", "inflight");
+  mkdirSync(inflight, { recursive: true });
   writeFileSync(join(inflight, "W1-T2.lock"), JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
-
-  const argv: string[][] = [];
+  const marker = join(fixture.dir, ".git", "gc.log");
+  writeFileSync(marker, "failure evidence\n");
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = await logDiskReclaimRung({ root: scratch("expiry-root") } as never, (s, f) => rows.push([s, f]), {
-    ...noSweeps,
-    objectRepoDir: () => fixture.dir,
-    objectInflightDir: () => inflight,
-    objectOpenFileCount: () => 0,
-    objectOwnInflightLock: "W1-T1.lock",
-    reapObjects: ((dir: string, inf: string, d: ObjectReapDeps) =>
-      reapGitObjects(dir, inf, {
-        ...d,
-        looseObjectCount: (() => {
-          let n = 0;
-          return () => (n++ === 0 ? LOOSE_OBJECT_FLOOR + 100 : 10);
-        })(),
-        runPrune: (_dir, args) => argv.push([...args]),
-        listProcesses: () => [],
-      })) as never,
-  });
+  await runRepositoryMaintenanceRung({ root } as never, (s, f) => rows.push([s, f]),
+    { activeLanes: 0, disk: "unknown", queueBusy: false });
+  const deferred = rows.find(([s]) => s === "repository_maintenance.defer")?.[1];
+  assert.ok(deferred, JSON.stringify(rows));
+  assert.equal(deferred.active_lanes, 1, "the default probe sees the live inflight holder");
+  assert.match(String(deferred.reason), /full GC requires quiet admission/);
+  assert.equal(rows.some(([s]) => s === "repository_maintenance.start"), false);
+  assert.equal(readFileSync(marker, "utf8"), "failure evidence\n");
+  const stateName = readdirSync(join(root, "state")).find((name) => name.startsWith("repository-maintenance-"))!;
+  const state = readMaintenanceState(join(root, "state", stateName));
+  assert.equal(state.nextEligibleAt, 0, "a busy deferral does not lose the due GC episode");
+  assert.equal(state.failures, 0);
 
-  assert.deepEqual(argv, [["prune", `--expire=${OBJECT_PRUNE_EXPIRY}`]], "the busy store is pruned, with its expiry");
-  assert.equal(out.objectsPruned, LOOSE_OBJECT_FLOOR + 90);
-  assert.equal(rows.some(([s]) => s === "run.disk_reclaim.objects_declined"), false, "a busy fleet is no longer a refusal");
-  const decision = rows.find(([s]) => s === "run.disk_reclaim.objects_decision");
-  assert.equal(decision?.[1].carried_by, "expiry", "the row names the barrier that carried the prune");
-  assert.equal(decision?.[1].repo, "managed");
-  assert.match(String(decision?.[1].quiet_shortfall), /worktree/, "and the quiet condition that failed");
-
-  // POSITIVE CONTROL: with nothing busy, the same decision says quiet carried it.
+  // Retained raw-prune exports still report the historical expiry barrier; production never calls them.
   assert.deepEqual(objectReapDecision("/r", "/i", { ...busy, listWorktrees: () => [], listInflightLocks: () => [] }), { carriedBy: "quiet" });
   assert.match(String(objectReapDecision("/r", "/i", { ...busy, listWorktrees: () => [] }).quietShortfall), /inflight lock/);
 });
@@ -114,28 +91,22 @@ test("an open handle under the git dir still refuses the prune even with the fle
   assert.match(objectReapDecision("/r", "/i", noCounter).refusedBecause ?? "", /open handle/);
 });
 
-test("the disk reclaim rung reaps the daemon checkout as a second repo with its own decision row", async () => {
-  const root = scratch("expiry-root2");
-  mkdirSync(join(root, "remudero", ".git"), { recursive: true });
-  const calls: Array<{ dir: string; streakPath?: string }> = [];
+test("the cadence maintains the daemon checkout as a second repo with its own decision and state", async () => {
+  const root = scratch("maintenance-two-stores");
+  const managed = gitRepo({ kind: "maintenance-managed" });
+  const daemon = gitRepo({ kind: "maintenance-daemon" });
+  mkdirSync(join(root, "repos"));
+  symlinkSync(managed.dir, join(root, "repos", "remudero"), "dir");
+  symlinkSync(daemon.dir, join(root, "remudero"), "dir");
+  for (const store of [managed, daemon]) writeFileSync(join(store.dir, ".git", "gc.log"), "prior failure\n");
   const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = await logDiskReclaimRung({ root } as never, (s, f) => rows.push([s, f]), {
-    ...noSweeps,
-    reapObjects: ((dir: string, _i: string, d: ObjectReapDeps) => {
-      calls.push({ dir, streakPath: d.streakPath });
-      return dir.endsWith(join("repos", "remudero"))
-        ? { pruned: 0, looseBefore: 9000, refusedBecause: "1 open handle(s) under .git", consecutiveRefusals: 4 }
-        : { pruned: 700, looseBefore: 141536, carriedBy: "expiry", quietShortfall: "2 worktree(s) registered" };
-    }) as never,
-  });
-  assert.deepEqual(calls.map((c) => c.dir), [join(root, "repos", "remudero"), join(root, "remudero")]);
-  assert.notEqual(calls[0].streakPath, calls[1].streakPath, "each repo keeps its own refusal streak");
-  assert.equal(out.objectsPruned, 700);
-  const declined = rows.find(([s]) => s === "run.disk_reclaim.objects_declined");
-  assert.equal(declined?.[1].repo, "managed");
-  const decision = rows.find(([s]) => s === "run.disk_reclaim.objects_decision");
-  assert.equal(decision?.[1].repo, "daemon-checkout");
-  assert.equal(decision?.[1].carried_by, "expiry");
+  await runRepositoryMaintenanceRung({ root } as never, (s, f) => rows.push([s, f]),
+    { activeLanes: 0, disk: "unknown", queueBusy: false });
+  const completed = rows.filter(([s]) => s === "repository_maintenance.complete").map(([, f]) => f);
+  assert.deepEqual(completed.map((f) => f.repo), [join(root, "repos", "remudero"), join(root, "remudero")]);
+  assert.ok(completed.every((f) => f.kind === "gc" && f.gc_log_before === "present" && f.gc_log_after === "absent"));
+  assert.equal(readdirSync(join(root, "state")).filter((name) => name.startsWith("repository-maintenance-")).length, 2);
+  for (const store of [managed, daemon]) assert.equal(existsSync(join(store.dir, ".git", "gc.log")), false);
 });
 
 test("a stale maintenance lock and gc pid are reclaimed before the prune and a fresh one is kept", () => {
