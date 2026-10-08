@@ -27,6 +27,7 @@ test("Haiku 5.5 leads Claude economy with a same-capability legacy fallback and 
 });
 
 test("Haiku 5.5 starts daily effort-specific Luna experiments only for both eligible concrete models", () => {
+  assert.equal(ROUTING_EXPERIMENTS[0]?.id, "sol-vs-sonnet", "new epochs append without changing historical CLI report order");
   const classify = (effort: string, claude = MODEL, codex = "gpt-6-luna", eligible = true) => routingExperimentFor({
     capability: "economy", effort, considered: [
       { provider: "claude", model: claude, eligible }, { provider: "codex", model: codex, eligible: true },
