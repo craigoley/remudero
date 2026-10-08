@@ -75,6 +75,7 @@
       "entries": [
         "a-board-wide-plan-red-is-main",
         "body-fetch-guards-on-http-not-size",
+        "ci-shard-one-eight-refuses-conflict-markers",
         "codeql-read-model-lane",
         "comment-load-ratchet-lane",
         "commitlint-pr-title-lane",
@@ -94,6 +95,7 @@
         ".github/**",
         ".github/workflows/ci.yml",
         "docs/comment-standard.md",
+        "hooks/pre-commit",
         "plan/tasks.d/**",
         "scripts/comment-load-baseline.json",
         "scripts/comment-load-ratchet.mjs",

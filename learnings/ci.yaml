@@ -161,7 +161,7 @@
   evidence: >-
     Twenty-seven pull requests in the window recorded as ci-learning:8684:lint-plan were repaired
     after lint-plan refused them; the common prevention point is the task-authoring lane, which
-    edits plan/tasks.d/** and receives matched learnings for that path.
+    edits task shards and receives matched learnings for that path.
   src: "ci-learning:8684:lint-plan"
   cited: "2026-10-08"
 
