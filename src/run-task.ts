@@ -7,9 +7,8 @@ import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
-// classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
-// src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
-// below have SECOND callers outside doctorCommand and stay imported here too.
+// classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
+// (W1-T2888), importing them from lib/doctor.js; symbols below have other callers and stay imported here.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { loadProposalRecords } from "./lib/plan-proposals.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";

@@ -1,4 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { fixedClock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { CAPABILITY_GRANT_SCHEMA_VERSION, verifyCapabilityGrant,
   type CapabilityGrant, type CapabilityGrantReadStore, type CapabilityRefusalCode,
   type CapabilityCheckedPredicate, type CapabilityUseRequest } from "./capability-grant.js";
@@ -34,7 +36,7 @@ function text(value: unknown): value is string {
 function instant(value: unknown): string | null {
   if (!(text(value) || typeof value === "number")) return null;
   const ms = typeof value === "number" ? value : Date.parse(value);
-  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : null;
+  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? fixedClock(ms).iso() : null;
 }
 function strings(value: unknown, max: number): value is string[] {
   return Array.isArray(value) && value.length <= max && value.every(text);
@@ -65,7 +67,11 @@ function predicates(): Predicates {
 function result(observedAt: string | null, verdict: CapabilityInspectionResult["verdict"], code: InspectionCode): CapabilityInspectionResult {
   return { schema: "capability-inspection-v1", observedAt, verdict, code, predicates: predicates() };
 }
-class MalformedSource extends Error {}
+class MalformedSource extends RmdError {
+  constructor() {
+    super("read-model", GENERIC_EXIT_CODE, "malformed capability inspection source");
+  }
+}
 interface CapturedGrant {
   grant: CapabilityGrant;
   revoked: boolean;
@@ -99,7 +105,8 @@ function snapshot(source: CapabilityInspectionSource, cases: readonly Capability
       }
     }
   } catch (error) {
-    return { unavailable: error instanceof MalformedSource ? "malformed-source" : "unreadable-source" };
+    const reason = error instanceof MalformedSource ? "malformed-source" : "unreadable-source";
+    return { unavailable: reason };
   }
   return {
     get: (id) => rows.get(id)?.grant,
