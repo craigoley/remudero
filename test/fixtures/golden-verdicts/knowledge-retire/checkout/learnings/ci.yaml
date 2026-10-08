@@ -1,0 +1,3 @@
+- id: rollup-dedupe-by-latest-attempt
+  # knowledge gardener: retire rollup-dedupe-by-latest-attempt
+  lifecycle: superseded

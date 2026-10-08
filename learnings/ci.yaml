@@ -31,7 +31,8 @@
 # ── Measurement traps observed 2026-08-23 (re-derived at 682c5d5a) ──
 - id: rollup-dedupe-by-latest-attempt
   subsystem: sweep
-  lifecycle: active
+  # knowledge gardener: retire rollup-dedupe-by-latest-attempt
+  lifecycle: superseded
   files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts]
   fact: >-
     A check-runs listing with ?filter=all returns SUPERSEDED attempts forever, so a check that was
