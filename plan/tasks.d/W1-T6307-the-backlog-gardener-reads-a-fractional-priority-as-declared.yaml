@@ -1,37 +1,44 @@
 - id: W1-T6307
-  title: "THE BACKLOG GARDENER READS A FRACTIONAL PRIORITY AS DECLARED — its `declared` probe is /^ {2}priority: (\\d+)[ \\t]*$/m, so a shard holding the machine-filing judge's `priority: 2.5` reads as unprioritized and the gardener inserts a SECOND `priority:` line; #9979 (2026-10-08) wrote `priority: 4` under W1-T6287's `priority: 2.5`, the shard stopped parsing, and lint-plan, claims, rule-checks and all eight ci shards went red"
+  title: "THE BACKLOG GARDENER LEAVES AN UNJUDGED MACHINE TASK'S PRIORITY TO THE JUDGE, AND NEVER WRITES A SECOND PRIORITY KEY — on 2026-10-08 the gardener banded W1-T6287 (author_class: machine, no risk_ruling, no priority) at 00:13Z, the machine-filing judge priced the same shard `priority: 2.5` on main at 00:21Z (#9978), and update-branch merged both lines into #9979 at 00:33Z; the shard stopped parsing and lint-plan, claims, rule-checks and all eight ci shards went red"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 4.00
-  risk: high  # Rule 19: one concern — the gardener never writes a second priority key
+  risk: high  # Rule 19: one concern — the gardener never produces a shard holding two priority keys
   band_meaning: span
   origin: "operator session 2026-10-08: PR watch, #9979 red on every gate"
-  plan_refs: [W1-T5519, W1-T4941]
+  plan_refs: [W1-T5519, W1-T4941, W1-T2977]
   files: [src/lib/backlog-gardener.ts, test/the-backlog-gardener-reads-a-fractional-priority-as-declared.test.ts]
   status: queued
   priority: 2
   attempts: 0
   rationale: |
-    MEASURED 2026-10-08: #9979 (backlog-garden-1791418379665) adds `priority: 4` + a `# backlog gardener:`
-    marker to plan/tasks.d/w1-t6287-selector-shadow-miss.yaml, which already declares `priority: 2.5`
-    (machine-filed, judge-set). The duplicate key fails YAML parsing, so every plan-reading gate is red.
-    READ on origin/main: applyBacklogActions (src/lib/backlog-gardener.ts) probes `declared` with
-    `priority: (\d+)` — 2.5 does not match, so the "a declared priority is the operator's, skip" guard
-    never fires and the undeclared branch inserts a new line before `status: queued`. W1-T5519
-    (plan-shard-repair) repairs the same duplicate AFTER it reaches main via two racing PRs; this is the
-    producer, and 34 shards on main carry `priority: 2.5` today.
+    MEASURED 2026-10-08 from #9979's history: 230f20927 (gardener, 00:13Z) adds `priority: 4` + marker to
+    plan/tasks.d/w1-t6287-selector-shadow-miss.yaml, whose base (c8d35a7d2) had `author_class: machine`,
+    no `risk_ruling` and no `priority`. a497f6a2f (#9978, judge, 00:21Z) adds `priority: 2.5` and the
+    ruling on main. 63b50bbc1 (update-branch, 00:33Z) merges both — textually disjoint, so git keeps both
+    keys and the shard fails to parse. READ on origin/main: machine-filing-judge.ts writes
+    UNPRICED_PRIORITY on a `proceed` ruling for an unpriced machine task, so an unjudged machine task's
+    priority belongs to the judge; backlogInventory (src/lib/backlog-gardener.ts) never reads
+    author_class or risk_ruling, so the two machines contend for one field. W1-T5519 repairs the same
+    duplicate only after it reaches main. Separately, applyBacklogActions' `declared` probe is
+    `priority: (\d+)`, so a decimal priority reads as undeclared and its band rewrite would insert a
+    second key; 34 shards on main carry `priority: 2.5`.
   design: |
-    Probe any declared priority value (integer or decimal), not only digits: a shard with a non-marker
-    priority is skipped exactly as an integer one is, and the band rewrite and the retirement delete
-    replace/remove the declared line whatever its value. The gardener's output must always parse.
+    backlogInventory skips an `author_class: machine` task with no `risk_ruling` — the judge prices it.
+    applyBacklogActions probes, rewrites and deletes a declared priority of any numeric value (integer
+    or decimal), so a non-marker decimal priority is skipped exactly as an integer one is. The gardener's
+    output always parses with at most one priority key.
   acceptance:
+    - claim: "an unjudged machine-filed task is not a backlog candidate; a judged one is"
+      proof: 'grep: test("W1-T6307: an unjudged machine task is left to the judge" in test/the-backlog-gardener-reads-a-fractional-priority-as-declared.test.ts'
     - claim: "a shard declaring a fractional priority is left untouched by a band proposal"
       proof: 'grep: test("W1-T6307: a fractional declared priority is respected, not duplicated" in test/the-backlog-gardener-reads-a-fractional-priority-as-declared.test.ts'
     - claim: "every shard the gardener writes still parses with exactly one priority key"
       proof: 'grep: test("W1-T6307: a gardened shard always parses with one priority key" in test/the-backlog-gardener-reads-a-fractional-priority-as-declared.test.ts'
   falsifier: |
-    Keep the `(\d+)` probe: the W1-T6287 fixture gains a second `priority:` line, fails to parse, and the
-    first test fails.
+    Drop the unjudged-machine skip: the W1-T6287 base-shape fixture (author_class: machine, no ruling)
+    becomes a candidate and the first test fails. Keep the `(\d+)` probe: the fractional fixture gains a
+    second `priority:` line and the second test fails.
