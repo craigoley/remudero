@@ -560,7 +560,13 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
-import { buildMainHealthRung } from "./lib/main-health-rung.js";
+import {
+  buildMainHealthRung,
+  type MainRepairFixRequest,
+  type MainRepairLane,
+  type MainRepairRevertOutcome,
+  type MainRepairRevertRequest,
+} from "./lib/main-health-rung.js";
 import { emailChannel, imessageChannel, notify, renderEscalationPing, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -37619,6 +37625,8 @@ export async function daemonCommand(
     // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
     // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
     readRequiredChecks: () => readCiGateRequiredChecks(targetCheckoutRoot),
+    // W1-T6403: a located red is repaired through a priority fix PR, then a revert PR, never a push.
+    repair: mainRepairLaneFor(target.owner, target.repo, config, ledgerPath, runId),
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
@@ -51372,6 +51380,200 @@ export async function dispatchAlertFixRun(
       /* best-effort cleanup */
     }
   }
+}
+
+/** W1-T6403 — the synthetic task id a red-main repair PR carries: one per offending merge. */
+export function mainRepairTaskId(offendingSha: string): string {
+  return `main-repair-${offendingSha.slice(0, 12)}`;
+}
+
+/** W1-T6403 — the priority fix worker's prompt: repair main, never revert, and open one PR. */
+export function mainRepairFixPrompt(request: MainRepairFixRequest): string {
+  const taskId = mainRepairTaskId(request.offendingSha);
+  const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
+  return [
+    "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
+    `The default branch \`${request.branch}\` is RED at \`${request.headSha}\`. Every open PR's CI fails until it is green.`,
+    `The first red merge is \`${request.offendingSha}\` (${pr}). Its diff stat:`,
+    request.diffStat,
+    "",
+    `Failing check(s): ${request.failingChecks.join(", ") || "(none named)"}`,
+    `Failing test title(s): ${request.failingTestTitles.join("; ") || "(none parsed from the log)"}`,
+    `Failing test file(s): ${request.testFiles.join(", ") || "(none parsed from the log)"}`,
+    `Why main reads red: ${request.reason}`,
+    "Log excerpt of the failing check(s):",
+    "```",
+    request.logExcerpt || "(no log was read)",
+    "```",
+    "",
+    "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+    "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
+    "Reproduce the failing test file(s) above first, then make the minimal correct change.",
+    "",
+    "Then, from the working directory:",
+    "- git add the changed files && commit;",
+    ...commitMessageContractLines(),
+    "- `git push origin HEAD` (NOT -u); never push to main;",
+    "- open a PR with an EXPLICIT title: `gh pr create --title \"fix(scope): subject\" --fill --base main`.",
+    "  PR TITLE: a conventional-commit subject of <= 100 characters, written by you.",
+    ...bodyVsDiffContractLines(),
+    "  The PR body MUST include:",
+    "  - an `Acceptance:` block of `- <claim> | <proof>` bullets naming the failing test(s) that now pass;",
+    `  - \`origin: main-repair#${request.offendingSha}\` naming the red merge this repairs;`,
+    `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
+    "- End your REPORT with exactly: PR_URL: <the pull request url>",
+  ].join("\n");
+}
+
+const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISPATCH_DEPS, spawn: ledgeredNonDispatchSpawn("main-repair-fix") };
+
+/**
+ * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
+ * worker on a branch off origin/main that commits, pushes and opens its own PR, which then enters the
+ * normal review/CI/arm flow. Returns that PR's url, or undefined when the worker opened none.
+ */
+export async function dispatchMainRepairFixRun(
+  owner: string,
+  repo: string,
+  config: Config,
+  request: MainRepairFixRequest,
+  ledgerPath: string,
+  runId: string,
+  deps: AlertFixDispatchDeps = REAL_MAIN_REPAIR_FIX_DEPS,
+): Promise<string | undefined> {
+  const taskId = mainRepairTaskId(request.offendingSha);
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
+  const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  const branch = `main-repair-fix-${request.offendingSha.slice(0, 12)}-${Date.now()}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  try {
+    await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    const settingsFile = deps.renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `main-repair-settings-${taskId}-${Date.now()}.json`),
+    });
+    // A red main blocks every merge, so this rides the fix route at the "high" band (blast-radius).
+    const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
+    log("main-repair.dispatching", { branch, mount: fixMount.model, offending_sha: request.offendingSha });
+    const worker = await deps.spawn({
+      cwd: worktreePath,
+      permissionMode: "bypassPermissions",
+      tools: [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")],
+      settingsFile,
+      model: fixMount.model,
+      mountProvider: fixMount.provider,
+      effort: fixMount.effort,
+      maxTurns: fixMount.maxTurns,
+      maxBudgetUsd: DEFAULT_BUDGET_USD,
+      config,
+      prompt: mainRepairFixPrompt(request),
+    });
+    log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
+    const prUrl = parseReport(workerTranscript(worker))?.prUrl;
+    if (!prUrl) {
+      log("main-repair.no_pr", { subtype: worker.subtype });
+      return undefined;
+    }
+    deps.ensureTaskTrailer(prUrl, taskId, log);
+    log("main-repair.pr_opened", { pr_url: prUrl, origin: `main-repair#${request.offendingSha}` });
+    return prUrl;
+  } finally {
+    try {
+      deps.worktreeRemove(repoDir, worktreePath);
+    } catch (error) {
+      log("main-repair.worktree_remove_failed", { error: String((error as Error)?.message ?? error) });
+    }
+  }
+}
+
+/** The revert PR body: the failing check, the fix PR, and why that fix was not enough. */
+export function mainRepairRevertBody(request: MainRepairRevertRequest): string {
+  const taskId = mainRepairTaskId(request.offendingSha);
+  const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR";
+  return [
+    `Reverts \`${request.offendingSha}\` (${pr}), the first red merge on \`${request.branch}\`.`,
+    "",
+    `\`${request.branch}\` is red at \`${request.headSha}\`; failing check(s): ${request.failingChecks.join(", ") || "(none named)"}.`,
+    `The priority fix ${request.fixPrUrl ? `PR ${request.fixPrUrl}` : "run"} was not enough: ${request.whyFixInsufficient}.`,
+    "",
+    "Opened by the red-main repair lane (W1-T6403) as an ordinary PR: review, CI and branch protection",
+    "judge it like any other. It is closed automatically if main turns green on its own head first.",
+    "",
+    "Acceptance:",
+    `- the failing check(s) pass with \`${request.offendingSha}\` reverted | ci: ${request.failingChecks.join(", ") || "ci-gate"}`,
+    "",
+    `Remudero-Task: ${taskId}`,
+  ].join("\n");
+}
+
+/**
+ * W1-T6403 — ONE revert PR of the offending merge: `git revert --no-edit <sha>` on a fresh branch off
+ * origin/main, the branch pushed (never forced, never to main) and the PR opened over REST through
+ * `fetch`. A revert that does not apply cleanly is aborted and refused with its conflicting paths.
+ */
+export async function openMainRepairRevertPr(
+  owner: string,
+  repo: string,
+  config: Config,
+  request: MainRepairRevertRequest,
+  ledgerPath: string,
+  runId: string,
+  fetch: GhApiFetcher = (args) => ghJsonAsync(args),
+): Promise<MainRepairRevertOutcome> {
+  const taskId = mainRepairTaskId(request.offendingSha);
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
+  const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  const branch = `main-repair-revert-${request.offendingSha.slice(0, 12)}-${Date.now()}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  try {
+    await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { log });
+    try {
+      await hostWorktreeGitAsync(worktreePath, ["revert", "--no-edit", request.offendingSha]);
+    } catch (error) {
+      const conflictPaths = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "--diff-filter=U"]))
+        .split("\n")
+        .map((path) => path.trim())
+        .filter(Boolean);
+      await hostWorktreeGitAsync(worktreePath, ["revert", "--abort"]).catch((abortError: unknown) =>
+        log("main-repair.revert_abort_failed", { error: String((abortError as Error)?.message ?? abortError) }),
+      );
+      return {
+        refused: `git revert of ${request.offendingSha} did not apply cleanly on origin/main: ${String((error as Error)?.message ?? error).split("\n")[0]}`,
+        conflictPaths,
+      };
+    }
+    await gitPushRunBranchAsync(worktreePath, { stdio: "ignore" });
+    const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
+    const created = (await fetch(
+      ratifyPrCreateRestArgs(owner, repo, {
+        title: `revert(main): ${subject}, the first red merge on ${request.branch}`,
+        body: mainRepairRevertBody(request),
+        head: branch,
+        base: request.branch,
+      }),
+    )) as { html_url?: unknown };
+    if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
+    const prUrl = created.html_url;
+    log("main-repair.revert_pr_opened", { pr_url: prUrl, branch, offending_sha: request.offendingSha });
+    return { prUrl };
+  } finally {
+    try {
+      await worktreeRemoveAsync(repoDir, worktreePath);
+    } catch (error) {
+      log("main-repair.worktree_remove_failed", { error: String((error as Error)?.message ?? error) });
+    }
+  }
+}
+
+/** W1-T6403 — the daemon's {@link MainRepairLane}: the fix worker and the revert PR above. */
+export function mainRepairLaneFor(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
+  return {
+    openFixPr: (request) => dispatchMainRepairFixRun(owner, repo, config, request, ledgerPath, runId),
+    openRevertPr: (request) => openMainRepairRevertPr(owner, repo, config, request, ledgerPath, runId),
+  };
 }
 
 /**
