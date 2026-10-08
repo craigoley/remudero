@@ -932,15 +932,6 @@ async function accumulateSelectorShadow(
   };
 }
 
-/** Count test files with the same suffix the full run selects, from this checkout. */
-export function selectorShadowFullSuiteSize(root: string): number {
-  const walk = (dir: string): number => readdirSync(dir, { withFileTypes: true }).reduce((count, entry) => {
-    if (entry.isDirectory()) return count + walk(join(dir, entry.name));
-    return count + Number(entry.isFile() && entry.name.endsWith(".test.ts"));
-  }, 0);
-  return walk(join(root, "test"));
-}
-
 const execAsync = promisify(execFile);
 const suiteSizes = new Map<string, { tree: string; size: number }>();
 
