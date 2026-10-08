@@ -3052,7 +3052,7 @@ export interface FastGateStep {
   script: string;
   reason: string;
   /** A small repository-local runner that is not a package.json npm script. */
-  runner?: "rule-checks";
+  runner?: "rule-checks" | "census-precheck";
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
@@ -3192,6 +3192,18 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "plain local git+fs read (never node --test, never a network call) that refuses a branch claiming a task (by an anchored " +
       "Remudero-Task trailer, or by filing a plan/tasks.d/ shard) whose head ref does not carry the run-<taskId>-<epochMs> shape " +
       "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
+  },
+  {
+    job: "census-precheck",
+    script: "census-precheck",
+    runner: "census-precheck",
+    reason:
+      "same-class (W1-T6435) — the census precheck hooks/pre-push runs (node scripts/census-precheck.mjs --base origin/main). " +
+      "Nothing installs that hook in an operator or agent clone, so a hand-built PR passed this preflight and reddened a census " +
+      "in CI (#10108: host-capability-fixtures). Exit 2 is the precheck's own 'could not measure'; the hook does not block on " +
+      "it and neither does this step, but it is named UNMEASURED in the detail, never a silent pass. Deliberately no `boundMs` " +
+      "(it spawns bounded suite children and a merge-base worktree, so it stays out of the census-class cost median) and no " +
+      "`remedyFiles` (its remedy is the offending change, never a baseline file)",
   },
 ];
 
@@ -3590,6 +3602,27 @@ function withoutNodeTestContext<T>(fn: () => T): T {
   }
 }
 
+/**
+ * W1-T6435 — the census-precheck leaf: the SAME command hooks/pre-push runs for the branch's own
+ * tree, with the SAME exit reading (0 pass, 2 "could not measure" not blocking, anything else
+ * refuses). Exit 2 is reported as UNMEASURED by name so it never reads as a measured pass.
+ */
+function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
+  const label = "node scripts/census-precheck.mjs --base origin/main";
+  const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
+  const res = withoutNodeTestContext(() => spawn(process.execPath, args, { cwd: repoRoot }));
+  const spawnFailed = spawnFailureDetail(label, res);
+  if (spawnFailed) return { ok: false, detail: spawnFailed };
+  if (res.status === 2) {
+    const why = (res.stdout + res.stderr).trim();
+    return {
+      ok: true,
+      detail: `PASS — ${label}: UNMEASURED (exit 2) — the precheck could not measure; not blocking, as in the pre-push hook, and NOT a measured pass${why ? `\n${why}` : ""}`,
+    };
+  }
+  return shellOut(() => res, label, process.execPath, args, { cwd: repoRoot });
+}
+
 /** `rmd preflight --fast`'s engine. One step per {@link FAST_GATE_STEPS} entry, run and reported
  *  independently, the same discipline as {@link runCiParity}. A script absent from
  *  `package.json`'s "scripts" reports `SCRIPT MISSING`, distinct from `FAIL` (the script ran and
@@ -3627,6 +3660,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           ),
         );
       }
+      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn);
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
