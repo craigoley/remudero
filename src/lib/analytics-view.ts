@@ -311,7 +311,7 @@ export function createAnalyticsView(): {
             try {
               snapshot.details = analyticsDetails(snapshot.asOf, readSourceSnapshotBody(db, state.instance, ANALYTICS_SOURCE_SIGNALS), readSourceSnapshotBody(db, state.instance, ANALYTICS_SOURCE_USAGE));
             } catch {
-              snapshot.details = unavailableDetails(snapshot.asOf, "stored analytics details could not be read");
+              snapshot.details = { version: ANALYTICS_DETAILS_VERSION, state: "unavailable", asOf: snapshot.asOf, reason: "stored analytics details could not be read" };
             }
           }
         }
