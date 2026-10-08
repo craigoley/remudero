@@ -71,6 +71,7 @@ const NEEDS_QUESTION_LABEL = ASK_TYPE_LABEL.question;
 /** One comment on an OPEN needs-question issue, normalized to the shape this reader needs. */
 export interface EscalationIssueComment {
   id: number;
+  createdAt?: string;
   body: string;
   authorLogin: string;
   /** GitHub's own vocabulary: `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, … . Only
@@ -84,6 +85,7 @@ export interface EscalationIssueComment {
 /** One reaction on an OPEN needs-question issue ITSELF (never a comment) — W1-T4676. */
 export interface EscalationIssueReaction {
   id: number;
+  createdAt?: string;
   /** GitHub's own reaction vocabulary (`+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`,
    *  `rocket`, `eyes`) — only `+1`/`-1` are ever acted on; every other content is skipped. */
   content: string;
@@ -127,6 +129,7 @@ export interface EscalationAnswerGateway {
 /** One raw comment row as GitHub's REST `/issues/{n}/comments` endpoint returns it. */
 interface RestCommentRow {
   id: number;
+  created_at?: string;
   body?: string;
   author_association?: string;
   user?: { login?: string; type?: string } | null;
@@ -136,6 +139,7 @@ interface RestCommentRow {
  *  `author_association` field (unlike {@link RestCommentRow}); see this module's header. */
 interface RestReactionRow {
   id: number;
+  created_at?: string;
   content?: string;
   user?: { login?: string; type?: string } | null;
 }
@@ -173,6 +177,7 @@ export function ghEscalationAnswerGateway(
       });
       return rows.map((r) => ({
         id: r.id,
+        createdAt: r.created_at,
         body: r.body ?? "",
         authorLogin: r.user?.login ?? "",
         authorAssociation: r.author_association ?? "NONE",
@@ -188,6 +193,7 @@ export function ghEscalationAnswerGateway(
       });
       return rows.map((r) => ({
         id: r.id,
+        createdAt: r.created_at,
         content: r.content ?? "",
         authorLogin: r.user?.login ?? "",
         authorType: r.user?.type ?? "User",
@@ -305,6 +311,14 @@ export interface EscalationAnswerResult {
   unreadable: number;
 }
 
+/** Already-authorized steering input; origin identifies the GitHub action across retries. */
+export interface AcceptedEscalationAnswer {
+  taskId: string;
+  origin: string;
+  text: string;
+  createdAt?: string;
+}
+
 /**
  * Poll every OPEN needs-question issue for a NEW repository-owner reply, and land each accepted
  * one in `plan/questions.ndjson` — the exact store {@link "./worker.js".appendQuestionAnswer}
@@ -318,6 +332,7 @@ export async function readEscalationAnswers(
   gateway: EscalationAnswerGateway,
   deps: LedgerWriterDeps,
   clock: Clock = systemClock,
+  onAnswer?: (answer: AcceptedEscalationAnswer) => void,
 ): Promise<EscalationAnswerResult> {
   const writeLedger = deps.writeLedger ?? appendLedger;
   let accepted = 0;
@@ -330,6 +345,17 @@ export async function readEscalationAnswers(
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
   const recordedOrigins = recordedQuestionStoreOrigins(root);
+  const deliverAnswer = (answer: AcceptedEscalationAnswer): boolean => {
+    try {
+      onAnswer?.(answer);
+      return true;
+    } catch (error) {
+      unreadable++;
+      writeLedger(deps.ledgerPath, { run_id: runId, task_id: answer.taskId, step: "escalation_answer.delivery_failed",
+        origin: answer.origin, reason: String(error).slice(0, 512) });
+      return false;
+    }
+  };
   /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
    *  sink, whichever channel answered", now three channels deep. */
   const landAnswer = (taskId: string, origin: string, answer: string, authorLogin: string) => {
@@ -360,7 +386,6 @@ export async function readEscalationAnswers(
     }
     for (const comment of comments) {
       const origin = `issue#${issue.number}:comment:${comment.id}`;
-      if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per comment id
       const refusal = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
       if (refusal !== undefined) {
         ignored++;
@@ -377,6 +402,8 @@ export async function readEscalationAnswers(
       }
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
+      if (!deliverAnswer({ taskId, origin, text: comment.body.trim(), createdAt: comment.createdAt })) continue;
+      if (recordedOrigins.has(origin)) continue;
       landAnswer(taskId, origin, answer, comment.authorLogin);
       try {
         gateway.reactPlusOne(comment.id);
@@ -395,11 +422,12 @@ export async function readEscalationAnswers(
     }
     for (const reaction of reactions) {
       const origin = `issue#${issue.number}:reaction:${reaction.id}`;
-      if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per reaction id
       if (operatorRefusal(reaction, gateway.operatorLogins,
           reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
       const answer = reactionAnswerText(reaction.content, issue.body ?? "");
       if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
+      if (!deliverAnswer({ taskId, origin, text: answer, createdAt: reaction.createdAt })) continue;
+      if (recordedOrigins.has(origin)) continue;
       landAnswer(taskId, origin, answer, reaction.authorLogin);
       try {
         gateway.reactPlusOneOnIssue?.(issue.number);

@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
+import { landFeedback, landFeedbackStatusContent, queueFeedbackRecord, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
+import type { AcceptedEscalationAnswer } from "./escalation-answers.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -734,6 +735,44 @@ export interface CaptureFeedbackOptions {
 export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot?: string): FeedbackEntry | null {
   const queued = stateRoot === undefined ? [] : ([...readQueuedFeedbackRecords(stateRoot).values()] as unknown as FeedbackEntry[]);
   return [...listFeedback(root), ...queued].find((e) => e.submission_key === key) ?? null;
+}
+
+/** Queue a trusted grill reply and its reverse edge; replay repairs a partial queue without minting another reply. */
+export function answerEscalatedFeedback(repoRoot: string, stateRoot: string, answer: AcceptedEscalationAnswer): { feedbackId?: string; queued: boolean; reason?: string } | undefined {
+  const targetId = /^TRIAGE-(fb-[A-Za-z0-9_-]+)$/.exec(answer.taskId)?.[1];
+  if (targetId === undefined) return undefined;
+  const createdMs = Date.parse(answer.createdAt ?? "");
+  if (!Number.isFinite(createdMs)) throw new FeedbackError("GitHub grill answer has no readable creation time");
+  const key = `github-answer:${answer.origin}`;
+  const replyId = `fb-${createdMs}-${createHash("sha256").update(answer.origin).digest("hex").slice(0, 12)}`;
+  const queued = readQueuedFeedbackRecords(stateRoot);
+  const target = (queued.get(feedbackEntryRepoPath(targetId)) ?? readFeedbackEntry(repoRoot, targetId)) as FeedbackEntry;
+  if (target.id !== targetId || typeof target.raw !== "string" || !FEEDBACK_STATUSES.includes(target.status)) {
+    throw new FeedbackError("GitHub grill target is not a readable feedback entry");
+  }
+  const entries = [...listFeedback(repoRoot), ...listFeedback(stateRoot), ...queued.values()] as FeedbackEntry[];
+  const existing = entries.find(entry => entry.submission_key === key);
+  if (entries.some(entry => entry.id === replyId && entry.submission_key !== key) || (existing && existing.id !== replyId)) {
+    throw new FeedbackError("GitHub grill reply identity does not match its origin");
+  }
+  if (target.status === "answered" && target.answered_by === replyId) {
+    if (!existing) throw new FeedbackError("answered grill refers to an unavailable reply");
+    return { feedbackId: replyId, queued: false };
+  }
+  if (target.status !== "grilling") return { queued: false, reason: `feedback#${targetId} is not awaiting a grill answer (${target.status})` };
+  if (entries.some(entry => entry.reply_to === targetId && entry.id !== replyId)) {
+    throw new FeedbackError(`feedback#${targetId} already has a different reply`);
+  }
+  const reply = existing ?? captureFeedback(stateRoot, { id: replyId, origin: "issue", replyTo: targetId, submissionKey: key,
+    raw: `[answer to feedback#${targetId}]\n${answer.text}\n\nOriginal feedback:\n${target.raw}`, land: { stateRoot } });
+  if (!queued.has(feedbackEntryRepoPath(reply.id)) && !existsSync(join(repoRoot, feedbackEntryRepoPath(reply.id)))) {
+    const staged = queueFeedbackRecord(stateRoot, feedbackEntryRepoPath(reply.id), stateRoot);
+    if (!staged.queued) throw new FeedbackError(staged.error ?? "grill reply was not queued");
+  }
+  const flipped = landFeedbackStatusContent(repoRoot, feedbackEntryRepoPath(targetId),
+    stringifyYaml({ ...target, status: "answered", answered_by: reply.id }), { stateRoot });
+  if (!flipped.queued) throw new FeedbackError(flipped.error ?? "grill answer edge was not queued");
+  return { feedbackId: reply.id, queued: true };
 }
 
 /** Capture one feedback item: writes `plan/feedback/<id>.yaml` with `status: new`, copying any

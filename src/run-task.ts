@@ -584,6 +584,7 @@ import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } fr
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  answerEscalatedFeedback,
   feedbackEntryPath,
   listFeedback,
   parseFeedbackAddArgs,
@@ -45483,7 +45484,10 @@ export function buildSweepHook(
     // so a reply steers this same tick. Contained like `mainHealthRung` above.
     if (escalationAnswerGateway) {
       try {
-        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath }, undefined, answer => {
+          const delivered = answerEscalatedFeedback(repoRoot, config.root, answer);
+          if (delivered?.queued) log("escalation_answer.feedback_queued", { taskId: answer.taskId, origin: answer.origin, feedback_id: delivered.feedbackId });
+        });
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
       } catch (e) {
         log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
