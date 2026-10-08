@@ -169,6 +169,7 @@ import {
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
+  codexCandidatesForCapability,
   type WorkerExit,
 } from "./worker-provider.js";
 import {
@@ -177,7 +178,7 @@ import {
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
-import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
+import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, mountedFixArms, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -1808,8 +1809,10 @@ async function applyFixLearner(input: {
   const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
   if (codexIndex >= 0 && capability && !input.codexPreference) {
     const current = capacities[codexIndex];
-    const known = learned.evidence.arms.filter((arm) => arm.provider === "codex").map((arm) => ({ provider: "codex", model: arm.model }));
-    const drawn = learned.weigh([...known, { provider: "codex", model: current.model }], seed).arms;
+    // W1-T6360: only arms the lane's current capability row mounts compete; with no rival to the served model, no draw.
+    const rivals = mountedFixArms(learned.evidence, "codex", codexCandidatesForCapability(capabilities, capability, args.effort))
+      .filter((arm) => arm.model !== current.model);
+    const drawn = rivals.length > 0 ? learned.weigh([...rivals, { provider: "codex", model: current.model }], seed).arms : [];
     const beat = drawn.find((arm) => arm.model === (current.model ?? ""))?.draw ?? 0;
     const better = drawn
       .flatMap((arm) => (arm.draw !== null && arm.model !== "" && arm.model !== current.model && arm.draw > beat ? [{ model: arm.model, draw: arm.draw }] : []))
