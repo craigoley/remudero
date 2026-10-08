@@ -41,11 +41,6 @@ const AFTER_PR_OPENED =
   "follow-ups with a PR), and gatherRuns reads pr.opened before any fallback row";
 const ANOTHER_RUNS_PR =
   "its pr_url names an earlier, already-merged PR, never this run's own: reading it would credit the run with a merge it did not make";
-const KNOWN_GAP =
-  "KNOWN GAP: can be a worker run's first pr_url row before its pr.opened, like its listed siblings acceptance.repaired and " +
-  "pr.head_provider; 0 rows in the live 60-day union on 2026-10-04, so the filtered read matches today. " +
-  "Follow-up: list it in CONFIG_GARDEN_LEDGER_STEPS with a fallback row in the W1-T5474 corpus";
-
 /** Each step the scan finds that the gardener deliberately does not read, and why. */
 const EXEMPT: Readonly<Record<string, string>> = {
   // The five W1-T5526 removed from the read, and the other cost-only rows.
@@ -156,11 +151,6 @@ const EXEMPT: Readonly<Record<string, string>> = {
   // Another run's PR.
   "dispatch.rerun_override": ANOTHER_RUNS_PR,
   "fix.remeasured": ANOTHER_RUNS_PR,
-  // Known gaps, named for a follow-up rather than hidden.
-  "acceptance.repair.unrepresentable": KNOWN_GAP,
-  "changeset_claim.repaired": KNOWN_GAP,
-  "retro.pr.recovered": KNOWN_GAP,
-  "pr.body_normalize.error": KNOWN_GAP,
 };
 
 const PRICED = /\b(?:pr_url|cost_usd)\b/;
