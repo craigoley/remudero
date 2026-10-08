@@ -51445,14 +51445,14 @@ export async function dispatchMainRepairFixRun(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const branch = `main-repair-fix-${request.offendingSha.slice(0, 12)}-${Date.now()}`;
+  const branch = `main-repair-fix-${request.offendingSha.slice(0, 12)}-${systemClock.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
     await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
-      outPath: join(config.root, "tmp", `main-repair-settings-${taskId}-${Date.now()}.json`),
+      outPath: join(config.root, "tmp", `main-repair-settings-${taskId}-${systemClock.now()}.json`),
     });
     // A red main blocks every merge, so this rides the fix route at the "high" band (blast-radius).
     const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
@@ -51526,7 +51526,7 @@ export async function openMainRepairRevertPr(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const branch = `main-repair-revert-${request.offendingSha.slice(0, 12)}-${Date.now()}`;
+  const branch = `main-repair-revert-${request.offendingSha.slice(0, 12)}-${systemClock.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { log });

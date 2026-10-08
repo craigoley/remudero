@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,7 +30,10 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 import {
   dispatchMainRepairFixRun,
   mainRepairTaskId,
@@ -177,15 +180,7 @@ function rig(w: World, lane: MainRepairLane | undefined, ledgerPath: string, ove
   };
 }
 
-function ledgerRows(ledgerPath: string): Array<Record<string, unknown>> {
-  try {
-    return readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-  } catch {
-    return [];
-  }
-}
-
-const rowsOf = (ledgerPath: string, step: string) => ledgerRows(ledgerPath).filter((row) => row.step === step);
+const rowsOf = (ledgerPath: string, step: string) => readLedgerLines(ledgerPath).filter((row) => row.step === step); // ledger-read-intent: live
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t6403-`));
@@ -450,10 +445,10 @@ test("W1-T6403: a fix run lost to a daemon restart stalls into the revert, and a
   try {
     // The previous daemon process located the red and dispatched its fix run, then died with it.
     const row = (step: string, extra: Record<string, unknown>) =>
-      `${JSON.stringify({ run_id: "DAEMON-OLD", task_id: "MAIN-HEALTH", step, offending_sha: RED_MERGE, ...extra })}\n`;
-    writeFileSync(
-      ledgerPath,
-      row("main.repair.located", { offending_pr: 10092, failing_checks: ["ci"] }) + row("main.repair.fix_dispatched", {}),
+      ({ run_id: "DAEMON-OLD", task_id: "MAIN-HEALTH", step, offending_sha: RED_MERGE, ...extra });
+    writeLedger(
+      [row("main.repair.located", { offending_pr: 10092, failing_checks: ["ci"] }), row("main.repair.fix_dispatched", {})],
+      { dir: root },
     );
     const lane = fakeLane(() => {
       throw new Error("push refused by the remote");
@@ -608,20 +603,21 @@ function revertRequest(offendingSha: string): MainRepairRevertRequest {
 /** A real origin + clone: a green commit, the offending merge, and (for a conflict) a later edit. */
 function gitFixture(opts: { conflict?: boolean } = {}) {
   const root = tmpRoot();
-  const origin = join(root, "origin.git");
+  const originFixture = gitRepo({ bare: true, kind: "t6403-origin" });
+  const origin = originFixture.dir;
+  const checkout = gitRepo({ seedCommit: false, kind: "t6403-checkout" });
   const repoDir = join(root, "repos", "fixture-repo");
   const identity: Record<string, string> = {
-    GIT_AUTHOR_NAME: "t6403",
-    GIT_AUTHOR_EMAIL: "t6403@example.invalid",
-    GIT_COMMITTER_NAME: "t6403",
-    GIT_COMMITTER_EMAIL: "t6403@example.invalid",
+    GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
   };
   const env = { ...process.env, ...identity, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
   const run = (cwd: string, ...args: string[]): string =>
     execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
-  mkdirSync(repoDir, { recursive: true });
-  execFileSync("git", ["init", "--quiet", "--bare", "--initial-branch=main", origin], { env });
-  run(repoDir, "init", "--quiet", "--initial-branch=main");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  renameSync(checkout.dir, repoDir);
   run(repoDir, "remote", "add", "origin", origin);
   writeFileSync(join(repoDir, "census.txt"), "recorded 33/53\n");
   run(repoDir, "add", ".");
@@ -672,6 +668,9 @@ function gitFixture(opts: { conflict?: boolean } = {}) {
     originMain: () => run(origin, "rev-parse", "refs/heads/main"),
     originBranches: () => run(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/").split("\n").filter(Boolean).sort(),
     fileOnBranch: (branch: string, file: string) => `${run(origin, "show", `refs/heads/${branch}:${file}`)}\n`,
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    cleanup: () => {
+      rmSync(root, { recursive: true, force: true });
+      originFixture.cleanup();
+    },
   };
 }
