@@ -37856,6 +37856,7 @@ export async function daemonCommand(
     spawn: childMeasurementCadenceSpawn({
       entry: fileURLToPath(new URL(`./measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
       cwd: repoRoot,
+      config,
     }),
   }) : undefined;
   // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —

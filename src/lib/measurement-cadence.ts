@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
+import { validateConfig, type Config } from "./config.js";
+import { validateConfigShape } from "./config-schema.js";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport, type RuleSignature } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
@@ -3560,6 +3562,40 @@ export async function measurementCadenceChildMain(
   }
 }
 
+/** W1-T6495: the env var that carries the daemon's resolved `Config` (JSON) to the child. An env var, not argv:
+ *  the config can hold a relay token and argv is world-readable through `ps`. */
+export const MEASUREMENT_CADENCE_CHILD_CONFIG_ENV = "RMD_MEASUREMENT_CADENCE_CHILD_CONFIG";
+
+/** The config the daemon named for this child, or `undefined` when none was named (a hand-run child, which
+ *  resolves its own). A named config that does not parse or validate THROWS: the child must never fall back to
+ *  `$HOME`'s config and measure a different root than the daemon that spawned it. */
+export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Config | undefined {
+  const raw = env[MEASUREMENT_CADENCE_CHILD_CONFIG_ENV];
+  if (raw === undefined || raw === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} is not readable JSON: ${String((e as Error)?.message ?? e)}`);
+  }
+  try {
+    const config = validateConfigShape(parsed, MEASUREMENT_CADENCE_CHILD_CONFIG_ENV);
+    validateConfig(config);
+    return config;
+  } catch (e) {
+    throw new Error(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} names an invalid config: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
+/** The child's cadence run: build the hooks over the daemon's named config (resolved inside the run, so a bad
+ *  named config lands as a `failed` state row rather than an uncaught throw before any row is written). */
+export function measurementCadenceChildRun(
+  env: NodeJS.ProcessEnv,
+  build: (config: Config | undefined) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
+): () => Promise<MeasurementCadenceRunResult> {
+  return async () => build(namedMeasurementCadenceChildConfig(env)).runMeasurementCadence();
+}
+
 /** The production spawn: `<entry> --measurement-cadence-child <statePath> <runId>` on this node and loader, detached so a
  *  daemon restart leaves it running, heap-capped and niced like a garden child. */
 export function childMeasurementCadenceSpawn(opts: {
@@ -3568,6 +3604,8 @@ export function childMeasurementCadenceSpawn(opts: {
   execArgv?: readonly string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** W1-T6495: the daemon's resolved config, handed to the child so it measures the same root. */
+  config?: Config;
   heapLimitMb?: number;
   spawnChild?: typeof spawn;
   setPriority?: (pid: number, priority: number) => void;
@@ -3576,7 +3614,7 @@ export function childMeasurementCadenceSpawn(opts: {
     const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${opts.heapLimitMb ?? MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
     const child = (opts.spawnChild ?? spawn)(opts.execPath ?? process.execPath, argv, {
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env: opts.config ? { ...(opts.env ?? process.env), [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : (opts.env ?? process.env),
       detached: true,
       stdio: "ignore",
     });
