@@ -338,8 +338,10 @@
   files:
     - "plan/tasks.d/**"
     - "src/run-task.ts"
+    - "src/lib/policy.ts"
     - "src/lib/affected-suites.ts"
     - "src/lib/dep-review.ts"
+    - "test/**"
     - "learnings/ci.yaml"
   fact: >-
     The remudero-review gate refused eight pull requests in one window (#9717, #9819, #9824, #9834,

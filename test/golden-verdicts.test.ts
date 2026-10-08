@@ -273,6 +273,19 @@ test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-pus
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {
+  const { verdict, golden } = judgeCase("ci-remudero-review-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6334.yaml", "src/run-task.ts", "src/lib/policy.ts", "src/lib/dep-review.ts", "test/new-census.test.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "remudero-review-refusals-repaired-by-hand"), taskFile);
+  }
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
