@@ -117,7 +117,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     return result.stdout;
   };
-  const report = (name, result, ok) => {
+  const report = (name, result, ok, metadata = {}) => {
     ensureDiagnostics();
     const stdout = result.stdout ?? '';
     const stderr = result.stderr ?? '';
@@ -126,7 +126,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       writeFileSync(logs.stdout, stdout, { mode: 0o600, flag: 'wx' });
       writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
     }
-    receipt.steps.push({ name, ok, exitCode: result.status, signal: result.signal ?? null,
+    receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name === 'affected-tests' ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
@@ -218,10 +218,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
-        const staticResult = runStep('static-preflight', ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
-          '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+        const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
+          join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
+          '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+        const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file);
         const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-        report('static-preflight', staticResult, staticOk);
+        report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
         // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
         // receipt and selected floor, but don't spend another full run on known-doomed tests.
         if (staticOk) {

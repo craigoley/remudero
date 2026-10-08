@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { getPriority } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { gitRepo } from './helpers/git-repo.js';
@@ -56,6 +57,42 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
+});
+
+test('author static preflight lowers real descendant priority and records the actual wrapper', () => {
+  const f = fixture();
+  const parentPriority = getPriority();
+  writeFileSync(join(f.root, 'src/run-task.ts'), `
+    import { getPriority } from 'node:os';
+    import { spawnSync } from 'node:child_process';
+    import { writeFileSync } from 'node:fs';
+    const child = spawnSync(process.execPath, ['-e', 'console.log(require("node:os").getPriority())'], {encoding:'utf8'});
+    if (child.status !== 0) throw new Error('descendant priority probe failed');
+    writeFileSync('coverage/static-priority.json', JSON.stringify({self:getPriority(), child:Number(child.stdout)}));
+  `);
+  f.git('add', '.'); f.git('commit', '-m', 'test: real descendant priority');
+  assert.equal(mod.main([], { root: f.root }), 0);
+  const receipt = f.receipt();
+  const step = receipt.steps.find((row: {name: string}) => row.name === 'static-preflight');
+  assert.ok(['nice', 'nice+ionice'].includes(step.priority));
+  const observed = JSON.parse(readFileSync(join(f.root, 'coverage/static-priority.json'), 'utf8'));
+  assert.equal(observed.self, Math.min(19, parentPriority + 10));
+  assert.equal(observed.child, observed.self, 'the entire static process tree inherits lower CPU priority');
+  assert.equal(receipt.verdict, 'passed');
+  assert.deepEqual(receipt.steps.map((row: {name: string}) => row.name), ['census-precheck', 'static-preflight', 'affected-tests']);
+});
+
+test('author static priority wrapping retains failure and never starts affected tests', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'src/run-task.ts'), 'process.exitCode = 7;\n');
+  f.git('add', '.'); f.git('commit', '-m', 'test: failed low priority static');
+  assert.equal(mod.main([], { root: f.root }), 1);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'failed');
+  assert.deepEqual(receipt.steps.map((row: {name: string}) => row.name), ['census-precheck', 'static-preflight']);
+  assert.equal(receipt.steps[1].exitCode, 7);
+  assert.ok(['nice', 'nice+ionice'].includes(receipt.steps[1].priority));
+  assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
 });
 
 test('author preflight refuses shared bare configuration before a real split-config migration can poison sibling worktrees', (t) => {
