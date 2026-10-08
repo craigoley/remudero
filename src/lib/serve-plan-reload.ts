@@ -186,7 +186,7 @@ export interface PlanSourceHolder {
 /** BACKSTOP: the longest failure reason a response carries; a reader needs the cause, not an unbounded error text. */
 export const PLAN_SOURCE_REASON_MAX = 240;
 
-/** CAP: bound response/log metadata, not plan size. Short references remain readable; large identities are hashed in full. */
+/** PRIMARY CONTROL: bound response/log metadata, not plan size. Short references remain readable; large identities are hashed in full. */
 export const PLAN_SOURCE_IDENTITY_MAX_BYTES = 1_024;
 
 const boundedReason = (reason: unknown): string => String((reason as Error)?.message ?? reason).slice(0, PLAN_SOURCE_REASON_MAX);
