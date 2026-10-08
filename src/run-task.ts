@@ -41954,8 +41954,7 @@ export function buildOpenPrViews(
 const OPEN_PR_READ_PENDING = new Error("W1-T6591: open-PR read pending");
 type OpenPrCiFailureRead = (owner: string, repo: string, rollup: Parameters<typeof fetchCiFailures>[2]) => Promise<CiFailure[]>;
 
-/** W1-T6591: runs a synchronous pass whose misses are awaited off the loop, until a pass misses
- *  none. A failed read is replayed as the same throw, so every catch arm sees what it saw before. */
+/** W1-T6591: reruns a sync pass, awaiting its misses, until none; a failed read replays as its throw. */
 export async function replayOpenPrReads<T>(
   run: (fetch: GhApiFetcher, ciFailures: typeof fetchCiFailures) => T,
   fetchAsync: (args: string[]) => Promise<unknown>,
@@ -41994,8 +41993,7 @@ export async function replayOpenPrReads<T>(
   }
 }
 
-/** W1-T6591: {@link buildOpenPrViews} with every GitHub read and CI-failure fetch awaited. Only the
- *  settled pass commits the plan-filing cache or emits classification telemetry. */
+/** W1-T6591: {@link buildOpenPrViews}, reads awaited; only the settled pass commits cache and telemetry. */
 export async function buildOpenPrViewsAsync(
   owner: string,
   repo: string,
