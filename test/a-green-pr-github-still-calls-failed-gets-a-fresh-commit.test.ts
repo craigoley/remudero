@@ -8,7 +8,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 import {
-  buildSweepEffects, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
+  buildSweepEffects, refreshStaleRollupAfterRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
 } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -125,6 +125,40 @@ test("W1-T6404: a head GitHub does not report blocked is not refreshed", async t
   assert.equal(h.rows("automerge.armed_idle_refused")[0].outcome, "direct-merge-failed");
   assert.equal(h.updates.length, 0);
   assert.equal(h.rows("automerge.stale_rollup_refreshed").length, 0);
+});
+
+function direct(t: TestContext, overrides: Partial<SweepDeps> = {}) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-stale-rollup-direct-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const deps = { ledgerPath, runId: "direct", escalate: () => {}, readCiGateRollup: () => ROLLUP, ...overrides };
+  return { deps, ledgerPath, rows: (step: string) => readLedgerLines(ledgerPath).filter(row => row.step === step) };
+}
+
+test("W1-T6404: a refresh with no updateBranch wired ledgers outcome unwired", async t => {
+  const d = direct(t);
+  const msg = await refreshStaleRollupAfterRefusal(d.deps, pr(), []);
+  assert.equal(msg, "stale-rollup refresh: unwired");
+  assert.equal(d.rows("automerge.stale_rollup_refreshed")[0].outcome, "unwired");
+});
+
+test("W1-T6404: a throwing updateBranch is ledgered as an error outcome, not propagated", async t => {
+  const d = direct(t, { updateBranch: () => { throw new Error("update-branch exploded"); } });
+  const msg = await refreshStaleRollupAfterRefusal(d.deps, pr(), []);
+  assert.equal(msg, "stale-rollup refresh: error: update-branch exploded");
+  assert.equal(d.rows("automerge.stale_rollup_refreshed")[0].outcome, "error: update-branch exploded");
+});
+
+test("W1-T6404: a failed exhaustion escalation is ledgered as escalated:false with its reason", async t => {
+  const d = direct(t, { escalate: () => { throw new Error("escalation transport down"); } });
+  const prior = [{ step: "automerge.stale_rollup_refreshed", pr_number: 6404, head_sha: HEAD }];
+  const msg = await refreshStaleRollupAfterRefusal(d.deps, pr({ headSha: NEXT_HEAD }), prior);
+  assert.match(msg, /escalation failed$/);
+  const exhausted = d.rows("automerge.stale_rollup_refresh_exhausted");
+  assert.equal(exhausted.length, 1);
+  assert.equal(exhausted[0].escalated, false);
+  assert.equal(exhausted[0].reason, "escalation transport down");
+  assert.equal(exhausted[0].head_sha, NEXT_HEAD);
 });
 
 test("W1-T6404: a refreshed head is never refreshed twice", async t => {
