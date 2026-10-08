@@ -237,6 +237,12 @@ test("GOLDEN — RULE-CHECKS LESSON: the cited gate refusal reaches the worker l
   }
 });
 
+test("GOLDEN — CLAIMS LESSON: the matched lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-claims-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — CI SHARD CONFLICT LESSON: the staged-marker remedy executes and arms", () => {
   const { verdict, golden } = judgeCase("ci-shard-conflict-lesson");
   assert.equal(golden.violation, "none");
@@ -251,6 +257,12 @@ test("GOLDEN — CODEQL READ-MODEL LESSON: the cited incident executes and the C
 
 test("GOLDEN — COMMENT-LOAD LESSON: the cited incident executes and the comment-load guidance arms", () => {
   const { verdict, golden } = judgeCase("ci-comment-load-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-push guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-light-gates-lesson");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
 });
