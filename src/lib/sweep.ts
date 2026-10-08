@@ -1727,6 +1727,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalateRearmExhausted",
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
+  "rerunFailedChecks",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1756,6 +1757,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "stackPrerequisite"
   | "withdrawStackAutoMerge"
   | "requeueCheck"
+  | "rerunFailedChecks"
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
@@ -2507,6 +2509,28 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
+    rerunFailedChecks: async (pr) => {
+      const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
+        { state?: string; head?: { sha?: string } } | undefined;
+      if (live?.state !== "open" || live.head?.sha !== pr.headSha) {
+        return { outcome: "head-moved", runIds: [], reason: "the PR is no longer open at the attempted head" };
+      }
+      const runIds = new Set<number>();
+      for (let page = 1; ; page++) {
+        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=100&page=${page}`]) as
+          { total_count?: number; workflow_runs?: Array<{ id?: number; head_sha?: string; status?: string; conclusion?: string }> } | undefined;
+        if (!body || !Array.isArray(body.workflow_runs)) throw new Error("failed workflow runs could not be read");
+        for (const run of body.workflow_runs) {
+          if (run.head_sha === pr.headSha && run.status === "completed" && run.conclusion === "failure" && typeof run.id === "number") {
+            runIds.add(run.id);
+          }
+        }
+        if (body.workflow_runs.length < 100 || (body.total_count !== undefined && page * 100 >= body.total_count)) break;
+      }
+      if (runIds.size === 0) return { outcome: "unavailable", runIds: [], reason: "no completed failed workflow run at this head" };
+      for (const id of runIds) ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/runs/${id}/rerun-failed-jobs`]);
+      return { outcome: "rerun", runIds: [...runIds] };
+    },
     requeueCheck: (pr, check) => {
       if (!check.jobId) {
         log("sweep.check_requeue.no_job_id", { pr_number: pr.prNumber, check_name: check.name });
@@ -10731,6 +10755,10 @@ export interface SweepDeps {
     pr: OpenPrView,
     check: CancelledRequiredCheck | CiFailure,
   ) => boolean | void | JobRequeueOutcome | Promise<boolean | void | JobRequeueOutcome>;
+  /** W1-T6353: retry failed jobs after a successful ci-log round left the head unchanged. */
+  rerunFailedChecks?: (pr: OpenPrView) => Promise<{
+    outcome: "rerun" | "head-moved" | "unavailable"; runIds: number[]; reason?: string;
+  }>;
   /** W1-T5939 — githubstatus.com's summary JSON, cached; the sweep classifies it with `classifyActionsIncident`. */
   readActionsStatusSummary?: () => Promise<unknown>;
   /** W1-T1223 — a SECOND cancellation of the SAME check on the SAME head, after this lane already
@@ -11793,11 +11821,13 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   if (!taskId) return false;
   let stalled = false;
   let dispatched = false;
+  let ciHead: unknown;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
+      ciHead = line.mode === "ci-log" ? line.head_sha : undefined;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
@@ -11810,6 +11840,9 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
       stalled = true; // W1-T5920: the FLAKE round's requeue never landed — nothing will move this head
+    } else if (line.step === "fix.done" && ciHead !== undefined && line.head_sha === ciHead &&
+        line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
+      stalled = true;
     }
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
@@ -12107,8 +12140,8 @@ export function fixRoundTally(
   taskId: string | undefined,
   currentHeadSha?: string,
   regime?: "executed" | "keyword_only",
-): { strikes: number; refusals: { reason: string; round_id: string }[]; repeatedRefusal?: string } {
-  const tally: ReturnType<typeof fixRoundTally> = { strikes: 0, refusals: [] };
+): { strikes: number; refusals: { reason: string; round_id: string }[]; repeatedRefusal?: string; noCommitRounds: string[] } {
+  const tally: ReturnType<typeof fixRoundTally> = { strikes: 0, refusals: [], noCommitRounds: [] };
   if (!taskId) return tally;
   if (regime === undefined) {
     const proofExec = lines.findLast((line) => line.task_id === taskId && line.step === "review.posted")?.proof_exec;
@@ -12139,6 +12172,7 @@ export function fixRoundTally(
     if (line.step === "fix.review") round.reviewed = true;
   }
   const reasons = new Map<string, number>();
+  const noCommitCounts = new Map<string, number>();
   for (const round of rounds) {
     if (!selected.has(round.dispatch)) continue;
     if (round.refusal || round.done?.subtype === "commit_refused") {
@@ -12157,9 +12191,18 @@ export function fixRoundTally(
       continue;
     }
     const pushedHead = round.done?.pushed_head_sha;
+    let repeatedNoCommit = false;
+    if (round.dispatch.mode === "ci-log" && typeof round.dispatch.head_sha === "string" && round.done?.subtype === "success" &&
+        (pushedHead === undefined || pushedHead === round.dispatch.head_sha)) {
+      tally.noCommitRounds.push(round.id);
+      const count = (noCommitCounts.get(round.dispatch.head_sha) ?? 0) + 1;
+      noCommitCounts.set(round.dispatch.head_sha, count);
+      repeatedNoCommit = count > 1;
+    }
     if (isRealStrike({
       workerRan: round.done !== undefined,
-      judgmentPosted: round.reviewed === true || (typeof pushedHead === "string" && pushedHead !== round.dispatch.head_sha),
+      judgmentPosted: round.reviewed === true || (typeof pushedHead === "string" && pushedHead !== round.dispatch.head_sha) ||
+        repeatedNoCommit,
     })) tally.strikes++;
   }
   return tally;
@@ -13553,6 +13596,10 @@ export async function runSweep(
       // DELIVERED stand-down sentence is written once per head instead of on every pass.
       const deliveredStandDownLogged = disposition === "post-review" && deduped && standDownReason !== undefined &&
         prior.reviewDelivered.has(reviewKey) && standDownAlreadyLogged(ledgerLines, pr, standDownReason);
+      const rerunReceipt = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
+      const rerunMemory = rerunReceipt === undefined ? {} : Object.fromEntries(
+        Object.entries(rerunReceipt).filter(([key]) => key.startsWith("no_commit_rerun_")));
       const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
@@ -13599,6 +13646,7 @@ export async function runSweep(
         // ONLY when this pass classified the PR base-caused AND a main tip was read; see
         // {@link lastBaseCausedTipFromLedger} for the fold that reads it back next pass.
         ...(baseCausedMainTipSha !== undefined ? { main_tip_sha: baseCausedMainTipSha } : {}),
+        ...rerunMemory,
         ...(extraDisposedFields ?? {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
@@ -14460,6 +14508,40 @@ export async function runSweep(
                 incidentHeldPrs.add(pr.prNumber);
                 acted = false;
                 standDownReason = incidentHold;
+                break;
+              }
+              const noCommitRound = fixRoundTally(ledgerLines, pr.taskId, pr.headSha).noCommitRounds.at(-1);
+              const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
+                row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
+              if (noCommitRound !== undefined && !rerunAttempted) {
+                acted = false;
+                if (!deps.rerunFailedChecks) {
+                  standDownReason = "no-commit CI fix awaits a failed-job rerun gateway";
+                  break;
+                }
+                // Claim before the write: a crash or partial rerun must never retry this head.
+                const receipt = { run_id: deps.runId, task_id: pr.taskId!, step: "sweep.disposed",
+                  pr_number: pr.prNumber, head_sha: pr.headSha, disposition: "wait", acted: true,
+                  no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound };
+                if (readLedger(deps.ledgerPath).some(row => row.step === "sweep.disposed" &&
+                    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true)) {
+                  standDownReason = "no-commit failed-job rerun already claimed by another pass";
+                  break;
+                }
+                appendLine(deps.ledgerPath, receipt);
+                acted = true;
+                spent = false;
+                let result: { outcome: string; runIds: number[]; reason?: string };
+                try {
+                  result = await deps.rerunFailedChecks(pr);
+                } catch (error) {
+                  result = { outcome: "failed", runIds: [], reason: String(error) };
+                }
+                extraDisposedFields = { ...extraDisposedFields,
+                  no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound,
+                  no_commit_rerun_outcome: result.outcome, no_commit_rerun_run_ids: result.runIds,
+                  no_commit_rerun_reason: result.reason };
+                standDownReason = `no-commit CI fix: failed-job rerun ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
                 break;
               }
               // W1-T3980 — the CodeQL-blocker route: the same hold, claim and host admission as the
