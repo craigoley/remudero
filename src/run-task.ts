@@ -19132,7 +19132,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
       }
-      log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
+      log("verdict", { ...v.ledger, pre_dispatch_contract_revision: preDispatchContractRevision(task), ...terminalVerdictFields(impl) });
       say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
       return {
         taskId,
@@ -38154,6 +38154,7 @@ export async function daemonCommand(
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: daemonFreshnessReads(repoRoot).checkFreshness,
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
+        categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the
         // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because

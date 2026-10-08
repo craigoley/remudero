@@ -3857,7 +3857,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           continue;
         }
         try {
-          holdTaskForRefusal(join(config.root, "state"), task, c.refusals);
+          holdTaskForRefusal(join(config.root, "state"), task, c.refusals, c.runId, c.contractRevision);
         } catch (e) {
           log("sweep.refusal_amendment.hold_failed", { task_id: c.taskId, error: String((e as Error)?.message ?? e) });
         }
