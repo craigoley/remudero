@@ -41423,7 +41423,7 @@ function openPrPlanIdentity(path: string): { kind: "readable"; identity: string 
  * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
  * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
-export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string, deps: OpenPrViewDeps = {}): ClassifiedOpenPrView[] {
+export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string, deps: NonNullable<Parameters<typeof openPrViewSteps>[3]> = {}): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
   return runStepsSync(openPrViewSteps(owner, repo, ledgerPath, deps, {
     read: fetch,
@@ -41439,8 +41439,6 @@ interface OpenPrViewReads {
   ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
   requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
 }
-
-type OpenPrViewDeps = NonNullable<Parameters<typeof openPrViewSteps>[3]>;
 
 function* openPrViewSteps(
   owner: string,
@@ -41994,7 +41992,7 @@ export function buildOpenPrViewsAsync(
   owner: string,
   repo: string,
   ledgerPath: string,
-  deps: Omit<OpenPrViewDeps, "fetch"> & {
+  deps: Omit<NonNullable<Parameters<typeof openPrViewSteps>[3]>, "fetch"> & {
     fetchAsync?: GhApiFetcher;
     fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
