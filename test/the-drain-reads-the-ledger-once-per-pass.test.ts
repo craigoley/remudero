@@ -9,9 +9,10 @@ import { nextRunnable, runDrain, runnableCandidateIds, runnableCandidates, type 
 import { runDaemon } from "../src/lib/daemon.js";
 import { auditedLifetimeTalliesFromArchives, breakerGateFor } from "../src/run-task.js";
 import { ledgerIndexBuildCount } from "../src/lib/status.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "drain-ledger-pass-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}drain-ledger-pass-`));
   const path = join(root, "ledger.ndjson");
   writeFileSync(path, "");
   const planPath = join(root, "tasks.yaml");
