@@ -36391,7 +36391,7 @@ function* retractGardenBranchSteps(
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_delete_failed";
   }
-  o.log(`${o.name}.garden_branch_retracted`, { branch: o.branch });
+  o.log(`${o.name}.garden_head_deleted`, { branch: o.branch });
   return "deleted";
 }
 
