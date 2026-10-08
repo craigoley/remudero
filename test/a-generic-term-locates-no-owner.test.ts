@@ -4,11 +4,25 @@ import { test } from "node:test";
 import { ciFrictionLadder, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
 import { locateCiFrictionOwner, type OwnerSearch } from "../src/lib/ci-friction-remedy.js";
 
+const REVISION = "a".repeat(40);
+const PIN = ["rev-parse", "--verify", "origin/main^{commit}"];
+const WORKFLOWS = ["ls-tree", "-r", "--name-only", REVISION, "--", ".github/workflows"];
+
 test("W1-T5380: a check family named by a generic term locates no owner and escalates", () => {
+  const calls: string[][] = [];
   const search = gitCiFrictionOwnerSearch((args) => {
-    assert.equal(args[0], "grep");
+    calls.push([...args]);
+    if (args[0] === "rev-parse") {
+      assert.deepEqual(args, PIN);
+      return REVISION;
+    }
+    if (args[0] === "ls-tree") {
+      assert.deepEqual(args, WORKFLOWS);
+      return "";
+    }
+    assert.deepEqual(args, ["grep", "-c", "-F", "-w", "-e", "ci", REVISION, "--", "src", "scripts"]);
     // The original 1868 hits were inside identifiers such as decision, not tokens naming CI.
-    return args.includes("-w") ? "" : "origin/main:src/run-task.ts:1868\norigin/main:src/lib/sweep.ts:484\n";
+    return args.includes("-w") ? "" : `${REVISION}:src/run-task.ts:1868\n${REVISION}:src/lib/sweep.ts:484\n`;
   });
   assert.equal(locateCiFrictionOwner("check:ci-log:ci", [], search), undefined);
   const result = ciFrictionLadder({
@@ -17,14 +31,24 @@ test("W1-T5380: a check family named by a generic term locates no owner and esca
   });
   assert.equal(result.next?.decision.kind, "escalate");
   assert.equal(result.ladder[0]?.state, "escalate");
+  assert.deepEqual(calls, [PIN, WORKFLOWS, WORKFLOWS]);
+  assert.deepEqual(search.filesContaining("ci"), []);
+  assert.equal(calls.length, 4, "source reads reuse the revision pinned by workflow discovery");
 });
 
 test("W1-T5380: a distinctive refusal reason still locates its owning file", () => {
+  const calls: string[][] = [];
   const search = gitCiFrictionOwnerSearch((args) => {
-    assert.deepEqual(args, ["grep", "-c", "-F", "-w", "-e", "no anchored COMMIT_MESSAGE line in the report", "origin/main", "--", "src", "scripts"]);
-    return "origin/main:src/lib/fix.ts:3\norigin/main:test/fix.test.ts:10\norigin/main:src/lib/fix.test.ts:8\n";
+    calls.push([...args]);
+    if (args[0] === "rev-parse") {
+      assert.deepEqual(args, PIN);
+      return REVISION;
+    }
+    assert.deepEqual(args, ["grep", "-c", "-F", "-w", "-e", "no anchored COMMIT_MESSAGE line in the report", REVISION, "--", "src", "scripts"]);
+    return `${REVISION}:src/lib/fix.ts:3\n${REVISION}:test/fix.test.ts:10\n${REVISION}:src/lib/fix.test.ts:8\n`;
   });
   assert.deepEqual(locateCiFrictionOwner("fix_refusal:no-anchored-commit-message", ["no anchored COMMIT_MESSAGE line in the report"], search)?.files, ["src/lib/fix.ts"]);
+  assert.deepEqual(calls, [PIN, ["grep", "-c", "-F", "-w", "-e", "no anchored COMMIT_MESSAGE line in the report", REVISION, "--", "src", "scripts"]]);
 });
 
 test("a failing-test signature outranks a family spanning more files regardless of hit counts", () => {
@@ -51,10 +75,20 @@ test("an unmatched signature preserves a distinctive family and a tied signature
 });
 
 test("whole-token search distinguishes no matches from search failures", () => {
-  const empty = gitCiFrictionOwnerSearch(() => { throw Object.assign(new Error("no matches"), { status: 1 }); });
+  const searchFailure = (failure: Error) => gitCiFrictionOwnerSearch((args) => {
+    if (args[0] === "rev-parse") {
+      assert.deepEqual(args, PIN);
+      return REVISION;
+    }
+    assert.deepEqual(args, ["grep", "-c", "-F", "-w", "-e", "ci", REVISION, "--", "src", "scripts"]);
+    throw failure;
+  });
+  const empty = searchFailure(Object.assign(new Error("no matches"), { status: 1 }));
   assert.deepEqual(empty.filesContaining("ci"), []);
-  const broken = gitCiFrictionOwnerSearch(() => { throw Object.assign(new Error("search failed"), { status: 128 }); });
-  assert.throws(() => broken.filesContaining("ci"), /search failed/);
+  const failure = Object.assign(new Error("search failed"), { status: 128 });
+  assert.throws(() => searchFailure(failure).filesContaining("ci"), error => error === failure);
+  const unreadable = Object.assign(new Error("unable to read blob"), { status: 1, stderr: "unable to read blob" });
+  assert.throws(() => searchFailure(unreadable).filesContaining("ci"), error => error === unreadable);
 });
 
 test("refusal terms spanning more files contribute no owners", () => {
