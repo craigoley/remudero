@@ -1,0 +1,35 @@
+- id: W1-T6494
+  title: "THE CONTAINERD DATA MOUNT IS READ FROM MOUNTINFO — resolve_data_mount (deploy/install-container-runtime-mount-order.sh) takes /var/lib/containerd's bind source from /proc/mounts, whose source field for a bind is the DEVICE, so DATA_MOUNT resolves to /dev and the live containerd drop-in says RequiresMountsFor=/dev /var/lib/containerd instead of naming /mnt/rmd"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the default mode orders containerd after the real data-disk mount
+  band_meaning: span
+  origin: "operator session 2026-10-08: PR #10123 build (scratch runtime roots)"
+  plan_refs: [W1-T2856]
+  files: [deploy/install-container-runtime-mount-order.sh, test/container-runtime-mount-order-install.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 on the host: /etc/systemd/system/containerd.service.d/20-remudero-mount-order.conf holds
+    `RequiresMountsFor=/dev /var/lib/containerd`, while /var/lib/containerd is an fstab bind from /mnt/rmd/containerd.
+    READ on origin/main: resolve_data_mount calls bind_source_for, which reads the source column of /proc/mounts; for a
+    bind mount that column is the backing device (e.g. /dev/nvme0n1p1), so `dirname` gives /dev and
+    enclosing_mount_point picks /dev. The existing test fixture writes a source-path shape /proc/mounts never shows,
+    so it hides the defect. W1-T2856's invariant (containerd waits for its runtime data mount) is therefore satisfied
+    only by the /var/lib/containerd mount itself, not by /mnt/rmd.
+  design: |
+    Resolve the bind's source from /proc/self/mountinfo (field 4 is the root within the source filesystem, field 5
+    the mount point) as #10123's scratch-mode live check already does: find the mount whose device matches
+    /var/lib/containerd's and whose mount point encloses the bind root, and set DATA_MOUNT to that mount point
+    (/mnt/rmd on the host). Fix the fixture to write real /proc/mounts and mountinfo shapes. Default-mode output is
+    otherwise unchanged.
+  acceptance:
+    - claim: "with a real-shaped bind mount the containerd drop-in requires the data disk mount, not /dev"
+      proof: 'grep: test("W1-T6494: a bind-mounted containerd root requires its data disk mount" in test/container-runtime-mount-order-install.test.ts'
+  falsifier: |
+    Keep the /proc/mounts source read: the real-shaped fixture renders RequiresMountsFor=/dev and the test fails.
