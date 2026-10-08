@@ -18,7 +18,7 @@ const probe = `
 function child(environment: NodeJS.ProcessEnv) {
   return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" },
+    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined },
   }));
 }
 function owner(t: { after: (fn: () => void) => void }) {
@@ -44,7 +44,7 @@ test("author static admission: real child and grandchild borrow one live owner w
     import { execFileSync } from 'node:child_process';
     process.stdout.write(execFileSync(process.execPath, ${JSON.stringify(["--import", "tsx", "--input-type=module", "-e", probe])}, {encoding:'utf8'}));
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" } });
+    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
   assert.deepEqual(readdirSync(dir), ["slot-1.json"]);
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
@@ -133,6 +133,42 @@ test("author static admission: release never removes a replacement nonce and sui
   const isolated = resolveTestSlotDir({ ...lease.childEnvironment, NODE_TEST_CONTEXT: "child" });
   assert.equal(isolated.scope, "test-process");
   assert.notEqual(isolated.dir, dir);
+});
+
+test("author static admission: an actual child detects a removed or replaced parent before completion", async (t) => {
+  for (const kind of ["removed", "replaced"]) {
+    const { lease, claim, bytes } = owner(t);
+    const peer = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import { acquireTestSlot } from './src/lib/test-slot.ts';
+      const lease=acquireTestSlot('parent-loss-child',{slots:1,waitBoundMs:0});
+      console.log('ready');
+      process.stdin.resume(); process.stdin.on('end',()=>{
+        const errors=[];
+        for(const method of ['refresh','release']) {
+          try { lease[method](); errors.push('incorrect success'); }
+          catch(error) { errors.push(String(error.message)); }
+        }
+        console.log(JSON.stringify(errors));
+      });
+    `], { cwd: ROOT, env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined }, stdio: ["pipe", "pipe", "pipe"] });
+    t.after(() => { if (peer.exitCode === null) peer.kill(); });
+    let output = "", stderr = "";
+    peer.stderr.on("data", (data) => { stderr += String(data); });
+    const finished = new Promise<void>((resolve, reject) => {
+      peer.once("error", reject); peer.once("exit", (code) => code === 0 ? resolve() : reject(Error(`child exit ${code}: ${stderr}`)));
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(Error("parent-loss child never reached admission")), 10_000);
+      peer.stdout.on("data", (data) => { output += String(data); if (output.startsWith("ready\n")) { clearTimeout(timeout); resolve(); } });
+    });
+    if (kind === "removed") rmSync(claim.path);
+    else writeFileSync(claim.path, JSON.stringify({ ...JSON.parse(bytes), ownerNonce: "replacement" }));
+    peer.stdin.end();
+    await finished;
+    const errors: string[] = JSON.parse(output.trim().split("\n")[1]!);
+    assert.equal(errors.length, 2);
+    for (const error of errors) assert.match(error, /ENOENT|lost its live owner/);
+  }
 });
 
 test("author static admission: kernel identity has real defaults and unknown facts never certify an owner", () => {

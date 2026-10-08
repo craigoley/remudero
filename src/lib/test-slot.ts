@@ -226,10 +226,17 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
         held.concurrency !== claim.concurrency || !Number.isSafeInteger(held.concurrency) || held.concurrency! < 1) return { rejected: "different-holder" };
     if (testSlotProcessFacts(held.pid)?.start !== held.processStart) return { rejected: "dead-or-reused-owner" };
     if (!testSlotHasAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
+    const verifyParent = () => {
+      const current = parseTestSlotHolder(readFileSync(claim.path, "utf8"));
+      if (!current || current.pid !== held.pid || current.ownerNonce !== held.ownerNonce ||
+          current.processStart !== held.processStart || testSlotProcessFacts(held.pid)?.start !== held.processStart) {
+        throw new Error("inherited parent test slot lost its live owner; nested completion refused");
+      }
+    };
     return { lease: { outcome: "acquired", concurrency: held.concurrency!, waitedMs: 0,
       note: `inherited live parent test slot (${claim.path}); --test-concurrency=${held.concurrency}`,
       childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
-      refresh: () => {}, release: () => {} } };
+      refresh: verifyParent, release: verifyParent } };
   } catch (error) {
     return { rejected: `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}` };
   }
