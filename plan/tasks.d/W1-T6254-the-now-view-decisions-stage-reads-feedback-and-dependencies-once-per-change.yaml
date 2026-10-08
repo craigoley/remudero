@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: now view 2.5-3.4 s per pass; views-worker CPU profile (serve lanes/claude/serve2-w2-_worker_9_.cpuprofile)"
   plan_refs: [W1-T6253, W1-T5730]
   files: [src/lib/now-view.ts, test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

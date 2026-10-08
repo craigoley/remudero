@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up of #9675 (W1-T6028), with #9682 (W1-T6027)"
   plan_refs: [W1-T6028, W1-T6027, W1-T6032, W1-T5999, W1-T5535]
   files: [src/run-task.ts, src/lib/fix-routing-learner.ts, test/a-fall-through-fix-round-carries-its-signal-end.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

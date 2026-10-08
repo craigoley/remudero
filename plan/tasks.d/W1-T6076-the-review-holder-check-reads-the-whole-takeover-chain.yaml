@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up of #9645"
   plan_refs: [W1-T6025, W1-T6026, W1-T4414, W1-T5279, W1-T3674, W1-T3648]
   files: [scripts/task-id-existence-check.mjs, src/lib/task-id-reservation.ts, src/lib/review.ts, test/the-review-holder-check-reads-the-whole-takeover-chain.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

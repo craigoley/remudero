@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: why console's watchdog reached deploy-run while core's never did"
   plan_refs: [W1-T6249, W1-T3532]
   files: [src/lib/deployer.ts, test/an-instances-idle-probe-counts-only-its-own-workers.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item M2), from W1-T6191's retention rows and an isolated memo replay"
   plan_refs: [W1-T6191, W1-T4567, W1-T5062]
   files: [src/lib/ledger-union.ts, src/lib/action-results.ts, src/lib/follow-up-policy.ts, src/lib/measurement-cadence.ts, src/lib/cost-anomaly.ts, test/a-cold-memo-reads-rotation-digests.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

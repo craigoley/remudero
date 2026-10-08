@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: Node 24 upgrade follow-up"
   plan_refs: [W1-T2770, W1-T5883]
   files: [.github/workflows/node-pin-follows-the-image.yml, scripts/node-pin-follows-the-image.mjs, test/the-node-pin-follows-a-patch-image-bump.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: daemon.freshness_decision rows 19:50–20:38Z ('change 2 + staleness N < 18')"
   plan_refs: [W1-T4945, W1-T6259]
   files: [src/lib/deploy-judge.ts, test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
