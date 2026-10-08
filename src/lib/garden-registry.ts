@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
@@ -405,6 +406,17 @@ export function selectorShadowGardenPass(
         { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
     } catch (e) {
       d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
+    }
+    // W1-T6406: the flake-incident garden runs in the pass that ledgers its evidence, on the same checkout,
+    // so it needs no second child process and no second garden branch form. It reads the ledger union, so
+    // a failed run read above does not stop it from judging what earlier passes recorded.
+    try {
+      await runFlakeIncidentGardener(d, {
+        mintTaskId,
+        readChangedPaths: (baseSha, headSha) => readSelectorShadowChangedPaths(owner, repo, { baseSha, headSha }, io.readJson),
+      });
+    } catch (e) {
+      d.log("flake_incident.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
   };
 }
