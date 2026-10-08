@@ -157,7 +157,8 @@ SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
 SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
 SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}" # docs/operator-guide.md "Serve supervisor"; off = direct launch
-SERVE_GENS_DIR="${RMD_SERVE_GENS_DIR:-${HOME:-/root}/rmd-serve-gens}"
+SERVE_GENS_DIR_OVERRIDE="${RMD_SERVE_GENS_DIR:-}"
+SERVE_GENS_DIR="${SERVE_GENS_DIR_OVERRIDE:-${HOME:-/root}/rmd-serve-gens}"
 SERVE_GENS_MOUNT_DEST="/home/node/rmd-serve-gens"
 SERVE_SUPERVISOR_ENTRY="/app/src/lib/serve-supervisor-main.ts"
 SERVE_NETWORK_ENV_VALUE="container"
@@ -625,7 +626,12 @@ fi
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
 if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
-  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
+  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
+    SERVE_SCRATCH_GENS_DIR="${SCRATCH_CONTAINER_TMP%/containers/*/tmp}/serve-gens"
+    if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${SERVE_SUPERVISOR}" = "on" ]; then SCRATCH_DIRS+=("${SERVE_SCRATCH_GENS_DIR}"); fi
+    if [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
+    if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then SERVE_GENS_DIR="${SERVE_SCRATCH_GENS_DIR}"; fi
+  fi
   echo "serve-container: scratch mounts ${SCRATCH_NOTE}"
 fi
 
