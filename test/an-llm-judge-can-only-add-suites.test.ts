@@ -269,7 +269,9 @@ test("W1-T4407: the production suite list refuses a substituted git pointer", (t
   mkdirSync(join(foreign.dir, "test"));
   writeFileSync(join(foreign.dir, "test", "foreign.test.ts"), "export {};\n");
   foreign.git("add", "test/foreign.test.ts");
-  assert.equal(foreign.git("ls-files", "--", "test"), "test/foreign.test.ts");
+  // The staged-file control reads the index through `diff --cached`, not the census idiom, so this
+  // single-file fixture is not discovered as a src-population census walker.
+  assert.equal(foreign.git("diff", "--cached", "--name-only", "--", "test"), "test/foreign.test.ts");
   writeFileSync(join(root, ".git"), `gitdir: ${join(foreign.dir, ".git")}\n`);
   const ports = productionCiJudgePorts({ owner: "o", repo: "r", repoRoot: root, stateDir: root, log: rows().log });
   assert.throws(() => ports.suiteIds(), WorktreePointerRefusedError);
