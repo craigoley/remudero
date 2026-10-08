@@ -6,6 +6,7 @@ import {
   type OpenIssue,
 } from "./escalate.js";
 import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
+import { baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "./base-reproduction.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
 import {
@@ -126,6 +127,8 @@ export interface MainHealthRungDeps {
   mergeReader?: MainHealthMergeReader;
   /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T6403: the red-main repair lane — a fix PR first, then a revert PR. Absent, a red escalates as before. */
+  repair?: MainRepairDeps;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -405,8 +408,11 @@ export function escalationFor(observation: MainHealthObservation, branch: string
           `merged, and they share ${met.sharedPaths.map((path) => `\`${path}\``).join(", ")}. Each passed CI alone. `
         : "") +
       `The default branch \`${branch}\` at \`${observation.sha}\` is red. ${observation.reason}.${diagnosis} ` +
-      "This observer never auto-reverts or pauses unrelated dispatch; an explicit operator ruling " +
-      "is required to hold the queue. The automatic PR repair and update paths remain active.",
+      "This observer never auto-reverts or pauses unrelated dispatch by itself: its repair lane (W1-T6403) " +
+      "opens one priority fix PR for the located first red merge and, if main stays red, one revert PR of " +
+      "that merge, both judged by review and CI, never a push to main. This issue means that lane could " +
+      "not locate, fix or revert this red; an explicit operator ruling is required to hold the queue. " +
+      "The automatic PR repair and update paths remain active.",
     options: [
       {
         label: "let automatic repair continue",
@@ -423,6 +429,409 @@ export function escalationFor(observation: MainHealthObservation, branch: string
   };
 }
 
+// ── W1-T6403 — A RED MAIN REPAIRS ITSELF: A FIX PR FIRST, THEN A REVERT PR ─────────────────────
+//
+// 2026-10-08: #10092 turned main red at 12:14:50Z; this rung ledgered `main.health.observed` red 12
+// times and repaired nothing until a human merged #10102 at 12:54Z. Operator ruling: locate the first
+// red merge, open ONE priority fix PR, and if main stays red past a bounded window open ONE revert PR
+// of that merge. Both are PRs, so review, CI and branch protection still judge them: nothing here
+// force-pushes or pushes to main. The MAIN-HEALTH escalation is raised only once locate, fix and revert
+// have all been refused. Every dedupe key is read back from the ledger, so a restart repeats nothing.
+
+/** Every branch this lane opens a PR from starts here; none is ever the default branch. */
+export const MAIN_REPAIR_BRANCH_PREFIX = "main-repair-";
+/** PRIMARY CONTROL: red observations with no fix-PR progress (no new head, no merge) before the
+ *  revert tier fires — the ruling's "two daemon ticks". */
+export const MAIN_REPAIR_FIX_STALL_OBSERVATIONS = 2;
+/** PRIMARY CONTROL: and the wall-clock floor under those observations. An event wake can observe twice
+ *  in a minute, and a fix PR's own CI runs ~15-17 minutes, so two ticks alone would revert over a fix
+ *  that is simply waiting on its checks. */
+export const MAIN_REPAIR_FIX_STALL_MIN_MS = 30 * 60_000;
+/** BACKSTOP: merges the bisect fallback probes below main's red head before it gives up. */
+export const MAIN_REPAIR_BISECT_LIMIT = 8;
+/** BACKSTOP: characters of the failing check's log tail a fix prompt carries. */
+export const MAIN_REPAIR_LOG_EXCERPT_CHARS = 4_000;
+
+/** What the fix worker is told: the failing checks, their output and the offending merge. */
+export interface MainRepairFixRequest {
+  /** Main's red head the evidence was read from. */
+  headSha: string;
+  offendingSha: string;
+  offendingPr?: number;
+  failingChecks: string[];
+  failingTestTitles: string[];
+  testFiles: string[];
+  logExcerpt: string;
+  /** A fresh branch off `base` — never `base` itself. */
+  branch: string;
+  base: string;
+}
+
+export interface MainRepairRevertRequest {
+  headSha: string;
+  offendingSha: string;
+  offendingPr?: number;
+  failingChecks: string[];
+  /** `git revert --no-edit <offendingSha>` is committed on this fresh branch, never on `base`. */
+  branch: string;
+  base: string;
+  fixPrUrl?: string;
+  /** Why the fix PR was not enough — carried into the revert PR's body. */
+  whyFixNotEnough: string;
+}
+
+export type MainRepairRevertResult = { prUrl: string } | { refused: string; conflictingPaths: readonly string[] };
+
+export interface MainRepairPrState {
+  state: "open" | "closed" | "merged";
+  headSha?: string;
+}
+
+/** The effects the repair lane drives. `openFixPr` and `openRevertPr` run OFF the observe path (a fix
+ *  worker takes minutes), so the sweep that awaits this rung is never held by them. */
+export interface MainRepairDeps {
+  /** One priority fix run on `request.branch` off origin/main; the PR url, or undefined when none opened. */
+  openFixPr(request: MainRepairFixRequest): Promise<string | undefined>;
+  /** Revert on `request.branch` off origin/main, push that branch, open the PR against `request.base`. */
+  openRevertPr(request: MainRepairRevertRequest): Promise<MainRepairRevertResult>;
+  readPr(prUrl: string): Awaitable<MainRepairPrState>;
+  closePr(prUrl: string, comment: string): Awaitable<void>;
+  /** W1-T6024's base-reproduction probe, run at any sha — the bisect fallback's only runner. */
+  reproduce?(sha: string, files: readonly string[]): Promise<BaseProbeResult>;
+}
+
+/** The current repair episode, read back from the ledger: rows since the last `main.repair.resolved`. */
+export interface MainRepairEpisode {
+  offendingSha?: string;
+  offendingPr?: number;
+  fixDispatched: boolean;
+  fixPrUrl?: string;
+  fixUnopened?: string;
+  revertPrUrl?: string;
+  revertRefused?: string;
+}
+
+export function mainRepairEpisodeFromLedger(lines: readonly Record<string, unknown>[]): MainRepairEpisode | undefined {
+  let episode: MainRepairEpisode | undefined;
+  for (const line of lines) {
+    const step = String(line.step ?? "");
+    if (!step.startsWith("main.repair.")) continue;
+    if (step === "main.repair.resolved") {
+      episode = undefined;
+      continue;
+    }
+    episode ??= { fixDispatched: false };
+    const sha = typeof line.offending_sha === "string" ? line.offending_sha : undefined;
+    if (step === "main.repair.located" && sha && sha !== episode.offendingSha) {
+      episode = { offendingSha: sha, fixDispatched: false, ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}) };
+      continue;
+    }
+    if (!sha || sha !== episode.offendingSha) continue;
+    if (step === "main.repair.fix_dispatched") episode.fixDispatched = true;
+    if (step === "main.repair.fix_opened" && typeof line.pr_url === "string") episode.fixPrUrl = line.pr_url;
+    if (step === "main.repair.fix_unopened") episode.fixUnopened = String(line.reason ?? "the fix run opened no PR");
+    if (step === "main.repair.revert_opened" && typeof line.pr_url === "string") episode.revertPrUrl = line.pr_url;
+    if (step === "main.repair.revert_refused") episode.revertRefused = String(line.reason ?? "the revert was refused");
+  }
+  return episode;
+}
+
+type Located = { offendingSha: string; offendingPr?: number; method: "first-red-run" | "bisect" };
+
+/** The bisect fallback: probe the failing test files at main's first-parent merges, nearest the head
+ *  first, and name the child of the first parent-green/child-red pair. Any probe that is neither
+ *  reproduced nor clear stops the walk: a guess would revert a merge that may be innocent. */
+export async function bisectOffendingMerge(
+  firstParents: readonly string[],
+  files: readonly string[],
+  reproduce: NonNullable<MainRepairDeps["reproduce"]>,
+): Promise<{ offendingSha: string } | { reason: string }> {
+  const verdictAt = async (sha: string) => decideBaseReproduction(files, await reproduce(sha, files));
+  const [head] = firstParents;
+  if (!head) return { reason: "main's first-parent window was empty" };
+  const atHead = await verdictAt(head);
+  if (atHead !== "reproduced") return { reason: `the failing test files read ${atHead} at main's head ${head}` };
+  const limit = Math.min(firstParents.length, MAIN_REPAIR_BISECT_LIMIT + 1);
+  for (let i = 1; i < limit; i++) {
+    const parent = firstParents[i]!;
+    const verdict = await verdictAt(parent);
+    if (verdict === "clear") return { offendingSha: firstParents[i - 1]! };
+    if (verdict !== "reproduced") return { reason: `the failing test files read ${verdict} at ${parent}` };
+  }
+  return { reason: `no parent-green/child-red pair within ${limit - 1} merges of main's head` };
+}
+
+interface RedContext {
+  branch: string;
+  /** Main's red head whose evidence decided the observation. */
+  headSha: string;
+  observation: MainHealthObservation;
+  failures: readonly CiFailure[];
+}
+
+interface RepairLaneDeps {
+  owner: string;
+  repo: string;
+  ledgerPath: string;
+  runId: string;
+  fetch: GhApiFetcher;
+  mergeReader: MainHealthMergeReader;
+  log: MainHealthRungDeps["log"];
+  now: () => number;
+  repair: MainRepairDeps;
+}
+
+/** The lane's per-process state. Dedupe lives in the ledger; this holds only what is in flight. */
+function buildRepairLane(deps: RepairLaneDeps) {
+  const { repair } = deps;
+  let job: Promise<void> | undefined;
+  let bisected: { headSha: string; unlocated?: string } | undefined;
+  let fixProgress: { url: string; key: string; sinceMs: number; observations: number } | undefined;
+  /** Bumped on every resolved episode: a fix run that reports back into a later generation is redundant. */
+  let generation = 0;
+
+  const record = (step: string, fields: Record<string, unknown>): void => {
+    appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, ...fields });
+  };
+  const background = (work: () => Promise<void>): void => {
+    const started = work().catch((error: unknown) => {
+      deps.log("main.repair.error", { error: String((error as Error)?.message ?? error) });
+    });
+    job = started;
+    void started.finally(() => {
+      if (job === started) job = undefined;
+    });
+  };
+  const prNumberOf = async (sha: string): Promise<number | undefined> => {
+    try {
+      return (await deps.mergeReader.prMerge(sha))?.number;
+    } catch (error) {
+      deps.log("main.repair.pr_unreadable", { offending_sha: sha, error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+  };
+  const evidenceFields = (ctx: RedContext) => ({
+    head_sha: ctx.headSha,
+    failing_checks: [...ctx.observation.failingChecks],
+    test_files: baseReproductionFiles(ctx.failures),
+  });
+  const unlocated = (ctx: RedContext, reason: string): false => {
+    if (bisected?.headSha !== ctx.headSha || bisected.unlocated === undefined) {
+      record("main.repair.unlocated", { head_sha: ctx.headSha, reason });
+    }
+    bisected = { headSha: ctx.headSha, unlocated: reason };
+    return false;
+  };
+
+  /** Locate the offending merge, or start the bisect that will; "pending" while it runs. */
+  const locate = async (ctx: RedContext): Promise<Located | "pending" | false> => {
+    const first = ctx.observation.firstRedCommit;
+    if (first) {
+      const offendingPr = first.pullRequest?.number ?? (await prNumberOf(first.headSha));
+      return { offendingSha: first.headSha, ...(offendingPr !== undefined ? { offendingPr } : {}), method: "first-red-run" };
+    }
+    if (bisected?.headSha === ctx.headSha && bisected.unlocated !== undefined) return false;
+    const files = baseReproductionFiles(ctx.failures);
+    const why = ctx.observation.runHistoryWindowExhausted ? "the push-run window never reached a green run" : "no first red push run";
+    if (!repair.reproduce) return unlocated(ctx, `${why}, and no reproduction probe to bisect with`);
+    if (files.length === 0) return unlocated(ctx, `${why}, and the failing checks name no test file to bisect with`);
+    background(async () => {
+      let found: { offendingSha: string } | { reason: string };
+      try {
+        const window = [...(await readMainFirstParentWindow(deps.owner, deps.repo, ctx.headSha, deps.fetch))];
+        found = await bisectOffendingMerge(window, files, repair.reproduce!);
+      } catch (error) {
+        found = { reason: `the bisect could not run: ${String((error as Error)?.message ?? error)}` };
+      }
+      if ("reason" in found) {
+        unlocated(ctx, `${why}; ${found.reason}`);
+        return;
+      }
+      const offendingPr = await prNumberOf(found.offendingSha);
+      record("main.repair.located", {
+        ...evidenceFields(ctx),
+        offending_sha: found.offendingSha,
+        ...(offendingPr !== undefined ? { offending_pr: offendingPr } : {}),
+        method: "bisect",
+      });
+    });
+    return "pending";
+  };
+
+  const startFix = (ctx: RedContext, located: Pick<Located, "offendingSha" | "offendingPr">): void => {
+    const startedIn = generation;
+    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}fix-${located.offendingSha.slice(0, 12)}-${deps.now()}`;
+    record("main.repair.fix_dispatched", { offending_sha: located.offendingSha, branch, priority: true });
+    const request: MainRepairFixRequest = {
+      headSha: ctx.headSha,
+      offendingSha: located.offendingSha,
+      ...(located.offendingPr !== undefined ? { offendingPr: located.offendingPr } : {}),
+      failingChecks: [...ctx.observation.failingChecks],
+      failingTestTitles: [...(ctx.observation.failingTestTitles ?? [])],
+      testFiles: baseReproductionFiles(ctx.failures),
+      logExcerpt: ctx.failures
+        .filter((failure) => ctx.observation.failingChecks.includes(failure.name))
+        .map((failure) => `== ${failure.name} ==\n${failure.logTail.slice(-MAIN_REPAIR_LOG_EXCERPT_CHARS)}`)
+        .join("\n")
+        .slice(-MAIN_REPAIR_LOG_EXCERPT_CHARS),
+      branch,
+      base: ctx.branch,
+    };
+    background(async () => {
+      let url: string | undefined;
+      try {
+        url = await repair.openFixPr(request);
+      } catch (error) {
+        record("main.repair.fix_unopened", { offending_sha: located.offendingSha, reason: String((error as Error)?.message ?? error) });
+        return;
+      }
+      if (!url) {
+        record("main.repair.fix_unopened", { offending_sha: located.offendingSha, reason: "the fix run opened no PR" });
+        return;
+      }
+      record("main.repair.fix_opened", { offending_sha: located.offendingSha, pr_url: url, branch });
+      if (generation !== startedIn) {
+        await repair.closePr(url, `Main went green while this fix run was in flight; closing it as redundant (W1-T6403).`);
+        record("main.repair.redundant_closed", { offending_sha: located.offendingSha, pr_url: url });
+      }
+    });
+  };
+
+  /** Why the fix was not enough, or undefined while it is still being given time. */
+  const fixShortfall = async (episode: MainRepairEpisode): Promise<string | undefined> => {
+    if (episode.fixUnopened) return `the fix run opened no PR (${episode.fixUnopened})`;
+    if (!episode.fixPrUrl) return "the fix run did not survive to report a PR";
+    let pr: MainRepairPrState;
+    try {
+      pr = await repair.readPr(episode.fixPrUrl);
+    } catch (error) {
+      deps.log("main.repair.pr_unreadable", { pr_url: episode.fixPrUrl, error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+    if (pr.state === "closed") return `fix PR ${episode.fixPrUrl} closed unmerged while main stayed red`;
+    const key = `${pr.state}:${pr.headSha ?? ""}`;
+    const at = deps.now();
+    if (fixProgress?.url !== episode.fixPrUrl || fixProgress.key !== key) {
+      fixProgress = { url: episode.fixPrUrl, key, sinceMs: at, observations: 0 };
+      return undefined;
+    }
+    fixProgress.observations++;
+    const idleMs = at - fixProgress.sinceMs;
+    if (fixProgress.observations < MAIN_REPAIR_FIX_STALL_OBSERVATIONS || idleMs < MAIN_REPAIR_FIX_STALL_MIN_MS) return undefined;
+    return (
+      `fix PR ${episode.fixPrUrl} made no progress (no new head, no merge) across ${fixProgress.observations} red ` +
+      `observations over ${Math.round(idleMs / 60_000)} minutes`
+    );
+  };
+
+  const startRevert = (ctx: RedContext, episode: MainRepairEpisode, why: string): void => {
+    const offendingSha = episode.offendingSha!;
+    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}revert-${offendingSha.slice(0, 12)}-${deps.now()}`;
+    const request: MainRepairRevertRequest = {
+      headSha: ctx.headSha,
+      offendingSha,
+      ...(episode.offendingPr !== undefined ? { offendingPr: episode.offendingPr } : {}),
+      failingChecks: [...ctx.observation.failingChecks],
+      branch,
+      base: ctx.branch,
+      ...(episode.fixPrUrl ? { fixPrUrl: episode.fixPrUrl } : {}),
+      whyFixNotEnough: why,
+    };
+    background(async () => {
+      let result: MainRepairRevertResult;
+      try {
+        result = await repair.openRevertPr(request);
+      } catch (error) {
+        result = { refused: String((error as Error)?.message ?? error), conflictingPaths: [] };
+      }
+      if ("prUrl" in result) {
+        record("main.repair.revert_opened", {
+          offending_sha: offendingSha,
+          pr_url: result.prUrl,
+          branch,
+          ...(episode.fixPrUrl ? { fix_pr_url: episode.fixPrUrl } : {}),
+          reason: why,
+        });
+        return;
+      }
+      record("main.repair.revert_refused", {
+        offending_sha: offendingSha,
+        reason: result.refused,
+        conflicting_paths: [...result.conflictingPaths],
+      });
+    });
+  };
+
+  return {
+    idle: (): Promise<void> => job ?? Promise.resolve(),
+    /** True while the lane owns this red, so no escalation is raised; false once it has been refused. */
+    async onRed(ctx: RedContext): Promise<boolean> {
+      if (job) return true;
+      let episode = mainRepairEpisodeFromLedger(readLedgerLines(deps.ledgerPath));
+      if (!episode?.offendingSha) {
+        const located = await locate(ctx);
+        if (located === "pending") return true;
+        if (!located) return false;
+        record("main.repair.located", {
+          ...evidenceFields(ctx),
+          offending_sha: located.offendingSha,
+          ...(located.offendingPr !== undefined ? { offending_pr: located.offendingPr } : {}),
+          method: located.method,
+        });
+        episode = { offendingSha: located.offendingSha, fixDispatched: false, ...(located.offendingPr !== undefined ? { offendingPr: located.offendingPr } : {}) };
+      }
+      if (episode.revertRefused) return false;
+      if (episode.revertPrUrl) {
+        try {
+          return (await repair.readPr(episode.revertPrUrl)).state !== "closed";
+        } catch (error) {
+          deps.log("main.repair.pr_unreadable", { pr_url: episode.revertPrUrl, error: String((error as Error)?.message ?? error) });
+          return true;
+        }
+      }
+      if (!episode.fixDispatched) {
+        startFix(ctx, { offendingSha: episode.offendingSha!, ...(episode.offendingPr !== undefined ? { offendingPr: episode.offendingPr } : {}) });
+        return true;
+      }
+      const why = await fixShortfall(episode);
+      if (why !== undefined) startRevert(ctx, episode, why);
+      return true;
+    },
+    /** Main green on its own head: ledger who repaired it and close every repair PR still open. */
+    async onGreen(sha: string): Promise<void> {
+      const episode = mainRepairEpisodeFromLedger(readLedgerLines(deps.ledgerPath));
+      if (!episode) return;
+      const states = new Map<string, MainRepairPrState | undefined>();
+      for (const url of [episode.fixPrUrl, episode.revertPrUrl]) {
+        if (!url) continue;
+        try {
+          states.set(url, await repair.readPr(url));
+        } catch (error) {
+          deps.log("main.repair.pr_unreadable", { pr_url: url, error: String((error as Error)?.message ?? error) });
+          states.set(url, undefined);
+        }
+      }
+      const merged = (url: string | undefined) => url !== undefined && states.get(url)?.state === "merged";
+      const by = merged(episode.revertPrUrl) ? "revert" : merged(episode.fixPrUrl) ? "fix" : "other";
+      const closed: string[] = [];
+      for (const [url, state] of states) {
+        if (state?.state !== "open") continue;
+        await repair.closePr(url, `Main is green again on its own head \`${sha}\` (by: ${by}); this repair PR is now redundant (W1-T6403).`);
+        closed.push(url);
+      }
+      record("main.repair.resolved", {
+        by,
+        head_sha: sha,
+        ...(episode.offendingSha ? { offending_sha: episode.offendingSha } : {}),
+        closed_prs: closed,
+      });
+      generation++;
+      fixProgress = undefined;
+      bisected = undefined;
+    },
+  };
+}
+
 function isMainHealthIssue(issue: OpenIssue): boolean {
   return /^\*\*Task:\*\*\s+MAIN-HEALTH\s*$/m.test(issue.body ?? "");
 }
@@ -434,11 +843,14 @@ function isMainHealthIssue(issue: OpenIssue): boolean {
  * errors are named and swallowed here so neither GitHub nor issue transport can stop the PR
  * reconciler that follows this rung.
  */
+/** The rung: observe main once. `repairIdle` settles when the repair effect it started (if any) has. */
+export type MainHealthRung = (() => Promise<void>) & { repairIdle(): Promise<void> };
+
 export function buildMainHealthRung(
   owner: string,
   repo: string,
   deps: MainHealthRungDeps,
-): () => Promise<void> {
+): MainHealthRung {
   let defaultBranch: string | undefined;
   let escalatedSignature: string | undefined;
   let resolvedSignature: string | undefined;
@@ -455,6 +867,11 @@ export function buildMainHealthRung(
     });
   const freshMs = Math.max(0, deps.freshMs ?? 0);
   const now = deps.now ?? Date.now;
+  const repairLane = deps.repair
+    ? buildRepairLane({ owner, repo, ledgerPath: deps.ledgerPath, runId: deps.runId, fetch: deps.fetch, mergeReader, log: deps.log, now, repair: deps.repair })
+    : undefined;
+  // W1-T6403: a red the lane is repairing is re-observed every tick, so its CI logs are read once per red signature.
+  let ciEvidenceCache: { signature: string; failures?: CiFailure[]; unavailable?: string } | undefined;
 
   const observe = async (startedAtMs: number): Promise<void> => {
     try {
@@ -652,9 +1069,15 @@ export function buildMainHealthRung(
             ? new Set([...required, MAIN_TRIPWIRE_CHECK_NAME])
             : required;
         try {
-          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(evidenceRollup, evidenceRequired)) : undefined;
-          if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
-          if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
+          if (repairLane && ciEvidenceCache?.signature === signature) {
+            failures = ciEvidenceCache.failures;
+            ciFailuresUnavailable = ciEvidenceCache.unavailable;
+          } else {
+            failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(evidenceRollup, evidenceRequired)) : undefined;
+            if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
+            if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
+            if (repairLane) ciEvidenceCache = { signature, ...(failures ? { failures } : {}), ...(ciFailuresUnavailable ? { unavailable: ciFailuresUnavailable } : {}) };
+          }
         } catch (error) {
           ciFailuresUnavailable = String((error as Error)?.message ?? error);
           deps.log("main.health.ci_evidence_unreadable", {
@@ -740,6 +1163,20 @@ export function buildMainHealthRung(
             }
           }
         }
+        // W1-T6403: a red that is not an infrastructure requeue goes to the repair lane first; the
+        // escalation below is raised only once that lane has refused (unlocated, or revert refused).
+        if (repairLane && !allRetryable) {
+          let owned = false;
+          try {
+            owned = await repairLane.onRed({ branch, headSha: decidedBySha, observation, failures: failures ?? [] });
+          } catch (error) {
+            deps.log("main.repair.error", { branch, sha, error: String((error as Error)?.message ?? error) });
+          }
+          if (owned) {
+            lastSuccessfulObservationAtMs = startedAtMs;
+            return;
+          }
+        }
         const issueUrl = await tryEscalateAsync(escalationFor(observation, branch, metLookup?.met), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
@@ -781,6 +1218,14 @@ export function buildMainHealthRung(
         );
         deps.log("main.health.resolved", { branch, sha, issue_url: issue.url });
       }
+      // W1-T6403 close-out: only main green on its OWN head ends a repair episode.
+      if (repairLane && decidedBySha === sha) {
+        try {
+          await repairLane.onGreen(sha);
+        } catch (error) {
+          deps.log("main.repair.error", { branch, sha, error: String((error as Error)?.message ?? error) });
+        }
+      }
       resolvedSignature = signature;
       lastSuccessfulObservationAtMs = startedAtMs;
     } catch (error) {
@@ -788,7 +1233,7 @@ export function buildMainHealthRung(
     }
   };
 
-  return () => {
+  const rung = () => {
     const startedAtMs = now();
     if (
       lastSuccessfulObservationAtMs !== undefined &&
@@ -805,4 +1250,5 @@ export function buildMainHealthRung(
     });
     return started;
   };
+  return Object.assign(rung, { repairIdle: () => repairLane?.idle() ?? Promise.resolve() });
 }
