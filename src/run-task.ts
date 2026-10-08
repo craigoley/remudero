@@ -215,7 +215,9 @@ export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -231,7 +233,9 @@ import {
 export {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -6490,7 +6494,11 @@ export function fixRungScopeStandDownReason(
     }
   | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
-  const planOnlyTask = declaredFiles.every(isInPlanScope);
+  // W1-T5118: the role is read from the inherited diff — a plan-only filing stays plan-scoped even
+  // when its shard declares future src/test paths. The SAME selection `renderFixPrompt` reads.
+  const regime = fixScopeRegime(declaredFiles, baselineDiffFiles);
+  const planOnlyTask = regime === "plan";
+  const planFiling = planOnlyTask && !declaredFiles.every(isInPlanScope);
   const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath)
     .filter((path) => !ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path));
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
@@ -6499,8 +6507,8 @@ export function fixRungScopeStandDownReason(
     : reachableRemedyPaths.length > 0
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
-  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges).filter(
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles, [], regime));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges, regime).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -6508,7 +6516,10 @@ export function fixRungScopeStandDownReason(
   const reason =
     scopeKind === "plan"
       ? `a fix worker added path(s) outside plan scope on a plan-only PR: ${newOutOfScopePaths.join(", ")} — ` +
-        `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/` +
+        (planFiling
+          ? `this PR is a plan-only filing (every path it carried before this rung is plan-scoped), so its ` +
+            `declared future paths are not yours to build here: a repair may only touch plan/** (or MASTER-PLAN.md/`
+          : `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/`) +
         `ORIENTATION.md), never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
         `rung itself wrote`
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
