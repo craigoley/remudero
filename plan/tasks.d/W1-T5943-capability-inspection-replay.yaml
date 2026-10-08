@@ -21,7 +21,7 @@
     - test/capability-inspection-redaction.test.ts
     - test/capability-inspection-cli.test.ts
     - docs/cli-reference.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: capability-grant.ts already implements a pure verifyCapabilityGrant over a

@@ -12,7 +12,7 @@
   origin: "operator approval 2026-10-07: engineering follow-up to canonical CI-friction issue #9018"
   plan_refs: [W1-T4435, W1-T5380]
   files: [src/lib/ci-friction-gardener.ts, src/lib/ci-friction-remedy.ts, test/a-ci-friction-workflow-owner-is-discovered.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Reserved with the shipped rmd next-task-id from the writable operator checkout:
