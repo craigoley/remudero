@@ -15668,59 +15668,72 @@ export function refreshManagedCheckout(
   repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  install?: (repoDir: string) => void,
+  install?: (repoDir: string) => void | Promise<void>,
   escalate?: (failure: StagedInstallFailure) => void,
-): ManagedCheckoutRefresh {
-  if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+): Promise<ManagedCheckoutRefresh> {
+  if (!existsSync(join(repoDir, "node_modules"))) return Promise.resolve({ kind: "unborrowed", release: () => {} });
   // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
   const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
+  // W1-T6356: the lock is taken SYNCHRONOUSLY (a cheap file create) so a busy lock still throws from the call itself, which is
+  // what retryWhileLockBusy's try/catch sees; only the git work after it is awaited.
   let lock: DrainLockHandle;
   try {
     lock = acquireDrainLock(lockPath);
   } catch (error) {
     throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
   }
-  const release = () => lock.release();
-  const git = (...args: string[]) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
+  const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
+  return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
+}
+
+/** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
+async function refreshHeldManagedCheckout(
+  repoDir: string,
+  release: () => void,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  runInstall: (repoDir: string) => void | Promise<void>,
+  git: (...args: string[]) => Promise<string>,
+): Promise<ManagedCheckoutRefresh> {
   const skip = (reason: string): ManagedCheckoutRefresh => {
     log("managed_checkout.refresh_skipped", { reason });
     return { kind: "skipped", reason, release };
   };
   try {
-    const dirty = git("status", "--porcelain");
+    const dirty = await git("status", "--porcelain");
     if (dirty) return skip(`checkout is dirty (${dirty.split("\n").length} changed path(s))`);
-    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    const branch = await git("rev-parse", "--abbrev-ref", "HEAD");
     if (branch !== "main") return skip(`checkout is on ${branch}, not main`);
     try {
-      git("fetch", "--quiet", "origin");
+      await git("fetch", "--quiet", "origin");
     } catch (error) {
       // Not a refusal: an unreachable origin leaves the checkout as it is, and `skip` ledgers the reason the refusal names.
       return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
     }
-    const beforeSha = git("rev-parse", "HEAD");
-    if (beforeSha === git("rev-parse", "origin/main")) {
+    const beforeSha = await git("rev-parse", "HEAD");
+    if (beforeSha === (await git("rev-parse", "origin/main"))) {
       // W1-T4933: code that is already current can still sit on a tree that predates its lockfile. A failed refresh keeps
       // the old tree (stagedInstall ledgered and escalated it); the dispatch goes on and W1-T4193 names any mismatch it causes.
       try {
-        runInstall(repoDir);
+        await runInstall(repoDir);
       } catch (error) {
         log("managed_checkout.install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
       }
       return { kind: "current", release };
     }
-    if (git("merge-base", "HEAD", "origin/main") !== beforeSha) return skip("checkout has diverged from origin/main");
+    if ((await git("merge-base", "HEAD", "origin/main")) !== beforeSha) return skip("checkout has diverged from origin/main");
     const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
       const held = path === repoDir ? undefined : readRunLock(path);
       return held?.kind === "corrupt" || (held?.kind === "live" && defaultIsPidAlive(held.info.pid));
     });
     if (borrower) return skip(`a live worker still borrows its node_modules (${borrower.path})`);
-    git("merge", "--ff-only", "--quiet", "origin/main");
-    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: git("rev-parse", "HEAD") });
+    await git("merge", "--ff-only", "--quiet", "origin/main");
+    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: await git("rev-parse", "HEAD") });
     try {
-      runInstall(repoDir);
+      await runInstall(repoDir);
     } catch (error) {
       // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
-      git("reset", "--quiet", "--keep", beforeSha);
+      await git("reset", "--quiet", "--keep", beforeSha);
       throw new Error(`install failed after the fast-forward, reverted to ${beforeSha}: ${String((error as Error)?.message ?? error)}`);
     }
     return { kind: "fast_forwarded", release };

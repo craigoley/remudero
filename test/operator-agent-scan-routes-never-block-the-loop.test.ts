@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,8 +25,27 @@ const ARCHIVES = 80;
 const LINES_PER_ARCHIVE = 10_000;
 /** Longest the loop may go without a turn while a route answers. The old sync union read held it 500+ ms here. */
 const LOOP_STALL_BUDGET_MS = 150;
-/** Busy time a warm read after a new rotation may take: it parses that rotation and the live file, never the union. */
-const WARM_ANSWER_BUDGET_MS = 150;
+// ── W1-T6402: the post-rotation read is bounded RELATIVE to its own runner ─────────────────────────────────────────
+// A warm read after a new rotation parses that rotation and the live file, never the union. Bounding its loop CPU by a
+// fixed 150 ms red healthy PRs on a loaded CI runner (#10058 158.6 ms, #10077, #10089, #10084 152.3 ms after W1-T6337's
+// fix; every retry red too). Runner load inflates every read on the thread alike, so the bound is now a RATIO to a
+// baseline measured moments earlier in the same process: the median loop CPU of ROTATION_BASELINE_READS warm reads of
+// the same route on the same service. A real regression — a rotation that re-reads the corpus — multiplies the subject
+// alone. ROTATION_READ_CEILING_MS stays as the catastrophic guard, declared through assertWallClockBound (W1-T2811).
+//
+// MEASURED 2026-10-08 on a 10-core Mac (node v24.21.0), subject ÷ median(9 baseline reads), 23 runs:
+//   idle (11 runs):              healthy ratio 22–51 (median 30); subject 25–47 ms; baseline median 0.8–1.6 ms
+//   10 CPU burners (6 runs):     healthy ratio 21–57;  subject 41–98 ms (the fixed 150 ms budget's headroom gone)
+//   20 CPU burners (6 runs):     healthy ratio 22–61;  subject 52–85 ms
+//   injected full-corpus re-read on the subject alone (same 23 runs): ratio 194–546 (re-read 393–689 ms of CPU)
+// R = 120 sits ~2× above the worst healthy ratio (61) and ~1.6× below the mildest regression (194); K = 9 because a
+// warm read costs ~1 ms, so a median over nine is cheap and steadies the small denominator.
+const ROTATION_BASELINE_READS = 9;
+const ROTATION_READ_RATIO = 120;
+/** The catastrophic tier: far above any healthy run (98 ms worst measured locally, 159 ms worst on CI). */
+const ROTATION_READ_CEILING_MS = 1000;
+/** The fixed budget W1-T6402 retired; kept so the acceptance test can show it reds a healthy read on a slower runner. */
+const RETIRED_FIXED_BUDGET_MS = 150;
 
 function filler(archive: number, line: number): Record<string, unknown> {
   return {
@@ -180,15 +200,117 @@ test("each operator-agent scan route answers a cold large corpus without holding
   await settleOperatorAgentUnionLoads();
 });
 
-test("after a rotation lands the emergency status answers within budget and sees the new stop", async () => {
+type Work<T> = () => Promise<T>;
+type WorkWrapper = <T>(work: Work<T>) => Promise<T>;
+const EMERGENCY_STATUS = "/v1/operator-agent/emergency/status";
+
+/** A runner `factor`× slower: after `work` finishes, spin this thread for (factor − 1)× the CPU the work itself took. */
+async function withCpuTax<T>(factor: number, work: Work<T>): Promise<T> {
+  const start = threadCpuMs();
+  const value = await work();
+  const until = start + (threadCpuMs() - start) * factor;
+  while (threadCpuMs() < until) { /* the tax */ }
+  return value;
+}
+
+/** The regression the relative bound must catch: decode and parse every archive in `dir` on this thread. */
+function rereadCorpus(dir: string): number {
+  let rows = 0;
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".ndjson.gz"))) {
+    for (const line of gunzipSync(readFileSync(join(dir, name))).toString("utf8").split("\n")) {
+      if (line) { JSON.parse(line); rows += 1; }
+    }
+  }
+  return rows;
+}
+
+/** Measure ROTATION_BASELINE_READS warm reads, land rotation `index` carrying stop `stopId`, then measure the read
+ *  after it. `everyRead` wraps baseline and subject alike (a uniform tax); `subjectOnly` wraps the subject alone. */
+async function measureRotationRead(
+  base: string,
+  ledger: LedgerFixture,
+  index: number,
+  stopId: string,
+  everyRead: WorkWrapper = (work) => work(),
+  subjectOnly: WorkWrapper = (work) => work(),
+): Promise<{ baselineMs: number[]; subjectMs: number; stallMs: number; elapsedMs: number; activeStops: string[] }> {
+  const baselineMs: number[] = [];
+  for (let i = 0; i < ROTATION_BASELINE_READS; i++) {
+    baselineMs.push((await longestLoopStall(() => everyRead(() => read(base, EMERGENCY_STATUS)))).busyMs);
+  }
+  writeLedger([], { dir: ledger.dir, rotations: [archive(index, [stopRow(stopId)])] });
+  const subject = await longestLoopStall(() => subjectOnly(() => everyRead(() => read(base, EMERGENCY_STATUS))));
+  const activeStops = (subject.value.active as Array<{ id: string }>).map((s) => s.id);
+  assert.ok(activeStops.includes(stopId), `the new rotation's stop ${stopId} is active`);
+  return { baselineMs, subjectMs: subject.busyMs, stallMs: subject.stallMs, elapsedMs: subject.elapsedMs, activeStops };
+}
+
+interface RotationReadVerdict { baselineMedianMs: number; subjectMs: number; ratio: number; withinRatio: boolean; underCeiling: boolean }
+
+function judgeRotationRead(baselineMs: readonly number[], subjectMs: number): RotationReadVerdict {
+  assert.equal(baselineMs.length, ROTATION_BASELINE_READS, "the relative bound needs its full same-run baseline");
+  const sorted = [...baselineMs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  // Thread CPU has microsecond resolution; the floor only keeps a zero reading from dividing by zero.
+  const baselineMedianMs = Math.max(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2, 0.001);
+  const ratio = subjectMs / baselineMedianMs;
+  return { baselineMedianMs, subjectMs, ratio, withinRatio: ratio <= ROTATION_READ_RATIO, underCeiling: subjectMs < ROTATION_READ_CEILING_MS };
+}
+
+function describeVerdict(v: RotationReadVerdict): string {
+  return `subject ${v.subjectMs.toFixed(1)} ms of loop CPU is ${v.ratio.toFixed(1)}× the same-run baseline median ` +
+    `${v.baselineMedianMs.toFixed(2)} ms (bound ${ROTATION_READ_RATIO}×, ceiling ${ROTATION_READ_CEILING_MS} ms)`;
+}
+
+test("after a rotation lands the emergency status answers within budget and sees the new stop", async (t) => {
+  const ledger = writeArchives(ARCHIVES);
+  await withDelegationService(ledger.path, async (base) => {
+    await read(base, EMERGENCY_STATUS);
+    const warm = await measureRotationRead(base, ledger, ARCHIVES, "stop-rotated");
+    assert.deepEqual(warm.activeStops, ["stop-rotated"], "the new rotation's stop is active");
+    const verdict = judgeRotationRead(warm.baselineMs, warm.subjectMs);
+    // Recorded on every run, so CI's own ratio distribution is readable from its logs.
+    t.diagnostic(`W1-T6402 rotation read: ${describeVerdict(verdict)}; baseline ${warm.baselineMs.map((ms) => ms.toFixed(1)).join(",")}`);
+    assert.ok(verdict.withinRatio, `the read after a rotation outgrew its same-run baseline: ${describeVerdict(verdict)}`);
+    assertWallClockBound(warm.subjectMs, ROTATION_READ_CEILING_MS, `the read after a rotation spent ${Math.round(warm.subjectMs)} ms of loop CPU (${Math.round(warm.elapsedMs)} ms elapsed)`);
+    assertWallClockBound(warm.stallMs, LOOP_STALL_BUDGET_MS, `the read after a rotation held the loop ${Math.round(warm.stallMs)} ms`);
+  });
+  await settleOperatorAgentUnionLoads();
+});
+
+test("W1-T6402: a rotation read is bounded by a same-run baseline, and a re-read of the corpus still fails", async (t) => {
   const ledger = writeArchives(ARCHIVES);
   await withDelegationService(ledger.path, async (base) => {
     await read(base, "/v1/operator-agent/emergency/status");
-    writeLedger([], { dir: ledger.dir, rotations: [archive(ARCHIVES, [stopRow("stop-rotated")])] });
-    const warm = await longestLoopStall(() => read(base, "/v1/operator-agent/emergency/status"));
-    assert.deepEqual((warm.value.active as Array<{ id: string }>).map((s) => s.id), ["stop-rotated"], "the new rotation's stop is active");
-    assertWallClockBound(warm.busyMs, WARM_ANSWER_BUDGET_MS, `the read after a rotation spent ${Math.round(warm.busyMs)} ms of loop CPU (${Math.round(warm.elapsedMs)} ms elapsed)`);
-    assertWallClockBound(warm.stallMs, LOOP_STALL_BUDGET_MS, `the read after a rotation held the loop ${Math.round(warm.stallMs)} ms`);
+
+    // Positive control: a healthy post-rotation read, untaxed, passes the relative bound and the ceiling.
+    const healthy = await measureRotationRead(base, ledger, ARCHIVES, "stop-healthy");
+    const healthyVerdict = judgeRotationRead(healthy.baselineMs, healthy.subjectMs);
+    assert.ok(healthyVerdict.withinRatio && healthyVerdict.underCeiling, `control: a healthy rotation read passes — ${describeVerdict(healthyVerdict)}`);
+
+    // A runner `factor`× slower taxes the baseline and the subject alike. The factor is sized from the healthy read so
+    // the taxed subject lands near 3× the retired fixed budget on any runner, fast or slow.
+    const factor = Math.max(2, Math.ceil((3 * RETIRED_FIXED_BUDGET_MS) / Math.max(healthy.subjectMs, 1)));
+    const taxed = await measureRotationRead(base, ledger, ARCHIVES + 1, "stop-taxed", (work) => withCpuTax(factor, work));
+    const taxedVerdict = judgeRotationRead(taxed.baselineMs, taxed.subjectMs);
+    assert.throws(
+      () => assertWallClockBound(taxed.subjectMs, RETIRED_FIXED_BUDGET_MS, `a ${factor}× slower runner's rotation read spent ${Math.round(taxed.subjectMs)} ms`),
+      /WALL-CLOCK DEPENDENT/,
+      `the retired fixed ${RETIRED_FIXED_BUDGET_MS} ms budget reds a healthy read on a ${factor}× slower runner (${Math.round(taxed.subjectMs)} ms)`,
+    );
+    assert.ok(taxedVerdict.withinRatio, `a uniform ${factor}× CPU tax cancels against the same-run baseline — ${describeVerdict(taxedVerdict)}`);
+
+    // A real regression: the read after the rotation re-reads every archive on the loop thread. The baseline is untouched.
+    const reread = await measureRotationRead(base, ledger, ARCHIVES + 2, "stop-reread", undefined, async (work) => {
+      const value = await work();
+      rereadCorpus(ledger.dir);
+      return value;
+    });
+    const rereadVerdict = judgeRotationRead(reread.baselineMs, reread.subjectMs);
+    t.diagnostic(`healthy: ${describeVerdict(healthyVerdict)}`);
+    t.diagnostic(`${factor}× taxed: ${describeVerdict(taxedVerdict)}`);
+    t.diagnostic(`corpus re-read: ${describeVerdict(rereadVerdict)}`);
+    assert.equal(rereadVerdict.withinRatio, false, `a post-rotation read that re-reads the corpus must fail the relative bound — ${describeVerdict(rereadVerdict)}`);
   });
   await settleOperatorAgentUnionLoads();
 });
