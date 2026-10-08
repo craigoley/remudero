@@ -89,7 +89,8 @@
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
         "skipped-check-deadlock",
-        "strikes-exhausted-counts-rows"
+        "strikes-exhausted-counts-rows",
+        "test-slow-shard-runs-one-suite-at-a-time"
       ],
       "globs": [
         ".github/**",
@@ -101,6 +102,7 @@
         "scripts/comment-load-ratchet.mjs",
         "scripts/diff-coverage.mjs",
         "scripts/lib/inherited-violation.mjs",
+        "scripts/test-tier-manifest.json",
         "src/lib/board-projection.ts",
         "src/lib/git-push.ts",
         "src/lib/ledger-projector.ts",
@@ -111,7 +113,8 @@
         "src/lib/review.ts",
         "src/lib/status.ts",
         "src/lib/sweep.ts",
-        "src/run-task.ts"
+        "src/run-task.ts",
+        "test/**"
       ],
       "symbols": [],
       "error_signatures": []
