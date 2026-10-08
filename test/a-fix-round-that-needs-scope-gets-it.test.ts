@@ -78,7 +78,7 @@ function rung(branch: string, body: string) {
       push: () => { assert.fail("implementation must wait for the scope amendment"); },
       waitForCiGreen: async () => { assert.fail("no CI wait before scope merges"); },
       runReview: async () => review,
-      issues: { create: () => ({ number: 1, url: "fixture" }), listOpen: () => [], comment: () => {} },
+      issues: { create: () => "https://github.com/acme/repo/issues/1", listOpen: () => [], comment: () => {} },
       ledgerPath: join(repo.dir, "ledger.ndjson"), ledgerLines: () => rows,
       log: (step, extra) => { rows.push({ step, task_id: taskId, ...extra }); }, say: () => {}, account: (r) => r,
     },

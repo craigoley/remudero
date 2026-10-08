@@ -25,6 +25,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
+import { taskIdFromRunBranch } from "./status.js";
 
 /** One worker-proposed replacement, parsed from the fix-rung report (see {@link
  *  parseProofAmendmentProposal}) or constructed directly by a test. `claim`/`oldProof` must be
@@ -480,6 +481,9 @@ export interface ScopeAmendmentRequest {
   readonly prUrl: string;
   readonly headSha: string;
   readonly trailerTaskId?: string;
+  /** W1-T6465: the implementation PR's head ref. A fleet build PR names its task by its
+   *  run-<taskId>-<epochMs> head, not a trailer — head-identity-gate accepts either form. */
+  readonly headRef?: string;
   readonly paths: readonly string[];
   readonly changedPaths: readonly string[];
 }
@@ -490,8 +494,11 @@ export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "inel
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
   const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
   if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number");
-  if (!request.trailerTaskId || request.trailerTaskId !== request.taskId) {
-    return refuse("no-task-trailer", "the implementation PR must carry the matching task trailer");
+  // W1-T6465: identity is the trailer OR the run-<taskId>-<epochMs> head ref, as head-identity-gate
+  // admits; every identity the PR does carry must name THIS task, so a conflicting one still refuses.
+  const identities = [request.trailerTaskId, taskIdFromRunBranch(request.headRef)].filter((id) => id !== undefined && id !== "");
+  if (identities.length === 0 || identities.some((id) => id !== request.taskId)) {
+    return refuse("no-task-trailer", "the implementation PR must carry the matching task trailer or run-<taskId>-<epochMs> head");
   }
   const paths = [...new Set(request.paths)].sort();
   if (paths.length === 0) return refuse("no-paths", "the worker requested no paths");

@@ -163,6 +163,8 @@ test("scope amendment failures retain the scope escalation fallback", async () =
   const pending = fixture();
   await runFixRung(pending.opts);
   pending.opts.deps.fetchPrBody = async () => "no task trailer";
+  // W1-T6465: a run-<taskId>-<epochMs> head is identity too, so the resume must lose BOTH to refuse.
+  pending.opts.branch = "feature/no-task-identity";
   await runFixRung(pending.opts);
   assert.equal(pending.spawns(), 1);
   assert.equal(pending.rows.findLast((row) => row.step === "fix.scope_amendment")?.reason, "no-task-trailer");

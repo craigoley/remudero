@@ -586,7 +586,8 @@ export function renderFixPrompt(opts: {
     "FIX_OUTCOME: FIXED — the saved edits fix this head; name COMMIT_MESSAGE if you can.",
     "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
     "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
-    "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation.",
+    "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation. " +
+      "Leave those out-of-scope edits saved (uncommitted) in the worktree when you report — never revert them: the scope amendment admits only paths this round actually changed.",
     "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
     ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,

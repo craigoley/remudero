@@ -223,6 +223,10 @@ test("W1-T5532: test admission includes additions and deletions without staging 
       else writeFileSync(join(f.repo.dir, change === "add" ? "test/new.test.ts" : "test/existing.test.ts"), "edit\n");
       if (change === "mixed") writeFileSync(join(f.repo.dir, "src/other.ts"), "undeclared\n");
     });
+    // W1-T6465: the run-<taskId> head now carries task identity, so the mixed round reaches the
+    // amendment writer; a shard-less fixture refuses it offline instead of reaching the real gh.
+    if (change === "mixed") f.run.deps.scopeAmendmentWritePorts = { repoDir: f.repo.dir, findShard: () => undefined,
+      lookupIdentity: () => undefined, probeExisting: () => undefined } as unknown as NonNullable<typeof f.run.deps.scopeAmendmentWritePorts>;
     const result = await runFixRung(f.run);
     assert.equal(result.outcome, change === "mixed" ? "stood_down" : "fixed");
     const path = change === "add" ? "test/new.test.ts" : "test/existing.test.ts";
