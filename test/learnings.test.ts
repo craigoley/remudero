@@ -185,7 +185,7 @@ test("W1-T3625: the comment-load lesson is scoped to its gate, workflow, baselin
   ];
 
   for (const file of gateAndPolicyPaths) {
-    const selected = loadLearningsForTaskFiles(learningsDir, [file]);
+    const selected = selectLearnings(loadLearningsForTaskFiles(learningsDir, [file]), [file]).selected;
     assert.ok(
       selected.some((entry) => entry.id === "comment-load-ratchet-lane"),
       `${file} must select the comment-load-ratchet guidance`,
@@ -193,7 +193,7 @@ test("W1-T3625: the comment-load lesson is scoped to its gate, workflow, baselin
   }
 
   for (const file of ["src/lib/worker.ts", "deploy/install-host-units.sh", "bin/rmd", "hooks/pre-push"]) {
-    const selected = loadLearningsForTaskFiles(learningsDir, [file]);
+    const selected = selectLearnings(loadLearningsForTaskFiles(learningsDir, [file]), [file]).selected;
     assert.ok(
       !selected.some((entry) => entry.id === "comment-load-ratchet-lane"),
       `${file} must not pull gate-specific guidance into an unrelated shard selection`,
