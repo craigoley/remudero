@@ -31,6 +31,8 @@ import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
 import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
+// #7598: pin TMPDIR to its real path before any fixture builds a temp path (macOS /var -> /private/var).
+import "./canonical-tmpdir.js";
 import { installReadMapFromEnv } from "./read-map.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
