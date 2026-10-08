@@ -166,6 +166,10 @@ export async function readRetroLedgerNdjson(
   // occurrence takes ownership instead of an old copy being evicted later while the newer one was
   // already forgotten.
   const retained = new Map<string, number>();
+  // Keep one live insertion-order cursor. Restarting entries() for every eviction repeatedly
+  // walks deleted slots on a long stream. Never advance an empty map: a completed iterator would
+  // not observe later insertions. Duplicate delete+set remains a move to the newest position.
+  const oldestRows = retained.entries();
   let bytes = 0;
   let droppedRows = 0;
   let droppedBytes = 0;
@@ -190,7 +194,7 @@ export async function readRetroLedgerNdjson(
     // order, so survivors are newest. One oversized row still survives by itself: an empty map
     // ends the loop, then takes the row, with no spin.
     while (retained.size > 0 && (bytes + cost > maxBytes || retained.size >= maxRows)) {
-      const oldest = retained.entries().next().value as [string, number];
+      const oldest = oldestRows.next().value as [string, number];
       retained.delete(oldest[0]);
       bytes -= oldest[1];
       droppedRows += 1;

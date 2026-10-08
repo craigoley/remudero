@@ -15,7 +15,7 @@
 import { execFile, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
@@ -26,6 +26,8 @@ import {
   selectorShadowFlakeLedger,
 } from "./selector-shadow-gardener.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
+import { randomUUID } from "node:crypto";
+import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
@@ -64,7 +66,7 @@ export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean }) => Promise<number | null>;
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; admitted?: () => void }) => Promise<number | null>;
 
 /** Share a small host budget across all garden starters. A busy garden keeps its own pending
  * pass rather than spawning a second child, while queued passes from other gardens wait here. */
@@ -73,7 +75,7 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
   type Pending = {
     name: RegisteredGardenName;
     args: readonly string[];
-    signal: { readonly stopped: boolean };
+    signal: { readonly stopped: boolean; admitted?: () => void };
     resolve: (exit: number | null) => void;
     reject: (error: unknown) => void;
   };
@@ -89,7 +91,11 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
       active += 1;
       // An asynchronous turn keeps a synchronous throwing spawn inside the same settle path.
       Promise.resolve()
-        .then(() => next.signal.stopped ? null : spawnPass(next.name, next.args, next.signal))
+        .then(() => {
+          if (next.signal.stopped) return null;
+          next.signal.admitted?.();
+          return spawnPass(next.name, next.args, next.signal);
+        })
         .then(next.resolve, next.reject)
         .finally(() => {
           active -= 1;
@@ -138,22 +144,41 @@ export interface GardenOffLoopWiring {
   /** Whether a pass would do anything ({@link gardenPassDue}). Absent, every tick spawns. A pass that would
    *  skip costs a file read here instead of a whole child process; a probe that throws spawns the pass. */
   due?: () => boolean;
+  observe?: (event: GardenerRuntimeEvent) => void;
 }
 
 export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: number, wiring: GardenOffLoopWiring): { stop: () => void } {
   const clock = wiring.clock ?? systemClock;
   const schedule = gardenSchedule(name);
+  const timerIntervalMs = schedule.intervalFor(intervalMs);
+  const timerAnchorMs = clock.now();
   const signal = { stopped: false };
   let running = false;
   let lastStartMs = -Infinity;
   let reportedBucket: number | undefined;
+  const observe = (event: GardenerRuntimeEvent): void => {
+    try { wiring.observe?.(event); }
+    catch { wiring.log("garden.telemetry_failed", { name, reason: "observer-failed" }); }
+  };
+  const nextEligibleCheck = (): string => {
+    const now = clock.now();
+    const earliest = Math.max(now, lastStartMs + schedule.minIntervalMs);
+    const ticks = Math.max(1, Math.ceil((earliest - timerAnchorMs) / timerIntervalMs));
+    const next = timerAnchorMs + ticks * timerIntervalMs;
+    return fixedClock(next <= now ? next + timerIntervalMs : next).iso();
+  };
+  const event = (phase: GardenerRuntimeEvent["phase"], fields: Partial<GardenerRuntimeEvent> = {}): GardenerRuntimeEvent => ({
+    name, phase, observedAt: clock.iso(), passId: null,
+    nextDueAt: nextEligibleCheck(),
+    queueMs: null, executionMs: null, exit: null, reason: null, ...fields,
+  });
   const tick = (): void => {
     if (running || signal.stopped || clock.now() - lastStartMs < schedule.minIntervalMs) return;
     const bucket = gardenLedgerBucket(clock);
     const hourly = schedule.hourly && bucket !== reportedBucket;
     if (!hourly && wiring.due) {
       try {
-        if (!wiring.due()) return;
+        if (!wiring.due()) { observe(event("idle", { reason: "inputs-unchanged" })); return; }
       } catch (e) {
         wiring.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) });
       }
@@ -161,14 +186,34 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     running = true;
     const startedMs = clock.now();
     lastStartMs = startedMs;
+    const passId = randomUUID();
+    let admittedMs: number | undefined;
+    observe(event("queued", { passId, nextDueAt: null }));
+    const passSignal = {
+      get stopped() { return signal.stopped; },
+      admitted: () => {
+        admittedMs = clock.now();
+        observe(event("running", { passId, nextDueAt: null, queueMs: Math.max(0, admittedMs - startedMs) }));
+      },
+    };
     const settle = (exit: number | null, error?: string): void => {
       running = false;
       if (hourly && exit === 0) reportedBucket = bucket;
-      wiring.log(GARDEN_PASS_STEP, { name, ms: clock.now() - startedMs, exit, ...(error === undefined ? {} : { error }) });
+      // One completion timestamp for both destinations: the logger's own latency
+      // is not child execution, and the persisted card can correlate this row.
+      const finishedMs = clock.now();
+      const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
+      const executionMs = admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
+      wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
+        ...(error === undefined ? {} : { error }) });
+      const phase = error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
+      observe(event(phase, { passId, exit,
+        queueMs, executionMs,
+        reason: error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
     };
     let pass: Promise<number | null>;
     try {
-      pass = wiring.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], signal);
+      pass = wiring.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], passSignal);
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
       settle(null, error);
@@ -180,7 +225,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     );
   };
   tick();
-  const timer = setInterval(tick, schedule.intervalFor(intervalMs));
+  const timer = setInterval(tick, timerIntervalMs);
   timer.unref?.();
   return {
     stop: () => {

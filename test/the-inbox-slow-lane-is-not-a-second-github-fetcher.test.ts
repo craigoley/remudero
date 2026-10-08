@@ -3,18 +3,18 @@
 // switch said: a second fetcher. The lane now reads the board snapshot the owner's walks persist, the
 // source the board and the now view read, and says when that snapshot is stale or missing.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { createBoardSnapshotCache } from "../src/lib/board-snapshot-cache.js";
+import { boardOpenSnapshotPath, createBoardSnapshotCache } from "../src/lib/board-snapshot-cache.js";
 import type { Clock } from "../src/lib/clock.js";
 import { readClassificationSnapshot } from "../src/lib/fleet-lane.js";
 import { createGithubKeepWarm, type WarmRefreshOutcome, type WarmRefreshTelemetry } from "../src/lib/github-refresh-pacer.js";
 import { NOW_GITHUB_STALE_MS } from "../src/lib/now-view.js";
 import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { runSlowLaneWorker, slowLaneTraceGithub, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
+import { ownerSnapshotGithub, runSlowLaneWorker, slowLaneTraceGithub, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { createReadModelWorker, readModelSwitchesPath } from "../src/lib/read-model-worker.js";
 import type { ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewSource } from "../src/lib/views.js";
@@ -131,6 +131,32 @@ function laneWorld(t: TestCtx, time: ReturnType<typeof manualTime>, root = coreR
   };
   return { root, stateDir, hold, pass, laneSource };
 }
+
+test("the inbox notices an atomic snapshot replacement even when its mtime is unchanged", (t) => {
+  const time = manualTime(T0);
+  const root = coreRoot(t);
+  const board = createBoardSnapshotCache(root, "o", "r");
+  assert.equal(board.commitClosed([pull(1, "MERGED")]), true);
+  assert.equal(board.commitIssues([]), true);
+  assert.equal(board.commitOpen!([pull(2, "OPEN")], time.clock.now()), true);
+  const path = boardOpenSnapshotPath(root, "o", "r");
+  const mtime = new Date(T0);
+  utimesSync(path, mtime, mtime);
+  const before = statSync(path);
+  const read = ownerSnapshotGithub(root, "o", "r", time.clock);
+  assert.equal(read().source.state, "fresh", "the initial saved corpus is readable");
+  time.advance(240_000);
+  assert.equal(read().source.state, "stale", "unchanged facts really age out");
+  assert.equal(board.commitOpen!([pull(2, "OPEN")], time.clock.now()), true);
+  utimesSync(path, mtime, mtime);
+  const after = statSync(path);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(after.size, before.size, "equal-width timestamps do not change the byte count");
+  assert.notEqual(after.ino, before.ino, "the real atomic writer replaced the file");
+  const current = read();
+  assert.equal(current.source.asOf, time.clock.iso());
+  assert.equal(current.source.state, "fresh", "a cache key cannot hide the owner's fresh receipt");
+});
 
 test("with the slow lane running exactly one fetcher calls github in either switch position", async (t) => {
   const shim = recordGh(t);
