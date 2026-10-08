@@ -1,13 +1,66 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { Worker } from "node:worker_threads";
 import { createLedgerRotationMemo, ledgerRotationEntries } from "../src/lib/ledger-union.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const holder = "landed-rotation";
 const noParse = () => { throw new Error("the memo must supply the rotation"); };
+
+test("digest worker replies validate rows and errors before a clean exit", async () => {
+  const digest = { schema: 1, holder, reducerVersion: "1", archive: "ledger.ndjson.1.gz", key: "1:2",
+    read: { rows: [{ keep: true, value: "🚀\u2028" }], torn: 1, tornLines: ["broken row"] } };
+  const invalid = [null, {}, { ...digest, schema: 2 }, ...[
+    { ...digest.read, rows: null }, { ...digest.read, rows: [null] },
+    { ...digest.read, rows: [[]] }, { ...digest.read, rows: [1] },
+    { ...digest.read, torn: -1 }, { ...digest.read, torn: 0.5 },
+    { ...digest.read, tornLines: null }, { ...digest.read, tornLines: [] },
+    { ...digest.read, tornLines: [1] },
+  ].map((read) => ({ ...digest, read }))];
+  const requests = [
+    { operation: "stringify", value: digest },
+    { operation: "parse", value: JSON.stringify(digest) },
+    ...invalid.map((value) => ({ operation: "parse", value: JSON.stringify(value) })),
+    { operation: "parse", value: "{" },
+    { operation: "stringify", value: { ...digest, value: 1n } },
+  ].map((request, id) => ({ id, ...request }));
+  const worker = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    import("tsx/esm/api").then(({ register }) => {
+      register();
+      return import(workerData.moduleUrl);
+    }).then(() => {
+      let received = 0;
+      parentPort.on("message", () => {
+        if (++received === workerData.requestCount) parentPort.close();
+      });
+      parentPort.postMessage({ ready: true });
+    });
+  `, { eval: true, execArgv: ["--enable-source-maps"],
+    workerData: { kind: "rotation-digest-codec", requestCount: requests.length,
+      moduleUrl: new URL("../src/lib/ledger-union.ts", import.meta.url).href } });
+  try {
+    const [ready] = await once(worker, "message");
+    assert.deepEqual(ready, { ready: true });
+    const replies: Array<{ id: number; value?: unknown; error?: string }> = [];
+    worker.on("message", (reply) => replies.push(reply));
+    const exited = once(worker, "exit");
+    for (const request of requests) worker.postMessage(request);
+    assert.deepEqual(await exited, [0], "the worker exits normally after replying to every request");
+    assert.deepEqual(replies, [
+      { id: 0, value: JSON.stringify(digest) }, { id: 1, value: digest },
+      ...invalid.map((_, index) => ({ id: index + 2, value: undefined })),
+      { id: requests.length - 2, error: "SyntaxError" },
+      { id: requests.length - 1, error: "TypeError" },
+    ]);
+  } finally {
+    await worker.terminate();
+  }
+});
 
 test("digest worker failure settles concurrent writes and the next load restarts it", async () => {
   const workers = createRequire(import.meta.url)("node:worker_threads") as typeof import("node:worker_threads");
