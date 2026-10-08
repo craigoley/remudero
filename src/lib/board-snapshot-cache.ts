@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 
 const SNAPSHOT_SCHEMA = 1;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
@@ -49,14 +49,14 @@ function createBoardRefreshRollup(log: BoardLog) {
     timer.unref();
   };
   const begin = (): void => {
-    start ??= Date.now();
+    start ??= systemClock.now();
     pendingRefreshRollups.add(rollup);
     arm();
   };
   const flush = (): void => {
     if (start === undefined) return;
     try {
-      log("board_gateway.rollup", { window_start: fixedClock(start).iso(), window_end: fixedClock(Date.now()).iso(), ...counts });
+      log("board_gateway.rollup", { window_start: fixedClock(start).iso(), window_end: fixedClock(systemClock.now()).iso(), ...counts });
     } catch (error) {
       console.error(`board_gateway.rollup: flush failed, counts retained: ${String(error)}`);
       return;
