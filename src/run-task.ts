@@ -1108,6 +1108,8 @@ import {
   renderVerbCensusDigestLine,
   priorVerifyHumanAgeBandKeys,
   runMeasurementCadenceReportAsync,
+  childMeasurementCadenceSpawn,
+  measurementCadenceChildRunner,
   runVerbCensus,
   verifyHumanCadence,
   wipeTestCadenceCheck,
@@ -37842,6 +37844,14 @@ export async function daemonCommand(
   // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
   // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
   const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
+  // W1-T5723: the cadence runs in a child that a daemon restart adopts rather than kills.
+  const measurementCadenceChild = target.isSelf ? measurementCadenceChildRunner({
+    statePath: join(config.root, "state", "measurement-cadence-child.json"),
+    spawn: childMeasurementCadenceSpawn({
+      entry: fileURLToPath(new URL(`./measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
+      cwd: repoRoot,
+    }),
+  }) : undefined;
   // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —
   // the ledger this reads and the marker/inbox files it writes both live under THIS process's
   // own config.root, never a drained target's. Without this line `deps.checkDigestCadence` is
@@ -38335,6 +38345,7 @@ export async function daemonCommand(
         // defaults to running: it writes nothing unless `escalate` is separately opted in).
         checkMeasurementCadence: measurementCadenceHooks?.checkMeasurementCadence,
         runMeasurementCadence: measurementCadenceHooks?.runMeasurementCadence,
+        measurementCadenceChild,
         // DIGEST CADENCE RUNG (W1-T2277's design, wired here). Same shape as the
         // measurement-cadence hooks immediately above and gated the same way — SAFE ON in
         // policy data (plan/policy.yaml's `digestCadence` row): sending a digest spends nothing
