@@ -569,8 +569,6 @@ export function computeTypeOnlyRanges(fileText) {
   const TYPE_OPEN = /^(\s*)(?:export\s+)?type\s+\S+[^={]*=\s*\{\s*$/;
   const CLOSER = /^(\s*)\}/;
   for (let i = 0; i < lines.length; i++) {
-    // Ask the runtime's existing erasure discriminator about the whole physical line: an
-    // inline interface must not excuse a runtime expression after its closing brace.
     if (!OPEN.test(lines[i]) && INLINE_INTERFACE.test(lines[i])
       && classifyTypeOnlyModule('inline-interface.ts', () => lines[i]).verdict === 'type-only') {
       ranges.push({ start: i + 1, end: i + 1,

@@ -24,7 +24,10 @@ export function cashRequestEffort(body: string, transport: CashRequestTransport)
     ({ provenance: "adapter-fetch-call", transport, parameter, state, value, providerEffectiveEffort: null });
   let parsed: unknown;
   try { parsed = JSON.parse(body); }
-  catch { return result("parameter-unreadable"); }
+  catch {
+    const unreadable = result("parameter-unreadable");
+    return unreadable;
+  }
   if (!object(parsed)) return result("parameter-unreadable");
   let value: unknown;
   if (transport === "chat-completions") {
