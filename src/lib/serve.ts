@@ -72,6 +72,7 @@ import {
 } from "./incident-events.js";
 import { buildConsoleTelemetryRoute, CONSOLE_TELEMETRY_ROUTE_METHOD, CONSOLE_TELEMETRY_ROUTE_PATH } from "./console-telemetry.js";
 import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
+import { buildGardenersRoute } from "./gardeners-route.js";
 import { BENCHMARK_AA_VERSION, TRIAL_ID_RE } from "./benchmark-aa.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol, paidPilotEvalCardTrial } from "./benchmark-paid-pilot.js";
 import { emptyEvalCardEvidence, parseEvalCardEvidence, parseEvalCardTrial, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
@@ -3029,6 +3030,7 @@ function assembleServeRoutes(
       clock: deps.incidents?.clock,
       readStore: deps.incidents?.readStore,
     }),
+    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath) }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" });
   routes.push(...buildOnboardingGoLiveRoutes(deps));

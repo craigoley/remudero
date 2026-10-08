@@ -92,6 +92,7 @@
         "rollup-dedupe-by-latest-attempt",
         "rule-checks-gate-census-and-plan-scope-refusals",
         "skipped-check-deadlock",
+        "squash-trailer-gate-task-authoring-lane",
         "strikes-exhausted-counts-rows"
       ],
       "globs": [
