@@ -16,7 +16,7 @@ function corpus(cmd: string, args: string[]): string {
   if (args[0] === "ls-remote") return ["a1\trefs/heads/main", `b2\trefs/heads/${SLUG}`].join("\n");
   if (args.includes("--merged=origin/main")) return "origin/main";
   if (args[0] === "for-each-ref") return `origin/main\ta1\t1\norigin/${SLUG}\tb2\t1`;
-  if (cmd === "gh") return "";
+  if (cmd !== "git") return "";
   if (args[0] === "merge-base") throw new Error("not an ancestor");
   if (args[0] === "grep" && args.includes("-o")) return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
   if (args[0] === "grep") throw new Error("exit 1: no match");
