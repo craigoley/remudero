@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: Node 24 image rollout (core markers archived by hand)"
   plan_refs: [W1-T1239, W1-T6062, W1-T3694]
   files: [src/lib/deployer.ts, test/a-healthy-current-daemon-retracts-stale-deploy-failure-markers.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

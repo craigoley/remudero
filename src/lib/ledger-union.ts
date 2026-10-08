@@ -1,11 +1,11 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { isMainThread, threadId } from "node:worker_threads";
 import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { pipeline } from "node:stream/promises";
-import { readFile as nodeReadFile } from "node:fs/promises";
+import { mkdir as nodeMkdir, readFile as nodeReadFile, readdir as nodeReaddir, rename as nodeRename, unlink as nodeUnlink, writeFile as nodeWriteFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createGunzip, gunzip as nodeGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
 import {
@@ -919,7 +919,8 @@ export interface LedgerRotationMemo {
   pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
-  retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number };
+  retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number;
+    digestHits?: number; digestMisses?: number; digestOutcomes?: Record<string, number>; digestErrors?: Record<string, string> };
   reportRetention: (stateDir: string, instance?: string, log?: MemoRetentionLog) => void;
 }
 
@@ -953,9 +954,14 @@ export function createLedgerRotationMemo(
     /** Only lines matching this are parsed by `load`; `reduce` must drop every row it would reject. */
     pattern?: RegExp;
     holder?: string;
+    /** Bump the version whenever the reducer or its input pattern changes. W1-T6263. */
+    durableDigest?: { reducerVersion: string };
     writeRetention?: (path: string, row: { run_id: string; task_id: string; step: string; [key: string]: unknown }) => void;
   } = {},
 ): LedgerRotationMemo {
+  if (io.durableDigest && (!io.holder || !io.durableDigest.reducerVersion)) {
+    throw new Error("rotation digests require a holder and reducer version");
+  }
   const statKey = io.statKey ?? ((path: string) => {
     const stat = nodeStatSync(path);
     return `${stat.size}:${stat.mtimeMs}`;
@@ -965,11 +971,101 @@ export function createLedgerRotationMemo(
   let memo = new Map<string, MemoEntry>();
   const loading = new Map<string, Promise<void>>();
   const reported = new Map<string, string>();
+  let digestHits = 0, digestMisses = 0;
+  const digestOutcomes: Record<string, number> = {};
+  const digestErrors: Record<string, string> = {};
+  const digestStateDirs = new Set<string>();
+  const outcome = (kind: string, error?: unknown): void => {
+    digestOutcomes[kind] = (digestOutcomes[kind] ?? 0) + 1;
+    if (error !== undefined) digestErrors[kind] = String(error);
+  };
+  const digestDirectory = (stateDir: string): string => join(stateDir, "cache", "rotation-digests", encodeURIComponent(io.holder!).replaceAll(".", "%2E"));
+  const digestPath = (entry: LedgerCorpusEntry): string => join(digestDirectory(dirname(entry.path)), `${basename(entry.path)}.json`);
+  const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<LedgerRotationRecords | undefined> => {
+    let raw: Buffer;
+    try {
+      raw = await nodeReadFile(digestPath(entry));
+    } catch (error) {
+      const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
+      outcome(reason === "ENOENT" ? "missing" : "unreadable", reason);
+      return undefined;
+    }
+    let digest: Record<string, unknown> | undefined;
+    try {
+      digest = parseObject(raw.toString("utf8"));
+    } catch (error) {
+      const reason = (error as Error).name;
+      outcome("corrupt", reason);
+      return undefined;
+    }
+    const read = digest?.read as LedgerRotationRecords | undefined;
+    if (digest?.schema !== 1 || !read || !Array.isArray(read.rows) ||
+        !read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) ||
+        !Number.isSafeInteger(read.torn) || read.torn < 0 || !Array.isArray(read.tornLines) ||
+        read.tornLines.length !== read.torn || !read.tornLines.every((line) => typeof line === "string")) {
+      outcome("corrupt");
+      return undefined;
+    }
+    if (digest.holder !== io.holder || digest.archive !== basename(entry.path) || digest.key !== key) {
+      outcome("identity");
+      return undefined;
+    }
+    if (digest.reducerVersion !== io.durableDigest!.reducerVersion) {
+      outcome("version");
+      return undefined;
+    }
+    digestHits++;
+    return read;
+  };
+  const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<void> => {
+    const path = digestPath(entry);
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      await nodeMkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await nodeWriteFile(temp, JSON.stringify({ schema: 1, holder: io.holder,
+        reducerVersion: io.durableDigest!.reducerVersion, archive: basename(entry.path), key, read }),
+      { flag: "wx", mode: 0o600, flush: true });
+      await nodeRename(temp, path);
+      outcome("written");
+    } catch (error) {
+      const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
+      outcome("writeFailed", reason);
+    } finally {
+      try {
+        await nodeUnlink(temp);
+      } catch (error) {
+        const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
+        if (reason !== "ENOENT") outcome("cleanupFailed", reason);
+      }
+    }
+  };
+  const pruneDigests = async (stateDir: string): Promise<void> => {
+    try {
+      const names = await nodeReaddir(stateDir);
+      const archives = new Set(ledgerRotationEntries(names, stateDir).map((entry) => `${basename(entry.path)}.json`));
+      for (const name of await nodeReaddir(digestDirectory(stateDir))) {
+        if (!name.endsWith(".json") || archives.has(name)) continue;
+        await nodeUnlink(join(digestDirectory(stateDir), name));
+        outcome("pruned");
+      }
+    } catch (error) {
+      const reason = (error as NodeJS.ErrnoException).code ?? (error as Error).name;
+      outcome(reason === "ENOENT" ? "pruneAbsent" : "pruneFailed", reason);
+    }
+  };
 
   const loadOne = async (entry: LedgerCorpusEntry): Promise<void> => {
     let key = "";
     try {
       key = statKey(entry.path);
+      if (io.durableDigest) {
+        const digest = await readDigest(entry, key);
+        if (digest) {
+          memo.set(entry.path, { key, read: digest });
+          return;
+        }
+        digestMisses++;
+      }
       let rows: Array<Record<string, unknown>> = [];
       let torn = 0;
       const tornLines: string[] = [];
@@ -1021,7 +1117,9 @@ export function createLedgerRotationMemo(
         if (entry.form === "gzip") await pipeline(source, createGunzip(), consume);
         else await pipeline(source, consume);
       }
-      memo.set(entry.path, { key, read: { rows, torn, tornLines } });
+      const read = { rows, torn, tornLines };
+      memo.set(entry.path, { key, read });
+      if (io.durableDigest) await writeDigest(entry, key, read);
     } catch {
       // deliberate: a failed load leaves a keyed marker, so the next pass parses this rotation inline and a
       // corrupt archive still lands in the union's `unread` exactly as it would without a memo.
@@ -1066,9 +1164,14 @@ export function createLedgerRotationMemo(
         rows += entry.read.rows.length;
         tornRows += entry.read.torn;
       }
-      return { archives: memo.size, rows, tornRows, failedArchives };
+      return { archives: memo.size, rows, tornRows, failedArchives,
+        ...(io.durableDigest ? { digestHits, digestMisses, digestOutcomes: { ...digestOutcomes }, digestErrors: { ...digestErrors } } : {}) };
     },
     load: async (entries) => {
+      if (io.durableDigest) {
+        for (const entry of entries) digestStateDirs.add(dirname(entry.path));
+        for (const stateDir of digestStateDirs) await pruneDigests(stateDir);
+      }
       for (const entry of entries) {
         const pending = loading.get(entry.path) ?? loadOne(entry).finally(() => loading.delete(entry.path));
         loading.set(entry.path, pending);

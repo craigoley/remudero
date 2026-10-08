@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-06 on the question W1-T6074's design leaves out of scope"
   plan_refs: [W1-T6074, W1-T6027, W1-T6073, W1-T5998]
   files: [src/lib/review.ts, src/run-task.ts, test/a-signal-ended-reviewer-is-re-run-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

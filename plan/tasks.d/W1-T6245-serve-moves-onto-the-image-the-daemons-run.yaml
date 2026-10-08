@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07 16:27Z: docker inspect after the Node 24 rollout"
   plan_refs: [W1-T4809, W1-T3245, W1-T6061]
   files: [src/lib/serve-policy-convergence.ts, test/serve-moves-onto-the-image-the-daemons-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

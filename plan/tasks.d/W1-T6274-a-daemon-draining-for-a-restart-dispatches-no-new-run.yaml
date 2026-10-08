@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: daemon.freshness_decision 20:38:42Z then run.start W1-T6262 20:39:46Z; restart 21:15:32Z"
   plan_refs: [W1-T4945, W1-T5083, W1-T6273]
   files: [src/lib/daemon.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

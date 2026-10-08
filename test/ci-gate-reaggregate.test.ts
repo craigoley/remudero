@@ -397,8 +397,8 @@ test("ci-gate: adaptive wait and grace cadences cap check-runs reads without sho
   const fixedWaitReads = 1 + Math.ceil(waitCap / fastPoll);
   const adaptiveGraceReads = Math.ceil(graceWindow / gracePoll);
   const fixedGraceReads = Math.ceil(graceWindow / 20);
-  assert.ok(adaptiveWaitReads <= 81,
-    "the 65-minute wait for the coverage shard and aggregator must use no more than 81 check-runs reads");
+  assert.ok(adaptiveWaitReads <= 91,
+    "the 75-minute wait for the coverage shard and aggregator must use no more than 91 check-runs reads");
   assert.equal(adaptiveGraceReads, 10, "the shipped grace window should use no more than 10 check-runs reads");
   assert.ok(adaptiveWaitReads + adaptiveGraceReads < fixedWaitReads + fixedGraceReads, "the adaptive cadence must reduce the maximum API reads while retaining both windows");
 });
