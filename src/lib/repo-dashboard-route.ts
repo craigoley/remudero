@@ -100,7 +100,10 @@ export interface RepoDashboardSettings {
   /** Available on an operating instance's summary; portfolio-only rows retain their null shape. */
   configSource?: Record<SettingName, "organization-default" | "repository-override" | null>;
   source?: Record<SettingName, string | null>;
-  freshness?: string;
+  /** When the newest source read last changed (its file mtime), never the read's own clock: a
+   *  clock-now stamp here would move every repositories view etag on each re-materialize. Null when
+   *  no source file was read. */
+  freshness?: string | null;
   reasons?: Partial<Record<SettingName, string>>;
 }
 
@@ -766,15 +769,24 @@ function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], le
   };
 }
 
-function readRepoSettings(deps: RepoDashboardOptions, nowMs: number): RepoDashboardSettings {
+/** A read source's modification time, or undefined when it no longer exists. */
+function sourceMtimeMs(path: string): number | undefined {
+  return statSync(path, { throwIfNoEntry: false })?.mtimeMs;
+}
+
+function readRepoSettings(deps: RepoDashboardOptions): RepoDashboardSettings {
   const settings: RepoDashboardSettings = {
     proofpolicy: null, workerpoolsize: null, alertthreshold: null,
     configSource: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
     source: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
-    freshness: fixedClock(nowMs).iso(), reasons: {},
+    freshness: null, reasons: {},
   };
+  const mtimes: number[] = [];
   try {
     const policy = (deps.readSettingsPolicy ?? loadDefaultPolicy)().values;
+    // An injected reader names no file, so only the install policy contributes a modification time.
+    const policyMtime = deps.readSettingsPolicy ? undefined : sourceMtimeMs(installPolicyPath());
+    if (policyMtime !== undefined) mtimes.push(policyMtime);
     settings.proofpolicy = { timeoutMs: policy.proofTimeoutMs };
     settings.workerpoolsize = policy.sweep.dispatchLanes;
     settings.configSource!.proofpolicy = settings.configSource!.workerpoolsize = "organization-default";
@@ -785,13 +797,17 @@ function readRepoSettings(deps: RepoDashboardOptions, nowMs: number): RepoDashbo
     settings.reasons!.proofpolicy = settings.reasons!.workerpoolsize = reason;
   }
   try {
-    settings.alertthreshold = loadAlertPolicy(join(deps.root, "plan", "alert-policy.yaml"));
+    const alertPolicyPath = join(deps.root, "plan", "alert-policy.yaml");
+    settings.alertthreshold = loadAlertPolicy(alertPolicyPath);
+    const alertMtime = sourceMtimeMs(alertPolicyPath);
+    if (alertMtime !== undefined) mtimes.push(alertMtime);
     settings.configSource!.alertthreshold = "repository-override";
     settings.source!.alertthreshold = "plan/alert-policy.yaml";
   } catch (error) {
     const reason = `repository alert policy unavailable: ${messageOf(error).replaceAll(deps.root, "<repository>")}`;
     settings.reasons!.alertthreshold = reason;
   }
+  if (mtimes.length > 0) settings.freshness = fixedClock(Math.max(...mtimes)).iso();
   return settings;
 }
 
@@ -799,7 +815,7 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
   const { identities, registry } = resolved;
   const measured = outcome?.ok ? outcome : undefined;
   const settings = identities.some((identity) => identity.own)
-    ? deps.fileReads?.settings ?? readRepoSettings(deps, deps.clock?.now() ?? nowMs) : undefined;
+    ? deps.fileReads?.settings ?? readRepoSettings(deps) : undefined;
   const rows = identities.map((identity, i) =>
     toDashboardEntry(identity.repo, measured?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? measured?.signals : undefined, nowMs, identity.own ? settings : undefined));
   return {
@@ -833,7 +849,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
   }
   const resolved = resolveIdentities(deps, deps.repoRegistryPath !== undefined ? parseRegistryRepos(text) : undefined);
   const reads: RepoSummaryFileReads = { ...(deps.repoRegistryPath !== undefined && !deps.instanceRepository ? { registry: text ?? null } : {}), managed: resolved.managed };
-  if (resolved.identities.some((identity) => identity.own)) reads.settings = replay?.settings ?? readRepoSettings(deps, nowMs);
+  if (resolved.identities.some((identity) => identity.own)) reads.settings = replay?.settings ?? readRepoSettings(deps);
   const projectionDeps = { ...deps, fileReads: reads };
   if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(projectionDeps, resolved, undefined, nowMs, true), fileReads: reads };
   const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;

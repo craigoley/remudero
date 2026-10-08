@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { buildRepoDashboardRoutes, repoSummarySync, type RepoDashboardResult } from "../src/lib/repo-dashboard-route.js";
-import { loadDefaultPolicy } from "../src/lib/policy.js";
+import { installPolicyPath, loadDefaultPolicy } from "../src/lib/policy.js";
 import { loadAlertPolicy } from "../src/lib/alert-lane.js";
 import { createService } from "../src/lib/service.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -47,7 +47,10 @@ test("W1-T5178: a repository reports its effective settings with their source", 
         proofpolicy: "plan/policy.yaml#proofTimeoutMs", workerpoolsize: "plan/policy.yaml#sweep.dispatchLanes",
         alertthreshold: "plan/alert-policy.yaml",
       });
-      assert.equal(entry.settings.freshness, "2026-10-08T12:00:00.000Z");
+      // Freshness is the newest source's own modification time, never the read's clock (NOW).
+      const newest = Math.max(statSync(installPolicyPath()).mtimeMs, statSync(join(root, "plan", "alert-policy.yaml")).mtimeMs);
+      assert.equal(entry.settings.freshness, new Date(newest).toISOString());
+      assert.notEqual(entry.settings.freshness, new Date(NOW).toISOString());
       assert.deepEqual(entry.settings.reasons, {});
       assert.equal(entry.not_computed.settings, "");
       assert.equal(entry.actions.find((action) => action.id === "configure")?.available, false);
@@ -76,6 +79,7 @@ test("W1-T5178: a setting with no source stays null with a reason", () => {
   assert.match(entry.settings.reasons!.workerpoolsize!, /policy source unavailable/);
   assert.match(entry.settings.reasons!.alertthreshold!, /ENOENT/);
   assert.match(entry.not_computed.settings, /alertthreshold/);
+  assert.equal(entry.settings.freshness, null, "no source file was read, so nothing dates the settings");
 });
 
 test("settings retain independent sources when the repository alert policy is malformed", () => {
