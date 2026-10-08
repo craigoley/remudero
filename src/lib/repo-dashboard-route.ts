@@ -16,8 +16,8 @@
  * - `modelsused` = provider-served models, else the canonical selected model (W1-T4478) of an assignment.
  * A row names its repository by its own `repo`, else through its run's `run.start` row; the instance's own
  * repository also owns every row that names none (its gardeners, sweeps and fix lanes).
- * `connected_at` and `settings` are NOT computed: no registry records a connection time, and no config key
- * holds a per-repo proof policy, pool size or alert threshold. `not_computed` says so per field.
+ * `connected_at` is not recorded. Settings are read from the operating instance's policy and
+ * repository alert policy; other repositories require their own instance's summary.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -36,6 +36,8 @@ import type { Plan } from "./plan.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { assignmentFacts, createRepoLedgerIndex, type RepoLedgerIndex, type RepoLedgerWatermark } from "./repo-ledger-index.js";
 import { DEFAULT_LIVENESS_BOUND_MS, isMergeCreditLine } from "./status.js";
+import { installPolicyPath, loadDefaultPolicy, type Policy } from "./policy.js";
+import { loadAlertPolicy, type AlertPolicy } from "./alert-lane.js";
 
 export type RepoCondition = "healthy" | "degraded" | "down" | "paused" | "idle" | "unknown";
 
@@ -88,10 +90,18 @@ export interface RepoDashboardTelemetry {
   modelsused: string[] | null;
 }
 
+type SettingName = "proofpolicy" | "workerpoolsize" | "alertthreshold";
 export interface RepoDashboardSettings {
-  proofpolicy: null;
-  workerpoolsize: null;
-  alertthreshold: null;
+  /** The timeout enforced by the acceptance-proof executor. */
+  proofpolicy: { timeoutMs: number } | null;
+  workerpoolsize: number | null;
+  /** Severity eligibility and critical paths used by the alert disposition policy. */
+  alertthreshold: AlertPolicy | null;
+  /** Available on an operating instance's summary; portfolio-only rows retain their null shape. */
+  configSource?: Record<SettingName, "organization-default" | "repository-override" | null>;
+  source?: Record<SettingName, string | null>;
+  freshness?: string;
+  reasons?: Partial<Record<SettingName, string>>;
 }
 
 /** A path is relative to the instance's own `/v1/i/<instance>/` prefix. */
@@ -197,6 +207,7 @@ export interface RepoSummaryFileReads {
   managed?: ManagedRepo[];
   /** The fleet-control markers and the incident store's alerts; the heartbeat stays the ledger's. */
   control?: Omit<RepoInstanceSignals, "lastDaemonMs">;
+  settings?: RepoDashboardSettings;
 }
 
 const UNKNOWN: RepoTelemetry = {
@@ -407,7 +418,7 @@ function repoActions(own: boolean, signals: RepoInstanceSignals | undefined): Re
   return [
     toggle,
     own ? { id: "viewlogs", available: true, method: "GET", path: "recent", scope: "read" } : { id: "viewlogs", available: false, reason: notOwn },
-    { id: "configure", available: false, reason: NOT_COMPUTED.settings },
+    { id: "configure", available: false, reason: own ? "core has no settings write endpoint" : NOT_COMPUTED.settings },
     { id: "test_run", available: false, reason: "core has no on-demand test-run endpoint" },
   ];
 }
@@ -419,6 +430,7 @@ function toDashboardEntry(
   own: boolean,
   signals: RepoInstanceSignals | undefined,
   nowMs: number,
+  settings?: RepoDashboardSettings,
 ): RepoDashboardEntry {
   const id = `${repo.owner}/${repo.repo}`;
   const measured = t.runs7d !== null;
@@ -451,9 +463,9 @@ function toDashboardEntry(
       subscription: t.subscription,
       modelsused: t.modelsused,
     },
-    settings: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+    settings: settings ?? { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
     actions: repoActions(own, signals),
-    not_computed: NOT_COMPUTED,
+    not_computed: settings ? { ...NOT_COMPUTED, settings: Object.entries(settings.reasons ?? {}).map(([field, reason]) => `${field}: ${reason}`).join("; ") } : NOT_COMPUTED,
   };
 }
 
@@ -689,6 +701,8 @@ export interface RepoDashboardOptions {
   /** Injected readers run the pass in-process; the defaults run it on a worker thread. */
   readLedger?: LedgerReader;
   readPlan?: (path: string) => Plan;
+  /** The same process-memoized policy used by the proof executor and daemon dispatch. */
+  readSettingsPolicy?: () => Policy;
   /** Test seam: the module a spawned telemetry worker loads. */
   workerUrl?: URL;
   /** repoSummarySync also returns each own repository's {@link RepoShadowFacts}. */
@@ -752,11 +766,42 @@ function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], le
   };
 }
 
+function readRepoSettings(deps: RepoDashboardOptions, nowMs: number): RepoDashboardSettings {
+  const settings: RepoDashboardSettings = {
+    proofpolicy: null, workerpoolsize: null, alertthreshold: null,
+    configSource: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+    source: { proofpolicy: null, workerpoolsize: null, alertthreshold: null },
+    freshness: fixedClock(nowMs).iso(), reasons: {},
+  };
+  try {
+    const policy = (deps.readSettingsPolicy ?? loadDefaultPolicy)().values;
+    settings.proofpolicy = { timeoutMs: policy.proofTimeoutMs };
+    settings.workerpoolsize = policy.sweep.dispatchLanes;
+    settings.configSource!.proofpolicy = settings.configSource!.workerpoolsize = "organization-default";
+    settings.source!.proofpolicy = "plan/policy.yaml#proofTimeoutMs";
+    settings.source!.workerpoolsize = "plan/policy.yaml#sweep.dispatchLanes";
+  } catch (error) {
+    const reason = `instance policy unavailable: ${messageOf(error).replaceAll(installPolicyPath(), "plan/policy.yaml")}`;
+    settings.reasons!.proofpolicy = settings.reasons!.workerpoolsize = reason;
+  }
+  try {
+    settings.alertthreshold = loadAlertPolicy(join(deps.root, "plan", "alert-policy.yaml"));
+    settings.configSource!.alertthreshold = "repository-override";
+    settings.source!.alertthreshold = "plan/alert-policy.yaml";
+  } catch (error) {
+    const reason = `repository alert policy unavailable: ${messageOf(error).replaceAll(deps.root, "<repository>")}`;
+    settings.reasons!.alertthreshold = reason;
+  }
+  return settings;
+}
+
 function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome: RepoTelemetryOutcome | undefined, nowMs: number, onlyOwn: boolean): RepoDashboardResult {
   const { identities, registry } = resolved;
   const measured = outcome?.ok ? outcome : undefined;
+  const settings = identities.some((identity) => identity.own)
+    ? deps.fileReads?.settings ?? readRepoSettings(deps, deps.clock?.now() ?? nowMs) : undefined;
   const rows = identities.map((identity, i) =>
-    toDashboardEntry(identity.repo, measured?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? measured?.signals : undefined, nowMs));
+    toDashboardEntry(identity.repo, measured?.telemetry[i] ?? UNKNOWN, identity.source, identity.own, identity.own ? measured?.signals : undefined, nowMs, identity.own ? settings : undefined));
   return {
     generated_at: fixedClock(nowMs).iso(),
     source: deps.instanceRepository ? "instance-registry" : registry?.state === "verified" ? "instance-registry+managed-repos" : "managed-repos",
@@ -788,7 +833,9 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
   }
   const resolved = resolveIdentities(deps, deps.repoRegistryPath !== undefined ? parseRegistryRepos(text) : undefined);
   const reads: RepoSummaryFileReads = { ...(deps.repoRegistryPath !== undefined && !deps.instanceRepository ? { registry: text ?? null } : {}), managed: resolved.managed };
-  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(deps, resolved, undefined, nowMs, true), fileReads: reads };
+  if (resolved.identities.some((identity) => identity.own)) reads.settings = replay?.settings ?? readRepoSettings(deps, nowMs);
+  const projectionDeps = { ...deps, fileReads: reads };
+  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(projectionDeps, resolved, undefined, nowMs, true), fileReads: reads };
   const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
   const request = telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs);
   const outcome = computeRepoTelemetrySync(request, { readLedger: deps.readLedger, readPlan: deps.readPlan, ...(replay?.control ? { control: replay.control } : {}) });
@@ -803,7 +850,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
     const condition = (runs7d: RepoRunOutcomes): { condition: RepoCondition; reasons: string[] } => deriveRepoCondition({ ...t, runs7d }, outcome.signals, nowMs);
     return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
   }));
-  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}), fileReads: reads };
+  return { ok: true, summary: dashboardResult(projectionDeps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}), fileReads: reads };
 }
 
 /**
