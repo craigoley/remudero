@@ -1,7 +1,7 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
+import { isMainThread, parentPort, threadId, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { pipeline } from "node:stream/promises";
@@ -941,26 +941,31 @@ const ROTATION_DIGEST_CODEC = "rotation-digest-codec";
 type DigestCodecRequest = { id: number; operation: "parse" | "stringify"; value: unknown };
 type DigestCodecReply = { id: number; value?: unknown; error?: string };
 
-if (!isMainThread && workerData?.kind === ROTATION_DIGEST_CODEC) {
-  parentPort!.on("message", ({ id, operation, value }: DigestCodecRequest) => {
-    try {
-      let result: unknown;
-      if (operation === "stringify") result = JSON.stringify(value);
-      else {
-        const digest = JSON.parse(value as string);
-        const read = digest?.read;
-        if (digest?.schema === 1 && read && Array.isArray(read.rows) &&
-            read.rows.every((row: unknown) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
-            Number.isSafeInteger(read.torn) && read.torn >= 0 && Array.isArray(read.tornLines) &&
-            read.tornLines.length === read.torn && read.tornLines.every((line: unknown) => typeof line === "string")) {
-          result = digest;
-        }
+export function replyToRotationDigestRequest(
+  { id, operation, value }: DigestCodecRequest,
+  port: Pick<MessagePort, "postMessage"> = parentPort!,
+): void {
+  try {
+    let result: unknown;
+    if (operation === "stringify") result = JSON.stringify(value);
+    else {
+      const digest = JSON.parse(value as string);
+      const read = digest?.read;
+      if (digest?.schema === 1 && read && Array.isArray(read.rows) &&
+          read.rows.every((row: unknown) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
+          Number.isSafeInteger(read.torn) && read.torn >= 0 && Array.isArray(read.tornLines) &&
+          read.tornLines.length === read.torn && read.tornLines.every((line: unknown) => typeof line === "string")) {
+        result = digest;
       }
-      parentPort!.postMessage({ id, value: result } satisfies DigestCodecReply);
-    } catch (error) {
-      parentPort!.postMessage({ id, error: (error as Error).name } satisfies DigestCodecReply);
     }
-  });
+    port.postMessage({ id, value: result } satisfies DigestCodecReply);
+  } catch (error) {
+    port.postMessage({ id, error: (error as Error).name } satisfies DigestCodecReply);
+  }
+}
+
+if (!isMainThread && workerData?.kind === ROTATION_DIGEST_CODEC) {
+  parentPort!.on("message", replyToRotationDigestRequest);
 }
 
 let digestCodecWorker: Worker | undefined;

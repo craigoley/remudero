@@ -4,14 +4,14 @@ import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { Worker } from "node:worker_threads";
-import { createLedgerRotationMemo, ledgerRotationEntries } from "../src/lib/ledger-union.js";
+import { MessageChannel, Worker } from "node:worker_threads";
+import { createLedgerRotationMemo, ledgerRotationEntries, replyToRotationDigestRequest } from "../src/lib/ledger-union.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const holder = "landed-rotation";
 const noParse = () => { throw new Error("the memo must supply the rotation"); };
 
-test("digest worker replies validate rows and errors before a clean exit", async () => {
+function digestCodecFixture() {
   const digest = { schema: 1, holder, reducerVersion: "1", archive: "ledger.ndjson.1.gz", key: "1:2",
     read: { rows: [{ keep: true, value: "🚀\u2028" }], torn: 1, tornLines: ["broken row"] } };
   const invalid = [null, {}, { ...digest, schema: 2 }, ...[
@@ -24,10 +24,38 @@ test("digest worker replies validate rows and errors before a clean exit", async
   const requests = [
     { operation: "stringify", value: digest },
     { operation: "parse", value: JSON.stringify(digest) },
-    ...invalid.map((value) => ({ operation: "parse", value: JSON.stringify(value) })),
+    ...invalid.map((value) => ({ operation: "parse" as const, value: JSON.stringify(value) })),
     { operation: "parse", value: "{" },
     { operation: "stringify", value: { ...digest, value: 1n } },
-  ].map((request, id) => ({ id, ...request }));
+  ] satisfies Array<{ operation: "parse" | "stringify"; value: unknown }>;
+  const identifiedRequests = requests.map((request, id) => ({ id, ...request }));
+  const replies = [
+    { id: 0, value: JSON.stringify(digest) }, { id: 1, value: digest },
+    ...invalid.map((_, index) => ({ id: index + 2, value: undefined })),
+    { id: requests.length - 2, error: "SyntaxError" },
+    { id: requests.length - 1, error: "TypeError" },
+  ];
+  return { requests: identifiedRequests, replies };
+}
+
+test("the digest codec replies preserve valid rows and reject corrupt shapes and json errors", async () => {
+  const { requests, replies } = digestCodecFixture();
+  const { port1, port2 } = new MessageChannel();
+  try {
+    for (let index = 0; index < requests.length; index++) {
+      const received = once(port2, "message");
+      replyToRotationDigestRequest(requests[index], port1);
+      assert.deepEqual(await received, [replies[index]], `codec reply for request ${index}`);
+    }
+  } finally {
+    port1.close();
+    port2.close();
+  }
+});
+
+test("digest worker replies validate rows and errors before a clean exit", async () => {
+  const fixture = digestCodecFixture();
+  const { requests } = fixture;
   const worker = new Worker(`
     const { parentPort, workerData } = require("node:worker_threads");
     import("tsx/esm/api").then(({ register }) => {
@@ -51,12 +79,7 @@ test("digest worker replies validate rows and errors before a clean exit", async
     const exited = once(worker, "exit");
     for (const request of requests) worker.postMessage(request);
     assert.deepEqual(await exited, [0], "the worker exits normally after replying to every request");
-    assert.deepEqual(replies, [
-      { id: 0, value: JSON.stringify(digest) }, { id: 1, value: digest },
-      ...invalid.map((_, index) => ({ id: index + 2, value: undefined })),
-      { id: requests.length - 2, error: "SyntaxError" },
-      { id: requests.length - 1, error: "TypeError" },
-    ]);
+    assert.deepEqual(replies, fixture.replies);
   } finally {
     await worker.terminate();
   }
