@@ -76,7 +76,7 @@ test('author static preflight lowers real descendant priority and records the ac
   const step = receipt.steps.find((row: {name: string}) => row.name === 'static-preflight');
   assert.ok(['nice', 'nice+ionice'].includes(step.priority));
   const observed = JSON.parse(readFileSync(join(f.root, 'coverage/static-priority.json'), 'utf8'));
-  assert.equal(observed.self, Math.min(19, parentPriority + 10));
+  assert.equal(observed.self, Math.min(process.platform === "darwin" ? 20 : 19, parentPriority + 10));
   assert.equal(observed.child, observed.self, 'the entire static process tree inherits lower CPU priority');
   assert.equal(receipt.verdict, 'passed');
   assert.deepEqual(receipt.steps.map((row: {name: string}) => row.name), ['census-precheck', 'static-preflight', 'affected-tests']);
