@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: round-3 steady-state daemon CPU profile (lanes/claude, pid 108, 00:22Z)"
   plan_refs: [W1-T424, W1-T5723]
   files: [src/lib/verdict-calibration.ts, test/verdict-calibration-indexes-commits-by-cited-task-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

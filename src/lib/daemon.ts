@@ -36,7 +36,7 @@ import type {
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import { runOpportunityIntake, openOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
-import { reconcileOpportunityOutcomes, productionOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
+import { reconcileOpportunityOutcomesAsync, openOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
@@ -4316,7 +4316,7 @@ export async function runDaemon(
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
             try {
-              const outcomes = reconcileOpportunityOutcomes(deps.opportunityOutcomes ?? productionOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
+              const outcomes = await reconcileOpportunityOutcomesAsync(deps.opportunityOutcomes ?? await openOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
               log("opportunity_outcomes.reconciled", { outcomes });
             } catch (error) {
               log("opportunity_outcomes.failed", { reason: String(error) });

@@ -184,9 +184,12 @@ import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace }
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenSchedule } from "./lib/garden-registry.js";
+import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
@@ -213,7 +216,9 @@ export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -229,7 +234,9 @@ import {
 export {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -283,7 +290,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -6488,7 +6495,11 @@ export function fixRungScopeStandDownReason(
     }
   | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
-  const planOnlyTask = declaredFiles.every(isInPlanScope);
+  // W1-T5118: the role is read from the inherited diff — a plan-only filing stays plan-scoped even
+  // when its shard declares future src/test paths. The SAME selection `renderFixPrompt` reads.
+  const regime = fixScopeRegime(declaredFiles, baselineDiffFiles);
+  const planOnlyTask = regime === "plan";
+  const planFiling = planOnlyTask && !declaredFiles.every(isInPlanScope);
   const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath)
     .filter((path) => !ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path));
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
@@ -6497,8 +6508,8 @@ export function fixRungScopeStandDownReason(
     : reachableRemedyPaths.length > 0
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
-  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges).filter(
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles, [], regime));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges, regime).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -6506,7 +6517,10 @@ export function fixRungScopeStandDownReason(
   const reason =
     scopeKind === "plan"
       ? `a fix worker added path(s) outside plan scope on a plan-only PR: ${newOutOfScopePaths.join(", ")} — ` +
-        `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/` +
+        (planFiling
+          ? `this PR is a plan-only filing (every path it carried before this rung is plan-scoped), so its ` +
+            `declared future paths are not yours to build here: a repair may only touch plan/** (or MASTER-PLAN.md/`
+          : `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/`) +
         `ORIENTATION.md), never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
         `rung itself wrote`
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
@@ -36524,6 +36538,12 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog");
       return gardenPass(backlogGardenSpec(d), d);
     }
+    // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
+    // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
+    case "scout": {
+      const d = deps("scout");
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+    }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
@@ -37280,8 +37300,13 @@ export async function daemonCommand(
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
+    daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
+    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: target.isSelf,
+      cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
+      scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -37851,6 +37876,7 @@ export async function daemonCommand(
   });
   const loopTelemetry = startReadPlaneTelemetry();
   try {
+    try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
       plan,
       {

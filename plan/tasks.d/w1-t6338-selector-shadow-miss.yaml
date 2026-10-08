@@ -1,0 +1,28 @@
+- id: W1-T6338
+  title: "REPAIR THE SELECTOR EDGE INTO test/every-view-body-matches-its-schema.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/every-view-body-matches-its-schema.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37738574315 for PR #10044 at 86bb5a01f79e8df2a48ad2415f2aa55f3d19e940: src/lib/repo-dashboard-route.ts, test/repo-settings-report-their-effective-values.test.ts -> test/every-view-body-matches-its-schema.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/every-view-body-matches-its-schema.test.ts when this edge is exercised"
+      proof: "grep: test/every-view-body-matches-its-schema\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared file is only src/lib/affected-suites.ts, which is test-selector logic. The description doesn't mention secrets, auth, deletion, merge/deploy policy, or any irreversible action."
+      - "The acceptance criterion is a single grep that checks the selector includes one test file. That makes it narrow and checkable."
+      - "The family track record is 6 merged and 0 declined (Beta mean 0.88), and filingTime is true. Nothing in the gates state is concerning."
+      - "No bounded change view was supplied, so this verdict rests on the description and declared files alone. CI and review still apply."
+    judged_at: "2026-10-08T07:56:13.259Z"
+    pin: "f44214565443e58ab5a2e96c15472253f72c4095dfb7e58578c1b114fcc550d7"

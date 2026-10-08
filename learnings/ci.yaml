@@ -10,7 +10,8 @@
 
 - id: required-check-poster
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire required-check-poster
+  lifecycle: superseded
   files: [src/lib/review.ts, src/lib/status.ts, ".github/**"]
   fact: >-
     A required check must be posted by the ORCHESTRATOR unconditionally, not solely by a worker: a
@@ -182,6 +183,24 @@
   src: "ci-learning:8684:claims"
   cited: "2026-10-08"
 
+- id: squash-trailer-gate-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts, .github/workflows/ci.yml]
+  fact: >-
+    Before opening a plan-only PR, inspect the commits reachable from its head for
+    `Remudero-Task:` trailers that credit implementation tasks. The squash-trailer-gate refuses
+    when a credited task declares non-plan files, because the PR changes only plan paths. Remove
+    that trailer or include the implementation changes before opening the PR; then rerun the gate
+    after correcting the branch or PR metadata.
+  evidence: >-
+    `scripts/acceptance-author-gate.mjs` applies this refusal only when every changed path is
+    plan-scoped and the trailer-resolved task declares non-plan files. The gate's diagnostic names
+    both remedies. Fourteen repaired pull requests in the window were recorded as
+    ci-learning:5433:squash-trailer-gate.
+  src: "ci-learning:5433:squash-trailer-gate"
+  cited: "2026-10-08"
+
 - id: comment-load-ratchet-lane
   subsystem: ci
   lifecycle: active
@@ -312,4 +331,52 @@
     shards, test files, and the preflight author script. Recon did not establish each PR's specific
     failure reason, so this entry names the pre-push checks rather than a single cause.
   src: "ci-learning:9301:light-gates"
+  cited: "2026-10-08"
+
+- id: prompt-surface-gate-learning-path-evidence
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    When a task changes data in a `learnings/*.yaml` shard, the prompt-surface-gate requires a golden
+    verdict under `test/fixtures/golden-verdicts/**`; adding or editing test files alone cannot
+    satisfy a path surface. Comment-only YAML changes are exempt, but any changed learning entry
+    needs the golden fixture in the same diff.
+  evidence: >-
+    The prompt-surface-gate refused seven pull requests in the window recorded as
+    ci-learning:9856:prompt-surface-gate (9856, 9989, 10001, 10015, 10019, 10027, 10035), and each
+    was repaired. The gate implementation confirms that learning-shard path surfaces accept golden
+    verdict fixtures and do not accept test-file evidence; this guidance names that remedy for
+    task authors.
+  src: "ci-learning:9856:prompt-surface-gate"
+  cited: "2026-10-08"
+
+- id: remudero-review-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - "src/run-task.ts"
+    - "src/lib/policy.ts"
+    - "src/lib/affected-suites.ts"
+    - "src/lib/dep-review.ts"
+    - "test/**"
+    - "learnings/ci.yaml"
+  fact: >-
+    The remudero-review gate refused eight pull requests in one window (#9717, #9819, #9824, #9834,
+    #9838, #9918, #9971, #9979), and each was repaired after the refusal. Before pushing, a worker
+    on a change that touches plan/ runs `npm run --silent rule15-precheck`, and if it adds or edits
+    a claim or proof in a plan task file or shard it lifts that shard into a plan-only PR rather than
+    filing it beside its implementation. A worker on a change that touches src/run-task.ts,
+    src/lib/policy.ts, src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and
+    the suites it names. Those are the precheck and census steps that a fix or implementation lane
+    skips before its first push.
+  evidence: >-
+    The remudero-review gate refused eight pull requests recorded as ci-learning:9717:remudero-review
+    (9717, 9819, 9824, 9834, 9838, 9918, 9971, 9979), and each was repaired. The repairs touched the
+    plan/tasks.d shard tree, the run-task and affected-suite selector lane, and census-covered test
+    files. Recon did not establish each PR's individual refusal reason or verify the live GitHub
+    state of those PRs, so this entry names the shared surface and the pre-push steps, not a
+    verified per-PR cause.
+  src: "ci-learning:9717:remudero-review"
   cited: "2026-10-08"

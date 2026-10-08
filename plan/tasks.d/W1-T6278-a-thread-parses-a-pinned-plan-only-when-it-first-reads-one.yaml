@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item C3, option b), from serve.plan_pin_adopted rows, an isolated parse replay and a static import walk"
   plan_refs: [W1-T5894, W1-T6262]
   files: [src/lib/thread-plan.ts, test/a-thread-parses-a-pinned-plan-only-when-it-first-reads-one.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

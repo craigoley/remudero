@@ -57,6 +57,7 @@ import {
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
+import { buildGardenersRoute } from "./gardeners-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
@@ -195,6 +196,7 @@ export function instanceRouteSet(
   const [owner, name] = repository.split("/");
   const reads = [
     buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
+    buildGardenersRoute({ stateDir: join(root.root, "state"), repository }),
     ...buildRepoDashboardRoutes({
       root: root.root, ledgerPath: root.ledgerPath, planPath: root.planPath, instanceRepository: { owner, repo: name },
       controlRoot: root.root, incidentsDir: join(root.root, "state"),

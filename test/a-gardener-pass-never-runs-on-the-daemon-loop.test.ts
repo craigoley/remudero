@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
 import {
   boundedGardenPassSpawn,
   childGardenPassSpawn,
@@ -21,16 +22,253 @@ import { HOST_RESOURCE_MIN_INTERVAL_MS } from "../src/lib/host-resource-gardener
 import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, daemonCommand, gardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function invokeGardenerRoute(route: import("../src/lib/service.js").Route) {
+  let status = 0, body = "";
+  const res = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } };
+  await route.handler({} as never, res as never, { params: {} });
+  return { status, body: JSON.parse(body) };
+}
+
+test("gardener runtime projects only known fields at persistence and the read boundary", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime, GARDENER_RUNTIME_FILE } =
+    await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-projection-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const stamp = "2026-10-07T12:00:00.000Z", clock = clockFromMillisFn(() => Date.parse(stamp));
+  const inventory = [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" as const }];
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: inventory, log: () => {} });
+  await writer.flush();
+  const expected = await readGardenerRuntime(stateDir);
+  const raw = { ...expected, internalNotes: "private-root",
+    gardens: expected.gardens.map((garden) => ({ ...garden, internalNotes: "private-entry" })) };
+  assert.deepEqual(parseGardenerRuntime(raw), expected);
+  writeFileSync(join(stateDir, GARDENER_RUNTIME_FILE), JSON.stringify(raw));
+  assert.deepEqual(await readGardenerRuntime(stateDir), expected);
+  // A port is not permission to forward its untrusted fields, either.
+  const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { ...expected, generatedAt: stamp, coverage: "registered-off-loop",
+    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
+  const extraInventory = inventory.map((garden) => ({ ...garden, internalNotes: "not-persisted" }));
+  const projectedWriter = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: extraInventory, log: () => {} });
+  await projectedWriter.flush();
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDir, GARDENER_RUNTIME_FILE), "utf8")), expected);
+});
+
+test("gardener runtime refuses array enum coercion at the parse and route boundaries", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-enum-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00.000Z"));
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  await writer.flush();
+  const expected = await readGardenerRuntime(stateDir);
+  for (const field of ["scope", "phase", "reason"] as const) {
+    const raw = structuredClone(expected);
+    Object.assign(raw.gardens[0]!, { [field]: [raw.gardens[0]![field]] });
+    assert.throws(() => parseGardenerRuntime(raw), /malformed/);
+    assert.deepEqual(await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw })),
+      { status: 503, body: { error: "gardeners_unavailable", reason: "unreadable" } });
+  }
+});
+
+test("gardener lifecycle measures admission separately from execution and preserves interruption", async (t) => {
+  const start = Date.parse("2026-10-07T12:00:00Z");
+  let now = start;
+  const observed: GardenerRuntimeEvent[] = [];
+  const releases: Array<(exit: number | null) => void> = [];
+  const spawn = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const wiring = { spawnPass: spawn, log: () => {}, clock: clockFromMillisFn(() => now), observe: (row: GardenerRuntimeEvent) => observed.push(row) };
+  const a = startGardenOffLoop("plan", 60_000, wiring), b = startGardenOffLoop("gate", 60_000, wiring);
+  t.after(() => { a.stop(); b.stop(); });
+  await wait(0); now += 100; releases[0]!(0); await wait(0);
+  now += 200; releases[1]!(null); await wait(0);
+  const plan = observed.find((r) => r.name === "plan" && r.phase === "completed");
+  const gate = observed.find((r) => r.name === "gate" && r.phase === "cancelled");
+  assert.ok(plan, "the producer records the completed process");
+  assert.ok(gate, "an interrupted process has a separate outcome");
+  assert.equal(plan.queueMs, 0); assert.equal(plan.executionMs, 100);
+  assert.equal(plan.nextDueAt, new Date(start + 60_000).toISOString());
+  assert.equal(gate.queueMs, 100); assert.equal(gate.executionMs, 200);
+  assert.equal(gate.reason, "signal-or-cancelled");
+  assert.ok(observed.some((r) => r.name === "gate" && r.phase === "running"));
+});
+
+test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-correlation-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  // Controlled process outcomes, not a claim of measured production work. The
+  // real admission queue and persistence must retain the same generated UUID.
+  let now = Date.parse("2026-10-07T12:00:00Z");
+  const clock = clockFromMillisFn(() => now);
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "correlation-fixture",
+    codeSha: "1".repeat(40), clock, log: () => {},
+    gardens: ["plan", "gate", "export"].map((name) => ({ name, enabled: true, cadenceMs: 60_000, scope: "repository" })) });
+  await writer.flush();
+  const completionRows = rows();
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    completionRows.log(step, extra);
+    now += 17; // Logging latency must not be counted as child execution.
+  };
+  const observe = (event: GardenerRuntimeEvent) => writer.record(event);
+  const releases: Array<(exit: number | null) => void> = [];
+  const spawnPass = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const plan = startGardenOffLoop("plan", 60_000, { spawnPass, clock, log, observe });
+  const gate = startGardenOffLoop("gate", 60_000, { spawnPass, clock, log, observe });
+  t.after(() => { plan.stop(); gate.stop(); });
+  await wait(0); assert.equal(releases.length, 1);
+  now += 100; releases[0]!(0); await wait(0);
+  assert.equal(releases.length, 2);
+  now += 200; releases[1]!(null); await wait(0);
+  const failed = startGardenOffLoop("export", 60_000, { clock, log, observe,
+    spawnPass: () => { throw new Error("controlled pre-admission failure"); } });
+  t.after(() => failed.stop());
+  await writer.flush();
+  const saved = await readGardenerRuntime(stateDir);
+  assert.deepEqual(completionRows.out.map((row) => row.extra.name), ["plan", "gate", "export"]);
+  assert.ok(completionRows.out.every((row) => row.step === GARDEN_PASS_STEP), "one existing completion row per terminal pass");
+  for (const row of completionRows.out) {
+    const entry = saved.gardens.find((garden) => garden.name === row.extra.name)!;
+    assert.match(String(row.extra.passId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(row.extra.passId, entry.passId);
+    assert.equal(row.extra.queueMs, entry.queueMs);
+    assert.equal(row.extra.executionMs, entry.executionMs);
+    assert.equal(row.extra.exit, entry.exit);
+    if (entry.queueMs !== null && entry.executionMs !== null) assert.equal(row.extra.ms, entry.queueMs + entry.executionMs);
+  }
+  assert.equal(saved.gardens.find((garden) => garden.name === "plan")!.executionMs, 100);
+  assert.equal(saved.gardens.find((garden) => garden.name === "gate")!.executionMs, 200);
+  const rejected = saved.gardens.find((garden) => garden.name === "export")!;
+  assert.equal(rejected.queueMs, null); assert.equal(rejected.executionMs, null);
+  assert.equal(rejected.reason, "spawn-failed");
+});
+
+test("gardener persistence drains a terminal receipt arriving as an atomic write settles", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-final-drain-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z"));
+  let lastWrite: Promise<void> | undefined, writes = 0;
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "final-drain-control", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {},
+    write: (path, text) => { writes++; lastWrite = writeAtomicAsync(path, text); return lastWrite; } });
+  await writer.flush();
+  assert.equal((await readGardenerRuntime(stateDir)).gardens[0]!.phase, "scheduled", "real atomic persistence positive control");
+  const queued: GardenerRuntimeEvent = { name: "plan", phase: "queued", observedAt: clock.iso(),
+    passId: "controlled-final-drain-pass", nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null };
+  writer.record(queued); assert.ok(lastWrite);
+  // The writer awaits this physical write before this later reaction is registered.
+  const terminal = lastWrite.then(() => writer.record({ ...queued, phase: "completed", queueMs: 0,
+    executionMs: 10, exit: 0, reason: "process-completed" }));
+  await writer.flush(); await terminal; await wait(0);
+  const saved = await readGardenerRuntime(stateDir);
+  assert.equal(saved.gardens[0]!.phase, "completed", "no later pass or periodic retry is needed to persist completion");
+  assert.equal(saved.gardens[0]!.passId, queued.passId);
+  assert.equal(saved.gardens[0]!.completions, 1);
+  assert.equal(writes, 3, "only the initial inventory, queued pass and terminal receipt are written");
+});
+
+test("gardener persistence reports a real write refusal without retrying and recovers on the next observation", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime, GARDENER_RUNTIME_FILE } = await import("../src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-write-recovery-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z")), logged = rows();
+  let writes = 0;
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "write-refusal-control", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: logged.log,
+    write: (path, text) => { writes++; return writeAtomicAsync(path, text); } });
+  await writer.flush();
+  const file = join(stateDir, GARDENER_RUNTIME_FILE);
+  renameSync(file, `${file}.previous`); mkdirSync(file);
+  const queued: GardenerRuntimeEvent = { name: "plan", phase: "queued", observedAt: clock.iso(),
+    passId: "controlled-refusal-pass", nextDueAt: null, queueMs: null, executionMs: null, exit: null, reason: null };
+  writer.record(queued);
+  await assert.rejects(writer.flush()); await wait(0);
+  assert.equal(writes, 2, "a failed physical write must not start an unbounded automatic retry");
+  assert.equal(logged.out.filter((row) => row.step === "garden.telemetry_failed").length, 1);
+  assert.equal(JSON.parse(readFileSync(`${file}.previous`, "utf8")).gardens[0].phase, "scheduled", "prior evidence is retained");
+  rmdirSync(file);
+  writer.record({ ...queued, phase: "completed", queueMs: 0, executionMs: 10, exit: 0, reason: "process-completed" });
+  await writer.flush();
+  const saved = await readGardenerRuntime(stateDir);
+  assert.equal(saved.gardens[0]!.phase, "completed"); assert.equal(saved.gardens[0]!.completions, 1);
+  assert.equal(writes, 3, "one new observation admits exactly one recovered write");
+});
+
+test("gardener lifecycle reports idle and spawn failures while an observer cannot break a pass", async (t) => {
+  const observed: GardenerRuntimeEvent[] = [], logs: string[] = [];
+  const idle = startGardenOffLoop("plan", 60_000, { log: () => {}, due: () => false,
+    spawnPass: async () => { throw new Error("idle cannot spawn"); }, observe: (r) => observed.push(r) });
+  const fail = startGardenOffLoop("gate", 60_000, { log: () => {}, spawnPass: () => { throw new Error("spawn refused"); },
+    observe: (r) => observed.push(r) });
+  const safe = startGardenOffLoop("config", 60_000, { log: (s) => logs.push(s), spawnPass: async () => 0,
+    observe: () => { throw new Error("telemetry unavailable"); } });
+  t.after(() => { idle.stop(); fail.stop(); safe.stop(); }); await wait(0);
+  assert.equal(observed[0]?.phase, "idle"); assert.equal(observed[0]?.reason, "inputs-unchanged");
+  assert.ok(observed.some((r) => r.phase === "failed" && r.reason === "spawn-failed" && r.executionMs === null));
+  assert.ok(logs.includes("garden.pass")); assert.ok(logs.includes("garden.telemetry_failed"));
+});
+
 function rows() {
   const out: Array<{ step: string; extra: Record<string, unknown> }> = [];
   return { out, log: (step: string, extra: Record<string, unknown> = {}) => void out.push({ step, extra }) };
 }
+
+test("an admitted daemon records its gardener inventory while dry runs and telemetry failures preserve authority", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-inventory-home-`));
+  const root = join(home, "Remudero"), state = join(root, "state");
+  // Review deliberately masks the checkout's credential-bearing Git config.
+  // Give this fixture a public origin in its own disposable HOME, never weaken
+  // that sandbox or write the shared checkout's config to make admission pass.
+  writeFileSync(join(home, ".gitconfig"), '[remote "origin"]\n\turl = https://github.com/fixture/remudero.git\n');
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(state, { recursive: true });
+  const planPath = join(home, "tasks.yaml"), inventoryPath = join(state, "gardener-runtime.json");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true }); });
+  let calls = 0;
+  const deps = { gardenPassesInProcess: true, githubFactory: () => fakeGitHub(), runDaemon: async (): Promise<DaemonSummary> => {
+    calls++; return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+  } };
+  const args = ["--allow-self-target", "--plan", planPath, "--max", "0"];
+  assert.equal(await daemonCommand(args, deps), 0);
+  assert.ok(existsSync(inventoryPath), "an admitted daemon persists its own inventory");
+  const manifest = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(manifest.version, 1);
+  assert.deepEqual(manifest.gardens.map((g: { name: string }) => g.name), REGISTERED_GARDEN_NAMES);
+  assert.ok(manifest.gardens.every((g: { enabled: boolean }) => g.enabled));
+  assert.match(manifest.codeSha, /^[a-f0-9]{40}$/);
+  const saved = JSON.stringify({ ...manifest, testSentinel: "preserve this recorded authority" });
+  writeFileSync(inventoryPath, saved);
+  assert.equal(await daemonCommand([...args, "--dry-run"], deps), 0);
+  assert.equal(calls, 1, "a dry run never admits the daemon loop");
+  assert.equal(readFileSync(inventoryPath, "utf8"), saved, "a dry run cannot replace the live receipt");
+  rmSync(inventoryPath); mkdirSync(inventoryPath);
+  assert.equal(await daemonCommand(args, deps), 0, "a telemetry write failure is not a failed daemon admission");
+  assert.equal(calls, 2);
+  const ledger = readFileSync(join(state, "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"step":"garden.telemetry_failed"/);
+  assert.match(ledger, /"reason":"runtime-inventory-write-failed"/);
+});
 
 test("W1-T5114: a gardener pass never runs on the daemon event loop", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-offloop-`));
