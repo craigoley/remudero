@@ -85,27 +85,29 @@ enclosing_mount_point() {
   printf '%s' "${best}"
 }
 
-# ── the literal source path of the mount line whose TARGET is exactly $1 (empty if none) ────────
-bind_source_for() {
-  local target="$1" src mnt
-  [ -r "${MOUNTS_FILE}" ] || return 0
-  while IFS=' ' read -r src mnt _; do
-    if [ "${mnt}" = "${target}" ]; then
-      printf '%s' "${src}"
-      return 0
-    fi
-  done < "${MOUNTS_FILE}"
-  return 0
-}
-
 # ── the mount BACKING /var/lib/containerd's bind source, else the one enclosing the root itself ─
 resolve_data_mount() {
-  local bind_source
-  bind_source="$(bind_source_for "${CONTAINERD_ROOT}")"
-  case "${bind_source}" in
-    /*) DATA_MOUNT="$(enclosing_mount_point "$(dirname "${bind_source}")")" ;;
-    *) DATA_MOUNT="$(enclosing_mount_point "${CONTAINERD_ROOT}")" ;;
-  esac
+  local backing_mount=""
+  # /proc/mounts names the device for a bind; mountinfo retains its filesystem root (W1-T6494).
+  if [ -r "${MOUNTINFO_FILE}" ]; then
+    backing_mount="$(awk -v target="${CONTAINERD_ROOT}" '
+      { dev[NR] = $3; root[NR] = $4; mount[NR] = $5 }
+      $5 == target { target_dev = $3; target_root = $4 }
+      END {
+        if (target_dev == "") exit
+        for (i = 1; i <= NR; i++) {
+          if (dev[i] != target_dev || mount[i] == target) continue
+          if (root[i] != "/" && target_root != root[i] && index(target_root, root[i] "/") != 1) continue
+          if (length(root[i]) > best_root ||
+              (length(root[i]) == best_root && length(mount[i]) < length(best))) {
+            best = mount[i]; best_root = length(root[i])
+          }
+        }
+        printf "%s", best
+      }
+    ' "${MOUNTINFO_FILE}")"
+  fi
+  DATA_MOUNT="${backing_mount:-$(enclosing_mount_point "${CONTAINERD_ROOT}")}"
 }
 
 # ── W1-T2856 criterion 5: refuses an unset, relative, absent, or unmounted RMD_STATE_DIR before
