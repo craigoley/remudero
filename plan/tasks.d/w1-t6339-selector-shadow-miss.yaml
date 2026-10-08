@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,14 @@
   acceptance:
     - claim: "the narrow selector includes test/view-etags-are-deterministic.test.ts when this edge is exercised"
       proof: "grep: test/view-etags-are-deterministic\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed plan limits the remedy to including one named test in the narrow selector, with src/lib/affected-suites.ts as the sole declared file."
+      - "The supplied family track record reports six merged tasks and zero declined tasks, supporting established practice."
+      - "The filing-time gates report no adverse condition; the stated scope identifies no sensitive access, deletion, irreversible action, or merge, deploy, infrastructure, or review policy change."
+      - "No diff or actual-change view is supplied; this verdict assesses the declared plan, not implementation correctness."
+    judged_at: "2026-10-08T07:46:06.863Z"
+    pin: "e8129d66df803f48fcfac340463b9e9654d1420347c0a3b900ba49e7dd7a796a"

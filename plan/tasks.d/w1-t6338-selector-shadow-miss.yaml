@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,13 @@
   acceptance:
     - claim: "the narrow selector includes test/every-view-body-matches-its-schema.test.ts when this edge is exercised"
       proof: "grep: test/every-view-body-matches-its-schema\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts, which maps changed files to the tests that should run. The task adds one test path to the narrow selector, so it touches no secrets, auth, permissions, deploy, merge or review policy, and it deletes nothing."
+      - "The acceptance criterion is a mechanical grep that can be verified automatically (verify: auto), so the finding can be checked from what is shown. It asks for no operator-only decision."
+      - "The family \"selector-shadow-miss\" has 6 merged and 0 declined tasks (Beta mean 0.88), and the author is a machine at filing time. The gates state shows nothing concerning, and the change is reversible and still passes CI and review."
+    judged_at: "2026-10-08T07:45:50.486Z"
+    pin: "f44214565443e58ab5a2e96c15472253f72c4095dfb7e58578c1b114fcc550d7"
