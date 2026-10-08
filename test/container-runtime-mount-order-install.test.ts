@@ -35,6 +35,7 @@ interface Fixture {
   dockerDropinDir: string;
   containerdDropinDir: string;
   mountsFile: string;
+  mountinfoFile: string;
   stateDir: string;
   dockerCallsFile: string;
   systemctlCallsFile: string;
@@ -54,6 +55,7 @@ function makeFixture(): Fixture {
   const dockerDropinDir = join(fixtureDir, "docker.service.d");
   const containerdDropinDir = join(fixtureDir, "containerd.service.d");
   const mountsFile = join(fixtureDir, "mounts");
+  const mountinfoFile = join(fixtureDir, "mountinfo");
   const stateDir = join(fixtureDir, "state-volume");
   const dockerCallsFile = join(fixtureDir, "docker-calls.tsv");
   const systemctlCallsFile = join(fixtureDir, "systemctl-calls.tsv");
@@ -68,13 +70,22 @@ function makeFixture(): Fixture {
   writeFileSync(
     mountsFile,
     [
-      "tmpfs /some/unrelated/path tmpfs rw 0 0",
+      "/dev/sda1 / ext4 rw 0 0",
+      "tmpfs /dev tmpfs rw 0 0",
       `/dev/sdb1 ${DATA_MOUNT} ext4 rw 0 0`,
-      `${DATA_MOUNT}/containerd ${CONTAINERD_ROOT} none rw,bind 0 0`,
-      `none ${stateDir} ext4 rw 0 0`,
+      `/dev/sdb1 ${CONTAINERD_ROOT} ext4 rw 0 0`,
+      `/dev/sdb1 ${stateDir} ext4 rw 0 0`,
       "",
     ].join("\n"),
   );
+  writeFileSync(mountinfoFile, [
+    "20 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+    "21 20 0:5 / /dev rw - tmpfs tmpfs rw",
+    `29 20 8:17 / ${DATA_MOUNT} rw,relatime shared:1 - ext4 /dev/sdb1 rw`,
+    `31 20 8:17 /containerd ${CONTAINERD_ROOT} rw,relatime - ext4 /dev/sdb1 rw`,
+    `32 20 8:17 /state2 ${stateDir} rw,relatime - ext4 /dev/sdb1 rw`,
+    "",
+  ].join("\n"));
 
   writeFileSync(
     join(binDir, "id"),
@@ -135,6 +146,7 @@ function makeFixture(): Fixture {
     dockerDropinDir,
     containerdDropinDir,
     mountsFile,
+    mountinfoFile,
     stateDir,
     dockerCallsFile,
     systemctlCallsFile,
@@ -163,6 +175,7 @@ function run(fx: Fixture, args: string[], env: Record<string, string | undefined
       RMD_DOCKER_DROPIN_DIR: fx.dockerDropinDir,
       RMD_CONTAINERD_DROPIN_DIR: fx.containerdDropinDir,
       RMD_PROC_MOUNTS_FILE: fx.mountsFile,
+      RMD_PROC_MOUNTINFO_FILE: fx.mountinfoFile,
       RMD_STATE_DIR: fx.stateDir,
       ...env,
     },
@@ -181,6 +194,46 @@ function dockerDropinPath(fx: Fixture): string {
 function containerdDropinPath(fx: Fixture): string {
   return join(fx.containerdDropinDir, DROPIN_FILENAME);
 }
+
+test("W1-T6494: a bind-mounted containerd root requires its data disk mount", () => {
+  const fx = makeFixture();
+  const install = run(fx, ["--install"]);
+  assert.equal(install.status, 0, install.output);
+  const rows = unitRows(readFileSync(containerdDropinPath(fx), "utf8"));
+  assert.deepEqual(rows, ["[Unit]", `RequiresMountsFor=${DATA_MOUNT} ${CONTAINERD_ROOT}`]);
+  assert.equal(run(fx, []).status, 0);
+});
+
+test("W1-T6494: the backing mount matches the device and most specific enclosing filesystem root", () => {
+  const fx = makeFixture();
+  writeFileSync(fx.mountinfoFile, [
+    `31 20 8:17 /vol/containerd ${CONTAINERD_ROOT} rw - ext4 /dev/sdb1 rw`,
+    "29 20 8:17 / /mnt/disk rw - ext4 /dev/sdb1 rw",
+    `33 29 8:17 /vol ${DATA_MOUNT} rw shared:1 - ext4 /dev/sdb1 rw`,
+    "34 20 8:17 /vol/container /mnt/prefix-trap rw - ext4 /dev/sdb1 rw",
+    "35 20 8:1 /vol/containerd /mnt/wrong-device rw - ext4 /dev/sda1 rw",
+    "",
+  ].join("\n"));
+  const install = run(fx, ["--install"]);
+  assert.equal(install.status, 0, install.output);
+  assert.deepEqual(unitRows(readFileSync(containerdDropinPath(fx), "utf8")), [
+    "[Unit]", `RequiresMountsFor=${DATA_MOUNT} ${CONTAINERD_ROOT}`,
+  ]);
+});
+
+test("W1-T6494: without a backing mount the dependency falls back to the containerd root", () => {
+  for (const shape of ["unreadable", "no target", "no backing mount"]) {
+    const fx = makeFixture();
+    writeFileSync(fx.mountinfoFile, shape === "no backing mount"
+      ? `31 20 8:17 /containerd ${CONTAINERD_ROOT} rw - ext4 /dev/sdb1 rw\n`
+      : "20 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
+    const install = run(fx, ["--install"], shape === "unreadable"
+      ? { RMD_PROC_MOUNTINFO_FILE: join(fx.fixtureDir, "absent-mountinfo") } : {});
+    assert.equal(install.status, 0, `${shape}: ${install.output}`);
+    const dependency = unitRows(readFileSync(containerdDropinPath(fx), "utf8"))[1];
+    assert.equal(dependency, `RequiresMountsFor=${CONTAINERD_ROOT} ${CONTAINERD_ROOT}`, shape);
+  }
+});
 
 test("W1-T2856: the rendered containerd and Docker drop-ins require their runtime roots, and Docker also requires RMD_STATE_DIR", () => {
   const fx = makeFixture();
@@ -294,7 +347,7 @@ test("W1-T2856: an unset, relative, absent or unmounted RMD_STATE_DIR is refused
       env = { ...env, RMD_STATE_DIR: join(fx.fixtureDir, "does-not-exist") };
     } else if (c.name === "unmounted") {
       // exists on disk, but is deliberately absent from the fixture's /proc/mounts.
-      writeFileSync(fx.mountsFile, `tmpfs /some/unrelated/path tmpfs rw 0 0\n/dev/sdb1 ${DATA_MOUNT} ext4 rw 0 0\n${DATA_MOUNT}/containerd ${CONTAINERD_ROOT} none rw,bind 0 0\n`);
+      writeFileSync(fx.mountsFile, `tmpfs /dev tmpfs rw 0 0\n/dev/sdb1 ${DATA_MOUNT} ext4 rw 0 0\n/dev/sdb1 ${CONTAINERD_ROOT} ext4 rw 0 0\n`);
     }
 
     const result = run(fx, ["--install"], env);
@@ -381,7 +434,7 @@ function makeScratchFixture(): ScratchFixture {
   const scratchRoot = join(fx.fixtureDir, "scratch");
   const fstab = join(fx.fixtureDir, "fstab");
   const daemonJson = join(fx.fixtureDir, "daemon.json");
-  const mountinfo = join(fx.fixtureDir, "mountinfo");
+  const mountinfo = join(fx.fixtureDir, "scratch-mountinfo");
   mkdirSync(unitDir);
   mkdirSync(join(scratchRoot, "containerd"), { recursive: true });
   writeFileSync(fstab, `UUID=abc / ext4 defaults 0 1\n# ${FSTAB_BIND}\n`);
