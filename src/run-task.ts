@@ -2500,6 +2500,7 @@ export function buildSweepEffects(
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
       preserveStagedResidue: preserveStagedFixOwnerResidue,
+      preserveUntracked: preserveAndClearUntrackedFixOwner,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -42668,7 +42669,9 @@ export interface RegisteredFixOwnerSnapshot {
   path: string;
   pathState: RegisteredFixOwnerSignal;
   attachmentState: "exact" | "detached_or_other" | "unknown";
-  treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "unknown";
+  /** W1-T6355: `untracked_only` is untracked paths with NO tracked change and no interrupted operation;
+   *  `untracked_dirty` is untracked paths beside tracked work, which always stays declined. */
+  treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "untracked_only" | "unknown";
   remoteState: "exact" | "changed" | "unknown";
   historyState: "contained" | "ahead" | "diverged" | "unknown";
   claimState: "clear" | "occupied" | "unknown";
@@ -42681,7 +42684,14 @@ export interface RegisteredFixOwnerSnapshot {
 }
 
 export type RegisteredFixOwnerRecoveryDecision =
-  | { kind: "reclaim-contained" | "publish-ahead" | "preserve-diverged" | "preserve-tracked-dirty" }
+  | {
+      kind:
+        | "reclaim-contained"
+        | "publish-ahead"
+        | "preserve-diverged"
+        | "preserve-tracked-dirty"
+        | "preserve-untracked-dirty";
+    }
   | {
       kind: "keep";
       reason:
@@ -42709,7 +42719,7 @@ export function decideRegisteredFixOwnerRecovery(
     return { kind: "keep", reason: "detached_or_wrong_branch" };
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
   if (snapshot.treeState === "untracked_dirty") return { kind: "keep", reason: "dirty_worktree" };
-  if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty")
+  if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty" && snapshot.treeState !== "untracked_only")
     return { kind: "keep", reason: "tree_probe_unreadable" };
   if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
   if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
@@ -42719,6 +42729,13 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
   if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
   if (snapshot.treeState === "tracked_dirty") return { kind: "preserve-tracked-dirty" };
+  // W1-T6355: untracked-only residue of an ended run (claim and process census clear above) is
+  // preserved then released, but only on a head the PR already contains -- ahead/diverged history
+  // beside untracked paths stays a no-touch decline.
+  if (snapshot.treeState === "untracked_only")
+    return snapshot.historyState === "contained"
+      ? { kind: "preserve-untracked-dirty" }
+      : { kind: "keep", reason: "dirty_worktree" };
   if (snapshot.historyState === "ahead") return { kind: "publish-ahead" };
   if (snapshot.historyState === "diverged") return { kind: "preserve-diverged" };
   return { kind: "reclaim-contained" };
@@ -42884,7 +42901,9 @@ export function captureRegisteredFixOwnerSnapshot(
       snapshot.treeState = "clean";
     } else {
       const untracked = hostWorktreeGit(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
-      snapshot.treeState = untracked.length === 0 ? "tracked_dirty" : "untracked_dirty";
+      snapshot.treeState = untracked.length === 0
+        ? "tracked_dirty"
+        : readOwnerHasTrackedWork(ownerPath) ? "untracked_dirty" : "untracked_only";
     }
   } catch (e) {
     return { ...snapshot, error: String(e) };
@@ -42928,6 +42947,20 @@ export function captureRegisteredFixOwnerSnapshot(
   snapshot.processState = process.state;
   if (process.state === "unknown") snapshot.processProbeReason = process.reason;
   return snapshot;
+}
+
+/** W1-T6355: tracked modifications, staged paths or an interrupted merge/cherry-pick/revert. */
+function readOwnerHasTrackedWork(ownerPath: string): boolean {
+  if (hostWorktreeGit(ownerPath, ["status", "--porcelain=v1", "--untracked-files=no"]).length > 0) return true;
+  return FIX_OWNER_OPERATION_MARKERS.some((marker) => {
+    try {
+      readFileSync(resolve(ownerPath, hostWorktreeGit(ownerPath, ["rev-parse", "--git-path", marker]).trim()));
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  });
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
@@ -43124,6 +43157,30 @@ function preserveTrackedDirtyPatch(
 // has confirmed the recovery ref reproduces that exact tree.
 export function resetTrackedDirtyFixOwner(ownerPath: string, localSha: string): void {
   hostWorktreeGit(ownerPath, ["reset", "--hard", localSha]);
+}
+
+/** W1-T6355: an ended run's UNTRACKED-ONLY owner. The untracked paths are recorded into the same
+ *  immutable, tree-verified recovery ref as tracked residue (patch built from a temporary index, so
+ *  the owner's own index is never touched), and only then cleared -- `git clean -fd`, never `-x`
+ *  or a forced worktree removal -- so the plain `git worktree remove` that follows can succeed. */
+export function preserveAndClearUntrackedFixOwner(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  const observedHead = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
+  if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
+  if (readOwnerHasTrackedWork(ownerPath)) throw new Error("dirty owner has tracked work beside its untracked paths");
+  let patch = "";
+  temporaryIndexTree(ownerPath, localSha, (env) => {
+    hostWorktreeGit(ownerPath, ["add", "-A"], { env });
+    patch = hostWorktreeGit(ownerPath, ["diff", "--cached", "--binary", "--no-ext-diff", localSha], { env, maxBuffer: 1 << 26 });
+  });
+  const recoveryRef = preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
+  hostWorktreeGit(ownerPath, ["clean", "-fd"]);
+  return recoveryRef;
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {

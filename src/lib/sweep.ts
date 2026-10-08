@@ -1113,6 +1113,8 @@ export interface RegisteredFixOwnerRecoveryDeps {
   /** W1-T5974: preserves a staged-only residue the PR's head has moved past; returns its recovery ref. */
   preserveStagedResidue?: SweepRuntimeFn;
   resetTrackedDirty?: SweepRuntimeFn;
+  /** W1-T6355: preserves, then clears, an ended run's untracked-only owner; returns its recovery ref. */
+  preserveUntracked?: SweepRuntimeFn;
 }
 
 export interface FixOwnerResidue {
@@ -3264,6 +3266,47 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
             }
+          } else if (recovery.kind === "preserve-untracked-dirty") {
+            // W1-T6355: the run that owned this worktree has ended (claim and process census clear), and
+            // the tree holds untracked paths only. Preserve them, clear them, release the owner.
+            const localSha = snapshot.localSha;
+            if (!localSha) {
+              return declineClaim({
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_dirty_recovery_identity_unreadable",
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+              });
+            }
+            try {
+              preservedRecoveryRef = String((registeredOwnerRecovery.preserveUntracked ?? requiredSweepRuntime("registeredOwnerRecovery.preserveUntracked"))(
+                repoDir,
+                registeredOwner,
+                realBranch,
+                localSha,
+              ));
+            } catch (e) {
+              return declineClaim({
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_untracked_preserve_failed",
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+              });
+            }
+            log("sweep.fix.checkout_owner_untracked_released", {
+              pr_number: pr.prNumber,
+              task_id: task.id,
+              branch: realBranch,
+              worktree_path: snapshot.path,
+              local_sha_prefix: localSha.slice(0, 12),
+              recovery_ref: preservedRecoveryRef.slice(0, 512),
+            });
           } else if (recovery.kind !== "reclaim-contained") {
             const localSha = snapshot.localSha;
             const remoteSha = snapshot.remoteSha;
@@ -3372,6 +3415,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               managed_path: snapshot.pathState === "managed",
               exact_branch: snapshot.attachmentState === "exact",
               clean_tree: snapshot.treeState === "clean",
+              untracked_only: snapshot.treeState === "untracked_only",
               exact_remote_head: snapshot.remoteState === "exact",
               owner_history_action: recovery.kind,
               local_contained_by_remote: snapshot.historyState === "contained",
