@@ -233,7 +233,7 @@ test("W1-T6362: a dead owner's staged work at the current head is preserved and 
     assert.equal(row.pr_number, PR);
     assert.equal(row.task_id, TASK);
     assert.equal(row.branch, f.branch);
-    assert.equal(realpathOf(String(row.worktree_path)), ownerRealpath, "the receipt names the dead worktree");
+    assert.equal(row.worktree_path, ownerRealpath, "the receipt names the dead worktree");
     assert.deepEqual(row.staged_paths, [STAGED], "the receipt names the staged paths");
     assert.equal(row.staged_more, 0);
     assert.equal(row.local_sha_prefix, f.ownerSha.slice(0, 12));
