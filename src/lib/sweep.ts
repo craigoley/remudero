@@ -11840,7 +11840,7 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
       stalled = true; // W1-T5920: the FLAKE round's requeue never landed — nothing will move this head
-    } else if (line.step === "fix.done" && ciHead !== undefined && line.head_sha === ciHead &&
+    } else if (line.step === "fix.done" && line.flake_claim === undefined && ciHead !== undefined && line.head_sha === ciHead &&
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
     }
@@ -12193,6 +12193,7 @@ export function fixRoundTally(
     const pushedHead = round.done?.pushed_head_sha;
     let repeatedNoCommit = false;
     if (round.dispatch.mode === "ci-log" && typeof round.dispatch.head_sha === "string" && round.done?.subtype === "success" &&
+        round.done.flake_claim === undefined &&
         (pushedHead === undefined || pushedHead === round.dispatch.head_sha)) {
       tally.noCommitRounds.push(round.id);
       const count = (noCommitCounts.get(round.dispatch.head_sha) ?? 0) + 1;

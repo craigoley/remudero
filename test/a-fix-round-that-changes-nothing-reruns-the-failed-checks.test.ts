@@ -8,7 +8,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import {
-  buildSweepEffects, DEFAULT_SWEEP_POLICY, fixRoundTally, runSweep,
+  buildSweepEffects, DEFAULT_SWEEP_POLICY, fixRoundTally, fixRungStalledWithoutNewHead, runSweep,
   type OpenPrView, type SweepDeps,
 } from "../src/lib/sweep.js";
 
@@ -118,6 +118,21 @@ test("W1-T6353: a repeated no-commit round at one head counts a strike", async (
   assert.equal(f.escalated.length, 1, "the existing strike cap ends the retry loop");
   assert.equal(f.dispatched.length, 1);
   assert.equal(f.writes.length, 1);
+});
+
+test("W1-T6353: explicit flake outcomes keep their accounting without a second rerun", async () => {
+  for (const claim of ["confirmed", "refuted", "requeue_deferred"] as const) {
+    const rows = round(`flake-${claim}`).map(row => row.step === "fix.done" ? { ...row, flake_claim: claim } : row);
+    const f = fixture(rows);
+    assert.equal(fixRungStalledWithoutNewHead(rows, TASK), claim === "requeue_deferred");
+    assert.deepEqual(fixRoundTally(rows, TASK, HEAD).noCommitRounds, []);
+    await f.pass();
+    assert.deepEqual(f.writes, [], "the explicit flake route already owns the rerun decision");
+    const mixed = [...rows, ...round("first-no-commit")];
+    assert.deepEqual(fixRoundTally(mixed, TASK, HEAD).noCommitRounds, ["first-no-commit"]);
+    assert.equal(fixRoundTally(mixed, TASK, HEAD).strikes, 0, "a flake receipt cannot spend the first no-commit retry");
+    assert.equal(fixRoundTally([...mixed, ...round("second-no-commit")], TASK, HEAD).strikes, 1);
+  }
 });
 
 test("W1-T6353: in-flight, pushed, refused and non-ci rounds do not earn a no-commit rerun", async () => {
