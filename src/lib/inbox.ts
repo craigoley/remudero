@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { fixedClock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
@@ -2109,6 +2110,19 @@ export class AnchorGrepTimeoutError extends RmdError {
 /** One `execFile` call, injectable so a test can stand in a slow or failing child. */
 export type AnchorGrepExecFile = typeof execFile;
 
+interface AnchorGrepWarmPass {
+  anchors: readonly EvidenceAnchor[];
+  batches: Map<AnchorGrepExecFile, Map<string, Promise<string>>>;
+}
+
+// W1-T6277: carry the whole pass through the existing single-anchor callback without changing its callers.
+const anchorGrepWarmPass = new AsyncLocalStorage<AnchorGrepWarmPass>();
+
+function batchableAnchor(anchor: EvidenceAnchor): boolean {
+  // Regex dialects and locale-sensitive expressions stay with Git's matcher (W1-T6277).
+  return /^[\x20-\x7e]*$/.test(anchor.pattern) && !/[\\.*+?^$()[\]{}|]/.test(anchor.pattern);
+}
+
 /** {@link gitGrepAnchorTrue} OFF THE EVENT LOOP, with the same exit-code contract: 0 is true, EXACTLY 1 is false, and
  *  anything else rejects with the child's own error. Past `timeoutMs` the child gets SIGTERM, then SIGKILL after a
  *  grace, and the call rejects with {@link AnchorGrepTimeoutError} — a named failure, never a guessed answer. */
@@ -2119,18 +2133,27 @@ export function gitGrepAnchorTrueAsync(
   timeoutMs = ANCHOR_GREP_TIMEOUT_MS,
   run: AnchorGrepExecFile = execFile,
 ): Promise<boolean> {
-  const args = anchor.path ? ["grep", "-I", "-q", "-e", anchor.pattern, ref, "--", anchor.path] : ["grep", "-I", "-q", "-e", anchor.pattern, ref];
-  return new Promise<boolean>((resolve, reject) => {
+  const pass = anchorGrepWarmPass.getStore();
+  const grouped = pass !== undefined && batchableAnchor(anchor);
+  const groupKey = JSON.stringify([cwd, ref, anchor.path || null, timeoutMs]);
+  let batches = pass?.batches.get(run);
+  if (pass !== undefined && batches === undefined) pass.batches.set(run, batches = new Map());
+  const pending = grouped ? batches?.get(groupKey) : undefined;
+  const result = pending ?? new Promise<string>((resolve, reject) => {
+    const patterns = grouped
+      ? [...new Set(pass.anchors.filter((a) => (a.path || null) === (anchor.path || null) && batchableAnchor(a)).map((a) => a.pattern))]
+      : [anchor.pattern];
+    const args = ["grep", "-I", ...(grouped ? ["--no-color", "--no-line-number", "--no-column", "--no-heading", "--no-break", "-h"] : ["-q"]), ...patterns.flatMap((pattern) => ["-e", pattern]), ref, ...(anchor.path ? ["--", anchor.path] : [])];
     let timedOut = false;
     let done = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const child = run("git", args, { cwd }, (err) => {
+    const child = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
       done = true;
       clearTimeout(timer);
       if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
-      if (!err) return resolve(true);
+      if (!err) return resolve(grouped ? stdout : "matched");
       // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
-      if ((err as { code?: unknown }).code === 1) return resolve(false);
+      if ((err as { code?: unknown }).code === 1) return resolve("");
       reject(err);
     });
     if (done) return;
@@ -2140,6 +2163,14 @@ export function gitGrepAnchorTrueAsync(
       killAfterGrace(child);
     }, timeoutMs);
   });
+  if (grouped && pending === undefined) batches!.set(groupKey, result);
+  return result.then(
+    (text) => grouped ? text.split("\n").slice(0, -1).some((line) => line.includes(anchor.pattern)) : text === "matched",
+    (err: unknown) => {
+      if (err instanceof AnchorGrepTimeoutError) throw new AnchorGrepTimeoutError(anchor, timeoutMs);
+      throw err;
+    },
+  );
 }
 
 /**
@@ -2231,7 +2262,8 @@ export async function warmAnchorGrepCache(
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => lane()));
+  await anchorGrepWarmPass.run({ anchors: [...misses.values()], batches: new Map() },
+    () => Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => lane())));
   return failures;
 }
 

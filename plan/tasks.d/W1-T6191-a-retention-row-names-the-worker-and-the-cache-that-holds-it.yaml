@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve memory investigation after PR 9863 (b218e749) was adopted at 13:36:35Z; its retention rows cannot tell two workers apart"
   plan_refs: [W1-T5885, W1-T5062, W1-T4567]
   files: [src/lib/read-model-worker.ts, src/lib/now-view.ts, src/lib/ledger-union.ts, src/lib/action-results.ts, src/lib/cost-anomaly.ts, src/lib/follow-up-policy.ts, src/lib/measurement-cadence.ts, test/a-retention-row-names-its-worker-and-holder.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

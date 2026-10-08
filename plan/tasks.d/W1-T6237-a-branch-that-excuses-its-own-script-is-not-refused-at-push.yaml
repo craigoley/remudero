@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: #9873 (W1-T6064) push refused by the hook census; RMD_PREPUSH_GATES=0 is not an acceptable remedy"
   plan_refs: [W1-T5101, W1-T6138, W1-T402]
   files: [scripts/census-precheck.mjs, hooks/pre-push, test/a-branch-that-excuses-its-own-script-is-not-refused-at-push.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

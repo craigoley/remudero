@@ -337,7 +337,9 @@ export function replayDeployRestartFrequency(scores: readonly number[], threshol
  * advance touching one changes what the RUNNING daemon does next, so it is worth a drain even while busy.
  */
 export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
+  "src/run-task.ts",
   "src/lib/daemon",
+  "src/lib/sweep",
   "src/lib/drain",
   "src/lib/dispatch-",
   "src/lib/ledger",
@@ -351,11 +353,21 @@ export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
 export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
 
 /** Freshness weight on deploy-judge's own scale: the daemon's own code is full weight, all else as deployed. */
+/** W1-T6273: a conventional-commit scope naming the daemon's own machinery, e.g. `perf(daemon): …`. */
+export const DAEMON_SELF_COMMIT_SCOPE = /^[a-z]+\((?:daemon|drain|dispatch|sweep)\)!?:/i;
+
 export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
   if (change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)))) {
     return {
       score: 18,
       reason: "the daemon's own loop, dispatch, drain or ledger code changed",
+      source: "deterministic",
+    };
+  }
+  if (change.subject !== undefined && DAEMON_SELF_COMMIT_SCOPE.test(change.subject)) {
+    return {
+      score: 18,
+      reason: "the commit is scoped to the daemon's own machinery",
       source: "deterministic",
     };
   }

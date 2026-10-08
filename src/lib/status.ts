@@ -13,7 +13,7 @@ import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -894,6 +894,32 @@ export function readMergeCreditedTaskIds(
   // CORPUS ran out" (every file opened, absence PROVEN). With no cap nothing is hidden, so it is false.
   const hidden = cap !== undefined && read.archiveCount > cap;
   return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && hidden };
+}
+
+const creditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+
+export async function readMergeCreditedTaskIdsAsync(
+  path: string,
+  opts: { candidates?: Iterable<string>; readLive?: (path: string) => Iterable<Record<string, unknown>> } = {},
+): Promise<{ credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean }> {
+  const credited = new Set<string>();
+  const wanted = new Set(opts.candidates ?? []);
+  let outstanding = wanted.size;
+  const take = (line: Record<string, unknown>): void => {
+    if (!isMergeCreditLine(line)) return;
+    const id = line.task_id;
+    if (typeof id !== "string" || credited.has(id)) return;
+    credited.add(id);
+    if (wanted.has(id)) outstanding -= 1;
+  };
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
+  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path);
+  const read = await readLedgerUnionRecordsMemoized(dirname(path), creditScanMemo, {
+    liveFirst: true, order: "newest-first", dedupe: false, pattern: /verdict/,
+    readLiveRecords: () => live, onRecord: take, satisfied: () => wanted.size > 0 && outstanding <= 0,
+  });
+  const complete = wanted.size === 0 ? true : outstanding <= 0;
+  return { credited, filesRead: read.filesRead, complete, budgetExhausted: false };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at

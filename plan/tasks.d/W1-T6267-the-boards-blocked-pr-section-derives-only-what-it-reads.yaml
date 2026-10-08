@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (items C1c and C1d), from a CPU profile of warm now@core builds in an isolated replay"
   plan_refs: [W1-T1006, W1-T6253, W1-T6015, W1-T1205]
   files: [src/lib/board.ts, src/lib/status-board.ts, test/the-boards-blocked-pr-section-derives-only-what-it-reads.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-07: Node 24 rollout (host node switched by hand)"
   plan_refs: [W1-T5883, W1-T6064, W1-T2770, W1-T3583]
   files: [deploy/install-host-units.sh, test/the-hosts-own-node-follows-nvmrc.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: daemon.loop_lag 863 s in ~40 min; live CPU profile (lanes/claude/daemon-cpu.cpuprofile)"
   plan_refs: [W1-T4773, W1-T5689, W1-T4075]
   files: [src/run-task.ts, test/open-pr-views-reuse-the-plan-until-it-changes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
