@@ -114,6 +114,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
   "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,
+  "dep-review.node_pin_refused": A_LANE_RUN_ID,
+  "dep-review.node_pin_synced": A_LANE_RUN_ID,
   "dep-review.migrate.capture_failed": A_LANE_RUN_ID,
   "dep-review.migrate.closed": A_LANE_RUN_ID,
   "dep-review.migrate.completed": A_LANE_RUN_ID,
