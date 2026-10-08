@@ -1,0 +1,43 @@
+- id: W1-T6467
+  title: "A BOARD PROJECTION SHARES EQUAL STRING VALUES ACROSS ITS OWN ROWS — each now@core instance holds every fact row as its own JSON.parse result, so the same step names, task ids, dispositions and urls are separate strings hundreds of thousands of times over; a per-projection table of equal primitive strings, scoped to the projection's lifetime, retained 21% less heap and built about 43% faster in an isolated replay, exactly equal to main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — sharing equal primitive string values inside one board projection's rows; no field pruning, no history change
+  band_meaning: span
+  origin: "operator session 2026-10-08: serve CPU and memory plan; W1-T6369's recon (PR #10118) recommendation"
+  plan_refs: [W1-T6369, W1-T6368, W1-T5885]
+  files: [src/lib/board-projection.ts, test/a-board-projection-shares-equal-string-values-within-its-rows.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REPLAY EVIDENCE, not a promised production saving (W1-T6369, PR #10118: an isolated replay of a private production
+    read-model backup on main, a frozen clock, a fresh database copy per arm, canonical body comparison):
+    - one now@core instance retains 522 MiB; interning equal short string values at the row parse retained 411 MiB (-21%);
+    - warm build CPU 1,165-1,354 ms on main vs 669-773 ms interned over 3 repetitions;
+    - every now@core body and section equal to main across cold, warm, oracle-pass, UTC-day-crossing, 40-append and
+      second-instance builds, and under a missing board snapshot cache, an unreadable plan and a truncated live ledger.
+    TOPOLOGY (read-model-worker.ts): the views lanes are worker_threads (`spawnViews`, `spawnHeavyViews`) inside serve's
+    process, each a separate V8 isolate and heap; a string cannot be shared between them. Each lane's projection has its
+    own table, and the replay's second-instance figure, which shared one table in one process, is not credited.
+  design: |
+    (1) BoardProjection creates one table when it is created and drops it with the projection (no module-level or global
+    pool). The table maps a string to the first equal string seen.
+    (2) Where the projection parses a fact body into a row, each TOP-LEVEL value that is a primitive string of at most 96
+    UTF-16 code units is replaced by the table's equal string. Objects, arrays, numbers, booleans, null and longer strings
+    are left untouched; no object is shared. Field presence, key order, row order and the stand-in rows' provenance are
+    unchanged; a string is only replaced by one that is === to it, so Unicode and types are exact by construction.
+    (3) No field is dropped, no history is truncated, no cache is released, and nothing else changes.
+  acceptance:
+    - claim: "equal string values from two rows resolve through one table entry; a non-string, an object, a long string and field order are untouched; each projection has its own table and a new projection starts empty; and the now view's body is canonically equal with and without the table"
+      proof: "unit test: test/a-board-projection-shares-equal-string-values-within-its-rows.test.ts"
+    - claim: "the projection owns its table"
+      proof: "grep: internRowStrings in src/lib/board-projection.ts"
+  falsifier: |
+    Remove the table: equal values never resolve through one entry and the sharing assertion fails. Share an object or a long
+    string, or reorder fields: the untouched-value assertions fail. Make the table module-level: the fresh-projection
+    assertion fails.

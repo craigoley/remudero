@@ -101,3 +101,9 @@ Learnings used when offered: 21%. Dangling Why pointers: 1.
 - retire required-check-poster: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 21%. Dangling Why pointers: 1.
+
+## Pass 2026-10-08T15:06:10.551Z
+
+- retire ledger-query-anchors-on-the-step-field: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 22%. Dangling Why pointers: 1.
