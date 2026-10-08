@@ -199,3 +199,16 @@ test("R-50: ci-gate.yml's job timeout exceeds WAIT_CAP_SECONDS + GRACE_WINDOW_SE
       "concludes, misattributing a slow-but-honest run as a hung job",
   );
 });
+
+test("coverage-shard has headroom beyond the measured 39m ceiling but remains below ci-gate's wait cap", async () => {
+  const ciRaw = await readFile(CI_YAML_PATH, "utf8");
+  const ci = parseYaml(ciRaw) as { jobs: Record<string, { "timeout-minutes"?: number }> };
+  const gateRaw = await readFile(CI_GATE_YAML_PATH, "utf8");
+  const gate = parseYaml(gateRaw) as { jobs: Record<string, { env?: Record<string, string> }> };
+  const coverageTimeout = ci.jobs["coverage-ratchet"]?.["timeout-minutes"];
+  const waitCapSeconds = Number(gate.jobs["ci-gate"]?.env?.WAIT_CAP_SECONDS);
+  assert.ok(coverageTimeout && coverageTimeout > 39,
+    `coverage-shard must exceed its former 39m ceiling after run 37694060425 hit that bound; got ${coverageTimeout}`);
+  assert.ok(Number.isFinite(waitCapSeconds) && coverageTimeout * 60 < waitCapSeconds,
+    `coverage-shard timeout (${coverageTimeout}m) must stay strictly below ci-gate WAIT_CAP_SECONDS (${waitCapSeconds}s)`);
+});
