@@ -54,6 +54,7 @@ test("the scratch plan binds only rebuildable paths and only when switched on ov
     "-v", `${base}/worktrees:/home/node/Remudero/worktrees`,
     "-v", `${base}/tmp:/home/node/Remudero/tmp`,
     "-v", `${base}/remudero-coverage:/home/node/Remudero/.remudero-coverage`,
+    "-v", `${base}/repos:/home/node/Remudero/repos`,
     "-v", `${base}/repos-coverage:/home/node/Remudero/repos/.remudero-coverage`,
     "-v", `${base}/read-model:/home/node/rmd-scratch/read-model`,
     "-v", `${base}/worker-homes:/home/node/rmd-scratch/worker-homes`,
@@ -62,13 +63,13 @@ test("the scratch plan binds only rebuildable paths and only when switched on ov
     "-e", "RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model",
     "-e", "RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes",
     "-e", "RMD_TEST_SLOT_DIR=/home/node/rmd-scratch/test-slots",
-  ], "the ledger, repos, lanes, plan and state files are never bound away from the state disk");
+  ], "the ledger, lanes, plan and state files are never bound away from the state disk");
   assert.equal(existsSync(base), false, "planning changes nothing on disk");
 
   rmSync(h.env.RMD_SCRATCH_SWITCH);
   assert.deepEqual(plan(h).args, [], "no switch file: dark, exactly today's launch");
   assert.match(plan(h).note, /^NOTE off/);
-  assert.deepEqual(plan(h, { RMD_SCRATCH: "on" }).args.length, 22, "RMD_SCRATCH=on turns it on without the file");
+  assert.deepEqual(plan(h, { RMD_SCRATCH: "on" }).args.length, 24, "RMD_SCRATCH=on turns it on without the file");
   assert.deepEqual(plan(h, { RMD_SCRATCH: "on", RMD_SCRATCH_MOUNTS_FILE: join(h.root, "absent") }).args, [], "a scratch root that is not mounted would put worktrees on the OS disk");
   assert.match(plan(h, { RMD_SCRATCH: "on", RMD_SCRATCH_MOUNTS_FILE: join(h.root, "absent") }).note, /is not a mounted filesystem/);
   writeFileSync(h.env.RMD_SCRATCH_SWITCH, "");
@@ -149,7 +150,7 @@ test("an empty scratch disk after a deallocate is re-created at docker start and
   assert.equal(first.status, 0, first.out);
   assert.match(first.dockerRun, new RegExp(`-v ${base}/worktrees:/home/node/Remudero/worktrees .*-v ${base}/containers/remudero-daemon/tmp:/tmp -v ${h.scratch}/rmd/test-slots:/home/node/rmd-scratch/test-slots -e RMD_READ_MODEL_DB_DIR=`), first.dockerRun);
   const recorded = readFileSync(join(h.state, ".scratch-mounts"), "utf8").trim().split("\n");
-  assert.equal(recorded.length, 8);
+  assert.equal(recorded.length, 9);
 
   rmSync(join(h.scratch, "rmd"), { recursive: true, force: true });
   const restored = spawnSync("bash", [LIB, "--restore", h.state, join(h.root, "no-such-instance")], { encoding: "utf8", env: { ...process.env, ...h.env } });
@@ -163,7 +164,7 @@ test("an empty scratch disk after a deallocate is re-created at docker start and
   assert.equal(unmounted.status, 0, "a restore never fails docker");
   assert.equal(existsSync(join(h.scratch, "rmd")), false, "nothing is created on a scratch root that is not mounted");
   const guarded = spawnSync("bash", [LIB, "--restore", h.state], { encoding: "utf8", env: { ...process.env, ...h.env } });
-  assert.equal(guarded.stdout.match(/restored/g)?.length, 8, "only dirs under the scratch root, with no '..', are re-created");
+  assert.equal(guarded.stdout.match(/restored/g)?.length, 9, "only dirs under the scratch root, with no '..', are re-created");
   assert.equal(spawnSync("bash", [LIB], { encoding: "utf8" }).status, 2, "the CLI names its one verb");
 
   rmSync(join(h.scratch, "rmd"), { recursive: true, force: true });
@@ -212,7 +213,7 @@ test("scratch prepare makes each state side mount point first so a rollback leav
   const h = host(t);
   const r = spawnSync("bash", ["-c", `. "${LIB}"; scratch_plan "$1" remudero-daemon && scratch_prepare && echo prepared`, "prep", h.state], { encoding: "utf8", env: { ...process.env, ...h.env } });
   assert.match(r.stdout, /prepared/, r.stderr);
-  for (const rel of ["worktrees", "tmp", ".remudero-coverage", join("repos", ".remudero-coverage")]) {
+  for (const rel of ["worktrees", "tmp", ".remudero-coverage", "repos", join("repos", ".remudero-coverage")]) {
     assert.ok(existsSync(join(h.state, rel)), `${rel} exists on the state disk before docker could create it as root`);
   }
   assert.equal(existsSync(join(h.state, "rmd-scratch")), false, "a bind outside the state root makes nothing on the state disk");

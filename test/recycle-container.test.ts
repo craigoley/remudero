@@ -1104,6 +1104,7 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
     [join(base, "worktrees"), "/home/node/Remudero/worktrees"],
     [join(base, "tmp"), "/home/node/Remudero/tmp"],
     [join(base, "remudero-coverage"), "/home/node/Remudero/.remudero-coverage"],
+    [join(base, "repos"), "/home/node/Remudero/repos"],
     [join(base, "repos-coverage"), "/home/node/Remudero/repos/.remudero-coverage"],
     [join(base, "read-model"), "/home/node/rmd-scratch/read-model"],
     [join(base, "worker-homes"), "/home/node/rmd-scratch/worker-homes"],

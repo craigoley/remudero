@@ -475,6 +475,18 @@ export function requestProofAmendment(request: ProofAmendmentRequest, deps: Proo
   }
 }
 
+/**
+ * The grep pattern that proves a scope amendment added `path` to a task's `files`: it matches only the
+ * entry this writer inserts (always JSON-quoted), never a rationale that already names the path — #10141's
+ * bare-path proof matched at the merge base and proof-discrimination refused it. The review gate runs it as
+ * `grep -arn -- <pattern> <shard>` (a basic regex), so the path is escaped and the line anchored.
+ */
+export function addedFilesEntryPattern(path: string, flow: boolean, singleLineFlow: boolean): string {
+  const quoted = JSON.stringify(path).replace(/[.*[\\^$]/g, "\\$&");
+  if (!flow) return `^ *- ${quoted}$`;
+  return singleLineFlow ? `^ *files: \\[.*${quoted}` : `, ${quoted}`;
+}
+
 export interface ScopeAmendmentRequest {
   readonly taskId: string;
   readonly prNumber: number;
@@ -574,7 +586,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const created = deps.createPr({ title, head: branch, base: "main",
       body: `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n` +
         renderAcceptanceBlock(additions.map((path) => ({ claim: `files includes ${path}`,
-          proof: `grep: ${path.replace(/[.*[\\^$]/g, "\\$&")} in ${shard.path}` }))) });
+          proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` }))) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {

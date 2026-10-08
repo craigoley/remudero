@@ -4297,6 +4297,75 @@ export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
 const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
   lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
 
+/** W1-T6404 — a green head GitHub still calls failed. The daemon judges the LATEST run of each
+ *  required check ({@link dedupeRollupByLatestAttempt}); GitHub's `blocked` verdict and FAILURE rollup
+ *  still count superseded failed runs on the same sha, so a direct merge of such a head is refused
+ *  until the sha changes (#10010: refused 12:42:11Z, cleared only by a hand-pushed merge of main).
+ *  The refresh mints that fresh sha ONCE PER PR — not per head, or the refreshed head would be
+ *  refreshed again, forever. A second refusal at the refreshed head escalates instead of looping. */
+export const STALE_ROLLUP_REFRESHED_STEP = "automerge.stale_rollup_refreshed";
+export const STALE_ROLLUP_REFRESH_EXHAUSTED_STEP = "automerge.stale_rollup_refresh_exhausted";
+
+export async function refreshStaleRollupAfterRefusal(
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "repushAbsent" | "readCiGateRollup" | "escalate" | "appendLine">,
+  pr: OpenPrView,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): Promise<string> {
+  const appendLine = deps.appendLine ?? appendLedger;
+  const base = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+  if (pr.mergeableState !== "blocked" || pr.mergeable !== true) {
+    return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
+  }
+  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  if (priorRefresh.length > 0) {
+    if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
+      return "stale-rollup refresh already spent for this PR; escalated once at this head";
+    }
+    const reason = `a green armed head is still refused after its one stale-rollup refresh (#${pr.prNumber} at ${pr.headSha.slice(0, 7)})`;
+    try {
+      await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...base, step: STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, escalated: false,
+        reason: String((e as Error)?.message ?? e) });
+      return `${reason}; escalation failed`;
+    }
+    appendLine(deps.ledgerPath, { ...base, step: STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, escalated: true, reason });
+    return reason;
+  }
+  let supersededFailures: Array<{ check: string; run_id: number | null; completed_at: string | null }> = [];
+  if (deps.readCiGateRollup) {
+    try {
+      const rollup = await deps.readCiGateRollup(pr);
+      supersededFailures = classifyRollupSupersession(rollup ?? []).superseded.map(({ entry }) => ({
+        check: entry.name ?? entry.context ?? "unknown",
+        run_id: entry.workflowRunId ?? entry.checkRunId ?? null,
+        completed_at: entry.completedAt ?? null,
+      }));
+    } catch {
+      // The evidence read is advisory; the refresh is justified by the refusal itself.
+    }
+  }
+  let outcome: string;
+  let newHead: string | undefined;
+  try {
+    if (!deps.updateBranch) {
+      outcome = "unwired";
+    } else {
+      outcome = await deps.updateBranch({ prNumber: pr.prNumber, prUrl: pr.prUrl,
+        ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }), headSha: pr.headSha, updateReason: "stale-blocked" });
+      if (outcome === "up-to-date" && deps.repushAbsent) {
+        newHead = await deps.repushAbsent(pr);
+        outcome = newHead === undefined ? "repush-unavailable" : "repushed";
+      }
+    }
+  } catch (e) {
+    outcome = `error: ${String((e as Error)?.message ?? e)}`;
+  }
+  appendLine(deps.ledgerPath, { ...base, step: STALE_ROLLUP_REFRESHED_STEP, outcome,
+    ...(newHead === undefined ? {} : { new_head_sha: newHead }), superseded_failures: supersededFailures });
+  return `stale-rollup refresh: ${outcome}`;
+}
+
 /** W1-T5956 — does a re-arm after an ejection spend the bound? Not while Actions reads degraded or
  *  major_outage; an unreadable read is an incident only until the head's unreadable re-arm streak
  *  is older than W1-T5939's hold BACKSTOP, so a stuck read cannot hide an ejection loop forever. */
@@ -12790,6 +12859,19 @@ export async function runSweep(
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const diagnoses: string[] = [];
+    const stalledFiles = baseReproductionFiles(pr.ciFailures ?? []);
+    if (fields.blocker === "own-red" && mainTipSha !== undefined &&
+        (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0 &&
+        stalledFiles.some(file => !reproductionCache.has(probeCacheKey(mainTipSha, file)))) {
+      if (deps.reproduceFailingTestsOnMain) {
+        const probe = await probeMain(pr, stalledFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
+        if (probe.verdict === "unrunnable" || probe.files.some(file => file.outcome === "unrunnable")) {
+          const reason = probe.setup_error ?? probe.reason ??
+            probe.files.filter(file => file.outcome === "unrunnable").map(file => file.reason ?? "probe returned no outcome").join("; ");
+          diagnoses.push(`main reproduction unrunnable (${boundedBaseProbeReason(reason)})`);
+        }
+      } else diagnoses.push("main reproduction unavailable (probe seam unwired)");
+    }
     // W1-T6405 — an own-red whose failing test files all pass at main's CURRENT tip, on a head behind
     // that main, is not this PR's red: take main once instead of escalating, and let the refreshed
     // head's own CI decide. A red that survives the refresh is a new own-red stage and escalates.
@@ -12999,6 +13081,33 @@ export async function runSweep(
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
+  const probeMain = async (pr: OpenPrView, reproductionFiles: readonly string[], mainSha: string,
+    reproduce: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>) => {
+    const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainSha, file)));
+    let probed: BaseProbeResult = [];
+    try {
+      if (reproductionFiles.length > BASE_REPRODUCTION_MAX_FILES) probed = Object.assign([], { reason: "too many test files" });
+      else if (missing.length > 0) probed = await reproduce(pr, missing, mainSha);
+    } catch (error) {
+      const reason = boundedBaseProbeReason(error);
+      probed = baseProbeSetupFailure(missing, reason);
+    }
+    const files = probed.reason === undefined ? reproductionFiles.map((file): BaseProbeFile => {
+      const cached = reproductionCache.get(probeCacheKey(mainSha, file));
+      const result = cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
+        { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
+      return probed.setup_error !== undefined && result.outcome === "unrunnable" ?
+        { file, outcome: "unrunnable", duration_ms: result.duration_ms, cached: result.cached } :
+        { ...result, ...(result.reason === undefined ? {} : { reason: boundedBaseProbeReason(result.reason) }) };
+    }) : [];
+    const verdict = decideBaseReproduction(reproductionFiles, files);
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, files, verdict,
+      ...(probed.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probed.setup_error) }),
+      ...(probed.reason === undefined ? {} : { reason: boundedBaseProbeReason(probed.reason) }) };
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
+    if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainSha, file.file), file);
+    return row;
+  };
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
@@ -14582,6 +14691,9 @@ export async function runSweep(
                   standDownReason = undefined;
                 }
               }
+              if (armedIdleDue && armOutcomeName === "direct-merge-failed") {
+                standDownReason = `arm outcome: ${armOutcomeName}; ${await refreshStaleRollupAfterRefusal(deps, pr, ledgerLines)}`;
+              }
               break;
             }
             case "blocked-fixable": {
@@ -15039,29 +15151,8 @@ export async function runSweep(
               }
               const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
-                const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainTipSha, file)));
-                let probed: BaseProbeResult = [];
-                try {
-                  if (reproductionFiles.length > BASE_REPRODUCTION_MAX_FILES) probed = Object.assign([], { reason: "too many test files" });
-                  else if (missing.length > 0) probed = await deps.reproduceFailingTestsOnMain(pr, missing, mainTipSha);
-                } catch (error) {
-                  const reason = boundedBaseProbeReason(error);
-                  probed = baseProbeSetupFailure(missing, reason);
-                }
-                const files = probed.reason === undefined ? reproductionFiles.map((file): BaseProbeFile => {
-                  const cached = reproductionCache.get(probeCacheKey(mainTipSha, file));
-                  const result = cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
-                    { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
-                  return probed.setup_error !== undefined && result.outcome === "unrunnable" ?
-                    { file, outcome: "unrunnable", duration_ms: result.duration_ms, cached: result.cached } :
-                    { ...result, ...(result.reason === undefined ? {} : { reason: boundedBaseProbeReason(result.reason) }) };
-                }) : [];
-                const verdict = decideBaseReproduction(reproductionFiles, files);
-                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, files, verdict,
-                  ...(probed.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probed.setup_error) }),
-                  ...(probed.reason === undefined ? {} : { reason: boundedBaseProbeReason(probed.reason) }) };
-                appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
-                if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainTipSha, file.file), file);
+                const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
+                const { verdict } = row;
                 if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
