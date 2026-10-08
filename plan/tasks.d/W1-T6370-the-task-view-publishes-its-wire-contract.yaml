@@ -1,0 +1,48 @@
+- id: W1-T6370
+  title: "The keyed task view publishes its real response schema so console adapters can pin it"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: span
+  origin: "operator-authorized daemon follow-ups, 2026-10-08; console admission and phase-four contract audit"
+  plan_refs: [W1-T5048, "console CONSOLE-T99"]
+  files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/task-view-wire-contract.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at e4835d9c0 on 2026-10-08: src/lib/task-view.ts defines TASK_VIEW_VERSION=1 and
+    TaskViewData, and src/lib/read-model-worker.ts registers the demand-materialized task view.
+    The OpenAPI document has neither /v1/views/task nor a TaskView response schema. A real run
+    of the console's pinCoreReadSchemas CLI refuses /v1/views/task because no GET 200 schema
+    exists. The same CLI successfully pins the workstreams, actions and agent view schemas.
+    This is a missing producer contract, not permission to invent a consumer payload. W1-T5048
+    owns the implemented producer but its scope and shipped proofs omit OpenAPI publication.
+  design: |
+    Declare /v1/views/task with the existing id and instance query semantics, version-1 view
+    envelope and the actual TaskViewData produced by src/lib/task-view.ts. Reuse ViewSource and
+    existing referenced component schemas where their shapes agree; preserve bounded facts,
+    runs, tail, trace, found=false and explicit unavailable-source evidence. Declare the actual
+    304 and demand-miss 404 behavior. Regenerate the API client with the shipped generator.
+    Test the published schema against real createTaskView materialization for found and missing
+    tasks and verify all referenced components resolve. Do not alter task materialization,
+    freshness, switches, eviction, review predicates or console rendering in this build.
+  acceptance:
+    - claim: "the real task view response is covered by the published version-one wire contract"
+      proof: 'grep: test("the published task view contract covers real found and missing task bodies" in test/task-view-wire-contract.test.ts'
+    - claim: "the task view schema has no unresolved component references"
+      proof: 'grep: test("the published task view contract resolves every response component reference" in test/task-view-wire-contract.test.ts'
+  falsifier: |
+    Remove the GET declaration or change the declared version away from TASK_VIEW_VERSION:
+    the real producer-schema test must fail. Remove a referenced component and require the
+    reference-closure test to fail. A fixture that copies an invented consumer shape is not proof.
+  note: |
+    Reserved W1-T6370 on origin refs/rmd-id/W1-T6370 for codex/task-view-contract-oct8.
+    The reservation walk advanced from W1-T6365 because earlier identities were already held;
+    no contested reservation was removed. Subject sweep found the built W1-T5048 producer and
+    no open task-contract PR in the 14-PR inventory; this record owns only its missing schema.
+    Consumer contract adoption is separate from producer publication and runtime view activation.
