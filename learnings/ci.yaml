@@ -139,7 +139,7 @@
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active
-  files: ["test/**", "scripts/test-tier-manifest.json", ".github/workflows/ci.yml", package.json]
+  files: ["**/*"]
   fact: >-
     When verifying test changes or the slow-tier runner, run one full test suite at a time. Do not
     background or parallelize `node --test` runs; the deny floor refuses concurrent full-suite
