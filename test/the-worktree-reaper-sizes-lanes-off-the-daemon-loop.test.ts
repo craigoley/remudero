@@ -118,10 +118,24 @@ test("W1-T6357: failed and invalid measurements are cached as unknown bytes", as
   }
 });
 
-test("W1-T6357: runTaskBody awaits lane removal and its census", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const lines = source.slice(source.indexOf("async function runTaskBody(")).split("\n");
-  const call = lines.find((line) => /^\s*(?:await )?runAdhocLaneReapRung\(config, log,/.test(line));
-  assert.ok(call, "the production body calls the rung");
-  assert.match(call, /^\s*await runAdhocLaneReapRung\(config, log,/);
+test("W1-T6357: rung completion waits for lane removal and its census", async () => {
+  const { lanes, config } = fixture();
+  const candidate = lane(lanes, "terminal");
+  const rows: string[] = [];
+  let finishSize!: (bytes: number) => void;
+  const size = new Promise<number>((resolve) => { finishSize = resolve; });
+  const completion = runAdhocLaneReapRung(config, (step) => rows.push(step), {
+    enabled: () => true, diskHeadroom, sizeBytes: () => size,
+  });
+  let completed = false;
+  void completion.then(() => { completed = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(completed, false, "the rung remains pending while sizing is pending");
+  assert.equal(existsSync(candidate), true, "the candidate survives until its size is known");
+  assert.equal(rows.includes("adhoc_lane.reap.census"), false, "the census waits for the pass");
+  finishSize(4096);
+  const summary = await completion;
+  assert.deepEqual(summary?.reaped, ["terminal"]);
+  assert.equal(existsSync(candidate), false, "completion includes removal");
+  assert.equal(rows.filter((step) => step === "adhoc_lane.reap.census").length, 1);
 });
