@@ -11135,7 +11135,8 @@ export async function runFixRung(opts: {
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
       }, deps.scopeAmendmentPortsIo);
       outcome = requestScopeAmendment({ taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
-        headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined }, ports);
+        headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined,
+        headRef: opts.branch }, ports);
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
