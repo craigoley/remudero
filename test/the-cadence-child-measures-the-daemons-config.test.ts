@@ -20,6 +20,7 @@ import {
   MEASUREMENT_CADENCE_CHILD_FLAG,
   measurementCadenceChildMain,
   measurementCadenceChildRun,
+  namedMeasurementCadenceChildConfig,
   type MeasurementCadenceChildState,
   type MeasurementCadenceRunResult,
 } from "../src/lib/measurement-cadence.js";
@@ -78,4 +79,11 @@ test("W1-T6495: a named config the child cannot read is a failed row, never a fa
   const state = JSON.parse(readFileSync(statePath, "utf8")) as MeasurementCadenceChildState;
   assert.equal(state.status, "failed");
   assert.match(String(state.error), new RegExp(MEASUREMENT_CADENCE_CHILD_CONFIG_ENV), "the failure names the config the daemon handed over");
+});
+
+test("W1-T6495: each way a named config is unusable throws its own named error, in process", () => {
+  const named = (raw: string) => () => namedMeasurementCadenceChildConfig({ [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: raw });
+  assert.equal(namedMeasurementCadenceChildConfig({ [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: "" }), undefined, "an empty value names nothing");
+  assert.throws(named("{nope"), new RegExp(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} is not readable JSON`));
+  assert.throws(named(JSON.stringify({ root: "/r" })), new RegExp(`${MEASUREMENT_CADENCE_CHILD_CONFIG_ENV} names an invalid config: .*claudeBin`));
 });
