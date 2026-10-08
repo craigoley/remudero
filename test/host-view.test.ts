@@ -199,9 +199,14 @@ test("W1-T5053: the host view carries each host route's body over the same input
     buildSelfMeasurementRoute({ stateDir: join(w.root, "state"), prewarm: false }),
   ]);
   try {
-    view.materialize(ctx(at.ms));
-    await settle();
-    const [body] = view.materialize(ctx(at.ms));
+    const deadline = Date.now() + 10_000;
+    let [body] = view.materialize(ctx(at.ms));
+    // The real archive read can outlast one settle() on an instrumented CI runner.
+    // Keep the probe clock pinned so these passes only re-compose landed readings.
+    while ((body!.data.selfMeasurement.status !== "ok" || body!.data.gauges.rateLimitRemaining === undefined) && Date.now() < deadline) {
+      await settle();
+      [body] = view.materialize(ctx(at.ms));
+    }
     // As the read model stores and serves it: JSON, where an undefined field is absent.
     const data = JSON.parse(JSON.stringify(body!.data)) as HostViewData;
     const route = async (path: string): Promise<unknown> => (await server.get(path)).body;

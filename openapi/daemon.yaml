@@ -259,7 +259,8 @@ components:
       description: >
         One task's projected merge-state, derived from GitHub (src/lib/status.ts's
         `StatusProjection` -- never written back to plan/tasks.yaml). This is the
-        per-task "live state" the read-only board (W3-T2) renders.
+        per-task "live state" the read-only board (W3-T2) renders. GET /v1/status also carries
+        BoardRow's sparse enrichment below; the bare SSE projection may omit that enrichment.
       required:
         - taskId
         - status
@@ -302,6 +303,57 @@ components:
           type: string
         prState:
           type: string
+        title:
+          type: string
+          description: The board row's plan title, or its escalation title for a task-less escalation.
+        risk:
+          type: string
+          enum: [low, medium, high]
+        lastActivityAt:
+          type: string
+          format: date-time
+          description: The last ledger activity naming this task; absent when none was observed.
+        liveSpendUsd:
+          type: number
+          description: Observed accumulated spend for the current in-flight run, including measured zero.
+        liveTurns:
+          type: number
+          description: Observed accumulated turns for the current in-flight run.
+        liveSpendPending:
+          type: boolean
+          enum: [true]
+          description: The run is in flight but has no spend evidence yet; not a measured zero.
+        needsHuman:
+          type: boolean
+          enum: [true]
+          description: An open escalation not superseded by a later dispatch; unreadable state keeps it visible.
+        escalationIssueUrl:
+          type: string
+        escalationTitle:
+          type: string
+        escalationUnverified:
+          type: boolean
+          enum: [true]
+          description: The escalation's current open state could not be confirmed.
+        escalationOpenedAt:
+          type: string
+          format: date-time
+        verifyHumanPending:
+          type: boolean
+          enum: [true]
+          description: Human verification is required and the task has not been credited merged.
+        processUnevidenced:
+          type: boolean
+          enum: [true]
+          description: An open PR suggests running, without recent worker activity or a live lock.
+        orphaned:
+          type: boolean
+          enum: [true]
+          description: A dispatched run has neither a terminal verdict nor current PR or activity evidence.
+        reviewState:
+          type: string
+          enum: [success, failure, pending, none, unreadable, not-applicable]
+          description: The row's observed remudero-review state; absent when no PR is attributed.
         rejected_candidates:
           type: array
           description: >

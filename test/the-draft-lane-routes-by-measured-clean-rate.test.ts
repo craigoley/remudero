@@ -131,10 +131,15 @@ test("W1-T4067: measured success cannot resurrect a deployment removed by contex
 
 test("W1-T4067: all contract failures exhaust each eligible rung once", async () => {
   const { attempts, rows } = await draftFixture(async (_args, _cfg, selection) => result("STAMP: missing fragment", selection.model));
-  const expected = selectOpenWeightModel(undefined, "haiku", "high", Buffer.byteLength("draft P1"));
+  const expected = selectOpenWeightModel(loadMounts(mountsPath(process.cwd())).capabilities,
+    "haiku", "high", Buffer.byteLength("draft P1"));
   assert.equal(attempts.length, 1 + expected.alternatives.length);
   assert.equal(new Set(attempts).size, attempts.length);
-  assert.ok(rows.filter((r) => r.step === "draft.routing.outcome").every((r) => r.extra.contract_failed === true));
+  assert.deepEqual([...attempts].sort(),
+    ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"].sort());
+  const outcomes = rows.filter((r) => r.step === "draft.routing.outcome");
+  assert.equal(outcomes.length, attempts.length);
+  assert.ok(outcomes.every((r) => r.extra.contract_failed === true));
 });
 
 test("W1-T4067: a refusal is not a contract failure and does not walk", async () => {

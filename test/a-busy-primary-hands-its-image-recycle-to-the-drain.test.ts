@@ -129,7 +129,8 @@ case "$1" in
   symbolic-ref) echo main;;
   rev-parse)
     if [ "$2" = --show-toplevel ]; then echo "$tree"; elif [ "$tree" = '${daemon}' ]; then printf '%040d\\n' 1; else printf '%040d\\n' 2; fi;;
-  log|diff|show|rev-list) : ;;
+  diff) [ "\${BEHIND:-}" != 1 ] || exit 1;; # W1-T6282: BEHIND differs on deploy logic too
+  log|show|rev-list) : ;;
   *) exit 2;;
 esac
 `);
@@ -162,10 +163,10 @@ test("W1-T6249: a tick deferred only on active work still asks deploy-run", (t) 
   assert.match(read(f.deployed), /^old deploy-run --image-drift-only/, "deploy-run is asked on the busy tick");
   assert.equal(read(join(f.daemon, "version")), "old", "the busy tree is never fast-forwarded");
 
-  // Control: a daemon tree that does not contain the install head defers as before, naming both shas.
+  // Control: a daemon tree lacking the install head's deploy logic defers, naming both shas (W1-T6282).
   const g = launcher(t);
   const behind = g.tick(true);
   assert.equal(behind.status, 0, behind.stderr);
   assert.equal(read(g.deployed), "");
-  assert.match(behind.stderr, new RegExp(`daemon tree ${"0".repeat(39)}1 does not contain install head ${"0".repeat(39)}2`));
+  assert.match(behind.stderr, new RegExp(`daemon tree ${"0".repeat(39)}1 lacks install head ${"0".repeat(39)}2's deploy logic`));
 });
