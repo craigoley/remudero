@@ -3584,7 +3584,6 @@ export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Conf
   }
 }
 
-/** Resolved inside the run so a bad named config lands as a `failed` state row. */
 export function measurementCadenceChildRun(
   env: NodeJS.ProcessEnv,
   build: (config: Config | undefined) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
