@@ -184,6 +184,8 @@ import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace }
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenSchedule } from "./lib/garden-registry.js";
+import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -213,7 +215,9 @@ export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -229,7 +233,9 @@ import {
 export {
   FIX_MODE_RULES,
   deriveFixMode,
+  fixScopeRegime,
   implementPromptParts,
+  isPlanFilingBaseline,
   outOfDeclaredScopeFiles,
   renderDiagnosePrompt,
   renderFixPrompt,
@@ -6488,7 +6494,11 @@ export function fixRungScopeStandDownReason(
     }
   | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
-  const planOnlyTask = declaredFiles.every(isInPlanScope);
+  // W1-T5118: the role is read from the inherited diff — a plan-only filing stays plan-scoped even
+  // when its shard declares future src/test paths. The SAME selection `renderFixPrompt` reads.
+  const regime = fixScopeRegime(declaredFiles, baselineDiffFiles);
+  const planOnlyTask = regime === "plan";
+  const planFiling = planOnlyTask && !declaredFiles.every(isInPlanScope);
   const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath)
     .filter((path) => !ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path));
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
@@ -6497,8 +6507,8 @@ export function fixRungScopeStandDownReason(
     : reachableRemedyPaths.length > 0
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
-  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges).filter(
+  const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles, [], regime));
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges, regime).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -6506,7 +6516,10 @@ export function fixRungScopeStandDownReason(
   const reason =
     scopeKind === "plan"
       ? `a fix worker added path(s) outside plan scope on a plan-only PR: ${newOutOfScopePaths.join(", ")} — ` +
-        `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/` +
+        (planFiling
+          ? `this PR is a plan-only filing (every path it carried before this rung is plan-scoped), so its ` +
+            `declared future paths are not yours to build here: a repair may only touch plan/** (or MASTER-PLAN.md/`
+          : `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/`) +
         `ORIENTATION.md), never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
         `rung itself wrote`
       : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
@@ -24973,8 +24986,10 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void): (filingBranch?: string) => string {
-  return (filingBranch) => {
+export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise):
+  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  const mintSync = (filingBranch?: string) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
     // The bridge supplies its actual landing identity, even when this manual command starts from
@@ -24986,6 +25001,31 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     );
     return held.taskId;
   };
+  return Object.assign(mintSync, {
+    async: async (filingBranch: string): Promise<string> => {
+      const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+        "--input-type=module", "--eval",
+        `import { format } from "node:util";
+         const rows = [];
+         console.log = (...args) => rows.push({ say: format(...args) });
+         const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+         try {
+           const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }))(process.argv[2]);
+           process.stdout.write(JSON.stringify({ id, rows }));
+         } catch (error) {
+           process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), rows }));
+         }`, root, filingBranch], { maxBuffer: 1 << 26 });
+      const result = JSON.parse(stdout) as { id: string; error?: string;
+        rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
+      if (stderr) process.stderr.write(stderr);
+      for (const row of result.rows) {
+        if ("say" in row) console.log(row.say);
+        else log?.(row.step, row.fields);
+      }
+      if (result.error !== undefined) throw new Error(result.error);
+      return result.id;
+    },
+  });
 }
 
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string; signatures?: readonly RuleSignature[] } = {}): number {
@@ -37253,8 +37293,13 @@ export async function daemonCommand(
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
+    daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
+    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: target.isSelf,
+      cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
+      scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -37824,6 +37869,7 @@ export async function daemonCommand(
   });
   const loopTelemetry = startReadPlaneTelemetry();
   try {
+    try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
       plan,
       {

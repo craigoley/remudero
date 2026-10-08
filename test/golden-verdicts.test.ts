@@ -28,6 +28,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { loadLearningsForTaskFiles, selectLearnings } from "../src/lib/learnings.js";
 import {
   checkDrillCoverage,
   checkTroubleshootingCoverage,
@@ -217,10 +218,29 @@ test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — CI SQUASH TRAILER LESSON: the task authoring lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-squash-trailer-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — LINT-PLAN LESSON: the task-authoring lane's cited incident executes and arms", () => {
   const { verdict, golden } = judgeCase("ci-lint-plan-lesson");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
+});
+
+test("GOLDEN — RULE-CHECKS LESSON: the cited gate refusal reaches the worker lane and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-rule-checks-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["src/run-task.ts", "plan/tasks.d/W1-T5961-the-rule-checks-gate-refused-9-pull-requests-in-this-window-and-each-was.yaml"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "rule-checks-gate-census-and-plan-scope-refusals"), taskFile);
+  }
 });
 
 test("GOLDEN — CLAIMS LESSON: the matched lane's cited incident executes and arms", () => {

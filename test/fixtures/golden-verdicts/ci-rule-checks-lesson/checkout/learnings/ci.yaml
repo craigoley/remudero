@@ -1,0 +1,19 @@
+- id: rule-checks-gate-census-and-plan-scope-refusals
+  subsystem: ci
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, "plan/tasks.d/**"]
+  fact: >-
+    When a change touches a listed source or preflight helper, or a plan task shard, run the cheap
+    checks before the first push: `rmd census-membership` (it maps changed paths to the census
+    suites that walk the whole tree), and `npm run --silent rule15-precheck`
+    when the diff touches plan/. A census suite refuses a file that references nothing it touches, so
+    `git grep` cannot find it. A plan/ shard added beside an implementation is refused by the
+    standing rule 15 gate; lift it into a plan-only PR and drop it from this branch.
+  evidence: >-
+    The rule-checks gate refused nine pull requests in the window (ci-learning:9276:rule-checks, with
+    repairs on #9301, #9337, #9358, #9362, #9369, #9380, #9382, #9388). The repairs touched the
+    run-task and census-precheck lane and plan/tasks.d shards, the same paths the census and
+    rule-15 checks walk. Recon did not establish each PR's individual gate failure, so this entry
+    names the shared surface, not a verified per-PR cause.
+  src: "ci-learning:9276:rule-checks"
+  cited: "2026-10-08"
