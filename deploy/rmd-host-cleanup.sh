@@ -180,12 +180,14 @@ for entry in $WATCH_FS; do
   w_path="${entry%:*}"; w_mark="${entry##*:}"; w_pct="${w_mark%%/*}"; w_free=""
   case "$w_mark" in */*) w_free="${w_mark#*/}" ;; esac
   case "$entry" in *:*) ;; *) w_path="" ;; esac
-  case "$w_pct" in ""|*[!0-9]*) w_path="" ;; esac
+  case "$w_pct" in ""|*[!0-9]*|????*) w_path="" ;; esac
   case "$w_free" in "") ;; *[!0-9KMGT]*|[KMGT]*|*[KMGT]?*) w_path="" ;; esac
+  w_kb="${w_free%[KMGT]}"
+  case "$w_kb" in ????????????????*) w_path="" ;; esac
   if [ -z "$w_path" ] || [ "${w_pct:-0}" -gt 100 ] 2>/dev/null; then
     echo "rmd-host-cleanup: FATAL RMD_CLEANUP_WATCH_FS entry '$entry' is not <path>:<pct>[/<min free>]" >&2; exit 2
   fi
-  w_kb="${w_free%[KMGT]}"; w_kb=$(( 10#${w_kb:-0} )); w_pct=$(( 10#$w_pct ))
+  w_kb=$(( 10#${w_kb:-0} )); w_pct=$(( 10#$w_pct ))
   case "$w_free" in
     *M) w_kb=$(( w_kb * 1024 )) ;; *G) w_kb=$(( w_kb * 1048576 )) ;; *T) w_kb=$(( w_kb * 1073741824 )) ;;
   esac
@@ -928,7 +930,6 @@ judge_filesystems() {
 
 # ── the pass ──
 before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
-before_pct="${before_pct:-0}"; before_avail="${before_avail:-0}"
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 
@@ -1017,8 +1018,14 @@ if [ "$TSX_PRUNED_COUNT" -gt 0 ]; then
   log "rmd-host-cleanup: pruned $TSX_PRUNED_COUNT stale tsx cache files ($TSX_PRUNED_BYTES bytes)"
 fi
 after_pct="$(df_field pct)"; after_avail="$(df_field avail)"
-after_pct="${after_pct:-0}"; after_avail="${after_avail:-0}"
-log "rmd-host-cleanup: / ${before_pct}% -> ${after_pct}% ($(( (after_avail - before_avail) / 1024 )) MB reclaimed this pass)"
+reclaimed=""
+case "${before_pct:-x}${before_avail:-x}${after_pct:-x}${after_avail:-x}" in
+  *[!0-9]*) ;;
+  *) reclaimed=" ($(( (10#$after_avail - 10#$before_avail) / 1024 )) MB reclaimed this pass)" ;;
+esac
+case "$before_pct" in ""|*[!0-9]*) before_pct=unknown ;; *) before_pct="${before_pct}%" ;; esac
+case "$after_pct" in ""|*[!0-9]*) after_pct=unknown ;; *) after_pct="${after_pct}%" ;; esac
+log "rmd-host-cleanup: / ${before_pct} -> ${after_pct}${reclaimed}"
 [ "$DRY_RUN" = 1 ] && log "rmd-host-cleanup: DRY_RUN=1 — nothing was changed"
 
 judge_filesystems

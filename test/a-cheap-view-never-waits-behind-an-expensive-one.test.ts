@@ -257,8 +257,9 @@ setInterval(() => {}, 1000);
   lanes.snapshot({ instance: "core", ok: true, asOf: new Date(T0).toISOString(), bodies: [] });
   lanes.want("task", "W1-T1");
   lanes.accept({ view: "inbox", version: 1, bodies: [] });
-  await until(() => got().includes("fast:bodies"), "every input reached the fast lane");
-  assert.deepEqual(got().filter((l) => /^(fast|heavy):(state|shadow|snapshot|want|bodies)$/.test(l)).sort(), ["fast:bodies", "fast:shadow", "fast:snapshot", "fast:state", "fast:want", "heavy:snapshot", "heavy:state", "heavy:want"]);
+  const expected = ["fast:bodies", "fast:shadow", "fast:snapshot", "fast:state", "fast:want", "heavy:snapshot", "heavy:state", "heavy:want"];
+  await until(() => expected.every((line) => got().includes(line)), "every input reached its lane");
+  assert.deepEqual(got().filter((l) => /^(fast|heavy):(state|shadow|snapshot|want|bodies)$/.test(l)).sort(), expected);
   // The heavy lane's death hands its units back to the fast lane, and again once it is respawned.
   await until(() => logs.some((l) => l.step === "read_model.views_exited" && l.extra.lane === "heavy"), "a heavy lane death is logged by lane");
   await until(() => got().filter((l) => l === "fast:lane:*:false").length >= 2, "the fast lane reclaimed the heavy lane's units at its death and at its respawn");
