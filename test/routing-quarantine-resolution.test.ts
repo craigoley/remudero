@@ -11,7 +11,7 @@ const { dailyRoutingReview } = await import(pathToFileURL(join(import.meta.dirna
 const asOf = "2026-10-08T12:00:00.000Z";
 const cli = { ts: "2027-10-14T10:00:00.000Z", step: "cli.invoked", argv: ["status"] };
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-const entry = (row = cli, sourceLabel = "core") => ({ sourceLabel, rowHash: hash(JSON.stringify(row)),
+const entry = (row: Record<string, unknown> = cli, sourceLabel = "core") => ({ sourceLabel, rowHash: hash(JSON.stringify(row)),
   kind: "future-timestamp", scope: "routing-trials", disposition: "irrelevant-cli-invocation",
   reason: "historical-test-clock", resolvedAt: "2026-10-08T11:00:00.000Z" });
 const manifest = (entries: unknown[]) => ({ version: "routing-quarantine-resolutions-v1", entries });
