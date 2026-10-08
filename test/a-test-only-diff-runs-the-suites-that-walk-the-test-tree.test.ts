@@ -12,7 +12,7 @@ const MEMBER = "test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts
 test("#10092: a test-only diff also runs the censuses that walk the test tree, git grep included", () => {
   assert.equal(enumeratesPopulation('gitGrepLines(["grep", "-lF", HELPER_IMPORT, "--", "test/*.test.ts"])'), true,
     "a git grep argv enumerates the files it matches");
-  assert.equal(enumeratesPopulation('execFileSync("git", ["commit", "-m", "x"]); writeFileSync(f, "x");'), false,
+  assert.equal(enumeratesPopulation('execFileSync("git", ["rev-parse", "HEAD"]); writeFileSync(f, "x");'), false,
     "shelling git for something else is not a population walk");
   assert.ok((censusSuiteFiles([MEMBER]) as string[]).includes(CENSUS), "the git-grep census is listed for a change to its member");
   const run = testOnlyRun([MEMBER]) as { mode: string; files: string[] };
