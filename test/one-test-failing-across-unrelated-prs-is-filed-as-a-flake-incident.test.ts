@@ -10,6 +10,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import {
   FLAKE_INCIDENT_POLICY, flakeIncidentOrigin, runFlakeIncidentGardener, testSourcePaths,
 } from "../src/lib/flake-incident-gardener.js";
+import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
 import {
   readSelectorShadowRunsAsync, SELECTOR_SHADOW_SHARDS, selectorShadowFlakeEvidence, selectorShadowFlakeLedger,
 } from "../src/lib/selector-shadow-gardener.js";
@@ -120,6 +121,40 @@ test("W1-T6406: a PR that touches the test is not evidence of a flake", async ()
   assert.deepEqual(watch[0]!.prs, [10089, 10091]);
   await runFlakeIncidentGardener(h.deps, h.sources(changed));
   assert.equal(h.rows("flake_incident.watch").length, 1, "an unchanged watch is not re-ledgered");
+});
+
+test("W1-T6406: the per-pass changed-path read budget is spent, and a PR it could not read is not evidence", async () => {
+  const h = harness();
+  for (const pr of [10058, 10077, 10084, 10089]) h.evidence(pr);
+  let calls = 0;
+  const sources = { ...h.sources(() => { calls++; return ["src/lib/unrelated.ts"]; }), policy: { changedPathReadsPerPass: 2 } };
+  await runFlakeIncidentGardener(h.deps, sources);
+  assert.equal(calls, 2, "only the budgeted number of compare reads is made");
+  assert.equal(h.landed.length, 0, "the two PRs left unread are not counted, so four PRs do not file");
+  const watch = h.rows("flake_incident.watch");
+  assert.equal(watch.length, 1, "the two PRs that were read raise a watch row");
+  assert.equal((watch[0]!.prs as number[]).length, 2);
+});
+
+test("W1-T6406: the registry's selector-shadow pass ledgers a flake-incident pass that throws", async () => {
+  const h = harness();
+  h.evidence(10058);
+  h.evidence(10077);
+  const deps = {
+    ...h.deps,
+    log: (step: string, extra: Record<string, unknown> = {}) => {
+      if (step === "flake_incident.watch") throw new Error("ledger write refused");
+      h.deps.log(step, extra);
+    },
+  };
+  const readJson = async (args: string[]): Promise<unknown> =>
+    args[1]!.includes("/compare/") ? { files: [{ filename: "src/lib/unrelated.ts" }] } : { workflow_runs: [] };
+  const pass = selectorShadowGardenPass(deps, "acme", "remudero", h.sources(() => []).mintTaskId, { readJson, readText: async () => "" });
+  await pass();
+  const failed = h.rows("flake_incident.gardener_failed");
+  assert.equal(failed.length, 1, "the throw is ledgered, not raised out of the pass");
+  assert.equal(failed[0]!.error, "ledger write refused");
+  assert.equal(h.landed.length, 0);
 });
 
 test("W1-T6406: a PR with any row touching the test is dropped whole, and a row without shas is touching", async () => {
