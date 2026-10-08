@@ -1,0 +1,56 @@
+- id: W1-T6597
+  title: "A STALL RECYCLE WAITS FOREVER ON WORK THE STALLED DAEMON ITSELF HOLDS — the progress watchdog (W1-T5687/W1-T5688) asks recycle-container.sh to replace a daemon whose loop is wedged, but the in-flight lock that blocks the recycle names that same live daemon pid and the lane-less worker it counts as busy is that daemon's own idle child, so neither W1-T2556's nor W1-T3611's reclaim (both need a DEAD holder) can ever fire and every attempt refuses after its 3000 s wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what a STALLED-verdict recycle may reclaim from a frozen daemon, and what it must still wait for
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-08: the 18:27Z core daemon wedge that blocked every review for about 3 h"
+  plan_refs: [W1-T5688, W1-T5687, W1-T5651, W1-T3611, W1-T2556, W1-T3628]
+  files: [deploy/recycle-container.sh, deploy/install-host-units.sh, test/fixtures/azure-host-units/rmd-relaunch.sh, test/a-stall-recycle-reclaims-only-what-a-frozen-daemon-holds.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 on the Azure host (ledger, docker, /proc, the watchdog journal; read only until an operator-approved
+    SIGTERM):
+    - The core daemon's main thread (container 2ca2ffc969af, in-container pid 110) wedged at 18:27:11Z in a pure compute
+      loop: about 98% CPU, all user time, 0 voluntary context switches and about 1 read syscall/s over 5 s, 0 page faults.
+      It wrote no ledger row and no log line after 18:27:11Z, reaped no child, and swept and reviewed nothing: the newest
+      progress row (review.posted #10141) was 18:26:11Z.
+    - The watchdog named it STALLED at 18:44:50Z and ran recycle-container.sh at 18:59:58Z and 20:45:44Z. Both runs engaged
+      PAUSE, waited 3000 s and REFUSED: "1 lane-holding and 1 lane-less worker(s) still in flight".
+    - The lane-holding lock was state/inflight/fix-branch--craigoley--remudero--run-unfiled-1791423000000.lock, {pid 110,
+      host 2ca2ffc969af}: the wedged daemon's own fix claim for #10166. Its fix worker had already finished at 18:27:11Z,
+      leaving an uncommitted, partly unmerged merge in its worktree. The lane-less "worker" was the daemon's idle CI-JUDGE
+      child (in ep_poll since 18:27:09Z). W1-T2556 reclaims only when the holder's container is not running, W1-T3611
+      only when the pid is absent; pid 110 was alive and spinning. No run could ever pass, and each held PAUSE for 50 min.
+    - Recovery needed an operator: a graceful SIGTERM to the container at 21:16:17Z (the entrypoint forwarded it; the
+      daemon exited 143), after which the waiting attempt reclaimed the lock as NOT RUNNING and recycled.
+  design: |
+    (1) The launcher tells recycle-container.sh which verdict triggered it, in RMD_RECYCLE_VERDICT (STALLED, with its progress
+    age). A recycle with
+    no STALLED verdict (deploys, manual runs) behaves exactly as today.
+    (2) STALLED OWNERSHIP, PROVEN, NOT INFERRED FROM AGE: under a STALLED verdict, a blocking lock is the frozen daemon's
+    only when (a) its pid and host equal the drain.lock holder's (the daemon process itself, in the target container), and
+    (b) that pid has written no ledger row of any step, daemon.pulse included (W1-T5651), for longer than the verdict's
+    stall bound. A lock's or worker's AGE alone never permits anything: an old lock under a pid that wrote a row inside
+    the bound is healthy work and is waited for, then refused, exactly as today. A lock naming any other pid is untouched.
+    (3) With ownership proven, the frozen daemon's own inflight locks move to inflight/reclaimed with a reason file (never
+    deleted, as W1-T2556 and W1-T3611 do), and its lane-less children stop counting as busy. RECOVERABLE ARTIFACTS ARE
+    KEPT: worktrees, worker homes and logs on the bind mounts are not touched, and each reclaimed lock's reason names the
+    worktree its holder was using. The recycle then stops the container through its existing docker stop.
+    (4) Bounded: a STALLED recycle either passes on the proof in (2) or refuses once, naming the clause that failed; it
+    never waits WAIT_SECONDS on the frozen daemon's own holdings.
+  acceptance:
+    - claim: "with a fake docker, ledger and process table: (i) a STALLED recycle whose blocking lock and idle lane-less child belong to the drain.lock holder pid, with no ledger row from that pid inside the bound, proceeds without the WAIT_SECONDS wait, moves the lock to inflight/reclaimed with a reason naming its worktree, and leaves the worktree and worker home in place; (ii) the same lock, however old, under a pid with a ledger row inside the bound, with a busy worker, is waited for and refused after WAIT_SECONDS; (iii) a recycle without a STALLED verdict behaves as before"
+      proof: "unit test: test/a-stall-recycle-reclaims-only-what-a-frozen-daemon-holds.test.ts"
+    - claim: "the recycle reads the verdict that triggered it"
+      proof: "grep: RMD_RECYCLE_VERDICT in deploy/recycle-container.sh"
+  falsifier: |
+    Pass any lock under a STALLED verdict, or judge ownership by lock age: case (ii) loses its wait and fails. Drop the
+    reclaim under proof: case (i) refuses after WAIT_SECONDS and fails. Delete instead of moving the lock, or remove the
+    worktree: case (i)'s preservation assertions fail. Apply the rule without a STALLED verdict: case (iii) fails.
