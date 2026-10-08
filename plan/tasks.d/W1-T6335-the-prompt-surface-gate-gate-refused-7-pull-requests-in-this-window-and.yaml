@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the prompt-surface-gate gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:9856:prompt-surface-gate in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:9856:prompt-surface-gate. The prompt-surface-gate gate went red on #9856 and was repaired; the repair touched test/golden-verdicts.test.ts, learnings/index.json, learnings/ci.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/diff.patch, test/fixtures/golden-verdicts/ci-claims-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/report.md, test/fixtures/golden-verdicts/ci-codeql-read-model-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-codeql-read-model-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-codeql-read-model-lesson/diff.patch, test/fixtures/golden-verdicts/ci-codeql-read-model-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-codeql-read-model-lesson/report.md, test/fixtures/golden-verdicts/ci-lint-plan-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-lint-plan-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-lint-plan-lesson/diff.patch, test/fixtures/golden-verdicts/ci-lint-plan-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-lint-plan-lesson/report.md, test/fixtures/golden-verdicts/ci-rule-checks-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-rule-checks-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-rule-checks-lesson/diff.patch, test/fixtures/golden-verdicts/ci-rule-checks-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-rule-checks-lesson/report.md, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/diff.patch, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/report.md, test/fixtures/golden-verdicts/ci-squash-trailer-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-squash-trailer-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-squash-trailer-lesson/diff.patch, test/fixtures/golden-verdicts/ci-squash-trailer-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-squash-trailer-lesson/report.md, test/fixtures/golden-verdicts/ci-test-slow-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-test-slow-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-test-slow-lesson/diff.patch, test/fixtures/golden-verdicts/ci-test-slow-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-test-slow-lesson/report.md, test/learnings.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed remedy is a matched CI learning entry, with learnings/ci.yaml as the sole declared file and verify: auto."
+      - "The supplied scope names no sensitive access, deletion, irreversible action, policy change, or operator-only decision; the gates state reports no blocking condition."
+      - "The family has seven merged tasks and one declined task. No diff or actual-change view is supplied, so this verdict assesses the filed scope only."
+    judged_at: "2026-10-08T07:55:46.441Z"
+    pin: "7bef3e1f736ce5d1ae761597bbe7b58ad1213c3a4eb8fcc702b1f6da2212c125"
