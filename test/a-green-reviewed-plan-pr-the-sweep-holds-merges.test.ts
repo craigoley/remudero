@@ -57,7 +57,7 @@ const PLAN_PR: OpenPrView = {
 };
 
 /** GitHub seams answering #10141's facts. `mergeableState` is what that pass read. */
-function githubFacts(mergeableState: string, behindBy = 0) {
+function remoteFacts(mergeableState: string, behindBy = 0) {
   const calls: string[] = [];
   const said: string[] = [];
   const seams = {
@@ -90,7 +90,7 @@ function githubFacts(mergeableState: string, behindBy = 0) {
  *  only the GitHub seams faked — so whatever the sweep wires (or fails to) decides the outcome. */
 function sweepArm(mergeableState: string, behindBy = 0) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6595-`));
-  const gh = githubFacts(mergeableState, behindBy);
+  const gh = remoteFacts(mergeableState, behindBy);
   const effects = buildSweepEffects({
     owner: "craigoley",
     repo: "remudero",
@@ -122,7 +122,7 @@ function sweepArm(mergeableState: string, behindBy = 0) {
 
 test("W1-T6595: the sweep merges a green reviewed plan PR the review would merge", async () => {
   // The review lane, on the facts it read at 18:29Z (clean): a direct merge.
-  const review = githubFacts("clean");
+  const review = remoteFacts("clean");
   const logged: string[] = [];
   const reviewOutcome = armIfVerdictPermits(
     { state: "success", capped: false, planOnly: false },
@@ -158,7 +158,7 @@ test("W1-T6595: a behind, blocked, green plan PR reaches W1-T5748's merge-safety
 });
 
 test("W1-T6595: a blocked plan PR nobody observed green is still held, as at open", async () => {
-  const gh = githubFacts("blocked");
+  const gh = remoteFacts("blocked");
   const result = await armAutoMergeDetailedAsync(PR_URL, TASK, gh.seams as unknown as ArmDeps<true>);
   assert.equal(result.outcome, "plan-pr-held");
   assert.deepEqual(gh.calls, []);
