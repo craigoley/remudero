@@ -143,6 +143,9 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
   for (const task of [...plan.open].sort((a, b) => filingNumber(a.id) - filingNumber(b.id) || a.id.localeCompare(b.id))) {
     const rel = plan.shards.get(task.id);
     if (!rel) continue;
+    // W1-T6307: the machine-filing judge prices an unjudged machine task when it rules; banding it
+    // first races that write, and update-branch merges both lines into one shard (#9979).
+    if (task.author_class === "machine" && task.risk_ruling === undefined) continue;
     const text = readFileSync(join(sources.repoRoot, rel), "utf8");
     const marker = MARKER.exec(text);
     // A marked priority is ours only while it still equals the band in our marker. Any other

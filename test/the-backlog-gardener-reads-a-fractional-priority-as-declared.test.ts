@@ -6,7 +6,10 @@ import { test } from "node:test";
 
 import { parse as parseYaml } from "yaml";
 
-import { applyBacklogActions, type BacklogAction, type BacklogDisposition } from "../src/lib/backlog-gardener.js";
+import { applyBacklogActions, backlogInventory, type BacklogAction, type BacklogDisposition, type BacklogSources } from "../src/lib/backlog-gardener.js";
+import { fixedClock } from "../src/lib/clock.js";
+import type { PlanInventory } from "../src/lib/plan-gardener.js";
+import type { Task } from "../src/lib/plan.js";
 
 const SIGNATURE = "0123456789abcdef";
 const OLD_SIGNATURE = "fedcba9876543210";
@@ -74,6 +77,30 @@ function parsedTask(text: string): Record<string, unknown> {
 function priorityLines(text: string): number {
   return text.split("\n").filter((line) => /^ {2}priority:/.test(line)).length;
 }
+
+test("W1-T6307: an unjudged machine task is left to the judge", (t) => {
+  // W1-T6287 at #9979's base: machine-filed, no ruling, no priority — the judge prices it next.
+  const unjudged: Task = { id: "W1-T6287", title: "task W1-T6287", repo: "remudero", depends_on: [], type: "implement", verify: "auto", risk: "low", status: "queued", attempts: 0, files: ["src/W1-T6287.ts"], author_class: "machine" };
+  const judged: Task = { ...unjudged, id: "W1-T6288", title: "task W1-T6288", files: ["src/W1-T6288.ts"], risk_ruling: { verdict: "low", action: "proceed", confidence: 0.87, reasons: ["fixture"] } as Task["risk_ruling"] };
+  const f = fixture(t, {
+    "W1-T6287": shard("W1-T6287", undefined, undefined),
+    "W1-T6288": shard("W1-T6288", undefined, undefined),
+  });
+  const plan: PlanInventory = { open: [unjudged, judged], all: [unjudged, judged], shards: f.shards };
+  const sources: BacklogSources = {
+    repoRoot: f.root,
+    plan: () => plan,
+    ledger: () => [],
+    history: () => [],
+    mergedLastDay: () => 5,
+    clock: fixedClock(new Date("2026-10-08T00:13:00.000Z").getTime()),
+    fileExists: () => true,
+    proofsHolding: () => new Set(),
+  };
+  const targets = backlogInventory(sources).candidates.map((c) => c.target);
+  assert.ok(!targets.includes("W1-T6287"), "the gardener must not band a machine task the judge has not yet priced");
+  assert.deepEqual(targets, ["W1-T6288"], "a judged machine task is the gardener's to band as before");
+});
 
 test("W1-T6307: a fractional declared priority is respected, not duplicated", (t) => {
   const f = fixture(t, { "W1-T6287": FRACTIONAL });
