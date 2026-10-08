@@ -64,6 +64,7 @@ interface Harness {
   reverts: MainRepairRevertRequest[];
   closed: Array<{ url: string; comment: string }>;
   created: Array<{ title: string; body: string }>;
+  logs: Array<{ step: string; fields?: Record<string, unknown> }>;
   prStates: Map<string, MainRepairPrState>;
   advance: (ms: number) => void;
   setHead: (sha: string) => void;
@@ -79,6 +80,9 @@ interface HarnessOptions {
   reproduce?: NonNullable<MainHealthRungDeps["repair"]>["reproduce"];
   firstParents?: string[];
   ledgerPath?: string;
+  prMerge?: MainHealthMergeReader["prMerge"];
+  readPr?: NonNullable<MainHealthRungDeps["repair"]>["readPr"];
+  closePr?: NonNullable<MainHealthRungDeps["repair"]>["closePr"];
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -123,13 +127,14 @@ function harness(options: HarnessOptions = {}): Harness {
     closeWithComment: async () => {},
   };
   const mergeReader: MainHealthMergeReader = {
-    prMerge: (sha) => (sha === OFFENDING ? { number: 10092, headSha: "aa".padEnd(40, "0"), parentSha: GREEN } : undefined),
+    prMerge: options.prMerge ?? ((sha) => (sha === OFFENDING ? { number: 10092, headSha: "aa".padEnd(40, "0"), parentSha: GREEN } : undefined)),
     mergeBase: () => GREEN,
     prsMergedBetween: () => [],
   };
   const fixes: MainRepairFixRequest[] = [];
   const reverts: MainRepairRevertRequest[] = [];
   const closed: Array<{ url: string; comment: string }> = [];
+  const logs: Harness["logs"] = [];
   const prStates = new Map<string, MainRepairPrState>();
   const repair: NonNullable<MainHealthRungDeps["repair"]> = {
     openFixPr: async (request) => {
@@ -144,8 +149,9 @@ function harness(options: HarnessOptions = {}): Harness {
       if ("prUrl" in result) prStates.set(result.prUrl, { state: "open", headSha: "e1".padEnd(40, "0") });
       return result;
     },
-    readPr: (url) => prStates.get(url) ?? { state: "open" },
-    closePr: (url, comment) => {
+    readPr: options.readPr ?? ((url) => prStates.get(url) ?? { state: "open" }),
+    closePr: async (url, comment) => {
+      await options.closePr?.(url, comment);
       closed.push({ url, comment });
       prStates.set(url, { ...(prStates.get(url) ?? {}), state: "closed" });
     },
@@ -156,7 +162,7 @@ function harness(options: HarnessOptions = {}): Harness {
     issues,
     ledgerPath,
     runId: "DAEMON-T6403",
-    log: () => {},
+    log: (step, fields) => void logs.push({ step, fields }),
     now: () => clock,
     readRequiredChecks: () => ["ci"],
     readCiFailures: () => (head === GREEN_HEAD ? [] : [{ name: "ci", logTail: LOG_TAIL, conclusion: "FAILURE" }]),
@@ -184,6 +190,7 @@ function harness(options: HarnessOptions = {}): Harness {
     reverts,
     closed,
     created,
+    logs,
     prStates,
     advance: (ms) => {
       clock += ms;
@@ -375,6 +382,170 @@ test("a red no merge can be located for is ledgered unlocated and escalated as t
     assert.match(String(unlocated?.reason), /no reproduction probe/);
     assert.equal(h.fixes.length, 0);
     assert.equal(h.created.length, 1, "today's escalation stands");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a rejected bisect probe records its reason once and escalates without guessing a merge", async () => {
+  let probes = 0;
+  const h = harness({ history: false, reproduce: async () => {
+    probes++;
+    throw new Error("probe worktree unavailable");
+  } });
+  try {
+    await tick(h);
+    assert.equal(h.rows("main.repair.unlocated")[0]?.reason,
+      "no first red push run; the bisect could not run: probe worktree unavailable");
+    assert.equal(h.created.length, 0, "the background probe settles before escalation");
+    await tick(h);
+    await tick(h);
+    assert.equal(h.created.length, 1);
+    assert.equal(probes, 1, "an unlocated head is not probed repeatedly");
+    assert.equal(h.rows("main.repair.unlocated").length, 1);
+    assert.equal(h.rows("main.repair.located").length, 0);
+    assert.equal(h.fixes.length + h.reverts.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a bisect with no green parent records the exhausted window and opens no repair PR", async () => {
+  const probed: string[] = [];
+  const h = harness({ history: false, reproduce: async (sha, files) => {
+    probed.push(sha);
+    return files.map((file) => ({ file, outcome: "fails", duration_ms: 1, cached: false }));
+  } });
+  try {
+    await tick(h);
+    assert.deepEqual(probed, [HEAD, OFFENDING, GREEN]);
+    assert.equal(h.rows("main.repair.unlocated")[0]?.reason,
+      "no first red push run; no parent-green/child-red pair within 2 merges of main's head");
+    await tick(h);
+    assert.equal(h.created.length, 1);
+    assert.equal(h.fixes.length + h.reverts.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("an unreadable offending PR preserves the bisected merge and still dispatches its fix", async () => {
+  const h = harness({ history: false,
+    reproduce: async (sha, files) => files.map((file) => ({
+      file, outcome: sha === GREEN ? "passes" : "fails", duration_ms: 1, cached: false,
+    })),
+    prMerge: () => { throw new Error("merge metadata unavailable"); },
+  });
+  try {
+    await tick(h);
+    assert.deepEqual(h.logs.filter(({ step }) => step === "main.repair.pr_unreadable"), [{
+      step: "main.repair.pr_unreadable",
+      fields: { offending_sha: OFFENDING, error: "merge metadata unavailable" },
+    }]);
+    const [located] = h.rows("main.repair.located");
+    assert.equal(located?.offending_sha, OFFENDING);
+    assert.equal(located?.offending_pr, undefined);
+    await tick(h);
+    assert.equal(h.fixes.length, 1);
+    assert.equal(h.fixes[0]?.offendingSha, OFFENDING);
+    assert.equal(h.fixes[0]?.offendingPr, undefined);
+    assert.equal(h.created.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a rejected fix opener records the error and advances to one revert instead of retrying the fix", async () => {
+  const h = harness({ fix: async () => { throw new Error("worker launch failed"); } });
+  try {
+    await tick(h);
+    const [unopened] = h.rows("main.repair.fix_unopened");
+    assert.equal(unopened?.offending_sha, OFFENDING);
+    assert.equal(unopened?.reason, "worker launch failed");
+    assert.equal(h.rows("main.repair.fix_opened").length, 0);
+    await tick(h);
+    await tick(h);
+    assert.equal(h.fixes.length, 1);
+    assert.equal(h.reverts.length, 1);
+    assert.equal(h.reverts[0]?.whyFixNotEnough, "the fix run opened no PR (worker launch failed)");
+    assert.equal(h.created.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("unreadable fix and revert PR states hold the lane until a closed state can be observed", async () => {
+  let unreadable = true;
+  const h = harness({ readPr: () => {
+    if (unreadable) throw new Error("PR API unavailable");
+    return { state: "closed" };
+  } });
+  try {
+    await tick(h);
+    await tick(h, MAIN_REPAIR_FIX_STALL_MIN_MS);
+    assert.deepEqual(h.logs.filter(({ step }) => step === "main.repair.pr_unreadable"), [{
+      step: "main.repair.pr_unreadable", fields: { pr_url: FIX_PR, error: "PR API unavailable" },
+    }]);
+    assert.equal(h.reverts.length, 0, "an unreadable fix is not evidence of a stalled fix");
+    assert.equal(h.created.length, 0);
+    unreadable = false;
+    await tick(h);
+    assert.equal(h.reverts.length, 1);
+    unreadable = true;
+    await tick(h);
+    assert.deepEqual(h.logs.filter(({ step }) => step === "main.repair.pr_unreadable").at(-1), {
+      step: "main.repair.pr_unreadable", fields: { pr_url: REVERT_PR, error: "PR API unavailable" },
+    });
+    assert.equal(h.created.length, 0, "an unreadable revert stays in flight");
+    assert.equal(h.reverts.length, 1);
+    unreadable = false;
+    await tick(h);
+    assert.equal(h.created.length, 1, "an observed closed revert finally escalates");
+    assert.equal(h.fixes.length, 1);
+    assert.equal(h.reverts.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a rejected revert opener records a refusal and escalates without retrying", async () => {
+  const h = harness({ revert: async () => { throw new Error("revert push rejected"); } });
+  try {
+    await tick(h);
+    h.prStates.set(FIX_PR, { state: "closed" });
+    await tick(h);
+    const [refused] = h.rows("main.repair.revert_refused");
+    assert.equal(refused?.offending_sha, OFFENDING);
+    assert.equal(refused?.reason, "revert push rejected");
+    assert.deepEqual(refused?.conflicting_paths, []);
+    assert.equal(h.rows("main.repair.revert_opened").length, 0);
+    await tick(h);
+    await tick(h);
+    assert.equal(h.created.length, 1);
+    assert.equal(h.reverts.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("green main with an unreadable repair PR resolves without claiming it merged or closing it", async () => {
+  const h = harness({ readPr: () => { throw new Error("green close-out API unavailable"); } });
+  try {
+    await tick(h);
+    h.setHead(GREEN_HEAD);
+    await tick(h);
+    assert.deepEqual(h.logs.filter(({ step }) => step === "main.repair.pr_unreadable"), [{
+      step: "main.repair.pr_unreadable",
+      fields: { pr_url: FIX_PR, error: "green close-out API unavailable" },
+    }]);
+    const [resolved] = h.rows("main.repair.resolved");
+    assert.equal(resolved?.by, "other");
+    assert.equal(resolved?.head_sha, GREEN_HEAD);
+    assert.deepEqual(resolved?.closed_prs, []);
+    assert.equal(h.closed.length, 0);
+    await tick(h);
+    assert.equal(h.rows("main.repair.resolved").length, 1);
+    assert.equal(h.fixes.length, 1);
   } finally {
     h.cleanup();
   }
@@ -673,5 +844,38 @@ test("a repair PR that reports back after main went green is closed as redundant
     } finally {
       h.cleanup();
     }
+  }
+});
+
+test("a background failure to close a late repair PR is logged and does not reject repairIdle", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const h = harness({
+    fix: async () => { await gate; return FIX_PR; },
+    closePr: async () => { throw new Error("redundant PR close denied"); },
+  });
+  try {
+    h.advance(60_000);
+    await h.rung();
+    assert.equal(h.rows("main.repair.fix_dispatched").length, 1);
+    h.setHead(GREEN_HEAD);
+    h.advance(60_000);
+    await h.rung();
+    assert.equal(h.rows("main.repair.resolved").length, 1);
+    release();
+    await h.rung.repairIdle();
+    assert.deepEqual(h.logs.filter(({ step }) => step === "main.repair.error"), [{
+      step: "main.repair.error", fields: { error: "redundant PR close denied" },
+    }]);
+    assert.equal(h.rows("main.repair.fix_opened")[0]?.pr_url, FIX_PR);
+    assert.equal(h.rows("main.repair.redundant_closed").length, 0);
+    assert.equal(h.closed.length, 0);
+    await tick(h);
+    assert.equal(h.fixes.length, 1);
+    assert.equal(h.created.length, 0);
+  } finally {
+    release();
+    await h.rung.repairIdle();
+    h.cleanup();
   }
 });
