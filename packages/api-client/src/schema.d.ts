@@ -3601,6 +3601,91 @@ export interface components {
       satisfied_by?: string;
       holdout?: boolean;
     };
+    /** GET /v1/views/task?instance=&id= (src/lib/task-view.ts; W1-T6370): a demand-materialized task page. Missing tasks return 200 with found=false; unavailable inputs carry their evidence in sources and, when the body is thin, data.reason. */
+    TaskView: {
+      view: "task";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: TaskViewData;
+    };
+    /** The actual TaskViewData from src/lib/task-view.ts, built from at most 400 newest fact rows. */
+    TaskViewData: {
+      instance: string;
+      id: string;
+      /** False when no projection row, plan record or fact names the task. */
+      found: boolean;
+      reason?: string;
+      task?: {
+        title: string;
+        type: string;
+        risk: string;
+        priority?: number;
+        status: string;
+        dependsOn: (string)[];
+        rationale?: string;
+        acceptance: (AcceptanceCriterion)[];
+      };
+      projection?: {
+        status: "queued" | "recon" | "prompted" | "running" | "review" | "fixing" | "diagnosing" | "blocked" | "merged" | "done";
+        merged: boolean;
+        source: "ledger" | "pr-field" | "manual-completion" | "trailer" | "head-branch" | "correction" | "none" | "throttled";
+        prNumber?: number;
+        prUrl?: string;
+        prState?: string;
+        phase?: "recon" | "implement" | "review" | "fix-rung";
+        startedAt?: string;
+        workerState?: "working" | "tool-executing" | "quiet";
+      };
+      /** Owned runs within the bounded fact window; only the newest ten get gateway PR details. */
+      runs: (TaskViewRun)[];
+      /** The newest fifty fact rows, newest first. */
+      facts: ({
+        seq: number;
+        ts: string;
+        step: string;
+        runId?: string;
+      })[];
+      /** True when the fact read reaches its 400-row limit. */
+      factsTruncated: boolean;
+      tail?: {
+        runId: string;
+        lines: (string)[];
+      };
+      trace: {
+        runs: number;
+        merged: boolean;
+        costUsd: number;
+        lastVerdict?: string;
+        firstTs?: string;
+        lastTs?: string;
+      };
+    };
+    /** TaskCardRun extended with optional gateway PR evidence (src/lib/task-view.ts). */
+    TaskViewRun: {
+      runId: string;
+      verdict?: string;
+      costUsd?: number;
+      prUrl?: string;
+      pr?: TaskViewPr;
+    };
+    TaskViewPr: {
+      url: string;
+      number?: number;
+      /** The gateway's state, or unknown with a reason when it cannot resolve the PR. */
+      state: string;
+      title?: string;
+      reason?: string;
+    };
+    /** A dark view or a demand miss; a demand miss includes reason and retryMs. */
+    TaskViewUnavailable: {
+      error: "view_disabled" | "view_shadow" | "view_not_ready";
+      view: "task";
+      reason?: "timeout" | "saturated" | "no_worker";
+      retryMs?: number;
+    };
     /** One owned run in a task card's history -- read from the ledger, no GitHub call. */
     TaskCardRun: {
       runId: string;
@@ -5557,6 +5642,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/task": {
+    get: {
+      responses: {
+          "200": TaskView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": TaskViewUnavailable;
+          "500": Error;
         };
     };
   };
