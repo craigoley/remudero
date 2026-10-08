@@ -533,7 +533,7 @@ note_progress_verdict() {
 
 # Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
 recycle_on_verdict() {
-  local container="$1" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=()
+  local container="$1" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=() age
   [ "$PROGRESS_ACTION" = "recycle" ] || return 1
   now="$(date -u +%s)"
   last="$(cat "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true)"
@@ -547,6 +547,9 @@ recycle_on_verdict() {
   printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
   [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
   [ -n "$INSTANCE_REGISTRY" ] && envs=(RMD_INSTANCE_REGISTRY="$INSTANCE_REGISTRY")
+  # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
+  age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
+  envs+=(RMD_RECYCLE_VERDICT="${PROGRESS_STATE} progressAgeMs=${age:-unknown}")
   echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE}; recycling $container via $script."
   if [ ! -f "$script" ]; then
     out="recycle-container.sh missing at $script"; rc=127

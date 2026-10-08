@@ -642,6 +642,8 @@ export interface NowViewOptions {
   readPinPolicy?: (instance: NowInstance) => PolicyValues;
   /** Fact rows one `board` step ingests at most (W1-T6014); the projection's default when omitted. */
   boardIngestChunkRows?: number;
+  /** False: the board keeps its rows' parsed strings (W1-T6467's equality arm). */
+  boardInternStrings?: boolean;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
@@ -1171,6 +1173,7 @@ export function createNowView(opts: NowViewOptions): {
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
           ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),
+          ...(opts.boardInternStrings === false ? { internStrings: false } : {}),
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
