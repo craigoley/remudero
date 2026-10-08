@@ -130,7 +130,7 @@ test('author preflight preserves unreadable or ambiguous Git topology as refusal
     assert.equal(selected, false);
     assert.equal(f.receipt().gitTopology.state, 'unknown');
     assert.deepEqual(f.receipt().gitTopology.reads, [{ key: 'core.bare', status: result.status,
-      signal: result.signal, error: 'error' in result ? result.error.message : null }]);
+      signal: result.signal, error: 'error' in result ? result.error?.message ?? null : null }]);
     assert.match(f.receipt().error, /shared Git core.bare is (unreadable|ambiguous)/);
     assert.deepEqual(f.receipt().steps, []);
   }
