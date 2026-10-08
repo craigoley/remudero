@@ -1,0 +1,16 @@
+- id: W1-T6338
+  title: "REPAIR THE SELECTOR EDGE INTO test/every-view-body-matches-its-schema.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/every-view-body-matches-its-schema.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37738574315 for PR #10044 at 86bb5a01f79e8df2a48ad2415f2aa55f3d19e940: src/lib/repo-dashboard-route.ts, test/repo-settings-report-their-effective-values.test.ts -> test/every-view-body-matches-its-schema.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/every-view-body-matches-its-schema.test.ts when this edge is exercised"
+      proof: "grep: test/every-view-body-matches-its-schema\\.test\\.ts in src/lib/affected-suites.ts"
