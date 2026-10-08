@@ -375,6 +375,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(gitLeafCensus) && changedSrcTypeScript) {
     pathReaders.push(gitLeafCensus);
   }
+  // W1-T5557: this suite scans tracked src/**/*.ts for env literals through git ls-files, outside the maps.
+  const envRegistry = "test/env-var-registry.test.ts";
+  if (input.files.has(envRegistry) && changedSrcTypeScript) {
+    pathReaders.push(envRegistry);
+  }
   // W1-T4994: a coverage shard failed on this suite at 39737b73 and the narrow selector missed it. The suite
   // drives runSweep and buildSweepEffects, so a change to the sweep, status or run-task seams must select it.
   const verdictReuse = "test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts";
