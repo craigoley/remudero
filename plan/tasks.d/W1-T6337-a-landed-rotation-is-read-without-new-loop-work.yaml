@@ -1,0 +1,39 @@
+- id: W1-T6337
+  title: "A LANDED ROTATION IS READ WITHOUT NEW LOOP WORK — #9949 (rotation digests, src/lib/ledger-union.ts) made the first read after a rotation lands cost about 1.5× the loop CPU (Mac median 29 → 43 ms over 9 runs each), which puts test/operator-agent-scan-routes-never-block-the-loop.test.ts over its 150 ms budget on CI (162 and 173 ms) and holds test-slow-shard (2/2) red on #10012, #10027 and #10035"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the post-rotation read's loop cost returns to its pre-#9949 level
+  band_meaning: span
+  origin: "operator session 2026-10-08: PR watch, test-slow-shard (2/2) red on four fleet PRs"
+  plan_refs: [W1-T2811]
+  files: [src/lib/ledger-union.ts, test/a-landed-rotation-is-read-without-new-loop-work.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08: the CI failure on #10012 and #10027 is 'after a rotation lands the emergency status
+    answers within budget and sees the new stop' (test/operator-agent-scan-routes-never-block-the-loop.test.ts)
+    — the read spent 173 ms / 162 ms of loop CPU against WARM_ANSWER_BUDGET_MS 150. In throwaway worktrees
+    with the budget patched to 0, 9 Mac runs each: before #9949 (2cb3278f5) median 29 ms [14..45]; at #9949
+    (e96314009) median 43 ms [36..47]. The test has not changed since #9910. READ on origin/main: #9949 added
+    durable rotation digests to createLedgerRotationMemo — on a miss writeDigest JSON.stringify-s every row of
+    the archive, and on a hit readDigest validates every row with rows.every(...); both are synchronous work
+    proportional to the archive, on whichever thread runs the memo.
+  design: |
+    Profile the post-rotation read at #9949's parent and at main to name the added frames, then take that work
+    off the measured path without dropping the digests: e.g. persist a new archive's digest after the answer
+    (deferred / off-thread) rather than inside the read, and validate a restored digest's shape without a
+    per-row walk on the loop. The digest contents, hit/miss accounting and every existing ledger-union and
+    rotation-digest test are unchanged. Do not raise WARM_ANSWER_BUDGET_MS.
+  acceptance:
+    - claim: "the first read after a rotation lands does no per-row digest serialization on the reading thread"
+      proof: 'grep: test("W1-T6337: the read that lands a rotation does not serialize its digest inline" in test/a-landed-rotation-is-read-without-new-loop-work.test.ts'
+    - claim: "the deferred digest is still written and a later cold memo still hits it"
+      proof: 'grep: test("W1-T6337: a landed rotation still leaves a digest a cold memo hits" in test/a-landed-rotation-is-read-without-new-loop-work.test.ts'
+  falsifier: |
+    Keep writeDigest inside the read: a JSON.stringify spy wrapping the read observes the archive's rows
+    serialized before the read resolves, and the first test fails.
