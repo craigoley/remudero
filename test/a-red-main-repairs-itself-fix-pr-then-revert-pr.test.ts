@@ -31,6 +31,17 @@ import {
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { mainHealthFromRollup } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "../src/lib/config.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+import {
+  buildMainRepairEffects,
+  dispatchMainRepairFixRun,
+  mainRepairTaskId,
+  openMainRepairRevertPr,
+  type AlertFixDispatchDeps,
+  type MainRepairRevertDeps,
+} from "../src/run-task.js";
 
 const OWNER = "o";
 const REPO = "r";
@@ -409,4 +420,227 @@ test("the MAIN-HEALTH escalation describes the repair lane it now follows", () =
   assert.match(detail, /fix PR/);
   assert.match(detail, /revert PR/);
   assert.match(detail, /never a push to main/);
+});
+
+// ── The daemon's wiring (src/run-task.ts): the fix run, the revert PR, PR reads and closes ───────
+
+function wiringRoot(): { root: string; ledgerPath: string; config: Config; cleanup: () => void } {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t6403-wiring-`));
+  return { root, ledgerPath: join(root, "ledger.ndjson"), config: { root } as Config, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+function fixRequest(branch = `${MAIN_REPAIR_BRANCH_PREFIX}fix-769d80530000-1`): MainRepairFixRequest {
+  return {
+    headSha: HEAD,
+    offendingSha: OFFENDING,
+    offendingPr: 10092,
+    failingChecks: ["ci"],
+    failingTestTitles: ["the wall-clock census matches its recorded baseline"],
+    testFiles: [FAILING_TEST],
+    logExcerpt: LOG_TAIL,
+    branch,
+    base: "main",
+  };
+}
+
+function revertRequest(branch = `${MAIN_REPAIR_BRANCH_PREFIX}revert-769d80530000-1`): MainRepairRevertRequest {
+  return {
+    headSha: HEAD,
+    offendingSha: OFFENDING,
+    offendingPr: 10092,
+    failingChecks: ["ci"],
+    branch,
+    base: "main",
+    fixPrUrl: FIX_PR,
+    whyFixNotEnough: `fix PR ${FIX_PR} closed unmerged while main stayed red`,
+  };
+}
+
+function workerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-t6403",
+    costUsd: 0.01,
+    numTurns: 1,
+    text,
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  } as unknown as WorkerResult;
+}
+
+function fixDeps(text: string, prompts: string[], extra: Partial<AlertFixDispatchDeps> = {}): AlertFixDispatchDeps {
+  return {
+    worktreeAdd: () => {},
+    worktreeRemove: () => {},
+    renderWorkerSettings: () => "/tmp/fake-settings.json",
+    loadMounts: () => ({}) as never,
+    resolveMount: () => ({ model: "fake-model", effort: "low", maxTurns: 5, contextBudget: 1000 }) as Mount,
+    spawn: async (args) => {
+      prompts.push(args.prompt);
+      return workerResult(text);
+    },
+    ensureTaskTrailer: () => {},
+    checkAcceptance: () => ({ ok: true }) as never,
+    ...extra,
+  };
+}
+
+test("the fix run tells its worker the failing check, its output and the offending merge, and returns its PR", async () => {
+  const w = wiringRoot();
+  try {
+    const prompts: string[] = [];
+    const trailers: string[] = [];
+    const url = await dispatchMainRepairFixRun("o", "r", w.config, fixRequest(), w.ledgerPath, "DAEMON-T6403", {
+      ...fixDeps(`REPORT\nPR_URL: ${FIX_PR}\n`, prompts, { ensureTaskTrailer: (_url, taskId) => void trailers.push(taskId) }),
+      diffStat: async () => " src/lib/wall-clock.ts | 3 +--",
+    });
+    assert.equal(url, FIX_PR);
+    assert.deepEqual(trailers, [mainRepairTaskId(OFFENDING)]);
+    const [prompt] = prompts;
+    assert.match(prompt!, /Failing check\(s\): ci/);
+    assert.match(prompt!, new RegExp(`Offending merge \\(the first red push run\\): ${OFFENDING} \\(PR #10092\\)`));
+    assert.match(prompt!, /src\/lib\/wall-clock\.ts \| 3/);
+    assert.match(prompt!, /measured 32 \/ 52/);
+    assert.match(prompt!, /Do NOT revert the offending merge/);
+    assert.match(prompt!, /--base main/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a fix run whose worker opens no PR returns none, and an unreadable diff stat or teardown is named", async () => {
+  const w = wiringRoot();
+  try {
+    const prompts: string[] = [];
+    const url = await dispatchMainRepairFixRun("o", "r", w.config, fixRequest(), w.ledgerPath, "DAEMON-T6403",
+      fixDeps("REPORT\nno pr\n", prompts, { worktreeRemove: () => { throw new Error("worktree busy"); } }));
+    assert.equal(url, undefined);
+    assert.match(prompts[0]!, /diff stat unavailable/, "the real `git show --stat` ran in a worktree that does not exist");
+    assert.ok(readFileSync(w.ledgerPath, "utf8").includes("main-repair.worktree_remove_failed"));
+    await assert.rejects(
+      dispatchMainRepairFixRun("o", "r", w.config, fixRequest("main"), w.ledgerPath, "DAEMON-T6403", fixDeps("", [])),
+      /refusing a main-repair fix on branch main/,
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+function revertDeps(fail?: "revert" | "diff" | "abort"): MainRepairRevertDeps & { gitCalls: string[][]; ghCalls: string[][]; removed: string[] } {
+  const gitCalls: string[][] = [];
+  const ghCalls: string[][] = [];
+  const removed: string[] = [];
+  return {
+    gitCalls,
+    ghCalls,
+    removed,
+    worktreeAdd: () => {},
+    worktreeRemove: (_repo, path) => void removed.push(path),
+    git: async (args) => {
+      gitCalls.push(args);
+      const verb = args.slice(2).join(" ");
+      if (fail && verb.startsWith("revert --no-commit")) throw new Error("CONFLICT (content): src/x.ts");
+      if (verb.startsWith("diff --name-only")) {
+        if (fail === "diff") throw new Error("index locked");
+        return "src/x.ts\ntest/x.test.ts\n";
+      }
+      if (fail === "abort" && verb === "revert --abort") throw new Error("no revert in progress");
+      return "";
+    },
+    gh: async (args) => {
+      ghCalls.push(args);
+      return { html_url: REVERT_PR };
+    },
+  };
+}
+
+test("the revert PR is a revert commit on its own branch, pushed there and opened against main, never pushed to main", async () => {
+  const w = wiringRoot();
+  try {
+    const deps = revertDeps();
+    const request = revertRequest();
+    const result = await openMainRepairRevertPr("o", "r", w.config, request, w.ledgerPath, "DAEMON-T6403", deps);
+    assert.deepEqual(result, { prUrl: REVERT_PR });
+    const verbs = deps.gitCalls.map((args) => args.slice(2));
+    assert.deepEqual(verbs[0], ["revert", "--no-commit", OFFENDING]);
+    assert.equal(verbs[1]![0], "commit");
+    assert.match(verbs[1]![2]!, /^revert\(main\): undo #10092 \(769d80530000\)/);
+    assert.match(verbs[1]![2]!, new RegExp(`This reverts commit ${OFFENDING}\\.`));
+    assert.deepEqual(verbs[2], ["push", "origin", `HEAD:refs/heads/${request.branch}`]);
+    assert.ok(verbs.every((args) => !args.includes("main") && !args.some((a) => /refs\/heads\/main$/.test(a))), "nothing names main as a push target");
+    const [post] = deps.ghCalls;
+    assert.deepEqual(post!.slice(0, 4), ["api", "-X", "POST", "repos/o/r/pulls"]);
+    assert.ok(post!.includes(`head=${request.branch}`));
+    assert.ok(post!.includes("base=main"));
+    const body = post!.find((a) => a.startsWith("body="))!;
+    assert.match(body, /Failing check\(s\): ci/);
+    assert.ok(body.includes(FIX_PR), "the body names the fix PR");
+    assert.match(body, /closed unmerged/, "and why it was not enough");
+    assert.match(body, new RegExp(`Remudero-Task: ${mainRepairTaskId(OFFENDING)}$`));
+    assert.equal(deps.removed.length, 1, "the worktree is torn down");
+    await assert.rejects(
+      openMainRepairRevertPr("o", "r", w.config, revertRequest("main"), w.ledgerPath, "DAEMON-T6403", revertDeps()),
+      /refusing a main-repair revert on branch main/,
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("a revert that does not apply is aborted and returned with its conflicting paths", async () => {
+  const w = wiringRoot();
+  try {
+    const deps = revertDeps("revert");
+    const result = await openMainRepairRevertPr("o", "r", w.config, revertRequest(), w.ledgerPath, "DAEMON-T6403", deps);
+    assert.ok("refused" in result);
+    assert.deepEqual(result.conflictingPaths, ["src/x.ts", "test/x.test.ts"]);
+    assert.match(result.refused, /did not apply/);
+    assert.ok(deps.gitCalls.some((args) => args.slice(2).join(" ") === "revert --abort"));
+    assert.equal(deps.ghCalls.length, 0, "no PR is opened for a revert that did not apply");
+    const unreadable = await openMainRepairRevertPr("o", "r", w.config, revertRequest(), w.ledgerPath, "DAEMON-T6403", revertDeps("diff"));
+    assert.ok("refused" in unreadable && /conflicting paths unreadable/.test(unreadable.conflictingPaths[0]!));
+    await openMainRepairRevertPr("o", "r", w.config, revertRequest(), w.ledgerPath, "DAEMON-T6403", revertDeps("abort"));
+    assert.ok(readFileSync(w.ledgerPath, "utf8").includes("main-repair.revert_abort_failed"));
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("the daemon's repair effects read a PR's state and close a redundant one with a comment", async () => {
+  const w = wiringRoot();
+  try {
+    const calls: string[][] = [];
+    const replies: Record<string, unknown> = {
+      "repos/o/r/pulls/10120": { state: "open", head: { sha: "f1" } },
+      "repos/o/r/pulls/10121": { state: "closed", merged_at: "2026-10-08T12:50:00Z" },
+      "repos/o/r/pulls/10122": { state: "closed", merged_at: null },
+    };
+    const effects = buildMainRepairEffects("o", "r", w.config, w.ledgerPath, "DAEMON-T6403", w.root, () => {}, async (args) => {
+      calls.push(args);
+      return replies[args[args.length - 1]!] ?? {};
+    });
+    assert.deepEqual(await effects.readPr(FIX_PR), { state: "open", headSha: "f1" });
+    assert.deepEqual(await effects.readPr(REVERT_PR), { state: "merged" });
+    assert.deepEqual(await effects.readPr(`https://github.com/o/r/pull/10122`), { state: "closed" });
+    await assert.rejects(Promise.resolve().then(() => effects.readPr("https://github.com/o/r/issues/1")), /not a pull request url/);
+    calls.length = 0;
+    await effects.closePr(FIX_PR, "main is green");
+    assert.deepEqual(calls, [
+      ["api", "-X", "POST", "repos/o/r/issues/10120/comments", "-f", "body=main is green"],
+      ["api", "-X", "PATCH", "repos/o/r/pulls/10120", "-f", "state=closed"],
+    ]);
+    assert.equal(typeof effects.reproduce, "function", "the bisect fallback is wired to W1-T6024's probe");
+  } finally {
+    w.cleanup();
+  }
 });
