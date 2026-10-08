@@ -1123,6 +1123,8 @@ export interface FixOwnerResidue {
   stagedPaths: string[];
   stagedMore: number;
   status: string;
+  /** W1-T5918's name for a staged-only residue with no operation marker. Since W1-T6362 the sweep
+   *  no longer refuses it for a dead owner: it is preserved from the index, then reset and reclaimed. */
   refusal?: "owner_dirty_staged_only_refused";
 }
 
@@ -3175,24 +3177,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               });
             }
             // W1-T5974: staged-only residue on a head the PR has moved past is superseded work --
-            // preserved from the index, then reset and reclaimed. On the PR's CURRENT head it may be
-            // real unfinished work, so W1-T5918's refusal stands, as a head-stamped decline the
-            // FIX_CLAIM_DECLINE_BACKSTOP escalation counts instead of a silent acted:true return.
+            // preserved from the index, then reset and reclaimed.
+            // W1-T6362: the same holds on the PR's CURRENT head. The owner is already proven dead
+            // (decideRegisteredFixOwnerRecovery admits this arm only with the claim and process
+            // census both clear), and the preserve proves the recovery ref reproduces the owner's
+            // exact index tree before anything is reset, so nothing is lost by reclaiming. The old
+            // current-head refusal held the PR's fix lane until FIX_CLAIM_DECLINE_BACKSTOP escalated
+            // it to a human (#10041, #10063, #10066, #10071, #10074). Only a preserve that FAILS
+            // still declines -- by name, head-stamped, so the backstop escalates it once.
             if (residue?.refusal) {
               const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
-              if (!superseded) {
-                return declineClaim({
-                  reason: "registered_worktree_owner",
-                  owner_recovery_reason: residue.refusal,
-                  pr_number: pr.prNumber,
-                  task_id: task.id,
-                  branch: realBranch,
-                  worktree_path: snapshot.path,
-                  local_sha_prefix: localSha.slice(0, 12),
-                  staged_paths: residue.stagedPaths,
-                  staged_more: residue.stagedMore,
-                });
-              }
               try {
                 preservedRecoveryRef = String((registeredOwnerRecovery.preserveStagedResidue ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStagedResidue"))(
                   repoDir,
@@ -3210,20 +3204,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   worktree_path: snapshot.path,
                   local_sha_prefix: localSha.slice(0, 12),
                   staged_paths: residue.stagedPaths,
+                  staged_more: residue.stagedMore,
                   error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
                 });
               }
-              log("sweep.fix.checkout_owner_dirty_preserved", {
-                pr_number: pr.prNumber,
-                task_id: task.id,
-                branch: realBranch,
-                local_sha_prefix: localSha.slice(0, 12),
-                remote_sha_prefix: snapshot.remoteSha?.slice(0, 12),
-                recovery_ref: preservedRecoveryRef.slice(0, 512),
-                staged_only: true,
-                staged_paths: residue.stagedPaths,
-                staged_more: residue.stagedMore,
-              });
+              if (!superseded) {
+                log("sweep.fix.owner_residue_preserved", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  head_sha: pr.headSha,
+                  worktree_path: snapshot.path,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  staged_paths: residue.stagedPaths,
+                  staged_more: residue.stagedMore,
+                  recovery_ref: preservedRecoveryRef.slice(0, 512),
+                  preserved_at: clockFromMillisFn(nowMsImpl).iso(),
+                });
+              } else {
+                log("sweep.fix.checkout_owner_dirty_preserved", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  remote_sha_prefix: snapshot.remoteSha?.slice(0, 12),
+                  recovery_ref: preservedRecoveryRef.slice(0, 512),
+                  staged_only: true,
+                  staged_paths: residue.stagedPaths,
+                  staged_more: residue.stagedMore,
+                });
+              }
             } else if (residue) {
               log("sweep.fix.checkout_owner_residue_discarded", {
                 pr_number: pr.prNumber,
