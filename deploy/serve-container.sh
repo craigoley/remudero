@@ -157,9 +157,6 @@ SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
 SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
 SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}" # docs/operator-guide.md "Serve supervisor"; off = direct launch
-# W1-T6401: an explicit RMD_SERVE_GENS_DIR always wins. Unset, the generations live under the scratch
-# base when the scratch plan below is on (serve's node and tsx loader read from them, and the root
-# disk is IOPS-throttled), else here. A wiped scratch heals: the supervisor re-creates an absent slot.
 SERVE_GENS_DIR_OVERRIDE="${RMD_SERVE_GENS_DIR:-}"
 SERVE_GENS_DIR="${SERVE_GENS_DIR_OVERRIDE:-${HOME:-/root}/rmd-serve-gens}"
 SERVE_GENS_MOUNT_DEST="/home/node/rmd-serve-gens"
@@ -630,13 +627,9 @@ SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; d
 if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
   if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
-    # W1-T6401: the same per-instance base scratch_plan chose (its container tmp is
-    # <base>/containers/<name>/tmp). Listed in SCRATCH_DIRS so scratch_prepare records it for the
-    # boot-time --restore, which re-creates it with the launcher's owner after a deallocate.
     SERVE_SCRATCH_GENS_DIR="${SCRATCH_CONTAINER_TMP%/containers/*/tmp}/serve-gens"
     if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${SERVE_SUPERVISOR}" = "on" ]; then SCRATCH_DIRS+=("${SERVE_SCRATCH_GENS_DIR}"); fi
     if [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
-    # A prepare that fell back dropped every bind; the generations then stay on the state disk too.
     if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then SERVE_GENS_DIR="${SERVE_SCRATCH_GENS_DIR}"; fi
   fi
   echo "serve-container: scratch mounts ${SCRATCH_NOTE}"
