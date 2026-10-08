@@ -2887,10 +2887,281 @@ export interface components {
         /** Each instance's own metrics, or a `reason` when it has no snapshot yet. */
         instances: ({
           instanceId: string;
+          /** Registry/config identity captured in the persisted snapshot; absent on older snapshots, never guessed from ledger rows. */
+          repository?: string;
           metrics?: (AnalyticsViewMetric)[];
           reason?: string;
+          details?: AnalyticsStoredDetails;
         })[];
       };
+    };
+    /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
+    AnalyticsStoredDetails: ({
+      version: "analytics-details-v1";
+      state: "reported";
+      asOf: string;
+      payloadBytes: number;
+      signals: {
+        version: "console-signals-v1";
+        timeSeries: (AnalyticsStoredSeries)[];
+        spend: {
+          cash: AnalyticsStoredCashSpend;
+        };
+        routingTelemetry: AnalyticsStoredRouting;
+      };
+      /** null means usage was not collected; it is not a fabricated zero-cost reading. */
+      usage: (null) | (AnalyticsStoredUsage);
+    }) | ({
+      version: "analytics-details-v1";
+      state: "unavailable";
+      asOf: string | null;
+      reason: string;
+    });
+    AnalyticsStoredSeries: {
+      id: string;
+      name: string;
+      window: string;
+      bucketWidth: string;
+      aggregation: string;
+      coverage?: "observed" | "not-collected";
+      comment?: string;
+      points: ({
+        t: string;
+        value?: number | null;
+        gap?: boolean;
+        note?: string;
+        unpricedRows?: number;
+      })[];
+    };
+    AnalyticsStoredCashSpend: {
+      state: "observed" | "not-collected";
+      unit: "usd";
+      asOf: string | null;
+      coverage: string;
+      reason?: string;
+      windows: ({
+        name: "7d" | "30d";
+        days: number;
+        fromDay: string;
+        toDay: string;
+        usd: number;
+        rows: number;
+        unpricedRows?: number;
+        complete: boolean;
+        reason?: string;
+      })[];
+    };
+    AnalyticsStoredRouting: {
+      version: "routing-v1";
+      evidenceState: "observed" | "not-collected-in-retained-ledger";
+      assignmentsObserved: number;
+      terminalResultsObserved: number;
+      terminalResultsWithoutAssignment: number;
+      assignmentsWithoutTerminalResult: number;
+      buckets: ({
+        provider: string;
+        assignedModel: string;
+        taskType: string;
+        routingRule: string;
+        assignments: number;
+        terminalResults: number;
+        successes: number;
+        failures: number;
+        totalTokens: number;
+        totalDurationMs: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+        fallbackReasons: ({
+          reason: string;
+          count: number;
+        })[];
+      })[];
+      daily: ({
+        day: string;
+        terminalResults: number;
+        totalTokens: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+      })[];
+      stepUps: {
+        total: number;
+        byStep: ({
+          step: "implement.step_up" | "fix.step_up";
+          count: number;
+        })[];
+        byTargetModel: ({
+          model: string;
+          count: number;
+        })[];
+      };
+      preferenceOutcomes: ({
+        preferredProvider: string;
+        selectedProvider: string;
+        selectedModel: string;
+        outcome: "kept" | "bypassed";
+        reason?: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsage: {
+      version: "usage-v1" | "usage-v2";
+      asOf: string | null;
+      coverage: {
+        from: string | null;
+        to: string | null;
+        note: string;
+      };
+      subscriptions: ({
+        provider: string;
+        state: "observed" | "stale" | "not-collected";
+        windows: (AnalyticsStoredUsageWindow)[];
+      })[];
+      cash: {
+        unit: "usd";
+        state: "observed" | "not-collected";
+        coverage: string;
+        windows: ({
+          name: "1h" | "24h" | "today-utc" | "7d" | "30d";
+          usd: number;
+          rows: number;
+          unpricedRows?: number;
+          complete: boolean;
+          reason?: string;
+        })[];
+        byModel24h: ({
+          model: string;
+          usd: number;
+          unpricedRows: number;
+        })[];
+        series: ({
+          hour: string;
+          usd: number;
+          rows: number;
+          unpricedRows: number;
+        })[];
+      };
+      routing: {
+        state: "observed" | "not-collected";
+        assignmentsObserved: number;
+        decisionsObserved: number;
+        recent: (AnalyticsStoredUsageAssignment)[];
+        aggregates: {
+          last24h: AnalyticsStoredUsageAggregate;
+          last7d: AnalyticsStoredUsageAggregate;
+        };
+        experiments: (AnalyticsStoredUsageExperiment)[];
+      };
+    };
+    AnalyticsStoredUsageWindow: {
+      name: string;
+      kind: "5h" | "weekly" | "other";
+      durationMs: number | null;
+      usedPercent: number;
+      remainingPercent: number;
+      limitPercent: number | null;
+      resetsAt: string | null;
+      asOf: string;
+      source: "ledger" | "live-status";
+      state: "observed" | "stale";
+      burn: {
+        lastHourPercent: number | null;
+        last24hPercent: number | null;
+        ratePercentPerHour: number | null;
+      };
+      projectedExhaustionAt: string | null;
+      exhaustsBeforeReset: boolean | null;
+      series: ({
+        hour: string;
+        usedPercent: number;
+        maxUsedPercent: number;
+        samples: number;
+      })[];
+    };
+    AnalyticsStoredUsageAssignment: {
+      id: string;
+      ts: string;
+      runId: string | null;
+      taskId: string | null;
+      lane: string | null;
+      requested: {
+        model: string;
+        effort: string;
+      };
+      selected: {
+        provider: string;
+        model: string;
+        effort: string;
+      };
+      rule: string;
+      ruleSource: "decision" | "legacy-mode";
+      capability: string | null;
+      considered: ({
+        provider: string;
+        model?: string;
+        eligible: boolean;
+        selected: boolean;
+        reason?: string;
+      })[];
+      headroomPercent: Record<string, number | null>;
+      reservePercent: number | null;
+      cashWhileSubscriptionHadRoom: boolean;
+      assignmentsInRun: number;
+      markers: Record<string, string>;
+    };
+    AnalyticsStoredUsageAggregate: {
+      windowHours: number;
+      total: number;
+      cashWhileSubscriptionHadRoom: number;
+      byModel: ({
+        provider: string;
+        model: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byTier: ({
+        tier: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byRule: ({
+        rule: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byProvider: ({
+        provider: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      rows: ({
+        provider: string;
+        model: string;
+        tier: string;
+        rule: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsageExperiment: {
+      trialId?: string;
+      trialArm?: string;
+      reason?: string;
+      reasonFull?: string;
+      reasonState?: "observed" | "not-collected" | "too-large";
+      reasonAsOf?: string;
+      marker: string;
+      value: string;
+      provider: string;
+      model: string;
+      runs: number;
+      assignments: number;
+      terminals: number;
+      successes: number;
+      successRatePercent: number | null;
+      meanAssignmentsPerRun: number;
+      meanDurationMs: number | null;
+      costUsd: number;
+      unpricedTerminals: number;
+      meanCostPerTerminalUsd: number | null;
     };
     /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
     ReadModelStatusView: {
