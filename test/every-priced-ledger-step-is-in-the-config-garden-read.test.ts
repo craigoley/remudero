@@ -106,6 +106,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "machine_judge.withdrawn": A_LANE_RUN_ID,
   "selector-shadow.miss_filed": A_LANE_RUN_ID,
   "selector-shadow.structural_filed": A_LANE_RUN_ID,
+  "flake_incident.filed": A_LANE_RUN_ID, // W1-T6406: the flake-incident gardener's filing, under the garden's own run id
   "plan.shard_repair_opened": A_LANE_RUN_ID,
   "plan.shard_repair_skipped": A_LANE_RUN_ID,
   "test.pass": A_LANE_RUN_ID,
