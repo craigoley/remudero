@@ -9419,9 +9419,9 @@ export function openPrsBehindMain(
       pr.checksState === "green" &&
       pr.reviewState === "success" &&
       pr.isDraft !== true;
-    // W1-T6022: a READY PR (armed, or the `mergeable` row's match) below the gate whose base files were read.
+    // W1-T6022: READY means green checks and review success; an arm alone can still be awaiting CI.
     const readyBelowGate = !staleBlocked && behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold &&
-      baseChangedFilesByPr !== undefined && pr.isDraft !== true && (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+      baseChangedFilesByPr !== undefined && pr.isDraft !== true && checksGreenReviewSuccess(pr);
     if (!staleBlocked && !readyBelowGate && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
     // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
@@ -9552,7 +9552,7 @@ export function queuedBehindMainSkips(
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
  *  set, never a second predicate recomputing the same two facts. ONE PER PASS, OLDEST HEAD FIRST —
  *  updating mints a NEW head and a verdict is input-pinned, so updating the whole stalled set each
- *  pass costs N+(N-1)+…+1 reviews. TWO EXCLUSIONS: a DRAFT, and an IN-FLIGHT HEAD. */
+ *  pass costs N+(N-1)+…+1 reviews. Excludes drafts, in-flight workers and pending checks. */
 export function selectUpdateBranchTarget(
   prs: readonly OpenPrView[],
   now: number,
@@ -9584,6 +9584,9 @@ export function selectUpdateBranchTarget(
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
+    // Let current-head checks finish before an ordinary refresh replaces that head. Red stale-gate
+    // recovery remains eligible; the bounded CI-timeout recovery has its own decision and effect.
+    if (view.checksState === "pending") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
@@ -15913,7 +15916,7 @@ export async function runSweep(
     const readyCandidate = deps.baseChangedFilesByPr !== undefined && refreshPrs.some((pr) => {
       const behindBy = behindMainByPr.get(pr.prNumber) ?? 0;
       return behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold && pr.isDraft !== true &&
-        (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+        checksGreenReviewSuccess(pr);
     });
     const readyFacts: ReadyRefreshFacts = {
       incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&

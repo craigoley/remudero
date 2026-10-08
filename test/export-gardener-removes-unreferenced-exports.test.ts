@@ -20,3 +20,8 @@ test("startCiFrictionGardener is not exported from ci-friction-gardener", async 
   const module = await import("../src/lib/ci-friction-gardener.js");
   assert.equal(Object.hasOwn(module, "startCiFrictionGardener"), false);
 });
+
+test("selectorShadowFullSuiteSize is not exported from selector-shadow-gardener", async () => {
+  const module = await import("../src/lib/selector-shadow-gardener.js");
+  assert.equal(Object.hasOwn(module, "selectorShadowFullSuiteSize"), false);
+});

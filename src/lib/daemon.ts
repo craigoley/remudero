@@ -36,7 +36,7 @@ import type {
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import { runOpportunityIntake, openOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
-import { reconcileOpportunityOutcomes, productionOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
+import { reconcileOpportunityOutcomesAsync, openOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
@@ -913,6 +913,7 @@ export type ReviewAdmissionGate = (() => boolean) & {
 };
 
 export interface DaemonDeps {
+  repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
   idleStarvedSupervised?: boolean;
   /** Complete, readable target-repo PR board count; undefined or throw means unknown, never empty. */
@@ -2654,6 +2655,10 @@ export async function runDaemon(
   // measured 12.5 min on 2026-09-30). `backgroundSweep` is the outstanding `runGatedSweep` call, cleared
   // the moment it returns; each completed pass is queued once and consumed, in order, by the next tick.
   let backgroundSweep: Promise<void> | undefined;
+  let repositoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  let repositoryMaintenanceStopped = false;
+  let repositoryMaintenanceQueueBusy = false;
+  let repositoryMaintenanceLaneCount = () => 0;
   // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
   let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
   let staleSinceMs: number | undefined;
@@ -2950,6 +2955,8 @@ export async function runDaemon(
     pauseReview.reported = 0;
   };
   const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+    repositoryMaintenanceStopped = true;
+    if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
     if (pauseReview.clock) await stopPauseReviewClock();
     prActionPumpRef.stop();
     plainBackfill?.stop();
@@ -3428,6 +3435,31 @@ export async function runDaemon(
     } catch (e) {
       log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
     }
+  };
+
+  let repositoryMaintenancePending = false;
+  const repositoryMaintenanceTick = (): void => {
+    if (!deps.repositoryMaintenance || repositoryMaintenancePending) return;
+    repositoryMaintenancePending = true;
+    // Give admission its turn before even the count-objects survey starts.
+    const work = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+      if (repositoryMaintenanceStopped) return;
+      return deps.repositoryMaintenance!({ queueBusy: repositoryMaintenanceQueueBusy,
+        activeLanes: inFlightReviewCount() + detachedSweepActionCount() + repositoryMaintenanceLaneCount() +
+          (backgroundSweep !== undefined || sweepLiveness.inFlight ? 1 : 0),
+        disk: "unknown",
+      });
+    }).catch((error) => {
+      log("repository_maintenance.fail", { reason: String(error), outcome: "fail" });
+    }).finally(() => { repositoryMaintenancePending = false; });
+    void work;
+  };
+  const scheduleRepositoryMaintenance = (queueBusy: boolean, lanes = () => 0): void => {
+    repositoryMaintenanceQueueBusy = queueBusy;
+    repositoryMaintenanceLaneCount = lanes;
+    if (!deps.repositoryMaintenance || repositoryMaintenanceTimer) return;
+    repositoryMaintenanceTick();
+    repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
   };
 
   for (;;) {
@@ -4284,7 +4316,7 @@ export async function runDaemon(
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
             try {
-              const outcomes = reconcileOpportunityOutcomes(deps.opportunityOutcomes ?? productionOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
+              const outcomes = await reconcileOpportunityOutcomesAsync(deps.opportunityOutcomes ?? await openOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
               log("opportunity_outcomes.reconciled", { outcomes });
             } catch (error) {
               log("opportunity_outcomes.failed", { reason: String(error) });
@@ -4729,6 +4761,7 @@ export async function runDaemon(
     }
 
     if (dispatchSet.length === 0) {
+      scheduleRepositoryMaintenance(false);
       // Unlike drain.ts, where nothing runnable is a terminal stop, the daemon is persistent: new work can
       // land later, so it paces itself with the injected clock and keeps polling.
       await flushLifetimePressure();
@@ -5155,7 +5188,10 @@ export async function runDaemon(
     const lanes = { inFlight: 0 };
     sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
+    const admittedWork = runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
+    scheduleRepositoryMaintenance(true, () => lanes.inFlight);
+    const settled = await admittedWork;
+    repositoryMaintenanceQueueBusy = false;
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.

@@ -184,6 +184,8 @@ import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace }
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenSchedule } from "./lib/garden-registry.js";
+import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -1262,7 +1264,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { activeWorkerProbes, type ObjectReapDeps, type ObjectReapResult, reapGitObjectsAsync } from "./lib/object-reaper.js";
+import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -24973,8 +24975,10 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void): (filingBranch?: string) => string {
-  return (filingBranch) => {
+export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise):
+  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  const mintSync = (filingBranch?: string) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
     // The bridge supplies its actual landing identity, even when this manual command starts from
@@ -24986,6 +24990,31 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     );
     return held.taskId;
   };
+  return Object.assign(mintSync, {
+    async: async (filingBranch: string): Promise<string> => {
+      const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+        "--input-type=module", "--eval",
+        `import { format } from "node:util";
+         const rows = [];
+         console.log = (...args) => rows.push({ say: format(...args) });
+         const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+         try {
+           const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }))(process.argv[2]);
+           process.stdout.write(JSON.stringify({ id, rows }));
+         } catch (error) {
+           process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), rows }));
+         }`, root, filingBranch], { maxBuffer: 1 << 26 });
+      const result = JSON.parse(stdout) as { id: string; error?: string;
+        rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
+      if (stderr) process.stderr.write(stderr);
+      for (const row of result.rows) {
+        if ("say" in row) console.log(row.say);
+        else log?.(row.step, row.fields);
+      }
+      if (result.error !== undefined) throw new Error(result.error);
+      return result.id;
+    },
+  });
 }
 
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string; signatures?: readonly RuleSignature[] } = {}): number {
@@ -35105,6 +35134,42 @@ export const DISK_RECLAIM_DEFAULT_SWEEPS = {
   sweepWorkerHomes: sweepStaleWorkerHomesAsync,
 } as const;
 
+/** One cadence over the canonical and managed object stores; policy is injectable. */
+export async function runRepositoryMaintenanceRung(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  context: MaintenanceContext,
+  policy?: ReturnType<typeof loadDefaultPolicy>["values"]["objectReap"],
+): Promise<void> {
+  const limits = policy ?? loadDefaultPolicy().values.objectReap;
+  const roots = new Set<string>();
+  const reposRoot = join(config.root, "repos");
+  if (existsSync(reposRoot)) {
+    for (const name of readdirSync(reposRoot)) {
+      const repo = join(reposRoot, name);
+      if (existsSync(join(repo, ".git"))) roots.add(repo);
+    }
+  }
+  const daemonRepo = join(config.root, "remudero");
+  if (existsSync(join(daemonRepo, ".git"))) roots.add(daemonRepo);
+  for (const repo of roots) {
+    const state = join(config.root, "state", `repository-maintenance-${createHash("sha256").update(repo).digest("hex").slice(0, 16)}.json`);
+    await runRepositoryMaintenance(repo, state, limits, log, {
+      context: () => {
+        const freeBytes = readDiskFreeBytes(config.root);
+        const inflight = join(config.root, "state", "inflight");
+        const probes = activeWorkerProbes(inflight);
+        const locks = defaultListInflightLocks(inflight);
+        return { ...context,
+          activeLanes: locks.includes("<unreadable>") ? Number.NaN :
+            Math.max(context.activeLanes, activeWorkerCount(), locks.filter((lock) => probes.isInflightLockActive!(lock)).length),
+          disk: freeBytes === undefined ? "unknown" : judgeDiskHeadroom(freeBytes).verdict === "OK" ? "healthy" : "low",
+        };
+      },
+    });
+  }
+}
+
 /**
  * W1-T411 — the disk-reclaim RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
  * `runTaskBody` beside `pruneStaleRuns` and W1-T406's {@link logWorktreeReapBootSurvey}. Three
@@ -35218,107 +35283,8 @@ export async function logDiskReclaimRung(
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
 
-  // W1-T3092 — THE FOURTH SWEEP. Guarded exactly like the three above: a throw here can never
-  // block the dispatch or its siblings. DRY BY DEFAULT behind `objectReap.enabled`, the posture
-  // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
-  // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
-  // outcomes: a survey that reached different probes would describe a decision nobody will make.
-  //
-  // TWO REPOS (operator ruling 2026-10-06): the managed checkout and the daemon's own checkout,
-  // each with its own decision row and refusal streak. The daemon checkout is reaped only where a
-  // git store exists at `<root>/remudero`; a host that keeps it elsewhere has nothing there.
-  let objectsPruned = 0;
-  let objectsWouldPrune = 0;
-  const objectRows: Array<[string, Record<string, unknown>]> = [];
-  try {
-    // W1-T4022: `loadDefaultPolicy()` reads the install's own policy (the seam `runAdhocLaneReapRung`
-    // uses). The prior `loadPolicy(policyPath(config.root))` THREW every tick — the daemon root has no
-    // plan/policy.yaml — and the catch below swallowed it: 0 `objects_declined` rows in four days.
-    let policyBlock: { enabled: boolean };
-    try {
-      policyBlock = deps.objectPolicy?.() ?? loadDefaultPolicy().values.objectReap;
-    } catch (err) {
-      // Logged HERE: an unloadable policy is a different failure than the generic catch below.
-      log("run.disk_reclaim.policy_error", { error: String((err as Error)?.message ?? err) });
-      throw err;
-    }
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
-    // Every OTHER git store under `<root>/repos` is a managed repo too: the console and site
-    // daemons run this rung with their own root and clone into `repos/remudero-console` and
-    // `repos/remudero-site`, which a lone `repos/remudero` never reached.
-    const reposRoot = join(config.root, "repos");
-    const otherManaged = (existsSync(reposRoot) ? readdirSync(reposRoot) : [])
-      .filter((name) => name !== "remudero" && existsSync(join(reposRoot, name, ".git")))
-      .sort();
-    const repos = [
-      {
-        repo: "managed",
-        dir: (deps.objectRepoDir ?? (() => join(reposRoot, "remudero")))(),
-        streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
-      },
-      ...otherManaged.map((name) => ({
-        repo: `managed:${name}`,
-        dir: join(reposRoot, name),
-        streakPath: join(config.root, "state", `object-reap-refusal-streak-${name}.json`),
-      })),
-      ...(existsSync(join(daemonCheckout, ".git"))
-        ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
-        : []),
-    ];
-    for (const { repo, dir, streakPath } of repos) {
-      // AWAITED (2026-10-06): the sync prune held the daemon loop 161 s; this one is bounded and off it.
-      const r = await (deps.reapObjects ?? reapGitObjectsAsync)(dir, inflight, {
-        dryRun: !enabled,
-        // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
-        // falls back to when nothing supplies a counter.
-        ...(deps.objectOpenFileCount ? { openFileCount: deps.objectOpenFileCount } : { openFileCountAsync: defaultOpenFileCountAsync }),
-        streakPath,
-        ownInflightLock: deps.objectOwnInflightLock,
-        ...activeWorkerProbes(inflight),
-      });
-      // An unknown yield adds nothing: the decision row below names it, and a sum cannot.
-      if (r.pruned !== "unknown") objectsPruned += r.pruned;
-      objectsWouldPrune += r.wouldPrune ?? 0;
-      // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
-      // that decides whether arming this rung is worth anything, and it is unreadable unless the
-      // declines are ledgered too, with the CONSECUTIVE REFUSAL streak and when it began (W1-T4022).
-      if (r.refusedBecause !== undefined) {
-        objectRows.push(["run.disk_reclaim.objects_declined", {
-          repo,
-          reason: r.refusedBecause,
-          consecutive_refusals: r.consecutiveRefusals,
-          refusing_since: r.refusingSinceIso,
-          // Named outcomes, never a reading: a handle probe killed at its bound, an unread count.
-          ...(r.handleProbe ? { handle_probe: r.handleProbe } : {}),
-          ...(r.looseBefore === "unknown" ? { loose_before: r.looseBefore } : {}),
-        }]);
-      } else if (r.carriedBy !== undefined) {
-        // WHICH BARRIER CARRIED IT: `quiet` (both held) or `expiry` (the store was busy).
-        objectRows.push(["run.disk_reclaim.objects_decision", {
-          repo,
-          carried_by: r.carriedBy,
-          quiet_shortfall: r.quietShortfall,
-          dry_run: !enabled,
-          loose_before: r.looseBefore,
-          pruned: r.pruned,
-          would_prune: r.wouldPrune,
-          locks_reclaimed: r.locks?.reclaimed,
-          locks_kept: r.locks?.kept,
-          locks_failed: r.locks?.failed,
-          // Armed rows only: a prune killed at its bound is named, never read as a completed one.
-          ...(enabled ? { prune_outcome: r.pruneTimedOutAfterMs !== undefined ? "timed_out" : "completed" } : {}),
-          prune_timed_out_after_ms: r.pruneTimedOutAfterMs,
-        }]);
-      }
-    }
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other three sweeps
-  }
+  const objectsPruned = 0;
+  const objectsWouldPrune = 0;
 
   if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
     log("run.disk_reclaim", {
@@ -35331,7 +35297,6 @@ export async function logDiskReclaimRung(
       objects_would_prune: objectsWouldPrune,
     });
   }
-  for (const [step, fields] of objectRows) log(step, fields);
 
   return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
@@ -36391,7 +36356,7 @@ function* retractGardenBranchSteps(
     o.log(`${o.name}.garden_branch_kept`, { branch: o.branch, reason: `delete failed: ${String((e as Error)?.message ?? e)}` });
     return "kept_delete_failed";
   }
-  o.log(`${o.name}.garden_branch_retracted`, { branch: o.branch });
+  o.log(`${o.name}.garden_head_deleted`, { branch: o.branch });
   return "deleted";
 }
 
@@ -37317,8 +37282,13 @@ export async function daemonCommand(
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
+    daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
+    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: target.isSelf,
+      cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
+      scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -37888,6 +37858,7 @@ export async function daemonCommand(
   });
   const loopTelemetry = startReadPlaneTelemetry();
   try {
+    try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
       plan,
       {
@@ -38294,6 +38265,7 @@ export async function daemonCommand(
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
         sweepOrphans,
+        repositoryMaintenance: (context) => runRepositoryMaintenanceRung(config, log, context, policy.values.objectReap),
         // W1-T530: the per-poll half of the feedback-landing sweep — the SAME options daemonBoot's
         // pass runs with, wired here so an entry captured (or a landing attempt that failed)
         // BETWEEN polls is still found within one cycle; awaited off the loop (W1-T5620).

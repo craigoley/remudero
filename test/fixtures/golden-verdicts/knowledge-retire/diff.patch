@@ -1,17 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -85,0 +86,6 @@
+@@ -91,0 +92,6 @@
 +
-+## Pass 2026-10-07T10:29:54.880Z
++## Pass 2026-10-08T05:37:57.432Z
 +
-+- retire canonical-checkout-lags-by-design: Workers offered it have rarely used it, compared with other learnings.
++- retire rollup-dedupe-by-latest-attempt: Workers offered it have rarely used it, compared with other learnings.
 +
-+Learnings used when offered: 19%. Dangling Why pointers: 1.
-diff --git a/learnings/platform.yaml b/learnings/platform.yaml
---- a/learnings/platform.yaml
-+++ b/learnings/platform.yaml
-@@ -307,1 +307,2 @@
++Learnings used when offered: 21%. Dangling Why pointers: 1.
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -34,1 +34,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire canonical-checkout-lags-by-design
++  # knowledge gardener: retire rollup-dedupe-by-latest-attempt
 +  lifecycle: superseded

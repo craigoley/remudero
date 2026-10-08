@@ -24,36 +24,18 @@ const noSweeps = {
   ratifications: new Map(),
 };
 
-test("W1-T3092: a disabled rung SURVEYS and never prunes", async () => {
-  let sawDryRun: boolean | undefined;
-  const rows: Array<[string, Record<string, unknown>]> = [];
-  const out = await logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
-    ...noSweeps,
-    objectPolicy: () => ({ enabled: false }),
-    reapObjects: ((_r: string, _i: string, d: { dryRun?: boolean }) => {
-      sawDryRun = d.dryRun;
-      return { pruned: 0, wouldPrune: 42, looseBefore: 9000 };
-    }) as never,
-  });
-  assert.equal(sawDryRun, true, "disabled must reach the reaper in dryRun, not skip it entirely");
-  assert.equal(out.objectsPruned, 0, "nothing is removed while off");
-  assert.equal(out.objectsWouldPrune, 42, "but what WOULD be removed is reported");
-  const reclaim = rows.find(([s]) => s === "run.disk_reclaim");
-  assert.equal(reclaim?.[1].objects_would_prune, 42, "and it reaches the ledger, or the survey is unreadable");
-});
-
-test("W1-T3092: an armed rung prunes when quiet — arming is the flag and nothing else", async () => {
-  let sawDryRun: boolean | undefined;
-  const out = await logDiskReclaimRung(cfg(), () => {}, {
-    ...noSweeps,
-    objectPolicy: () => ({ enabled: true }),
-    reapObjects: ((_r: string, _i: string, d: { dryRun?: boolean }) => {
-      sawDryRun = d.dryRun;
-      return { pruned: 9649, looseBefore: 16747 };
-    }) as never,
-  });
-  assert.equal(sawDryRun, false, "armed passes dryRun:false");
-  assert.equal(out.objectsPruned, 9649);
+test("W1-T3116: dispatch never invokes the retired object reaper, regardless of its flag", async () => {
+  for (const enabled of [false, true]) {
+    const rows: string[] = [];
+    const out = await logDiskReclaimRung(cfg(), (step) => rows.push(step), {
+      ...noSweeps,
+      objectPolicy: () => { assert.fail("dispatch must not even load object maintenance policy"); },
+      reapObjects: () => { assert.fail(`dispatch must not survey or reap (flag ${enabled})`); },
+    });
+    assert.equal(out.objectsPruned, 0);
+    assert.equal(out.objectsWouldPrune, 0);
+    assert.deepEqual(rows, []);
+  }
 });
 
 test("W1-T3092: survey and armed share ONE predicate — the survey returns past every refusal", () => {
@@ -99,17 +81,6 @@ test("W1-T3092: a throwing object sweep does not break the rung or its three sib
   });
   assert.equal(out.objectsPruned, 0, "the object sweep degrades to zero");
   assert.equal(out.tempDirsRemoved, 1, "and its SIBLING still ran — the guard is per-sweep, not per-rung");
-});
-
-test("W1-T3092: the decline is ledgered, because 'how often is the fleet quiet' IS the survey result", async () => {
-  const rows: Array<[string, Record<string, unknown>]> = [];
-  await logDiskReclaimRung(cfg(), (s, f) => rows.push([s, f]), {
-    ...noSweeps,
-    objectPolicy: () => ({ enabled: false }),
-    reapObjects: (() => ({ pruned: 0, looseBefore: 9000, refusedBecause: "3 worktree(s) registered" })) as never,
-  });
-  const declined = rows.find(([s]) => s === "run.disk_reclaim.objects_declined");
-  assert.match(String(declined?.[1].reason), /3 worktree\(s\) registered/, "an unledgered decline makes the survey unreadable");
 });
 
 test("W1-T3092: a malformed or absent policy block refuses at LOAD, never defaulting to armed", () => {

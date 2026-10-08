@@ -528,6 +528,7 @@ export interface NeedsMeSection {
 
 export interface StatusBoardModel {
   generatedAt: string;
+  repositoryMaintenance?: RepositoryMaintenanceStatus[];
   liveness: LivenessSection;
   latches: LatchesSection;
   /** W1-T3381: `cadenceMarkerRows` judged against `CADENCE_MARKERS` — the judge's own seat on the
@@ -542,6 +543,39 @@ export interface StatusBoardModel {
   cacheHit: CacheHitSection;
   learningsInjection: LearningsInjectionSection;
   needsMe: NeedsMeSection;
+}
+
+export interface RepositoryMaintenanceStatus {
+  repo: string;
+  outcome: string;
+  reason: string;
+  durationMs?: number;
+  looseBefore?: number;
+  looseAfter?: number;
+  bytesBefore?: number;
+  bytesAfter?: number;
+  nextRetry?: number;
+  lastSuccess?: number;
+  lastFailure?: number;
+  retryPending: boolean;
+  gcLogVerdict: string;
+}
+
+export function repositoryMaintenanceStatus(lines: readonly Record<string, unknown>[]): RepositoryMaintenanceStatus[] {
+  const latest = new Map<string, RepositoryMaintenanceStatus>();
+  for (const row of lines) {
+    if (!String(row.step).startsWith("repository_maintenance.")) continue;
+    const repo = String(row.repo ?? "unknown");
+    latest.set(repo, { repo, outcome: String(row.outcome ?? "unknown"), reason: String(row.reason ?? "unknown"),
+      durationMs: row.duration_ms as number | undefined,
+      looseBefore: row.loose_before as number | undefined, looseAfter: row.loose_after as number | undefined,
+      bytesBefore: row.bytes_before as number | undefined, bytesAfter: row.bytes_after as number | undefined,
+      nextRetry: row.next_retry as number | undefined, lastSuccess: row.last_success as number | undefined,
+      lastFailure: row.last_failure as number | undefined, retryPending: row.retry_pending === true,
+      gcLogVerdict: String(row.gc_log_after ?? row.gc_log_before ?? "unknown"),
+    });
+  }
+  return [...latest.values()];
 }
 
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
@@ -2370,6 +2404,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    repositoryMaintenance: repositoryMaintenanceStatus(lines),
     liveness,
     latches: latchesSection,
     cadence: cadenceSection,
@@ -2866,6 +2901,12 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   // Each block renders into its own array so the presence projection can read what the reader actually sees. The join
   // below reproduces the previous concatenation line for line.
   const blocks: { label: string; section: unknown; rendered: string[] }[] = [
+    ...(model.repositoryMaintenance?.length ? [{ label: "repository maintenance", section: model.repositoryMaintenance,
+      rendered: ["### repository maintenance", ...model.repositoryMaintenance.map((row) =>
+        `${row.repo}: ${row.outcome} — ${row.reason}; gc log ${row.gcLogVerdict}; ` +
+        `loose ${row.looseBefore ?? "unknown"} -> ${row.looseAfter ?? "unknown"}; ` +
+        `duration ${row.durationMs ?? "unknown"}ms; retry ${row.retryPending ? row.nextRetry : "none"}; ` +
+        `last success ${row.lastSuccess ?? "unknown"}; last failure ${row.lastFailure ?? "unknown"}`)] }] : []),
     { label: "liveness", section: model.liveness, rendered: renderLivenessBlock(model.liveness, enabled) },
     { label: "latches", section: model.latches, rendered: renderLatchesBlock(model.latches) },
     { label: "cadence", section: model.cadence, rendered: renderCadenceBlock(model.cadence) },

@@ -20,6 +20,7 @@ import {
   readGardenState,
   runGarden,
   startGarden,
+  isPromiseLike,
   type GardenCheckout,
   type GardenerDeps,
   type GardenPlan as GenericPlan,
@@ -877,6 +878,34 @@ export function appendGardenLog(root: string, at: Date, actions: GardenAction[],
 export interface GardenWorkspace extends GardenCheckout {
   /** Re-run learnings assertions in the workspace (the REFRESH action); returns changed paths. */
   refreshAssertions: () => string[];
+  /** W1-T4927: this gardener's own open knowledge-garden PR, if one is open, with the targets it already acts on. */
+  openGardenPr?: () => OpenGardenPr | undefined;
+  /** W1-T4927: add this pass's changes to the open PR's branch instead of opening another. */
+  updateGardenPr?: (pr: OpenGardenPr, opts: { paths: string[]; title: string; body: string }) => string | undefined | Promise<string | undefined>;
+}
+
+/** An open knowledge-garden PR: its url and the entries it already retires, merges or repairs. */
+export interface OpenGardenPr {
+  url: string;
+  handled: string[];
+}
+
+type LandOpts = { paths: string[]; title: string; body: string };
+
+/** W1-T4927: land into the open gardener PR when there is one, so one retirement never gets two PRs. */
+function reusingOpenPr(deps: GardenerDeps<GardenWorkspace>): GardenerDeps<GardenWorkspace> {
+  const wrap = (ws: GardenWorkspace): GardenWorkspace => {
+    const open = ws.openGardenPr?.();
+    if (!open || !ws.updateGardenPr) return ws;
+    return Object.assign(Object.create(ws) as GardenWorkspace, { land: (o: LandOpts) => ws.updateGardenPr!(open, o) });
+  };
+  return {
+    ...deps,
+    openWorkspace: () => {
+      const ws = deps.openWorkspace() as unknown;
+      return (isPromiseLike(ws) ? ws.then((w) => wrap(w as GardenWorkspace)) : wrap(ws as GardenWorkspace)) as never;
+    },
+  };
 }
 
 /** One acceptance claim of a pass's PR: what it asserts and the proof that executes at its head. */
@@ -1104,9 +1133,13 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       return actions;
     },
     scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs }) }),
-    apply: (ws, plan, card) => {
+    apply: (ws, plan0, card) => {
+      let plan = plan0;
       const learningsDir = resolveRepoLayout(ws.root).learningsDir;
       const before = readPassBefore(ws.root, learningsDir);
+      // W1-T4927: an entry the open gardener PR already handles is not handled again.
+      const handled = new Set(ws.openGardenPr?.()?.handled ?? []);
+      if (handled.size > 0) plan = { ...plan, actions: plan.actions.filter((a) => a.class === "refresh" || !handled.has(a.target)) };
       const applied = applyLearningActions(learningsDir, plan.actions);
       const ruleMerged = applyRuleMergeActions(ws.root, plan.actions);
       const repaired = applyRepairReferenceActions(ws.root, plan.actions);
@@ -1143,11 +1176,11 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
 
 /** One knowledge gardener pass. Returns what it did. */
 export function runGardenPass(deps: GardenerDeps<GardenWorkspace>): { ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard } {
-  const result = runGarden(knowledgeGardenSpec(deps), deps);
+  const result = runGarden(knowledgeGardenSpec(deps), reusingOpenPr(deps));
   return { ...result, scorecard: result.scorecard as unknown as KnowledgeScorecard | undefined };
 }
 
 /** Run knowledge passes on their own timer beside the main loop, never two at once. */
 export function startKnowledgeGardener(deps: GardenerDeps<GardenWorkspace>, intervalMs: number): { stop: () => void } {
-  return startGarden(knowledgeGardenSpec(deps), deps, intervalMs);
+  return startGarden(knowledgeGardenSpec(deps), reusingOpenPr(deps), intervalMs);
 }

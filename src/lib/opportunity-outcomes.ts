@@ -8,7 +8,7 @@ import type { GardenerOverseerPorts, OpportunityMeasurement, productionGardenerO
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { opportunityKey, productionOpportunityIntakePorts, type OpportunityCandidate, type OpportunityIntakePorts, type OpportunityWork } from "./opportunity-intake.js";
+import { opportunityKey, openOpportunityIntakePorts, productionOpportunityIntakePorts, type OpportunityCandidate, type OpportunityIntakePorts, type OpportunityWork } from "./opportunity-intake.js";
 import { loadCreditStore } from "./status.js";
 
 export type { OpportunityWindow, OpportunityMeasurement } from "./gardener-overseer.js";
@@ -39,7 +39,7 @@ export interface OpportunityOutcomePorts {
   readSources: () => OpportunitySource[];
   readEvidence: (source: OpportunitySource) => OpportunityEvidence;
   save: (outcomes: OpportunityOutcome[]) => void;
-  dispose?: () => void;
+  dispose?: () => void | Promise<void>;
 }
 
 function comparable(pair: OpportunityMeasurement["targetedCost"], deployedAt: number, now: number): boolean {
@@ -101,6 +101,15 @@ export function reconcileOpportunityOutcomes(ports: OpportunityOutcomePorts): Op
   } finally { ports.dispose?.(); }
 }
 
+/** The daemon awaits workspace cleanup even when source reading or persistence fails. */
+export async function reconcileOpportunityOutcomesAsync(ports: OpportunityOutcomePorts): Promise<OpportunityOutcome[]> {
+  try {
+    return reconcileOpportunityOutcomes({ ...ports, dispose: undefined });
+  } finally {
+    await ports.dispose?.();
+  }
+}
+
 function readOutcomes(path: string): OpportunityOutcome[] {
   try {
     const rows: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -127,6 +136,14 @@ function matchingTasks(work: OpportunityWork, source: OpportunitySource) {
   const candidate = source.candidate;
   return work.tasks.filter((t) => (t.repo === candidate.repo || t.repo === candidate.repo.split("/")[1]) &&
     (t.origin === candidate.key || t.origin === opportunityKey(candidate) || t.note?.split("\n").includes(`Opportunity-Key: ${opportunityKey(candidate)}`)));
+}
+
+/** Acquire the daemon's asynchronous workspace before using the unchanged outcome evidence fold. */
+export async function openOpportunityOutcomePorts(garden: GardenerDeps,
+  deps: NonNullable<Parameters<typeof productionOpportunityOutcomePorts>[1]> = {},
+): Promise<OpportunityOutcomePorts> {
+  const intake = deps.intake ?? await openOpportunityIntakePorts(garden);
+  return productionOpportunityOutcomePorts(garden, { ...deps, intake });
 }
 
 /** Re-read source and runtime receipts on the admitted intake cadence; never change policy. */

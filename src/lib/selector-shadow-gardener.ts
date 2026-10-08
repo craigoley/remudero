@@ -1,4 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
+import { readdir, readFile, writeFile, rename, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
 
 import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, shadowRecord } from "./affected-suites.js";
@@ -14,6 +17,7 @@ import { loadPlan, loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
 import { machineShardHeaderLines } from "./machine-filing.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
 // PRIMARY CONTROL: the live window one pass reads. Since W1-T5925 the verdict folds every stored
@@ -928,14 +932,66 @@ async function accumulateSelectorShadow(
   };
 }
 
-/** Count test files with the same suffix the full run selects, from this checkout. */
-export function selectorShadowFullSuiteSize(root: string): number {
-  const walk = (dir: string): number => readdirSync(dir, { withFileTypes: true }).reduce((count, entry) => {
-    if (entry.isDirectory()) return count + walk(join(dir, entry.name));
-    return count + Number(entry.isFile() && entry.name.endsWith(".test.ts"));
-  }, 0);
-  return walk(join(root, "test"));
+const execAsync = promisify(execFile);
+const suiteSizes = new Map<string, { tree: string; size: number }>();
+
+export async function selectorShadowFullSuiteSizeAsync(root: string, cachePath?: string): Promise<number> {
+  let tree: string | undefined;
+  try {
+    const io = { log: () => { /* An unpinned checkout uses the uncached async walk below. */ } };
+    const id = await hostWorktreeGitAsync(root, ["rev-parse", "HEAD:test"], io);
+    const dirty = await hostWorktreeGitAsync(root, ["status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--", "test/"], io);
+    if (!dirty.trim()) tree = id.trim();
+  } catch (error) {
+    // Without a readable git identity, count asynchronously and never reuse an unverified size.
+    suiteSizes.delete(root);
+  }
+  let cached = suiteSizes.get(root);
+  if (tree !== undefined && cachePath !== undefined && cached?.tree !== tree) {
+    try {
+      const stored = JSON.parse(await readFile(cachePath, "utf8")) as { root?: string; tree?: string; size?: number };
+      if (stored.root === root && stored.tree === tree && nonnegativeInteger(stored.size)) cached = { tree, size: stored.size };
+    } catch (error) {
+      // A missing or corrupt optional cache establishes no size; recompute from the actual tree.
+      cached = undefined;
+    }
+  }
+  if (tree !== undefined && cached?.tree === tree) return cached.size;
+  const walk = async (dir: string): Promise<number> => {
+    let count = 0;
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      count += entry.isDirectory() ? await walk(join(dir, entry.name))
+        : Number(entry.isFile() && entry.name.endsWith(".test.ts"));
+    }
+    return count;
+  };
+  const size = await walk(join(root, "test"));
+  if (tree !== undefined) {
+    suiteSizes.set(root, { tree, size });
+    if (cachePath !== undefined) {
+      const temporary = `${cachePath}.${process.pid}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ root, tree, size }) + "\n");
+        await rename(temporary, cachePath);
+      } finally { await rm(temporary, { force: true }); }
+    }
+  }
+  else suiteSizes.delete(root);
+  return size;
 }
+
+export async function selectorShadowPlanTasksAsync(repoRoot: string): Promise<SelectorShadowPlanTask[]> {
+  const { stdout } = await execAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+    "--input-type=module", "--eval",
+    `const { selectorShadowPlanTasks } = await import(${JSON.stringify(import.meta.url)});
+     process.stdout.write(JSON.stringify(selectorShadowPlanTasks(process.argv[1])));`, repoRoot],
+    { maxBuffer: 1 << 26 });
+  return JSON.parse(stdout) as SelectorShadowPlanTask[];
+}
+
+export type SelectorShadowTaskIdMinter = ((filingBranch: string) => string | Promise<string>) & {
+  async?: (filingBranch: string) => Promise<string>;
+};
 
 export function selectorShadowMissKey(miss: SelectorShadowMiss): string {
   return `selector-shadow:${miss.headSha}:${miss.selection}:${miss.file}`;
@@ -1145,8 +1201,8 @@ export async function runSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[],
   readChangedPaths: (miss: SelectorShadowMiss) => string[] | Promise<string[]>,
-  mintTaskId: (filingBranch: string) => string,
-  planTasks: () => SelectorShadowPlanTask[] = () => selectorShadowPlanTasks(deps.repoRoot),
+  mintTaskId: SelectorShadowTaskIdMinter,
+  planTasks: () => SelectorShadowPlanTask[] | Promise<SelectorShadowPlanTask[]> = () => selectorShadowPlanTasksAsync(deps.repoRoot),
   isRepaired?: (homeTaskId: string, file: string) => boolean,
   mainFailures?: SelectorShadowMainFailures,
   options: { replay?: SelectorShadowReplay } = {},
@@ -1177,7 +1233,8 @@ export async function runSelectorShadowGardener(
     const reading = selectorShadowReading(run);
     readings.push(reading.kind === "complete" ? { kind: "complete", observation: await attribute(reading.observation) } : reading);
   }
-  const report = selectorShadowWindowReport(readings, selectorShadowFullSuiteSize(deps.repoRoot));
+  const report = selectorShadowWindowReport(readings,
+    await selectorShadowFullSuiteSizeAsync(deps.repoRoot, join(deps.stateDir, "selector-shadow-suite-size.json")));
   // W1-T5925: the verdict folds every stored observation; filing below still reads this window's misses.
   const accumulated = await accumulateSelectorShadow(deps, readings, report, options.replay, attribute);
   deps.log("selector-shadow.report", {
@@ -1203,7 +1260,7 @@ export async function runSelectorShadowGardener(
   const planned = new Map<string, { id: string; retired: boolean; structural: boolean }>();
   const statusOf = new Map<string, string | undefined>();
   if (unseen.length > 0) {
-    for (const task of planTasks()) {
+    for (const task of await planTasks()) {
       statusOf.set(task.id, task.status);
       const file = selectorShadowCauseOf(task.origin);
       if (file === undefined) continue;
@@ -1228,7 +1285,7 @@ export async function runSelectorShadowGardener(
     const workspace = await deps.openWorkspace();
     try {
       if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
-      const taskId = mintTaskId(workspace.branch);
+      const taskId = await (mintTaskId.async ?? mintTaskId)(workspace.branch);
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
       const made = build(taskId);
@@ -1309,9 +1366,9 @@ export function startSelectorShadowGardener(
   deps: GardenerDeps,
   readRuns: () => SelectorShadowRun[] | Promise<SelectorShadowRun[]>,
   readChangedPaths: (miss: SelectorShadowMiss) => string[] | Promise<string[]>,
-  mintTaskId: (filingBranch: string) => string,
+  mintTaskId: SelectorShadowTaskIdMinter,
   intervalMs: number,
-  planTasks?: () => SelectorShadowPlanTask[],
+  planTasks?: () => SelectorShadowPlanTask[] | Promise<SelectorShadowPlanTask[]>,
   isRepaired?: (homeTaskId: string, file: string) => boolean,
 ): { stop: () => void } {
   let running = false;
