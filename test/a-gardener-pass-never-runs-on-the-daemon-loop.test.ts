@@ -232,6 +232,10 @@ function rows() {
 test("an admitted daemon records its gardener inventory while dry runs and telemetry failures preserve authority", async (t) => {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-inventory-home-`));
   const root = join(home, "Remudero"), state = join(root, "state");
+  // Review deliberately masks the checkout's credential-bearing Git config.
+  // Give this fixture a public origin in its own disposable HOME, never weaken
+  // that sandbox or write the shared checkout's config to make admission pass.
+  writeFileSync(join(home, ".gitconfig"), '[remote "origin"]\n\turl = https://github.com/fixture/remudero.git\n');
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(state, { recursive: true });
