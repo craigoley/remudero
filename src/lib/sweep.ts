@@ -9584,6 +9584,9 @@ export function selectUpdateBranchTarget(
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
+    // Let current-head checks finish before an ordinary refresh replaces that head. Red stale-gate
+    // recovery remains eligible; the bounded CI-timeout recovery has its own decision and effect.
+    if (view.checksState === "pending") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
