@@ -321,6 +321,33 @@ test("one lifetime cadence continues while a task lane stays occupied", { timeou
   assert.equal(active, 1);
 });
 
+test("a rejected maintenance callback logs its reason and cadence retries without failing the task", { timeout: 5000 }, async () => {
+  const store = gitRepo({ kind: "maintenance-callback-rejection" });
+  const planPath = join(store.dir, "tasks.yaml");
+  writeFileSync(planPath, "- id: W1-T1\n  title: task\n  repo: remudero\n  type: implement\n  status: queued\n  depends_on: []\n");
+  let release = () => {};
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const failures: Array<Record<string, unknown> | undefined> = [];
+  let ticks = 0;
+  try {
+    const result = await runDaemon(loadPlan(planPath), {
+      refreshMerged: () => () => false, sleep: async () => {},
+      log: (step, fields) => { if (step === "repository_maintenance.fail") failures.push(fields); },
+      runOne: async (taskId) => { await pending; return { taskId, runId: taskId,
+        merged: true, verdict: "merged", costUsd: 0 }; },
+      repositoryMaintenance: async () => {
+        ticks++;
+        if (ticks === 1) throw new Error("maintenance state unavailable");
+        release();
+      },
+    }, { max: 1, pollIntervalMs: 5 });
+    assert.deepEqual(failures, [{ reason: "Error: maintenance state unavailable", outcome: "fail" }]);
+    assert.equal(ticks, 2, "the failed callback must release the cadence's pending guard");
+    assert.deepEqual(result.merged, ["W1-T1"]);
+    assert.equal(result.stopReason, "max_reached");
+  } finally { release(); }
+});
+
 test("default surveys report missing repositories and unreadable markers without healthy zeros", async () => {
   const store = gitRepo({ kind: "maintenance-probe-errors" });
   const missing = await maintenance.surveyRepositoryMaintenance(join(store.dir, "missing"), 0, "healthy", 1000);
