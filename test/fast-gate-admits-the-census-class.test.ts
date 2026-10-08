@@ -74,10 +74,11 @@ test("FAST_GATE_STEPS: exactly seven census entries, each bound at the shared FA
   }
   assert.equal(
     NON_CENSUS_STEPS.length,
-    13,
+    14,
     "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet, the " +
       "comment-load ratchet, W1-T3702's lint-plan gate and the plan-shaped self-path-proof ratchet (a dir-walk suite, " +
-      "so a plain step rather than a census member), plus W1-T4433's tree-derived rule-check runner",
+      "so a plain step rather than a census member), plus W1-T4433's tree-derived rule-check runner, plus " +
+      "W1-T6435's census-precheck (the pre-push hook's own command)",
   );
 });
 
@@ -171,7 +172,7 @@ test("package.json: every census:* script names exactly ONE test file, never the
   }
 });
 
-test("runPreflightFast: mocked end-to-end over all thirteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", () => {
+test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", () => {
   const { spawn, calls } = recordingSpawn();
   runPreflightFast(REPO_ROOT, { spawn, packageJsonText: REAL_PACKAGE_JSON });
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
@@ -182,6 +183,9 @@ test("runPreflightFast: mocked end-to-end over all thirteen FAST_GATE_STEPS, no 
     if (FAST_GATE_STEPS[index]?.runner === "rule-checks") {
       assert.equal(call.file, process.execPath);
       assert.deepEqual(call.args, ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"]);
+    } else if (FAST_GATE_STEPS[index]?.runner === "census-precheck") {
+      assert.equal(call.file, process.execPath);
+      assert.deepEqual(call.args, ["scripts/census-precheck.mjs", "--base", "origin/main"]);
     } else {
       assert.equal(call.file, "npm", "ordinary FAST_GATE_STEPS entries remain npm-script calls");
     }
@@ -307,7 +311,7 @@ test("runPreflightFast: with the census entries removed from `steps`, a spawn th
     const call = calls.find((c) => c.args.includes(step.script));
     assert.equal(call, undefined, `${step.script} must never be spawned once the census steps are removed from the list`);
   }
-  // 13: the 12 existing non-census gates plus the tree-derived rule-check runner.
-  assert.equal(result.steps.length, 13);
+  // 14: the 12 existing non-census gates plus the tree-derived rule-check runner and W1-T6435's census-precheck.
+  assert.equal(result.steps.length, 14);
   assert.equal(result.ok, true, "with every pre-existing step at its default clean PASS and no census step present, the run reads green — the exact blind spot #3304 fell through");
 });
