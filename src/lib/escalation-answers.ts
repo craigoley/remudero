@@ -49,17 +49,24 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { openLedgerUnion } from "./ledger-union.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
+  ghIssueGatewayAsync,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
+  renderIssueBody,
   splitConcatenatedJsonPages,
+  tryEscalateAsync,
+  type AsyncIssueGateway,
+  type Escalation,
   type OpenIssue,
 } from "./escalate.js";
 
@@ -115,6 +122,8 @@ export interface EscalationAnswerGateway {
   readonly ownerLogin?: string;
   /** Explicit human principals from validated config; when present replaces owner inference on both channels. */
   readonly operatorLogins?: readonly string[];
+  /** Refusal alarms use the escalation writer, separate from answer acknowledgements. */
+  readonly refusalIssues?: AsyncIssueGateway;
   /** Acknowledge an ACCEPTED reply with a `+1` reaction — never a posted comment (design iv).
    *  Best-effort: a failed reaction never blocks the answer from landing. */
   reactPlusOne(commentId: number): void;
@@ -161,6 +170,7 @@ export function ghEscalationAnswerGateway(
   return {
     ownerLogin: owner,
     operatorLogins,
+    refusalIssues: ghIssueGatewayAsync(owner, repo, { exec: readText }),
     async listOpen(label) {
       return parseLabelledIssuesRest(await readText(labelledIssuesRestArgs(repoArg, label, "open")));
     },
@@ -305,6 +315,105 @@ export interface EscalationAnswerResult {
   unreadable: number;
 }
 
+interface RefusalHistory {
+  login: string;
+  reason: string;
+  origins: Map<string, { issue: string; passes: Set<string> }>;
+  excluded: Set<string>;
+  alarm?: string;
+}
+
+function observeRefusal(groups: Map<string, RefusalHistory>, row: Record<string, unknown>): void {
+  if (row.step === "panel.question_answered" && typeof row.author_login === "string") {
+    for (const group of groups.values()) {
+      if (group.login !== row.author_login.toLowerCase()) continue;
+      group.excluded = new Set(group.origins.keys());
+      group.alarm = undefined;
+    }
+    return;
+  }
+  const login = row.step === "escalation_answer.refusal_alarm" ? row.login : row.author_login;
+  if (typeof login !== "string" || !/^[a-z\d](?:[a-z\d-]{0,38})$/i.test(login) ||
+      (row.reason !== "not-owner" && row.reason !== "not-configured-operator") ||
+      (typeof row.author_type === "string" && row.author_type.toLowerCase() === "bot")) return;
+  const normalized = login.toLowerCase();
+  const key = `${normalized}:${row.reason}`;
+  const group: RefusalHistory = groups.get(key) ?? { login: normalized, reason: row.reason, origins: new Map(), excluded: new Set() };
+  groups.set(key, group);
+  if (row.step === "escalation_answer.refusal_alarm") {
+    if (row.status === "closed") {
+      group.excluded = new Set(Array.isArray(row.origins) ? row.origins as string[] : group.origins.keys());
+      group.alarm = undefined;
+    } else if (typeof row.issue_url === "string") group.alarm = row.issue_url;
+    return;
+  }
+  if (row.step !== "escalation_answer.ignored" || typeof row.origin !== "string") return;
+  const issueNumber = /^issue#(\d+):comment:\d+$/.exec(row.origin)?.[1];
+  if (!issueNumber) return;
+  const entry = group.origins.get(row.origin) ?? { issue: `issue#${issueNumber}`, passes: new Set<string>() };
+  if (typeof row.issue_url === "string") entry.issue = row.issue_url;
+  const pass = row.pass_id ?? row.run_id;
+  if (typeof pass === "string") entry.passes.add(pass);
+  group.origins.set(row.origin, entry);
+}
+
+async function raiseRefusalAlarms(
+  history: Record<string, unknown>[], current: Record<string, unknown>[],
+  issues: AsyncIssueGateway, deps: LedgerWriterDeps, runId: string,
+): Promise<number> {
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  const groups = new Map<string, RefusalHistory>();
+  for (const row of history.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))) observeRefusal(groups, row);
+  const active = [...groups.values()].filter(group => group.alarm !== undefined);
+  let open: OpenIssue[] = [];
+  if (groups.size > 0 || current.some(row => row.step === "escalation_answer.ignored" && row.reason !== "bot")) {
+    try {
+      if (!issues.listOpen) throw new Error("refusal alarm gateway cannot read open issues");
+      open = await issues.listOpen("needs-human");
+      for (const group of active) {
+        if (open.some(issue => issue.url === group.alarm)) continue;
+        const row = { step: "escalation_answer.refusal_alarm", run_id: runId, task_id: `ESCALATION-ANSWERS:${group.login}`, login: group.login,
+          reason: group.reason, comments: group.origins.size, issue_url: group.alarm,
+          status: "closed", origins: [...group.origins.keys()] };
+        writeLedger(deps.ledgerPath, row);
+        observeRefusal(groups, row);
+      }
+    } catch (error) {
+      writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
+        reason: String((error as Error).message ?? error) });
+      return 1;
+    }
+  }
+  for (const row of current) observeRefusal(groups, row);
+  for (const group of groups.values()) {
+    if (group.alarm !== undefined) continue;
+    const comments = [...group.origins].filter(([origin]) => !group.excluded.has(origin));
+    const passes = new Set(comments.flatMap(([, entry]) => [...entry.passes]));
+    if (comments.length < 3 && passes.size < 2) continue;
+    const recommendation = "configure the human operator";
+    const alarm: Escalation = {
+      class: "MANUAL", taskId: `ESCALATION-ANSWERS:${group.login}`, runId,
+      summary: `answers from ${group.login} keep being ignored`,
+      detail: `${group.login} was refused on ${comments.length} distinct comments (${group.reason}).\n` +
+        `Issues commented on: ${[...new Set(comments.map(([, entry]) => entry.issue))].join(", ")}.\n` +
+        "To admit this human, set operatorGithubLogins in config.json. Without a configured list, " +
+        "the repository-owner rule accepts only a non-bot OWNER comment. Verify the login before configuring it.",
+      options: [{ label: recommendation, detail: "Verify the login and add it to operatorGithubLogins in config.json." },
+        { label: "keep refusing this login", detail: "Leave the authority configuration unchanged and close this alarm." }],
+      recommendation,
+      consequence: "These replies will remain ignored and the questions they answer will remain unanswered.",
+    };
+    const issueUrl = await tryEscalateAsync(alarm, { issues: { ...issues, listOpen: () => open }, ledgerPath: deps.ledgerPath, runId });
+    if (issueUrl !== null) {
+      writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm", run_id: runId, task_id: alarm.taskId,
+        login: group.login, reason: group.reason, comments: comments.length, issue_url: issueUrl });
+      if (!open.some(issue => issue.url === issueUrl)) open.push({ number: Number(issueUrl.split("/").at(-1)),
+        url: issueUrl, title: `[${alarm.class}] ${alarm.taskId}: ${alarm.summary}`, body: renderIssueBody(alarm) });
+    }
+  }
+  return 0;
+}
+
 /**
  * Poll every OPEN needs-question issue for a NEW repository-owner reply, and land each accepted
  * one in `plan/questions.ndjson` — the exact store {@link "./worker.js".appendQuestionAnswer}
@@ -319,7 +428,12 @@ export async function readEscalationAnswers(
   deps: LedgerWriterDeps,
   clock: Clock = systemClock,
 ): Promise<EscalationAnswerResult> {
-  const writeLedger = deps.writeLedger ?? appendLedger;
+  const current: Record<string, unknown>[] = [];
+  const writeLedger: typeof appendLedger = (path, row) => {
+    current.push(row);
+    (deps.writeLedger ?? appendLedger)(path, row);
+  };
+  const passId = randomUUID();
   let accepted = 0;
   let ignored = 0;
   let unreadable = 0;
@@ -328,6 +442,20 @@ export async function readEscalationAnswers(
     issues = await gateway.listOpen(NEEDS_QUESTION_LABEL);
   } catch {
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
+  }
+  const history: Record<string, unknown>[] = [];
+  let historyReadable = true;
+  if (gateway.refusalIssues) {
+    for await (const row of openLedgerUnion(dirname(deps.ledgerPath), {
+      step: ["escalation_answer.ignored", "escalation_answer.refusal_alarm", "panel.question_answered"],
+      onUnreadArchive: () => { historyReadable = false; },
+      onUnreadLive: () => { historyReadable = false; },
+    })) history.push(row);
+    if (!historyReadable) {
+      unreadable++;
+      writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
+        reason: "unreadable ledger history" });
+    }
   }
   const recordedOrigins = recordedQuestionStoreOrigins(root);
   /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
@@ -371,6 +499,9 @@ export async function readEscalationAnswers(
           origin,
           author_association: comment.authorAssociation,
           author_login: comment.authorLogin,
+          author_type: comment.authorType,
+          issue_url: issue.url,
+          pass_id: passId,
           reason: refusal,
         });
         continue;
@@ -407,6 +538,9 @@ export async function readEscalationAnswers(
         // best-effort acknowledgement — a failed reaction never un-lands the answer.
       }
     }
+  }
+  if (gateway.refusalIssues && historyReadable) {
+    unreadable += await raiseRefusalAlarms(history, current, gateway.refusalIssues, deps, runId);
   }
   return { accepted, ignored, unreadable };
 }
