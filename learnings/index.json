@@ -84,6 +84,7 @@
         "hand-review-collides-with-the-daemon",
         "inherited-violation-not-authors",
         "lease-is-not-a-supersession-guard",
+        "light-gates-pre-push-ratchets",
         "lint-plan-refuses-before-pr",
         "required-check-poster",
         "rerun-the-job-not-the-run",
@@ -101,6 +102,8 @@
         "scripts/comment-load-ratchet.mjs",
         "scripts/diff-coverage.mjs",
         "scripts/lib/inherited-violation.mjs",
+        "scripts/source-size-baseline.json",
+        "scripts/source-size-ratchet.mjs",
         "src/lib/board-projection.ts",
         "src/lib/git-push.ts",
         "src/lib/ledger-projector.ts",
@@ -111,7 +114,8 @@
         "src/lib/review.ts",
         "src/lib/status.ts",
         "src/lib/sweep.ts",
-        "src/run-task.ts"
+        "src/run-task.ts",
+        "test/**"
       ],
       "symbols": [],
       "error_signatures": []
