@@ -98,7 +98,7 @@ test("unit test: the shipped sweep waits on running checks then refreshes the sa
     updateBranch: (candidate) => { updates.push(candidate); return "updated"; },
   };
   await runSweep([target], deps, POLICY);
-  assert.deepEqual(updates, []);
+  assert.equal(updates.length, 0);
   assert.equal(JSON.stringify(target), before);
   assert.equal(rows.some((row) => row.step === "sweep.update_branch.attempted"), false);
   assert.ok(rows.some((row) => String(row.reason).includes("checks pending")), "the existing decision row reports why work waits");
