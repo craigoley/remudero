@@ -6387,6 +6387,34 @@ function defaultBranchIsLiveUpstream(branch: string, repoDir: string): boolean {
  * HOW an entry is removed lives in {@link planWorktreeRemoval}; a bare `rmSync` here is what stranded records as `prunable`
  * on 2026-07-31 (W1-T175). */
 export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): WorktreeReapSummary {
+  const pass = worktreeReapPass(root, opts);
+  let next = pass.next();
+  while (!next.done) {
+    opts.onCandidate?.(next.value);
+    next = pass.next();
+  }
+  return next.value;
+}
+
+export type AsyncWorktreeReapOpts = Omit<WorktreeReapOpts, "onCandidate"> & {
+  onCandidate?: (path: string) => void | Promise<void>;
+};
+
+/** Same gates and removals as the synchronous reaper, awaiting observation before removal. */
+export async function reapStaleWorktreesAsync(root: string, opts: AsyncWorktreeReapOpts = {}): Promise<WorktreeReapSummary> {
+  const pass = worktreeReapPass(root, opts);
+  let next = pass.next();
+  while (!next.done) {
+    await opts.onCandidate?.(next.value);
+    next = pass.next();
+  }
+  return next.value;
+}
+
+function* worktreeReapPass(
+  root: string,
+  opts: Omit<WorktreeReapOpts, "onCandidate">,
+): Generator<string, WorktreeReapSummary> {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKTREE_REAP_GRACE_MS;
   const now = opts.now ?? (() => Date.now());
@@ -6426,7 +6454,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       continue; // vanished between readdir and stat — someone else's cleanup won the race
     }
     if (!isDir) continue;
-    opts.onCandidate?.(entryPath);
+    yield entryPath;
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {
@@ -6561,8 +6589,13 @@ function mergeWorktreeReapSummaries(summaries: readonly WorktreeReapSummary[]): 
   };
 }
 
-function laneSizeBytes(path: string): number {
-  const out = execFileSync("du", ["-sk", path], { encoding: "utf8", stdio: "pipe" });
+async function laneSizeBytes(path: string): Promise<number> {
+  const out = await new Promise<string>((resolve, reject) => {
+    execFile("du", ["-sk", path], { encoding: "utf8" }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
   const kilobytes = out.trim().split(/\s+/)[0];
   const bytes = Number(kilobytes) * 1024;
   if (!kilobytes || !Number.isFinite(bytes) || bytes < 0) throw new Error(`invalid disk usage for ${path}: ${out}`);
@@ -6601,12 +6634,12 @@ function laneWorkKeepReason(config: Config, path: string, branch?: string): Work
 
 /** Survey-first lane reap with one census per pass (W1-T4065). Removal stays in reapStaleWorktrees;
  * disk pressure changes only the age gate, never the live-work or undecidable gates. */
-export function runAdhocLaneReapRung(
+export async function runAdhocLaneReapRung(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
     root?: () => string;
-    reap?: typeof reapStaleWorktrees;
+    reap?: (root: string, opts: AsyncWorktreeReapOpts) => WorktreeReapSummary | Promise<WorktreeReapSummary>;
     /** Survey-only while this reads false — the shipped default. See the doc above. */
     enabled?: () => boolean;
     maxAgeMs?: number;
@@ -6616,9 +6649,9 @@ export function runAdhocLaneReapRung(
     repoDir?: string;
     listUnmanaged?: typeof unmanagedWorktreeLanes;
     diskHeadroom?: (path: string) => { freeBytes?: number; totalBytes?: number };
-    sizeBytes?: (path: string) => number | undefined;
+    sizeBytes?: (path: string) => number | undefined | Promise<number | undefined>;
   } = {},
-): WorktreeReapSummary | null {
+): Promise<WorktreeReapSummary | null> {
   const summaries: WorktreeReapSummary[] = [];
   const sizes = new Map<string, number | undefined>();
   let root = "";
@@ -6628,7 +6661,7 @@ export function runAdhocLaneReapRung(
   let error: string | undefined;
   try {
     enabled = (deps.enabled ?? (() => false))();
-    const reap = deps.reap ?? reapStaleWorktrees;
+    const reap = deps.reap ?? reapStaleWorktreesAsync;
     root = (deps.root ?? (() => adhocLaneRoot(config)))();
     try {
       const disk = (deps.diskHeadroom ?? ((path: string) => {
@@ -6651,9 +6684,11 @@ export function runAdhocLaneReapRung(
         error = String(e);
         log("adhoc_lane.reap.enumeration_error", { root, error });
       },
-      onCandidate: (path: string): void => {
+      // Sequential observation bounds sizing to one child; cache known and unknown sizes per pass.
+      onCandidate: async (path: string): Promise<void> => {
+        if (sizes.has(path)) return;
         try {
-          const bytes = (deps.sizeBytes ?? laneSizeBytes)(path);
+          const bytes = await (deps.sizeBytes ?? laneSizeBytes)(path);
           sizes.set(path, bytes !== undefined && Number.isFinite(bytes) && bytes >= 0 ? bytes : undefined);
         } catch (e) {
           sizes.set(path, undefined);
@@ -6669,7 +6704,7 @@ export function runAdhocLaneReapRung(
         }
       },
     };
-    const rootSummary = reap(root, baseOpts);
+    const rootSummary = await reap(root, baseOpts);
     summaries.push(rootSummary);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
@@ -6688,7 +6723,7 @@ export function runAdhocLaneReapRung(
     if (deps.repoDir !== undefined) {
       const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
       if (unmanaged.length) {
-        const unmanagedSummary = reap(root, { ...baseOpts, candidatePaths: unmanaged });
+        const unmanagedSummary = await reap(root, { ...baseOpts, candidatePaths: unmanaged });
         summaries.push(unmanagedSummary);
         log("adhoc_lane.unmanaged", {
           count: unmanaged.length,

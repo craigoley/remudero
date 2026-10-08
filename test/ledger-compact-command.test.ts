@@ -95,6 +95,7 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
   // The 08-01 source is stamped six hours after its row, so its day output takes a NEW name.
   const memory = memoryFs({
     [join(STATE_DIR, compactedArchiveName("2026-08-01T06:00:00.000Z"))]: gzipRows([a]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T12:00:00.000Z"))]: gzipRows([a]),
     [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([a, b]),
     [join(STATE_DIR, compactedArchiveName("2026-09-09T00:00:00.000Z"))]: gzipRows([recent]),
   });
@@ -105,16 +106,16 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
   assert.equal(result.code, 0);
   assert.deepEqual(corpusRows(memory.files), before, "apply must preserve every distinct row");
   assert.equal(memory.writes.length, 2, "one atomic replacement per day of rows is written");
-  assert.equal(memory.removals.length, 1, "the non-colliding source is removed after replacement");
+  assert.equal(memory.removals.length, 2, "the non-colliding sources are removed after replacement");
   assert.deepEqual(JSON.parse(result.out[0]!), {
     mode: "apply",
     olderThanDays: 7,
     maxSources: 50,
-    eligibleCount: 2,
+    eligibleCount: 3,
     unparseableAgeCount: 0,
-    sourceCount: 2,
+    sourceCount: 3,
     rowsWritten: 2,
-    duplicatesCollapsed: 1,
+    duplicatesCollapsed: 2,
     archiveName: compactedArchiveName("2026-08-02T00:00:00.000Z"),
     archiveNames: [compactedArchiveName("2026-08-01T00:00:00.000Z"), compactedArchiveName("2026-08-02T00:00:00.000Z")],
   });
@@ -122,10 +123,10 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
 
 test("ledger-compact dry-run reports the apply counts and mutates nothing", () => {
   const a = row("2026-08-01T00:00:00.000Z", "R1");
-  const b = row("2026-08-02T00:00:00.000Z", "R2");
+  const b = row("2026-08-01T01:00:00.000Z", "R2");
   const initial = {
     [join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"))]: gzipRows([a]),
-    [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([a, b]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows([a, b]),
   };
   const applyMemory = memoryFs(initial);
   const dryMemory = memoryFs(initial);
@@ -144,6 +145,9 @@ test("ledger-compact dry-run reports the apply counts and mutates nothing", () =
   assert.equal(applyMode, "apply");
   assert.equal(dryMode, "dry-run");
   assert.deepEqual(dryCounts, applyCounts);
+  assert.equal(applyCounts.sourceCount, 2);
+  assert.equal(applyCounts.archiveNames.length, 1);
+  assert.equal(applyMemory.writes.length, 1);
 });
 
 test("ledger-compact previews and applies a copied fixture through real gzip and atomic filesystem I/O", (t) => {
@@ -154,6 +158,7 @@ test("ledger-compact previews and applies a copied fixture through real gzip and
   const first = compactedArchiveName("2026-08-01T00:00:00.000Z").replace(/\.gz$/, "");
   const second = compactedArchiveName("2026-08-02T00:00:00.000Z");
   writeFileSync(join(stateDir, first), `${a}\n`);
+  writeFileSync(join(stateDir, compactedArchiveName("2026-08-01T12:00:00.000Z")), gzipRows([a]));
   writeFileSync(join(stateDir, second), gzipRows([a, b]));
   writeFileSync(join(stateDir, "ledger.ndjson"), `${row("2026-09-10T00:00:00.000Z", "LIVE")}\n`);
   const before = readdirSync(stateDir)
@@ -188,6 +193,8 @@ test("ledger-compact previews and applies a copied fixture through real gzip and
   assert.equal(dryMode, "dry-run");
   assert.equal(applyMode, "apply");
   assert.deepEqual(dryCounts, applyCounts);
+  assert.equal(applyCounts.sourceCount, 3);
+  assert.equal(applyCounts.archiveNames.length, 2);
   const replacement = [compactedArchiveName("2026-08-01T00:00:00.000Z"), second].flatMap((name) =>
     gunzipSync(readFileSync(join(stateDir, name))).toString("utf8").trim().split("\n"));
   assert.deepEqual(new Set(replacement), new Set([a, b]));
@@ -196,7 +203,10 @@ test("ledger-compact previews and applies a copied fixture through real gzip and
 
 test("ledger-compact gives an all-torn corpus the same deterministic name in preview and apply", () => {
   const name = compactedArchiveName("2026-08-01T00:00:00.000Z");
-  const initial = { [join(STATE_DIR, name)]: gzipRows(["torn-row-without-a-timestamp"]) };
+  const initial = {
+    [join(STATE_DIR, name)]: gzipRows(["torn-row-without-a-timestamp"]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows(["torn-row-without-a-timestamp"]),
+  };
   const applyMemory = memoryFs(initial);
   const dryMemory = memoryFs(initial);
 
@@ -207,6 +217,8 @@ test("ledger-compact gives an all-torn corpus the same deterministic name in pre
   assert.equal(dry.code, 0);
   assert.equal(JSON.parse(applied.out[0]!).archiveName, compactedArchiveName(NOW.toISOString()));
   assert.equal(JSON.parse(dry.out[0]!).archiveName, JSON.parse(applied.out[0]!).archiveName);
+  assert.equal(JSON.parse(applied.out[0]!).sourceCount, 2);
+  assert.deepEqual(corpusRows(applyMemory.files), new Set(["torn-row-without-a-timestamp"]));
 });
 
 test("ledger-compact caps one invocation at the 50 oldest eligible sources", () => {
@@ -268,11 +280,12 @@ test("ledger-compact refuses an output collision with an unselected archive befo
   const collidingName = compactedArchiveName("2026-09-01T00:00:00.000Z");
   const memory = memoryFs({
     [join(STATE_DIR, selectedName)]: gzipRows([row("2026-09-01T00:00:00.000Z", "FROM-OLD-FILE")]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows([row("2026-09-01T00:00:00.000Z", "FROM-SECOND-OLD-FILE")]),
     [join(STATE_DIR, collidingName)]: gzipRows([row("2026-09-01T00:00:00.000Z", "UNSELECTED")]),
   });
   const before = snapshot(memory.files);
 
-  const result = command(["--max-sources", "1"], memory);
+  const result = command(["--max-sources", "2"], memory);
 
   assert.equal(result.code, 1);
   assert.match(result.errors.join("\n"), /refusing to overwrite unselected archive/);
@@ -350,7 +363,10 @@ test("ledger-compact names a selected-source read failure without writing or rem
 
 test("ledger-compact preserves every source when the atomic replacement withdraws", () => {
   const name = compactedArchiveName("2026-08-01T00:00:00.000Z");
-  const memory = memoryFs({ [join(STATE_DIR, name)]: gzipRows([row("2026-08-01T00:00:00.000Z", "R")]) });
+  const memory = memoryFs({
+    [join(STATE_DIR, name)]: gzipRows([row("2026-08-01T00:00:00.000Z", "R")]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows([row("2026-08-01T01:00:00.000Z", "R2")]),
+  });
   const before = snapshot(memory.files);
   memory.fs.writeAtomic = () => false;
 
@@ -411,11 +427,11 @@ const topLevelRows = (files: Map<string, Buffer>) =>
 
 test("ledger-compact moves a merged source into cold storage instead of deleting it", () => {
   const a = row("2026-08-01T00:00:00.000Z", "R1");
-  const b = row("2026-08-02T00:00:00.000Z", "R2");
+  const b = row("2026-08-01T12:00:00.000Z", "R2");
   const older = join(STATE_DIR, compactedArchiveName("2026-08-01T06:00:00.000Z"));
   const memory = coldMemoryFs({
     [older]: gzipRows([a]),
-    [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([a, b]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T12:00:00.000Z"))]: gzipRows([a, b]),
   });
   const before = corpusRows(memory.files);
 
@@ -432,7 +448,7 @@ test("ledger-compact deletes a cold-stored source only after its retention lapse
   const memory = coldMemoryFs(
     {
       [join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"))]: gzipRows([row("2026-08-01T00:00:00.000Z", "R1")]),
-      [join(STATE_DIR, compactedArchiveName("2026-08-02T00:00:00.000Z"))]: gzipRows([row("2026-08-02T00:00:00.000Z", "R2")]),
+      [join(STATE_DIR, compactedArchiveName("2026-08-01T12:00:00.000Z"))]: gzipRows([row("2026-08-01T12:00:00.000Z", "R2")]),
       [stale]: gzipRows([row("2026-07-01T00:00:00.000Z", "OLD")]),
       [young]: gzipRows([row("2026-09-05T00:00:00.000Z", "YOUNG")]),
     },

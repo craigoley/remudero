@@ -75,7 +75,9 @@ fi`);
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
     return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean);
   };
-  return { state, snapshot, ledger, put, advance, tick };
+  const installEdgeHeal = () => executable(join(state, "daemon-install", "deploy", "edge-heal.sh"),
+    'echo "edge-heal state=$RMD_STATE_DIR" >> "$FIXTURE/calls"; exit "$(cat "$FIXTURE/edge-exit")"');
+  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal };
 }
 
 function fullTick(calls: string[]) {
@@ -98,6 +100,26 @@ test("W1-T6361: an unchanged tick skips the checkout walk", (t) => {
     assert.deepEqual(calls.filter((line) => /^(rmd |units |docker top)/.test(line)), []);
     assert.ok(calls.some((line) => line.startsWith(`docker inspect daemon-${instance} `)));
     assert.match(readFileSync(h.snapshot, "utf8"), /\|PROGRESSING\|[0-9]+\|1\n$/);
+  }
+});
+
+test("an unchanged core tick still heals the edge without checkout or node work", (t) => {
+  const h = host(t);
+  h.put("edge-exit", "0");
+  h.installEdgeHeal();
+  h.advance();
+  const initial = h.tick();
+  fullTick(initial);
+  assert.deepEqual(initial.filter((line) => line.startsWith("edge-heal ")), [`edge-heal state=${h.state}`]);
+  for (const exit of ["0", "1"]) {
+    h.put("edge-exit", exit);
+    h.advance();
+    const calls = h.tick();
+    assert.deepEqual(calls.filter((line) => line.startsWith("edge-heal ")), [`edge-heal state=${h.state}`]);
+    assert.deepEqual(calls.filter((line) => line.startsWith("git ")), [
+      "git daemon-install ls-remote --exit-code origin refs/heads/main", "git daemon-install rev-parse HEAD",
+    ]);
+    assert.deepEqual(calls.filter((line) => /^(rmd |units |docker top)/.test(line)), []);
   }
 });
 

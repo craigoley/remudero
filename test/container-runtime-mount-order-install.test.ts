@@ -352,3 +352,225 @@ test("W1-T2856 (mutation): removing the state-directory dependency reproduces th
   assert.doesNotMatch(check.output, /MISSING from containerd\.service/, "containerd's own requirement is unaffected by the mutation");
   assert.ok(!check.output.includes(`- docker.service: ${DOCKER_ROOT}\n`), "the Docker root must still be reported present, not missing");
 });
+
+// ── RMD_RUNTIME_ON_SCRATCH=1 (2026-10-08): containerd's root becomes a systemd bind-mount unit from
+// /mnt/scratch and docker's data-root moves there, behind guards that refuse an unmounted scratch.
+// THE TRAP these tests pin: an fstab bind runs in local-fs, BEFORE rmd-scratch.service mounts the
+// NVMe, so it would bind an empty OS-disk directory and containerd would pull images onto `/`.
+
+const MOUNT_UNIT = "var-lib-containerd.mount";
+const GUARD_FILENAME = "15-remudero-scratch-runtime.conf";
+const FSTAB_BIND = "/mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0";
+
+interface ScratchFixture extends Fixture {
+  unitDir: string;
+  scratchRoot: string;
+  fstab: string;
+  daemonJson: string;
+  mountinfo: string;
+}
+
+/** A host mid-window: /mnt/scratch mounted with the containerd copy on it, the fstab bind already
+ * commented out, daemon.json pointed at the scratch root. The systemctl stub additionally answers
+ * ExecStartPre/ExecStartPost (every matching row of the unit's fixture drop-ins), a mount unit's
+ * What/FragmentPath (from the fixture unit dir) and ActiveState ($RMD_TEST_MOUNT_STATE), and
+ * rmd-scratch.service's Type ($RMD_TEST_SCRATCH_TYPE). */
+function makeScratchFixture(): ScratchFixture {
+  const fx = makeFixture();
+  const unitDir = join(fx.fixtureDir, "system");
+  const scratchRoot = join(fx.fixtureDir, "scratch");
+  const fstab = join(fx.fixtureDir, "fstab");
+  const daemonJson = join(fx.fixtureDir, "daemon.json");
+  const mountinfo = join(fx.fixtureDir, "mountinfo");
+  mkdirSync(unitDir);
+  mkdirSync(join(scratchRoot, "containerd"), { recursive: true });
+  writeFileSync(fstab, `UUID=abc / ext4 defaults 0 1\n# ${FSTAB_BIND}\n`);
+  writeFileSync(daemonJson, `{\n  "data-root": "${scratchRoot}/docker"\n}\n`);
+  writeFileSync(
+    mountinfo,
+    [`29 1 259:1 / ${scratchRoot} rw,relatime - ext4 /dev/nvme0n1 rw`, `31 1 259:1 /containerd ${CONTAINERD_ROOT} rw,relatime - ext4 /dev/nvme0n1 rw`, ""].join("\n"),
+  );
+  writeFileSync(fx.mountsFile, `${readFileSync(fx.mountsFile, "utf8")}/dev/nvme0n1 ${scratchRoot} ext4 rw 0 0\n`);
+  writeFileSync(
+    join(fx.binDir, "systemctl"),
+    [
+      "#!/usr/bin/env bash",
+      'printf "systemctl" >> "$RMD_TEST_SYSTEMCTL_CALLS"',
+      'for arg in "$@"; do printf "\\t%s" "$arg" >> "$RMD_TEST_SYSTEMCTL_CALLS"; done',
+      'printf "\\n" >> "$RMD_TEST_SYSTEMCTL_CALLS"',
+      'case "$1" in',
+      "  daemon-reload) exit 0 ;;",
+      "  show) ;;",
+      "  *) exit 1 ;;",
+      "esac",
+      'unit="$2"; prop="${3#--property=}"',
+      'case "$unit" in',
+      "  *.mount)",
+      '    f="$RMD_SYSTEMD_UNIT_DIR/$unit"',
+      '    case "$prop" in',
+      '      ActiveState) echo "ActiveState=${RMD_TEST_MOUNT_STATE:-inactive}" ;;',
+      '      FragmentPath) if [ -f "$f" ]; then echo "FragmentPath=$f"; else echo "FragmentPath="; fi ;;',
+      "      *) echo \"$prop=$(grep -m1 \"^$prop=\" \"$f\" 2>/dev/null | cut -d= -f2-)\" ;;",
+      "    esac",
+      "    exit 0 ;;",
+      '  rmd-scratch.service) dir="$RMD_SYSTEMD_UNIT_DIR/rmd-scratch.service.d" ;;',
+      '  docker.service) dir="$RMD_TEST_DOCKER_DROPIN_DIR" ;;',
+      '  containerd.service) dir="$RMD_TEST_CONTAINERD_DROPIN_DIR" ;;',
+      "  *) exit 1 ;;",
+      "esac",
+      'if [ "$prop" = "Type" ]; then echo "Type=${RMD_TEST_SCRATCH_TYPE:-oneshot}"; exit 0; fi',
+      'vals=""',
+      "shopt -s nullglob",
+      'for f in "$dir"/*.conf; do',
+      '  while IFS= read -r line; do vals="$vals ${line#"$prop="}"; done < <(grep "^$prop=" "$f" || true)',
+      "done",
+      'printf "%s=%s\\n" "$prop" "$(echo "$vals" | xargs -0 | sed "s/^ *//")"',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { ...fx, unitDir, scratchRoot, fstab, daemonJson, mountinfo };
+}
+
+function runScratch(fx: ScratchFixture, args: string[], env: Record<string, string | undefined> = {}): ScriptRun {
+  return run(fx, args, {
+    RMD_RUNTIME_ON_SCRATCH: "1",
+    RMD_SCRATCH_ROOT: fx.scratchRoot,
+    RMD_SYSTEMD_UNIT_DIR: fx.unitDir,
+    RMD_FSTAB_FILE: fx.fstab,
+    RMD_DOCKER_DAEMON_JSON: fx.daemonJson,
+    RMD_PROC_MOUNTINFO_FILE: fx.mountinfo,
+    RMD_TEST_DOCKER_ROOT: `${fx.scratchRoot}/docker`,
+    ...env,
+  });
+}
+
+function unitRows(text: string): string[] {
+  return text.split("\n").filter((l) => l !== "" && !l.startsWith("#"));
+}
+
+test("scratch runtime: the opt-in mode renders the containerd bind mount unit ordered after and requiring rmd-scratch.service", () => {
+  const fx = makeScratchFixture();
+  const install = runScratch(fx, ["--install"]);
+  assert.equal(install.status, 0, install.output);
+
+  const unitPath = join(fx.unitDir, MOUNT_UNIT);
+  assert.ok(existsSync(unitPath), `scratch mode must render ${MOUNT_UNIT}:\n${install.output}`);
+  const rows = unitRows(readFileSync(unitPath, "utf8"));
+  for (const row of [
+    "Requires=rmd-scratch.service",
+    "After=rmd-scratch.service",
+    `AssertPathIsMountPoint=${fx.scratchRoot}`,
+    `What=${fx.scratchRoot}/containerd`,
+    `Where=${CONTAINERD_ROOT}`,
+    "Type=none",
+    "Options=bind",
+  ]) {
+    assert.ok(rows.includes(row), `${MOUNT_UNIT} is missing '${row}':\n${rows.join("\n")}`);
+  }
+  // A Condition= failure SKIPS the mount and lets containerd start on the bare directory; an
+  // Assert= failure fails the start job, and containerd's RequiresMountsFor fails with it.
+  assert.ok(!rows.some((r) => r.startsWith("ConditionPathIsMountPoint=")), "the scratch guard must be an Assert, never a Condition");
+  assert.equal(install.dockerCalls.length, 0, "scratch install runs while docker is stopped, so it must never ask docker anything");
+
+  const docker20 = readFileSync(dockerDropinPath(fx), "utf8");
+  assert.match(docker20, new RegExp(`^RequiresMountsFor=${fx.scratchRoot}/docker ${CONTAINERD_ROOT} `, "m"));
+  const scratchDirs = readFileSync(join(fx.unitDir, "rmd-scratch.service.d", "20-remudero-runtime-dirs.conf"), "utf8");
+  assert.match(scratchDirs, new RegExp(`^ExecStartPost=.*install -d -m 0711 ${fx.scratchRoot}/containerd`, "m"), "a deallocate wipes scratch, so the bind source is re-created after each provision");
+});
+
+test("scratch runtime: install refuses while fstab still binds /var/lib/containerd, prints the exact line, and writes nothing", () => {
+  const fx = makeScratchFixture();
+  writeFileSync(fx.fstab, `UUID=abc / ext4 defaults 0 1\n${FSTAB_BIND}\n`);
+  const install = runScratch(fx, ["--install"]);
+  assert.notEqual(install.status, 0, install.output);
+  assert.match(install.output, /REFUSING/);
+  assert.ok(install.output.includes(FSTAB_BIND), `the refusal must print the exact fstab line to comment out:\n${install.output}`);
+  assert.ok(!existsSync(join(fx.unitDir, MOUNT_UNIT)), "no mount unit may be written while the fstab bind is live");
+  assert.deepEqual(readdirSync(fx.dockerDropinDir), [], "no docker drop-in may be written");
+  assert.deepEqual(readdirSync(fx.containerdDropinDir), [], "no containerd drop-in may be written");
+  assert.equal(install.systemctlCalls.some((c) => c[1] === "daemon-reload"), false, "a refusal must not reload systemd");
+  assert.equal(readFileSync(fx.fstab, "utf8"), `UUID=abc / ext4 defaults 0 1\n${FSTAB_BIND}\n`, "the script never edits fstab itself");
+});
+
+test("scratch runtime: both the docker and containerd drop-ins carry the scratch mountpoint guard ahead of the restore", () => {
+  const fx = makeScratchFixture();
+  const install = runScratch(fx, ["--install"]);
+  assert.equal(install.status, 0, install.output);
+
+  for (const [dir, extra] of [
+    [fx.dockerDropinDir, null],
+    [fx.containerdDropinDir, CONTAINERD_ROOT],
+  ] as const) {
+    const guardPath = join(dir, GUARD_FILENAME);
+    assert.ok(existsSync(guardPath), `missing guard drop-in ${guardPath}:\n${install.output}`);
+    const pre = unitRows(readFileSync(guardPath, "utf8")).filter((r) => r.startsWith("ExecStartPre="));
+    assert.equal(pre.length, 1, `exactly one guard row expected in ${guardPath}`);
+    assert.ok(!pre[0].startsWith("ExecStartPre=-"), "the guard must not be failure-tolerant ('-' prefix)");
+    assert.ok(pre[0].includes(`mountpoint -q ${fx.scratchRoot} `), `guard does not test ${fx.scratchRoot}: ${pre[0]}`);
+    assert.match(pre[0], /exit 1/);
+    if (extra) assert.ok(pre[0].includes(`mountpoint -q ${extra} `), `containerd's guard must also test ${extra}: ${pre[0]}`);
+    // drop-ins apply in filename order, so the guard runs before 20-'s scratch restore can mkdir on `/`.
+    assert.ok(GUARD_FILENAME < DROPIN_FILENAME, "the guard must sort before the restore drop-in");
+  }
+  assert.match(install.output, /docker\.service refuses to start without/);
+  assert.match(install.output, /containerd\.service refuses to start without/);
+});
+
+test("scratch runtime: install refuses a daemon.json not pointed at the scratch docker root, naming the value to set", () => {
+  const fx = makeScratchFixture();
+  writeFileSync(fx.daemonJson, '{ "data-root": "/mnt/rmd/docker" }\n');
+  const install = runScratch(fx, ["--install"]);
+  assert.notEqual(install.status, 0, install.output);
+  assert.ok(install.output.includes(`"data-root": "${fx.scratchRoot}/docker"`), install.output);
+  assert.ok(!existsSync(join(fx.unitDir, MOUNT_UNIT)));
+});
+
+test("scratch runtime: check mode passes only when the bind is live from the scratch device and Docker runs from scratch", () => {
+  const fx = makeScratchFixture();
+  assert.equal(runScratch(fx, ["--install"]).status, 0);
+
+  const live = runScratch(fx, [], { RMD_TEST_MOUNT_STATE: "active" });
+  assert.equal(live.status, 0, live.output);
+  assert.match(live.output, /containerd and docker run from/);
+
+  // The trap, live: /var/lib/containerd bound from a directory on the OS disk, not the NVMe.
+  writeFileSync(fx.mountinfo, [`29 1 259:1 / ${fx.scratchRoot} rw - ext4 /dev/nvme0n1 rw`, `31 1 8:1 /var/lib/containerd ${CONTAINERD_ROOT} rw - ext4 /dev/sda1 rw`, ""].join("\n"));
+  const trapped = runScratch(fx, [], { RMD_TEST_MOUNT_STATE: "active" });
+  assert.notEqual(trapped.status, 0, trapped.output);
+  assert.match(trapped.output, /NOT LIVE — .*containerd/);
+
+  const oldDocker = runScratch(fx, [], { RMD_TEST_MOUNT_STATE: "active", RMD_TEST_DOCKER_ROOT: "/mnt/rmd/docker" });
+  assert.notEqual(oldDocker.status, 0, oldDocker.output);
+  assert.match(oldDocker.output, /DockerRootDir is \/mnt\/rmd\/docker/);
+});
+
+test("scratch runtime: --uninstall-scratch-runtime refuses while the mount is active, then removes only its own files", () => {
+  const fx = makeScratchFixture();
+  assert.equal(runScratch(fx, ["--install"]).status, 0);
+
+  const refused = run(fx, ["--uninstall-scratch-runtime"], { RMD_SYSTEMD_UNIT_DIR: fx.unitDir, RMD_TEST_MOUNT_STATE: "active" });
+  assert.notEqual(refused.status, 0, refused.output);
+  assert.ok(existsSync(join(fx.unitDir, MOUNT_UNIT)), "an active mount must not lose its unit underneath it");
+
+  writeFileSync(fx.systemctlCallsFile, "");
+  const removed = run(fx, ["--uninstall-scratch-runtime"], { RMD_SYSTEMD_UNIT_DIR: fx.unitDir });
+  assert.equal(removed.status, 0, removed.output);
+  assert.ok(!existsSync(join(fx.unitDir, MOUNT_UNIT)));
+  assert.deepEqual(readdirSync(fx.dockerDropinDir), [DROPIN_FILENAME]);
+  assert.deepEqual(readdirSync(fx.containerdDropinDir), [DROPIN_FILENAME]);
+  assert.deepEqual(readdirSync(join(fx.unitDir, "rmd-scratch.service.d")), []);
+  assert.equal(removed.systemctlCalls.filter((c) => c[1] === "daemon-reload").length, 1);
+});
+
+test("scratch runtime (control): without RMD_RUNTIME_ON_SCRATCH the installer ignores fstab, daemon.json and the scratch disk", () => {
+  const fx = makeScratchFixture();
+  writeFileSync(fx.fstab, `${FSTAB_BIND}\n`);
+  const install = run(fx, ["--install"], { RMD_SYSTEMD_UNIT_DIR: fx.unitDir, RMD_FSTAB_FILE: fx.fstab, RMD_DOCKER_DAEMON_JSON: fx.daemonJson });
+  assert.equal(install.status, 0, install.output);
+  assert.deepEqual(readdirSync(fx.unitDir), [], "the default mode renders no mount unit");
+  assert.deepEqual(readdirSync(fx.dockerDropinDir), [DROPIN_FILENAME]);
+  assert.deepEqual(readdirSync(fx.containerdDropinDir), [DROPIN_FILENAME]);
+  assert.match(readFileSync(containerdDropinPath(fx), "utf8"), new RegExp(`^RequiresMountsFor=${DATA_MOUNT} ${CONTAINERD_ROOT}$`, "m"));
+  assert.match(readFileSync(dockerDropinPath(fx), "utf8"), new RegExp(`^RequiresMountsFor=${DOCKER_ROOT} ${CONTAINERD_ROOT} `, "m"));
+});

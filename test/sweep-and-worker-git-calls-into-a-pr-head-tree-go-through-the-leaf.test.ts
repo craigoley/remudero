@@ -21,7 +21,7 @@ import { planRepairGitRun, rebaseDirtyFleetBranchViaGit, renumberPlanPrIds, type
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   credentialHelperSocketWired,
-  reapStaleWorktrees,
+  reapStaleWorktreesAsync,
   runAdhocLaneReapRung,
   wireCredentialHelperSocket,
   worktreeAdd,
@@ -215,7 +215,7 @@ test("W1-T6133: the credential-helper wiring refuses a worktree whose pointer na
   assert.match(intact.git("config", "--worktree", "--get-all", "credential.helper"), /git-credential-socket-helper\.mjs/);
 });
 
-test("W1-T6133: the lane reaper keeps a lane whose pointer it refuses instead of reading the planted gitdir", () => {
+test("W1-T6133: the lane reaper keeps a lane whose pointer it refuses instead of reading the planted gitdir", async () => {
   const root = makeTempDir("t6133-lanes");
   const lanes = join(root, "lanes");
   mkdirSync(lanes);
@@ -230,10 +230,10 @@ test("W1-T6133: the lane reaper keeps a lane whose pointer it refuses instead of
   utimesSync(hostile.dir, old, old);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
 
-  const summary = runAdhocLaneReapRung({ root } as Config, (step, extra) => rows.push({ step, extra }), {
+  const summary = await runAdhocLaneReapRung({ root } as Config, (step, extra) => rows.push({ step, extra }), {
     enabled: () => true,
     diskHeadroom: () => ({ freeBytes: 0, totalBytes: 100 }),
-    reap: (at, opts) => reapStaleWorktrees(at, {
+    reap: (at, opts) => reapStaleWorktreesAsync(at, {
       ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
     }),
   });
