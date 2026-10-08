@@ -185,11 +185,15 @@ export function classifyCoverage(files) {
  * (helpers, fixtures, setup) can change many suites: run the full suite. Outside test/: `null`, the
  * ordinary classification applies.
  * @param {unknown} files
+ * @param {(changed: string[]) => string[]} [censusSuites] the census suites the changed files join (default: {@link censusSuiteFiles}).
  * @returns {{ mode: "files", files: string[] } | { mode: "full" } | null}
  */
-export function testOnlyRun(files) {
+export function testOnlyRun(files, censusSuites = (changed) => censusSuiteFiles(changed)) {
   if (!Array.isArray(files) || files.length === 0 || !files.every(isTestPath)) return null;
-  return files.every((f) => f.endsWith(".test.ts")) ? { mode: "files", files: [...files] } : { mode: "full" };
+  if (!files.every((f) => f.endsWith(".test.ts"))) return { mode: "full" };
+  // A changed test is DATA to every census that walks test/: #10092 edited one suite, ran only it,
+  // and shrank a population a census it never ran pinned, turning main red. Run those censuses too.
+  return { mode: "files", files: [...new Set([...files, ...censusSuites(files)])] };
 }
 
 /**
@@ -304,7 +308,10 @@ export function enumeratesPopulation(content) {
   return (
     /\bls-files\b/.test(content) ||
     /\breaddirSync\b|\breaddir\b/.test(content) ||
-    /\bglobSync\b|\bglob\(/.test(content)
+    /\bglobSync\b|\bglob\(/.test(content) ||
+    // `git grep` as an argv element enumerates the files it matches: #10092's census
+    // (`["grep", "-lF", HELPER, "--", "test/*.test.ts"]`) was invisible to the three arms above.
+    /["'`]grep["'`]\s*,/.test(content)
   );
 }
 
@@ -453,7 +460,8 @@ export function main(argv) {
       // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
       "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
-      // W1-T4395: prints "files" then the changed test files, or "full", or nothing (not a test-only diff).
+      // W1-T4395: prints "files" then the changed test files plus the census suites that walk them, or "full",
+      // or nothing (not a test-only diff).
       "test-only-run": { type: "boolean", default: false },
       // W1-T2680: given a changed-file list, print every suite that WALKS a population those files
       // belong to, or READS one of them as text — the suites `git grep -l <symbol>` cannot reach.
