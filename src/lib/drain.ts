@@ -243,6 +243,8 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 export interface NextRunnableOpts extends TaskPreconditionOptions {
+  /** W1-T6358: renew the command-owned ledger snapshot before walking any candidates. */
+  beginSelectionPass?: () => void;
   onPreconditionUnmet?: (task: Task, unmet: UnmetTaskPrecondition) => void;
   /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
    * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
@@ -455,6 +457,7 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
+  opts.beginSelectionPass?.();
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
     // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
@@ -733,6 +736,7 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
 /** The dispatcher's exact eligibility pass, before its disjoint lane packing. A read-only
  *  frontier needs membership for every task, not an N-lane pack of all N candidates. */
 function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
+  opts.beginSelectionPass?.();
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
@@ -1083,6 +1087,7 @@ function nextCurated(
   isMerged: MergedSet,
   opts: NextRunnableOpts,
 ): Task | undefined {
+  opts.beginSelectionPass?.();
   const done = new Set(attempted);
   for (const id of curated) {
     if (done.has(id)) continue;
@@ -1274,6 +1279,7 @@ export function renderRundown(lines: RundownLine[]): string {
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage defaults. */
 export interface DrainDeps extends TaskPreconditionOptions {
+  beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3412: command-built calibration once per pass. Undefined is the safe historic order. */
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
@@ -1661,6 +1667,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
       : undefined;
     const skipOpts: NextRunnableOpts = {
+      beginSelectionPass: deps.beginSelectionPass,
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
@@ -2101,6 +2108,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
       : undefined;
     const skipOpts: NextRunnableOpts = {
+      beginSelectionPass: deps.beginSelectionPass,
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
