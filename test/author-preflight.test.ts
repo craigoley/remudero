@@ -95,6 +95,68 @@ test('author static priority wrapping retains failure and never starts affected 
   assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
 });
 
+test('author static admission holds one real slot from static preflight through affected tests', () => {
+  const f = fixture();
+  const slotModule = pathToFileURL(join(ROOT, 'src/lib/test-slot.ts')).href;
+  writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), `
+    if (process.env.RMD_TEST_SLOT_PARENT) throw Error('the cheap census must precede slot admission');
+    console.log('cheap census before admission');
+  `);
+  writeFileSync(join(f.root, 'src/run-task.ts'), `
+    import assert from 'node:assert/strict';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    const { acquireTestSlot } = await import(${JSON.stringify(slotModule)});
+    const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
+    assert.ok(claim, 'static preflight must already hold a parent slot');
+    const before=readFileSync(claim.path,'utf8');
+    const nested=acquireTestSlot('real-static-nested-check',{waitBoundMs:0});
+    assert.match(nested.note,/inherited live parent test slot/);
+    nested.refresh(); nested.release();
+    assert.equal(readFileSync(claim.path,'utf8'),before);
+    writeFileSync('coverage/slot-owner.json',JSON.stringify(claim));
+  `);
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), `
+    import { test } from 'node:test';
+    import assert from 'node:assert/strict';
+    import { existsSync, readFileSync } from 'node:fs';
+    test('affected child retains the admitted owner',()=>{
+      const claim=JSON.parse(readFileSync('coverage/slot-owner.json','utf8'));
+      assert.ok(existsSync(claim.path),'the same owner remains held during affected execution');
+      assert.equal(process.env.RMD_TEST_SLOT_PARENT,undefined,'native fixtures do not inherit the production admission claim');
+    });
+  `);
+  f.git('add', '.'); f.git('commit', '-m', 'test: real static and affected admission');
+  assert.equal(mod.main([], { root: f.root }), 0);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'passed');
+  assert.deepEqual(receipt.steps.map((row: { name: string }) => row.name), ['census-precheck', 'static-preflight', 'affected-tests']);
+  assert.equal(receipt.testSlot.outcome, 'acquired');
+  const claim = JSON.parse(readFileSync(join(f.root, 'coverage/slot-owner.json'), 'utf8'));
+  assert.equal(existsSync(claim.path), false, 'the author releases only its own slot at the terminal');
+});
+
+test('author static admission releases its real parent after a failed static gate', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'src/run-task.ts'), `
+    import assert from 'node:assert/strict';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
+    assert.ok(claim,'failed static work was admitted first');
+    assert.ok(readFileSync(claim.path,'utf8'));
+    writeFileSync('coverage/failed-static-owner.json',JSON.stringify(claim));
+    process.exitCode=7;
+  `);
+  f.git('add', '.'); f.git('commit', '-m', 'test: failed admitted static gate');
+  assert.equal(mod.main([], { root: f.root }), 1);
+  const receipt = f.receipt();
+  assert.equal(receipt.verdict, 'failed');
+  assert.equal(receipt.steps[1].exitCode, 7);
+  assert.equal(receipt.steps.length, 2);
+  assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
+  const claim = JSON.parse(readFileSync(join(f.root, 'coverage/failed-static-owner.json'), 'utf8'));
+  assert.equal(existsSync(claim.path), false);
+});
+
 test('author preflight refuses shared bare configuration before a real split-config migration can poison sibling worktrees', (t) => {
   const f = fixture(), bare = gitRepo({ bare: true, kind: 'author-bare-topology' });
   t.after(() => bare.cleanup());

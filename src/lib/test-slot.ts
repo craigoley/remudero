@@ -16,7 +16,9 @@
  *   wait past bound  → `wait_bound_exceeded`: run UNSLOTTED at concurrency 1 — slow, never deadlocked;
  *   slot dir unusable → `slot_unavailable`: run unslotted at the load-derived concurrency.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,6 +31,8 @@ import { RMD_TMP_PREFIX } from "./tmp.js";
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
 /** Overrides the host-wide slot count. */
 export const TEST_SLOTS_ENV = "RMD_TEST_SLOTS";
+/** A descendant's claim to its live parent's slot; never an injected environment argument. */
+export const TEST_SLOT_PARENT_ENV = "RMD_TEST_SLOT_PARENT";
 /** The host side of the scratch mount (deploy/scratch-mounts.sh `scratch_root`/rmd). */
 export const HOST_SCRATCH_RMD_DIR = "/mnt/scratch/rmd";
 /** A test child's CPU niceness — the same yield {@link import("./garden-registry.js").GARDEN_CHILD_NICENESS} uses. */
@@ -147,7 +151,8 @@ export function resolveTestSlotDir(
     }
   },
 ): TestSlotDir {
-  const configured = env[TEST_SLOT_DIR_ENV];
+  // Native suite children retain private fixture admission even when their author owns a slot.
+  const configured = env.NODE_TEST_CONTEXT && env[TEST_SLOT_PARENT_ENV] ? undefined : env[TEST_SLOT_DIR_ENV];
   if (configured) return { dir: configured, scope: "configured" };
   if (env.NODE_TEST_CONTEXT) {
     testProcessSlotDir ??= mkdtempSync(join(TEST_PROCESS_TMP_ROOT, `${RMD_TMP_PREFIX}test-slots-`));
@@ -166,6 +171,67 @@ export interface TestSlotHolder {
   startedAt: string;
   heartbeatAt: string;
   label: string;
+  ownerNonce?: string;
+  processStart?: string;
+  concurrency?: number;
+}
+
+/** Kernel-derived start identity and parent, including on hosts without /proc. */
+export function testSlotProcessFacts(pid: number,
+  read = (path: string) => readFileSync(path, "utf8"),
+  ps = (id: number) => execFileSync("ps", ["-p", String(id), "-o", "ppid=", "-o", "lstart="],
+    { encoding: "utf8", timeout: 1_000, maxBuffer: 4_096 }),
+): { start: string; parent: number } | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  try {
+    const raw = read(`/proc/${pid}/stat`);
+    const fields = raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/);
+    if (raw.includes(") ") && /^[0-9]+$/.test(fields[19] ?? "") && /^[0-9]+$/.test(fields[1] ?? "")) {
+      return { start: `proc:${fields[19]}`, parent: Number(fields[1]) };
+    }
+  } catch { /* A non-/proc host uses its actual kernel ps result below. */ }
+  try {
+    const match = ps(pid).trim().match(/^([0-9]+)\s+(\S.*)$/);
+    if (match) return { start: `ps:${match[2]}`, parent: Number(match[1]) };
+  } catch { /* Unknown identity never permits borrowing a parent's slot. */ }
+  return undefined;
+}
+
+function isTestSlotAncestor(pid: number): boolean {
+  let child = process.pid;
+  const seen = new Set<number>();
+  for (let depth = 0; depth < 64 && child > 1 && !seen.has(child); depth += 1) {
+    seen.add(child);
+    const facts = testSlotProcessFacts(child);
+    if (!facts) return false;
+    if (facts.parent === pid) return true;
+    child = facts.parent;
+  }
+  return false;
+}
+
+function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: string } {
+  const raw = process.env[TEST_SLOT_PARENT_ENV];
+  if (!raw || process.env.NODE_TEST_CONTEXT) return {};
+  try {
+    const claim = JSON.parse(raw);
+    if (!claim || typeof claim.path !== "string" || typeof claim.nonce !== "string" ||
+        !Number.isSafeInteger(claim.pid) || typeof claim.start !== "string" || !Number.isSafeInteger(claim.concurrency) ||
+        !/^slot-[1-9][0-9]*\.json$/.test(claim.path.split("/").at(-1) ?? "")) return { rejected: "malformed-claim" };
+    if (realpathSync(join(claim.path, "..")) !== realpathSync(dir)) return { rejected: "different-slot-directory" };
+    const held = parseTestSlotHolder(readFileSync(claim.path, "utf8"));
+    if (!held || held.pid !== claim.pid || held.ownerNonce !== claim.nonce ||
+        held.processStart !== claim.start || held.host !== hostname() ||
+        held.concurrency !== claim.concurrency || !Number.isSafeInteger(held.concurrency) || held.concurrency! < 1) return { rejected: "different-holder" };
+    if (testSlotProcessFacts(held.pid)?.start !== held.processStart) return { rejected: "dead-or-reused-owner" };
+    if (!isTestSlotAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
+    return { lease: { outcome: "acquired", concurrency: held.concurrency!, waitedMs: 0,
+      note: `inherited live parent test slot (${claim.path}); --test-concurrency=${held.concurrency}`,
+      childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
+      refresh: () => {}, release: () => {} } };
+  } catch (error) {
+    return { rejected: `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}` };
+  }
 }
 
 export function readBootId(path: string = BOOT_ID_PATH): string | undefined {
@@ -215,6 +281,8 @@ export interface TestSlotLease {
   waitedMs: number;
   /** One line for the step detail: the run says whether it waited, and on whom. */
   note: string;
+  /** Only a positively identified real descendant may borrow this owner; absent for unslotted runs. */
+  childEnvironment?: Record<string, string>;
   refresh(): void;
   release(): void;
 }
@@ -258,6 +326,9 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
   const unslotted = (outcome: TestSlotLease["outcome"], concurrency: number, note: string): TestSlotLease => ({
     outcome, concurrency, waitedMs: clock.now() - startedAt, note, refresh: () => {}, release: () => {},
   });
+  const inherited = inheritedTestSlot(dir);
+  if (inherited.lease) return inherited.lease;
+  if (inherited.rejected) log(JSON.stringify({ step: "test_slot.parent_rejected", label, reason: inherited.rejected }));
   try {
     mkdirSync(dir, { recursive: true, mode: 0o777 });
     // Every container user and the host operator reclaim each other's records: umask must not narrow it.
@@ -268,9 +339,12 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
   }
+  const ownerNonce = randomUUID();
+  const processStart = testSlotProcessFacts(opts.pid ?? process.pid)?.start;
+  let concurrency = 1;
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
-    heartbeatAt: clock.iso(), label,
+    heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency,
   });
   let announced = false;
   try {
@@ -288,13 +362,17 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
           try {
+            concurrency = testRunConcurrency(load(), slots);
             writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });
             const waitedMs = clock.now() - startedAt;
-            const concurrency = testRunConcurrency(load(), slots);
             if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
             let held = true;
             return {
               outcome: "acquired", concurrency, waitedMs,
+              ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
+                childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
+                  [TEST_SLOT_DIR_ENV]: dir },
+              } : {}),
               note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
                 `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced`,
               refresh: () => {
@@ -307,7 +385,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
                 try {
                   reclaimStaleLock(path, {
                     parseHolder: parseTestSlotHolder,
-                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host(),
+                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce,
                     onReclaim: () => {},
                     onLostReclaim: () => {},
                   });
