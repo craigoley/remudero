@@ -160,7 +160,8 @@
   cited: "2026-08-23"
 - id: ledger-query-anchors-on-the-step-field
   subsystem: ledger
-  lifecycle: active
+  # knowledge gardener: retire ledger-query-anchors-on-the-step-field
+  lifecycle: superseded
   files: [ src/lib/ledger-union.ts, src/lib/ledger.ts ]
   fact: >-
     resolveLedgerUnion takes a raw pattern and matches ANYWHERE in a row, so a

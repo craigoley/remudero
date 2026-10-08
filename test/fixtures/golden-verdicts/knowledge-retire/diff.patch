@@ -1,17 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -97,0 +98,6 @@
+@@ -103,0 +104,6 @@
 +
-+## Pass 2026-10-08T09:17:53.791Z
++## Pass 2026-10-08T15:06:10.551Z
 +
-+- retire required-check-poster: Workers offered it have rarely used it, compared with other learnings.
++- retire ledger-query-anchors-on-the-step-field: Workers offered it have rarely used it, compared with other learnings.
 +
-+Learnings used when offered: 21%. Dangling Why pointers: 1.
-diff --git a/learnings/ci.yaml b/learnings/ci.yaml
---- a/learnings/ci.yaml
-+++ b/learnings/ci.yaml
-@@ -13,1 +13,2 @@
++Learnings used when offered: 22%. Dangling Why pointers: 1.
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@ -163,1 +163,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire required-check-poster
++  # knowledge gardener: retire ledger-query-anchors-on-the-step-field
 +  lifecycle: superseded
