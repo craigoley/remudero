@@ -4202,62 +4202,18 @@ export function stripQuotedRegions(report: string): { scan: string; fenceUnbalan
   // the false control "This PR is plan-only."; #4577 had to OMIT its block to be reviewed. Blanked for
   // CLAIM SCANNING ONLY — `parseAcceptanceBlock` and the author-time checks still read it unchanged.
   const acceptance = acceptanceBlockRegion(report);
-  let inFence = false;
-  let inHtmlComment = false;
+  const state: MarkdownLineState = { inHtmlComment: false };
   const scan = report
     .split("\n")
     .map((line, index) => {
-      // A fence owns everything inside it, including comment-looking examples. Conversely, an HTML comment owns
-      // every fence marker inside the comment. The ordering is load-bearing: #4867's hidden repair note must not
-      // become a claim, and a hidden ``` must not leave the rest of the rendered body looking fenced to this scan.
-      if (inFence) {
-        if (/^\s*```/.test(line)) inFence = false;
-        return " ".repeat(line.length);
-      }
-      if (!inHtmlComment && /^\s*```/.test(line)) {
-        inFence = true;
-        return " ".repeat(line.length);
-      }
-
-      let cursor = 0;
-      let commentStripped = "";
-      while (cursor < line.length) {
-        if (inHtmlComment) {
-          const close = line.indexOf("-->", cursor);
-          if (close < 0) {
-            commentStripped += " ".repeat(line.length - cursor);
-            cursor = line.length;
-          } else {
-            commentStripped += " ".repeat(close + 3 - cursor);
-            cursor = close + 3;
-            inHtmlComment = false;
-          }
-          continue;
-        }
-        const open = line.indexOf("<!--", cursor);
-        if (open < 0) {
-          commentStripped += line.slice(cursor);
-          cursor = line.length;
-        } else {
-          commentStripped += line.slice(cursor, open) + " ".repeat(4);
-          cursor = open + 4;
-          inHtmlComment = true;
-        }
-      }
-
-      // A comment may close before a real fence on the same line. Test the stripped line so a marker still inside
-      // the comment can never toggle the state.
-      if (/^\s*```/.test(commentStripped)) {
-        inFence = true;
-        return " ".repeat(line.length);
-      }
-      if (/^\s*>/.test(commentStripped)) return " ".repeat(line.length);
-      // AFTER the fence arms, never before: a fence opened inside the block must still toggle.
+      const classified = classifyMarkdownLine(line, state);
+      if (classified.insideFence || /^\s*>/.test(classified.scan)) return " ".repeat(line.length);
+      // Walk fences even inside Acceptance, so an opener there still owns subsequent lines.
       if (acceptance && index > acceptance.headerLine && index < acceptance.endLine) return " ".repeat(line.length);
-      return commentStripped;
+      return classified.scan;
     })
     .join("\n");
-  return { scan, fenceUnbalancedAtEof: inFence };
+  return { scan, fenceUnbalancedAtEof: state.fence !== undefined };
 }
 
 /** Does an enumeration TOKEN correspond to a member of `diffFiles` (W1-T2224)? Replaces a shape guess with a contract
@@ -6329,28 +6285,82 @@ export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
 /** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
  *  fixture can drive both of its arms by name (the negative-reachability ratchet). */
-export const FENCE_OPEN_RE = /^\s*(`{3,}(?=[^`]*$)|~{3,})/;
+export const FENCE_OPEN_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 
-/** WHERE THE ACCEPTANCE BLOCK BEGINS — the index of the first line matching {@link ACCEPTANCE_HEADER_RE} OUTSIDE a
- *  fenced code block, or -1. W1-T5621: a body that SHOWS the format inside a ``` fence ahead of its real block used to
- *  parse back only the example, so review executed the example's proof and never read the real block. THE ONE header
- *  walker: {@link parseAcceptanceBlock}, {@link acceptanceBlockRegion} and `replaceAcceptanceBlock` (plan-pr-emitter.ts)
- *  all start here, so the reviewer, the author-time gate and the repair cannot disagree. A fence closes only on its
- *  own character at the opener's length or longer with nothing after it; an unclosed fence runs to the end. */
-export function acceptanceHeaderLine(lines: readonly string[]): number {
-  let fence: string | undefined;
+export interface MarkdownLineState {
+  inHtmlComment: boolean;
+  fence?: string;
+}
+
+/** Walk one line, mutating ownership state and blanking hidden text without moving UTF-16 offsets.
+ * An active fence owns comment syntax; otherwise comments own their fence markers. */
+export function classifyMarkdownLine(
+  line: string,
+  state: MarkdownLineState,
+): { scan: string; insideFence: boolean } {
+  if (state.fence !== undefined) {
+    const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line.replace(/\r$/, ""));
+    if (close && close[1][0] === state.fence[0] && close[1].length >= state.fence.length) {
+      state.fence = undefined;
+    }
+    return { scan: " ".repeat(line.length), insideFence: true };
+  }
+
+  let cursor = 0;
+  let scan = "";
+  let visible = "";
+  while (cursor < line.length) {
+    if (state.inHtmlComment) {
+      const close = line.indexOf("-->", cursor);
+      const end = close < 0 ? line.length : close + 3;
+      scan += " ".repeat(end - cursor);
+      cursor = end;
+      if (close >= 0) state.inHtmlComment = false;
+    } else {
+      // A fence may follow a comment close on this line; its info string owns comment syntax too.
+      const fenceOpen = /^ *$/.test(visible)
+        ? FENCE_OPEN_RE.exec((visible + line.slice(cursor)).replace(/\r$/, ""))
+        : null;
+      if (fenceOpen) {
+        state.fence = fenceOpen[1];
+        return { scan: " ".repeat(line.length), insideFence: true };
+      }
+      const open = line.indexOf("<!--", cursor);
+      const end = open < 0 ? line.length : open;
+      const text = line.slice(cursor, end);
+      scan += text;
+      visible += text;
+      cursor = end;
+      if (open >= 0) {
+        scan += " ".repeat(4);
+        cursor += 4;
+        state.inHtmlComment = true;
+      }
+    }
+  }
+  return { scan, insideFence: false };
+}
+
+function acceptanceHeaderLocation(lines: readonly string[]): { headerLine: number; headerInsideFence: boolean } {
+  const state: MarkdownLineState = { inHtmlComment: false };
+  let headerInsideFence = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].replace(/\r$/, "");
-    if (fence !== undefined) {
-      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = undefined;
-      continue;
+    const classified = classifyMarkdownLine(line, state);
+    if (classified.insideFence) {
+      if (ACCEPTANCE_HEADER_RE.test(line)) headerInsideFence = true;
+      if (state.fence === undefined) headerInsideFence = false;
+    } else if (ACCEPTANCE_HEADER_RE.test(classified.scan)) {
+      return { headerLine: index, headerInsideFence: false };
     }
-    const open = FENCE_OPEN_RE.exec(line);
-    if (open) fence = open[1];
-    else if (ACCEPTANCE_HEADER_RE.test(line)) return index;
   }
-  return -1;
+  return { headerLine: -1, headerInsideFence };
+}
+
+/** First Acceptance header outside comments and matching CommonMark fences, or -1.
+ * Shared by the parser, block region and repair emitter (W1-T5621). */
+export function acceptanceHeaderLine(lines: readonly string[]): number {
+  return acceptanceHeaderLocation(lines).headerLine;
 }
 
 /** THE LINE SPAN of a body's Acceptance block: from the header to the first line that is neither a bullet, an
@@ -6470,6 +6480,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
 export interface AcceptanceBlockDiagnostics {
   /** Was an Acceptance HEADER found at all? False ⇒ the parser resolves nothing and review fails closed. */
   headerFound: boolean;
+  /** The only visible header candidates belong to a fence still open at EOF. */
+  headerInsideFence: boolean;
   /** Criterion BULLETS the author wrote under that header, counted with the parser's own bullet regex. */
   bulletsWritten: number;
   /** Criteria {@link parseAcceptanceBlock} actually resolved. */
@@ -6501,6 +6513,7 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
   const headerFound = region !== undefined;
   return {
     headerFound,
+    headerInsideFence: acceptanceHeaderLocation((body ?? "").split("\n")).headerInsideFence,
     bulletsWritten,
     criteriaParsed: parsed.length,
     emptyProofs,
