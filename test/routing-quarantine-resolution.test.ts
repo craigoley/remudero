@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.js";
 
 const { dailyRoutingReview } = await import(pathToFileURL(join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs")).href);
 const asOf = "2026-10-08T12:00:00.000Z";
@@ -63,6 +62,15 @@ test("a quarantine hash from another source or changed raw row never qualifies a
 });
 
 test("a trial assignment or a CLI row carrying outcome and billing evidence remains quarantined", async () => {
+  const f = fixture([cli, { ...cli, success: true }]);
+  try {
+    const { snapshot } = await dailyRoutingReview({ ...f, asOf,
+      quarantineResolutions: manifest([entry(), entry({ ...cli, success: true })]) });
+    assert.equal(snapshot.sources[0].routingResolvedFutureRows, 1);
+    assert.equal(snapshot.sources[0].futureRows, 2);
+    assert.equal(snapshot.sources[0].reports[0].reviewState, "source-incomplete");
+  } finally { f.close(); }
+  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("../src/lib/routing-quarantine-resolution.js");
   for (const row of [{ ...cli, step: "worker.assignment" }, ...["selection_assignment_id", "worker_assignment", "tokens",
     "total_cost_usd", "cost_usd", "notional_cost_usd", "billing_mode", "success", "served_model"].map(key => ({ ...cli, [key]: null }))]) {
     const raw = JSON.stringify(row);
@@ -82,7 +90,8 @@ test("resolving an irrelevant future row never clears malformed or invalid times
   } finally { f.close(); }
 });
 
-test("resolution manifests refuse unknown scopes, repetitions, oversized input and later decisions", () => {
+test("resolution manifests refuse unknown scopes, repetitions, oversized input and later decisions", async () => {
+  const { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } = await import("../src/lib/routing-quarantine-resolution.js");
   for (const input of [null, {}, manifest(Array(201).fill(entry())), manifest([entry(), entry()]),
     manifest([{ ...entry(), sourceLabel: "unknown" }]), manifest([{ ...entry(), rowHash: "bad" }]),
     manifest([{ ...entry(), scope: "all-ledger" }]), manifest([{ ...entry(), reason: "assumed" }]),
