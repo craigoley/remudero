@@ -552,7 +552,7 @@ import {
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
-  createGhReadWarmer,
+  GH_READ_WARM_CONCURRENCY,
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type PlanFilingFileCache,
   type PlanFilingFileObservation,
@@ -36867,7 +36867,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   changedFilesFetch?: (prNumber: string) => Promise<string[] | undefined>;
   commitTrailerIndex?: () => Map<string, PrRef[]> | null;
   evidenceRootFor?: (owner: string, repo: string) => string | undefined;
-  viewsDeps?: Parameters<typeof buildOpenPrViews>[3];
+  viewsDeps?: Parameters<typeof buildOpenPrViewsAsync>[3];
+  /** W1-T6591: the open-PR reads' async transport; absent, `fetch` or `ghJsonAsync` answers them. */
+  fetchAsync?: (args: string[]) => Promise<unknown>;
   log?: (step: string, extra?: Record<string, unknown>) => void;
 } = {}) {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
@@ -36882,7 +36884,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   let generationClock = 0;
   const closedAt = new Map<number, string>();
   let closedRows: ReadonlyArray<{ number: number; url: string; state: string }> = [];
-  const fetch: GhApiFetcher = (args, budget) => {
+  const readKey = (args: string[]) => {
     const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
     let key = args.join("\0");
     if (endpoint?.includes("/pulls?") && endpoint.includes("state=open")) {
@@ -36893,8 +36895,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       url.searchParams.sort();
       key = url.pathname + url.search;
     }
-    if (reads.has(key)) return reads.get(key);
-    const answer = (io.fetch ?? ghJson)(args, budget);
+    return { endpoint, key };
+  };
+  const remember = (endpoint: string | undefined, key: string, answer: unknown) => {
     reads.set(key, answer);
     if (endpoint?.includes("state=closed") && Array.isArray(answer)) { // W1-T5318: GitHub's own terminal times
       for (const pr of answer as Array<{ number?: unknown; merged_at?: unknown; closed_at?: unknown }>) {
@@ -36903,6 +36906,15 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       }
     }
     return answer;
+  };
+  const fetch: GhApiFetcher = (args, budget) => {
+    const { endpoint, key } = readKey(args);
+    return reads.has(key) ? reads.get(key) : remember(endpoint, key, (io.fetch ?? ghJson)(args, budget));
+  };
+  const fetchAsync = async (args: string[]) => {
+    const { endpoint, key } = readKey(args);
+    if (reads.has(key)) return reads.get(key);
+    return remember(endpoint, key, io.fetchAsync ? await io.fetchAsync(args) : io.fetch ? io.fetch(args) : await ghJsonAsync(args));
   };
   const github = io.github ?? buildBatchedGithub(owner, repo, {
     log, pacer, snapshotCache: {
@@ -36930,8 +36942,11 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = paceGhEntry(pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)); }
-    catch (error) {
+    try {
+      openPrRows = await replayOpenPrReads((read) => fetchOpenPrsWithPostedIds(owner, repo, read), fetchAsync, fetchCiFailuresAsync);
+      pacer.recordResult(false);
+    } catch (error) {
+      pacer.recordResult(isGhRateLimitError(error));
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
     }
@@ -36964,8 +36979,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
     credits = creditBefore;
     projection = derive();
-    const openPrViews = openPrRows ? buildOpenPrViews(owner, repo, ledgerPath, {
-      ...io.viewsDeps, fetch, pacer, planFilingFileCache: filingFiles, openPrRows,
+    const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
     }) : [];
     const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
@@ -36991,13 +37006,15 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
-    const postFixCiFailuresByPr = new Map(openPrViews.map((pr) => {
+    const postFixCiFailuresByPr = new Map<number, CiFailure[] | undefined>();
+    for (const pr of openPrViews) {
       const raw = rawByNumber.get(pr.prNumber);
-      const failures = pr.checksState === "pending" && raw && !raw.rollupUnreadable
-        ? (io.viewsDeps?.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, raw.statusCheckRollup)
-        : pr.ciFailures;
-      return [pr.prNumber, failures] as const;
-    }));
+      const syncRead = io.viewsDeps?.fetchCiFailureEvidence;
+      postFixCiFailuresByPr.set(pr.prNumber, pr.checksState === "pending" && raw && !raw.rollupUnreadable
+        ? (syncRead ? syncRead(owner, repo, raw.statusCheckRollup)
+          : await (io.viewsDeps?.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync)(owner, repo, raw.statusCheckRollup))
+        : pr.ciFailures);
+    }
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
@@ -41441,6 +41458,9 @@ export function buildOpenPrViews(
      *  drain.ts's `isDispatchEligible` would. Omitted ⇒ `planResequenceIneligible` stays `undefined`
      *  for every PR — fail closed, exactly today's behavior for every existing caller/fixture. */
     isMerged?: MergedResolver;
+    /** W1-T6591: lets {@link buildOpenPrViewsAsync} read the ledger and protection once per pass. */
+    readLedger?: (path: string) => ReturnType<typeof readLedgerLines>;
+    readRequiredContexts?: (owner: string, repo: string) => RequiredContextsRead;
   } = {},
 ): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -41450,7 +41470,7 @@ export function buildOpenPrViews(
   // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
   // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
   const raw = (deps.openPrRows ?? paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch))) as RawOpenPr[];
-  const ledger = readLedgerLines(ledgerPath);
+  const ledger = (deps.readLedger ?? readLedgerLines)(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
   const questionLines = readQuestionsNdjson(repoRoot);
@@ -41467,7 +41487,7 @@ export function buildOpenPrViews(
     ? ((r) => (r && r.length > 0 ? ({ kind: "contexts", contexts: r } as const) : ({ kind: "none" } as const)))(
         deps.requiredContexts(owner, repo),
       )
-    : readRequiredStatusCheckContexts(owner, repo);
+    : (deps.readRequiredContexts ?? readRequiredStatusCheckContexts)(owner, repo);
   const requiredContexts = requiredRead.kind === "contexts" ? requiredRead.contexts : undefined;
   // W1-T2399: the read failure's own cause, hoisted so the view below can assign the key
   // unconditionally — see that assignment's own comment for why the conditional-spread form could
@@ -41929,6 +41949,85 @@ export function buildOpenPrViews(
       pendingAnswer: taskId ? operatorVerdictEvidence(taskId, ledger, questionLines) : undefined,
     };
   });
+}
+
+const OPEN_PR_READ_PENDING = new Error("W1-T6591: open-PR read pending");
+type OpenPrCiFailureRead = (owner: string, repo: string, rollup: Parameters<typeof fetchCiFailures>[2]) => Promise<CiFailure[]>;
+
+/** W1-T6591: runs a synchronous pass whose misses are awaited off the loop, until a pass misses
+ *  none. A failed read is replayed as the same throw, so every catch arm sees what it saw before. */
+export async function replayOpenPrReads<T>(
+  run: (fetch: GhApiFetcher, ciFailures: typeof fetchCiFailures) => T,
+  fetchAsync: (args: string[]) => Promise<unknown>,
+  ciFailuresAsync: OpenPrCiFailureRead,
+): Promise<T> {
+  const answers = new Map<string, { ok: true; value: unknown } | { ok: false; error: unknown }>();
+  for (;;) {
+    const misses = new Map<string, () => Promise<unknown>>();
+    const read = (key: string, start: () => Promise<unknown>): unknown => {
+      const answer = answers.get(key);
+      if (answer?.ok) return answer.value;
+      if (answer) throw answer.error;
+      misses.set(key, start);
+      throw OPEN_PR_READ_PENDING;
+    };
+    let outcome: { ok: true; value: T } | { ok: false; error: unknown };
+    try {
+      outcome = { ok: true, value: run(
+        (args) => read(JSON.stringify(args), () => fetchAsync(args)),
+        (owner, repo, rollup) => read(JSON.stringify(["ci", owner, repo, rollup]), () => ciFailuresAsync(owner, repo, rollup)) as CiFailure[],
+      ) };
+    } catch (error) {
+      outcome = { ok: false, error };
+    }
+    if (misses.size === 0) {
+      if (outcome.ok) return outcome.value;
+      throw outcome.error;
+    }
+    const queue = [...misses];
+    await Promise.all(Array.from({ length: GH_READ_WARM_CONCURRENCY }, async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const [key, start] = next;
+        try { answers.set(key, { ok: true, value: await start() }); } catch (error) { answers.set(key, { ok: false, error }); }
+      }
+    }));
+  }
+}
+
+/** W1-T6591: {@link buildOpenPrViews} with every GitHub read and CI-failure fetch awaited. Only the
+ *  settled pass commits the plan-filing cache or emits classification telemetry. */
+export async function buildOpenPrViewsAsync(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  deps: Omit<NonNullable<Parameters<typeof buildOpenPrViews>[3]>, "fetch"> & {
+    fetchAsync?: (args: string[]) => Promise<unknown>;
+    fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
+  } = {},
+): Promise<ClassifiedOpenPrView[]> {
+  const { fetchAsync = ghJsonAsync, fetchCiFailureEvidenceAsync = fetchCiFailuresAsync, ...rest } = deps;
+  const openPrRows = deps.openPrRows ??
+    await replayOpenPrReads((fetch) => fetchOpenPrsWithPostedIds(owner, repo, fetch), fetchAsync, fetchCiFailureEvidenceAsync);
+  const cache = deps.planFilingFileCache ?? createPlanFilingFileCache();
+  const ledger = readLedgerLines(ledgerPath);
+  const readRequired = deps.readRequiredContexts ?? readRequiredStatusCheckContexts;
+  let required: RequiredContextsRead | undefined;
+  let pass = cache;
+  let events: PlanFilingClassificationEvent[] = [];
+  const views = await replayOpenPrReads((fetch, ciFailures) => {
+    pass = { entries: new Map(cache.entries), missCursors: new Map(cache.missCursors) };
+    events = [];
+    return buildOpenPrViews(owner, repo, ledgerPath, {
+      ...rest, openPrRows, fetch, planFilingFileCache: pass, readLedger: () => ledger,
+      fetchCiFailureEvidence: deps.fetchCiFailureEvidence ?? ciFailures,
+      readRequiredContexts: (o, r) => (required ??= readRequired(o, r)),
+      onPlanFilingClassification: (event) => events.push(event),
+    });
+  }, fetchAsync, fetchCiFailureEvidenceAsync);
+  cache.entries = pass.entries;
+  cache.missCursors = pass.missCursors;
+  for (const event of events) deps.onPlanFilingClassification?.(event);
+  return views;
 }
 
 /**
@@ -45586,7 +45685,6 @@ export function buildSweepHook(
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  const openPrReads = createGhReadWarmer(ghJsonAsync);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
   // `boardGithub` above — from THIS repository's own file, so a restart with an unchanged branch
   // set and an unexpired interval reads "unchanged" instead of every boot re-judging every remote
@@ -45619,9 +45717,7 @@ export function buildSweepHook(
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
-      if (!tickRead) await openPrReads.warm();
-      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : buildOpenPrViews(owner, repo, ledgerPath, {
-        fetch: openPrReads.fetcher(ghJson),
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
@@ -45981,15 +46077,12 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  const openPrReads = createGhReadWarmer(ghJsonAsync);
   return async (scope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
     try {
-      await openPrReads.warm();
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
-        fetch: openPrReads.fetcher(ghJson),
+      const openPrs = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,
