@@ -1,7 +1,7 @@
 import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { isMainThread, threadId } from "node:worker_threads";
+import { isMainThread, parentPort, threadId, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { addAbortSignal, type Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { pipeline } from "node:stream/promises";
@@ -937,6 +937,86 @@ export const LEDGER_ROTATION_LOAD_LINES_PER_TURN = 10_000;
 
 type MemoEntry = { key: string; read?: LedgerRotationRecords };
 
+const ROTATION_DIGEST_CODEC = "rotation-digest-codec";
+type DigestCodecRequest = { id: number; operation: "parse" | "stringify"; value: unknown };
+type DigestCodecReply = { id: number; value?: unknown; error?: string };
+
+export function replyToRotationDigestRequest(
+  { id, operation, value }: DigestCodecRequest,
+  port: Pick<MessagePort, "postMessage"> = parentPort!,
+): void {
+  try {
+    let result: unknown;
+    if (operation === "stringify") result = JSON.stringify(value);
+    else {
+      const digest = JSON.parse(value as string);
+      const read = digest?.read;
+      if (digest?.schema === 1 && read && Array.isArray(read.rows) &&
+          read.rows.every((row: unknown) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
+          Number.isSafeInteger(read.torn) && read.torn >= 0 && Array.isArray(read.tornLines) &&
+          read.tornLines.length === read.torn && read.tornLines.every((line: unknown) => typeof line === "string")) {
+        result = digest;
+      }
+    }
+    port.postMessage({ id, value: result } satisfies DigestCodecReply);
+  } catch (error) {
+    port.postMessage({ id, error: (error as Error).name } satisfies DigestCodecReply);
+  }
+}
+
+export function registerRotationDigestCodec(
+  port: Pick<MessagePort, "on" | "postMessage"> | null,
+  kind: unknown,
+): void {
+  if (port && kind === ROTATION_DIGEST_CODEC) {
+    port.on("message", (request: DigestCodecRequest) => replyToRotationDigestRequest(request, port));
+  }
+}
+
+registerRotationDigestCodec(parentPort, workerData?.kind);
+
+let digestCodecWorker: Worker | undefined;
+let digestCodecId = 0;
+const digestCodecPending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+
+function rotationDigestCodec<T>(operation: DigestCodecRequest["operation"], value: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (!digestCodecWorker) {
+      const spawned = new Worker(new URL(import.meta.url), {
+        execArgv: ["--import", "tsx"], workerData: { kind: ROTATION_DIGEST_CODEC },
+      });
+      digestCodecWorker = spawned;
+      const failed = (error: Error): void => {
+        if (digestCodecWorker !== spawned) return;
+        digestCodecWorker = undefined;
+        for (const pending of digestCodecPending.values()) pending.reject(error);
+        digestCodecPending.clear();
+      };
+      spawned.on("message", (reply: DigestCodecReply) => {
+        const pending = digestCodecPending.get(reply.id)!;
+        digestCodecPending.delete(reply.id);
+        if (digestCodecPending.size === 0) spawned.unref();
+        if (reply.error) pending.reject(Object.assign(new Error("rotation digest codec failed"), { name: reply.error }));
+        else pending.resolve(reply.value);
+      });
+      spawned.on("error", failed);
+      spawned.on("exit", (code) => failed(new Error(`rotation digest codec exited: ${code}`)));
+    }
+    const id = ++digestCodecId;
+    const target = digestCodecWorker;
+    digestCodecPending.set(id, { resolve: (result) => resolve(result as T), reject });
+    target.ref();
+    try {
+      target.postMessage({ id, operation, value } satisfies DigestCodecRequest);
+    } catch (error) {
+      const reason = error;
+      digestCodecPending.delete(id);
+      if (digestCodecPending.size === 0) target.unref();
+      reject(reason);
+    }
+  });
+}
+
 /**
  * Memoizes each rotation's `reduce`d records by path, size and mtime. A rotation is written once, so a
  * repeated union read parses only the live file: re-parsing ~150 immutable archives per request held
@@ -992,17 +1072,13 @@ export function createLedgerRotationMemo(
     }
     let digest: Record<string, unknown> | undefined;
     try {
-      digest = parseObject(raw.toString("utf8"));
+      digest = await rotationDigestCodec<Record<string, unknown> | undefined>("parse", raw.toString("utf8"));
     } catch (error) {
       const reason = (error as Error).name;
       outcome("corrupt", reason);
       return undefined;
     }
-    const read = digest?.read as LedgerRotationRecords | undefined;
-    if (digest?.schema !== 1 || !read || !Array.isArray(read.rows) ||
-        !read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) ||
-        !Number.isSafeInteger(read.torn) || read.torn < 0 || !Array.isArray(read.tornLines) ||
-        read.tornLines.length !== read.torn || !read.tornLines.every((line) => typeof line === "string")) {
+    if (!digest) {
       outcome("corrupt");
       return undefined;
     }
@@ -1015,15 +1091,16 @@ export function createLedgerRotationMemo(
       return undefined;
     }
     digestHits++;
-    return read;
+    return digest.read as LedgerRotationRecords;
   };
   const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<void> => {
     const path = digestPath(entry);
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
       await nodeMkdir(dirname(path), { recursive: true, mode: 0o700 });
-      await nodeWriteFile(temp, JSON.stringify({ schema: 1, holder: io.holder,
-        reducerVersion: io.durableDigest!.reducerVersion, archive: basename(entry.path), key, read }),
+      const text = await rotationDigestCodec<string>("stringify", { schema: 1, holder: io.holder,
+        reducerVersion: io.durableDigest!.reducerVersion, archive: basename(entry.path), key, read });
+      await nodeWriteFile(temp, text,
       { flag: "wx", mode: 0o600, flush: true });
       await nodeRename(temp, path);
       outcome("written");
