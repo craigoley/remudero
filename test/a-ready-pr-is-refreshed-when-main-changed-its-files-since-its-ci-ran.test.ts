@@ -1,4 +1,4 @@
-// W1-T6022 — a READY PR (auto-merge armed, or checks green with review success) that is at least one
+// W1-T6022 — a READY PR (checks green with review success, not an arm alone) that is at least one
 // commit behind takes W1-T5696's overlap and baseline arms WITHOUT the 10-commit distance gate, with
 // update reason `ready-overlap`. #9539/#9542 is the reach rule's shape: #9539's test reads
 // test/fixtures/golden-verdicts/ and #9542 rewrote test/fixtures/golden-verdicts/knowledge-retire/*.
@@ -81,10 +81,10 @@ test("a ready PR 2 commits behind whose own file main changed is selected with r
   assert.deepEqual(picked[0]?.matchingBaseFiles, ["src/mine.ts"]);
   assert.equal(picked[0]?.behindBy, 2);
 
-  // armed alone is ready: checks and review still pending
+  // #10000: an arm alone survives new heads; pending gates must finish before a ready refresh.
   const armed = pr(6002, { autoMergeArmed: true, checksState: "pending", reviewState: "pending" });
   const armedPick = openPrsBehindMain([armed], one(6002, 1), POLICY, new Set(), one(6002, base(["src/mine.ts"])));
-  assert.equal(armedPick[0]?.updateReason, "ready-overlap");
+  assert.deepEqual(armedPick, []);
 
   // the baseline arm also applies without the distance gate
   const baseline = openPrsBehindMain([pr(6003)], one(6003, 3), POLICY, new Set(), one(6003, base(["package-lock.json"])));

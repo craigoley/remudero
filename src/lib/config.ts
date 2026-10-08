@@ -134,6 +134,12 @@ export class ConfigValidationError extends Error {
  */
 export function validateConfig(config: Config): void {
   validateConfigShape(config, "validateConfig input");
+  const operators = config.operatorGithubLogins;
+  if (operators !== undefined && (operators.length === 0 ||
+      operators.some(login => !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(login)) ||
+      new Set(operators.map(login => login.toLowerCase())).size !== operators.length)) {
+    throw new ConfigValidationError("invalid config: operatorGithubLogins requires unique, non-empty human GitHub logins");
+  }
   const dailyCapIsNone = config.dailyCapUsd === undefined || config.dailyCapUsd === null;
   if (config.overflow === "api_key" && dailyCapIsNone) {
     throw new ConfigValidationError(
