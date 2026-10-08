@@ -1,0 +1,43 @@
+- id: W1-T6301
+  title: "VERDICT CALIBRATION INDEXES COMMITS BY CITED TASK ONCE PER REPORT — locateMergeCommit runs citesTaskId over EVERY commit for EVERY verdict row, building a fresh RegExp per (row, commit, form) and re-lowercasing each commit's subject and body each time; the 2026-10-08 steady-state CPU profile caught the measurement cadence as one unbroken 365.7 s block on the daemon thread, 186.5 s of it verdictCalibrationReport"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — verdict calibration's commit lookup is indexed, its answers unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-08: round-3 steady-state daemon CPU profile (lanes/claude, pid 108, 00:22Z)"
+  plan_refs: [W1-T424, W1-T5723]
+  files: [src/lib/verdict-calibration.ts, test/verdict-calibration-indexes-commits-by-cited-task-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 00:22Z (366 s Profiler session on the live core daemon, every W1-T6246..T6276
+    loop fix live): busy 365.7 of 366 s in ONE run — runMeasurementCadenceReport 341.7 s →
+    verdictCalibrationReport 186.5 s → locateMergeCommit 147.7 s → citesTaskId 146.4 s (self 81.9 s,
+    escapeRegExp 9.3 s, taskCitationForms 3.5 s, an anonymous verdict-calibration.ts closure 57.8 s self).
+    READ on origin/main: verdictCalibrationReport loops verdict rows and calls locateMergeCommit(commits,
+    taskId, armedTs), which filters ALL commits through citesTaskId; citesTaskId lowercases subject+body
+    and compiles `new RegExp` per citation form per call — O(rows × commits) regex compiles. The code is
+    unchanged since W1-T424; the cost grew with the ledger and git history. wasReverted/hasFollowupFix
+    scan commits per row too. W1-T5723 (cadence out of process) is the costly structural fix; this is
+    the cheap one and helps wherever the report runs.
+  design: |
+    Parse once, index once: per report, lowercase and pad each commit's subject/body once, and build a
+    Map from cited token to the commits citing it (a token is a run with no `()\s,:.` preceded by
+    `[(\s,:]` and followed by `[)\s,:.]` — exactly what citesTaskId's regex accepts for a form that
+    contains none of those characters; a form that does falls back to the existing regex). Compile any
+    remaining per-form regex once per task id, not per commit. Apply the same index to the per-row
+    revert/follow-up scans where they match on task citations. Every row's merge commit, revert and
+    follow-up answer is unchanged.
+  acceptance:
+    - claim: "a report over many rows and commits compiles a bounded number of citation regexes, not one per row per commit"
+      proof: 'grep: test("W1-T6301: a calibration report does not rebuild a citation regex per row per commit" in test/verdict-calibration-indexes-commits-by-cited-task-once.test.ts'
+    - claim: "every row's merge, revert and follow-up answer matches the unindexed lookup"
+      proof: 'grep: test("W1-T6301: indexed merge, revert and follow-up answers match the per-commit scan" in test/verdict-calibration-indexes-commits-by-cited-task-once.test.ts'
+  falsifier: |
+    Keep citesTaskId's per-call RegExp in locateMergeCommit: a RegExp-construction counter records
+    rows × commits compiles and the first test fails.
