@@ -662,6 +662,23 @@ host_tmpdir_on_scratch
 HOST_TMPDIR
 }
 
+# Core only: recreate an ABSENT remudero-serve/cloudflared (deploy/edge-heal.sh). On EXIT, so every
+# clean tick path reaches it and serve-container.sh can read the App env off a just-revived daemon.
+render_edge_heal() {
+  case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
+  cat <<'EDGE_HEAL'
+edge_heal_on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
+    RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh" ||
+      echo "rmd-relaunch: edge heal incomplete; the next tick re-asks." >&2
+  fi
+  return "$rc"
+}
+trap edge_heal_on_exit EXIT
+EDGE_HEAL
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -757,6 +774,8 @@ if [ "\${1:-}" = "--check-crash-loop" ]; then
   crash_loop_signature "\${2:-\$REVIVAL_LOG}"
   exit 0
 fi
+
+$(render_edge_heal)
 
 # W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
 #

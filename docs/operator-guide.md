@@ -1368,6 +1368,42 @@ there mean a daemon crash-looping under a watchdog that keeps papering over it.
 This installer does **not** start or stop the daemon. Bring it up with `~/rmd-relaunch.sh`, or let
 `rmd-fleet.service` do it at boot.
 
+#### Serve and cloudflared self-heal (`deploy/edge-heal.sh`)
+
+The **core** launcher (no `--instance`, or `--instance core`) runs `deploy/edge-heal.sh` from
+`<state>/daemon-install` on every tick that exits 0. That covers boot, a healthy daemon, a revived
+daemon and `state/STOP`; a refused tick (for example an unmounted `/mnt/rmd`) skips it. It recreates
+`remudero-serve` and `cloudflared` only when they are **absent**. That is what a Docker data root on
+wiped scratch looks like after an Azure deallocate. A stopped container stays with its
+`unless-stopped` policy. When both containers exist, the step costs one `docker container inspect`
+each.
+
+- **Serve absent:** it runs `deploy/serve-container.sh` in create mode, with the tick's state root.
+  Because the step runs after the daemon is revived, the script can read the GitHub App env from it.
+- **cloudflared absent:** it runs `cloudflare/cloudflared:latest` on `rmd-net` with
+  `--restart=unless-stopped`. The token file is mounted read-only and passed as
+  `tunnel --no-autoupdate run --token-file /etc/cloudflared/token` (cloudflared 2025.4.0 or later),
+  so the token never appears in argv, env or `docker inspect`. If the token file is missing or
+  empty, it logs one `REFUSING` line and creates nothing.
+- **`rmd-net` absent:** it creates the network only when no `cloudflared` exists. A new network next
+  to a live tunnel would leave the tunnel on the old network.
+
+The token file defaults to `/etc/remudero/cloudflared-token` (override:
+`RMD_CLOUDFLARED_TOKEN_FILE`). The heal only stats the file. cloudflared reads it inside the
+container as uid 65532 (the image's nonroot user), so a `root:root 0600` file would be unreadable
+there. Create it owned by that uid, readable by nobody else on the host:
+
+```
+sudo install -d -m 0755 /etc/remudero
+sudo install -m 0400 -o 65532 -g 65532 /dev/stdin /etc/remudero/cloudflared-token   # paste the token, then ^D
+```
+
+**One-off migration off the inline token.** The live `cloudflared` was created by hand with
+`--token <TOKEN>` on its command line, which `docker inspect` shows. Rotate the token in Cloudflare,
+write the new one to the file, then run `deploy/edge-heal.sh --migrate-cloudflared` as the service
+user. It refuses without the file, pulls the image, removes the old container and recreates it in
+the token-file shape. The tunnel is down for a few seconds.
+
 
 ### Rotating the service tokens
 
