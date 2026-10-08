@@ -1523,6 +1523,8 @@ import {
   deriveStatus,
   dispatchesWithoutNewOwnedPr,
   evaluateDispatchBreakerCorroboratedDetailed,
+  type LedgerSnapshot,
+  readLedgerSnapshot,
   type DispatchBreakerDetail,
   ghGateway,
   ghRequiredStatusCheckContexts,
@@ -33612,7 +33614,8 @@ function recordLifetimeTally(
  * join the tally. This is what prevents the archive snapshot and the live retention core from
  * double-charging the same dispatch. */
 export interface LifetimeHistory {
-  tallyFor: (taskId: string) => LifetimeDispatchTally;
+  /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
+  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content">) => LifetimeDispatchTally;
 }
 
 function lifetimeHistory(
@@ -33623,10 +33626,13 @@ function lifetimeHistory(
   const live = new Map<string, LifetimeDispatchTally>();
   let identity: string | undefined;
   let offsetChars = 0;
-  const refresh = () => {
+  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content">) => {
     let snapshot: { identity: string; content: string };
     let fd: number | undefined;
-    try {
+    if (supplied) {
+      if (supplied.identity === undefined) return;
+      snapshot = { identity: supplied.identity, content: supplied.content };
+    } else try {
       fd = openSync(ledgerPath, "r");
       const stat = fstatSync(fd);
       snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
@@ -33665,8 +33671,8 @@ function lifetimeHistory(
     offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
   };
   return {
-    tallyFor(taskId) {
-      refresh();
+    tallyFor(taskId, supplied) {
+      refresh(supplied);
       return addLifetimeDispatchTallies(historic.get(taskId) ?? { starts: 0, capacityBlocked: 0 }, live.get(taskId) ?? { starts: 0, capacityBlocked: 0 });
     },
   };
@@ -33734,6 +33740,8 @@ export function breakerGateFor(
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
   isLifetimeCapExceeded: (taskId: string) => boolean;
+  /** W1-T6358: drop the ledger snapshot; the next predicate reads the file once for the whole pass. */
+  beginSelectionPass: () => void;
   /**
    * WHAT THE BREAKER SAW for `taskId`, straight off the memo the boolean
    * predicates above already answered from — never a second evaluation. A
@@ -33745,7 +33753,18 @@ export function breakerGateFor(
   detailFor: (taskId: string) => DispatchBreakerDetail;
 } {
   const cache = createDispatchBreakerCache();
-  let memo: { taskId: string; detail: DispatchBreakerDetail } | undefined;
+  // W1-T6358: one read per pass; answers memoised per snapshot. `cache` (regression memory) outlives renewals.
+  let snapshot: LedgerSnapshot | undefined;
+  let details = new Map<string, DispatchBreakerDetail>();
+  let pressures = new Map<string, boolean>();
+  const current = (): LedgerSnapshot => {
+    if (snapshot === undefined) {
+      snapshot = readLedgerSnapshot(ledgerPath);
+      details = new Map();
+      pressures = new Map();
+    }
+    return snapshot;
+  };
   // W1-T2318: A THUNK IS RESOLVED HERE, ON FIRST READ, NOT BY THE CALLER AT BOOT.
   //
   // `listOpenHeadBranches()` costs a full board walk — MEASURED 26 sequential REST calls, 22.2s, of
@@ -33774,39 +33793,39 @@ export function breakerGateFor(
     return resolvedBranches;
   };
   const detailFor = (taskId: string) => {
-    if (memo?.taskId !== taskId) {
-      memo = {
-        taskId,
-        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, branchesFor),
-      };
+    const snap = current();
+    let detail = details.get(taskId);
+    if (detail === undefined) {
+      detail = evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, branchesFor, { snapshot: snap });
+      details.set(taskId, detail);
     }
-    return memo.detail;
+    return detail;
   };
   const stateFor = (taskId: string) => detailFor(taskId).state;
-  let lifetimeMemo: { taskId: string; pressure: boolean } | undefined;
   const lifetimeCapExceededFor = (taskId: string) => {
-    if (lifetimeMemo?.taskId !== taskId) {
+    const snap = current();
+    let pressure = pressures.get(taskId);
+    if (pressure === undefined) {
       // W1-T4025: the old count is now a SENSOR. Archive history is the audited boot projection;
       // the live ledger contributes only attributable attempts so orphaned workers and capacity
       // refusals do not spend adaptive pressure. A repeated signal routes through the judge but
       // never refuses the task here.
-      const live = readLedgerLines(ledgerPath);
+      const live = snap.lines;
       const liveTally = lifetimeDispatchTally(live, taskId);
       const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
-      const archived = auditedLifetimeHistory?.tallyFor(taskId) ?? { starts: 0, capacityBlocked: 0 };
-      lifetimeMemo = {
-        taskId,
-        pressure:
-          hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
-          effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1,
-      };
+      const archived = auditedLifetimeHistory?.tallyFor(taskId, snap) ?? { starts: 0, capacityBlocked: 0 };
+      pressure =
+        hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
+        effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1;
+      pressures.set(taskId, pressure);
     }
-    return lifetimeMemo.pressure;
+    return pressure;
   };
   return {
     isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
     isTripped: (taskId) => stateFor(taskId) === "tripped",
     isLifetimeCapExceeded: lifetimeCapExceededFor,
+    beginSelectionPass: () => { snapshot = undefined; },
     detailFor,
   };
 }
@@ -34853,6 +34872,7 @@ async function drainCommand(
         // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
         // "indeterminate" (handled above by isIndeterminate) rather than a false
         // "clear" that would silently untrip an already-tripped task.
+        beginSelectionPass: breakerGate.beginSelectionPass,
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
         // evaluation the predicate above answered from — never a second call.
@@ -37982,6 +38002,7 @@ export async function daemonCommand(
         // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
         // "indeterminate" (handled above by isIndeterminate) rather than a false
         // "clear" that would silently untrip an already-tripped task.
+        beginSelectionPass: breakerGate.beginSelectionPass,
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
         // evaluation the predicate above answered from — never a second call.
