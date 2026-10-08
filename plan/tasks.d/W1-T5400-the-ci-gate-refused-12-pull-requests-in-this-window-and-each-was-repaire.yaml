@@ -6,7 +6,9 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: done
+  retirement: closed
+  # plan gardener: retire W1-T5400 commit f812ef9753ff41ababa99e39c6c94e2a49c924b0 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   author_class: machine
   origin: "ci-learning:8551:ci"
