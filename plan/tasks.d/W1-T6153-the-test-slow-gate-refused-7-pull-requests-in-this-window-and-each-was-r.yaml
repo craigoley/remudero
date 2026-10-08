@@ -6,7 +6,9 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: done
+  retirement: closed
+  # plan gardener: retire W1-T6153 commit 5a504c313d07e58b4c443703a48173a66ceab41d — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   author_class: machine
   origin: "ci-learning:9362:test-slow"
