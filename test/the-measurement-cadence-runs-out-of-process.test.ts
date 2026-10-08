@@ -20,6 +20,7 @@ import {
   measurementCadenceChildAlive,
   measurementCadenceChildMain,
   measurementCadenceChildRunner,
+  type MeasurementCadenceChildOutcome,
   type MeasurementCadenceChildState,
   type MeasurementCadenceRunResult,
 } from "../src/lib/measurement-cadence.js";
@@ -91,6 +92,7 @@ async function boot(rows: Row[], deps: Record<string, unknown>): Promise<void> {
 }
 
 const childRows = (rows: Row[]) => rows.filter((r) => r.step === "measurement_cadence.child").map((r) => r.extra);
+const settledOf = (o: MeasurementCadenceChildOutcome) => (o.kind === "none" ? undefined : o.settled);
 const readState = (path: string) => JSON.parse(readFileSync(path, "utf8")) as MeasurementCadenceChildState;
 
 test("W1-T5723: with a fake spawner the cadence starts a child rather than running in-process", { timeout: 5_000 }, async () => {
@@ -131,7 +133,7 @@ test("W1-T5723: a second boot with the child still alive adopts the run instead 
   // Boot 1: the previous daemon process started the child, then restarted.
   const first = runnerFor(statePath, children).start({ fire: true });
   assert.equal(first.kind, "started");
-  void (first.kind !== "none" ? first.settled : undefined)?.catch(() => {});
+  void settledOf(first)?.catch(() => {});
 
   const rows: Row[] = [];
   await boot(rows, {
@@ -156,7 +158,7 @@ test("W1-T5723: a dead child's run is logged and restarted once, then discarded"
   const statePath = join(scratch(), "state.json");
   const children = fakeChildren();
   const first = runnerFor(statePath, children).start({ fire: true });
-  void (first.kind !== "none" ? first.settled : undefined)?.catch(() => {});
+  void settledOf(first)?.catch(() => {});
   const deadPid = children.spawned[0].pid;
   children.alive.delete(deadPid);
 
@@ -189,7 +191,7 @@ test("W1-T5723: a child whose cadence throws records a failure the daemon reads"
   const started = runnerFor(statePath, children).start({ fire: true });
   assert.equal(await measurementCadenceChildMain(statePath, "RUN-1", async () => { throw new Error("verb exploded"); }), 1);
   assert.equal(readState(statePath).status, "failed");
-  await assert.rejects(started.kind !== "none" ? started.settled! : Promise.resolve(), /verb exploded/);
+  await assert.rejects(settledOf(started) ?? Promise.resolve(), /verb exploded/);
   assert.equal(runnerFor(statePath, children).pending(), false, "a recorded failure is not restarted");
 });
 
@@ -199,11 +201,11 @@ test("W1-T5723: an unreadable state file is discarded and logged, never trusted"
   const children = fakeChildren();
   const outcome = runnerFor(statePath, children).start({ fire: false });
   assert.equal(outcome.kind, "discarded");
-  assert.equal(outcome.kind !== "none" ? outcome.previous?.rule : undefined, "unreadable");
+  assert.equal(outcome.kind === "discarded" ? outcome.previous?.rule : undefined, "unreadable");
   assert.equal(children.spawned.length, 0);
   const fired = runnerFor(statePath, children).start({ fire: true });
   assert.equal(fired.kind, "started");
-  void (fired.kind !== "none" ? fired.settled : undefined)?.catch(() => {});
+  void settledOf(fired)?.catch(() => {});
 });
 
 test("W1-T5723: the production spawn is detached, heap-capped and niced", () => {
