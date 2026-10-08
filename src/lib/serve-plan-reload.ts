@@ -7,6 +7,7 @@
  * restart diff was taken against and installs it with one assignment.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type Plan, type QuarantinedTask } from "./plan.js";
@@ -163,7 +164,8 @@ async function readServePlanPreferringWorker(repoDir: string, ref: string, optio
  * health from a task count. `loaded` is a successful read (an intentionally empty plan included); `unavailable` is an
  * initial read that has not yet succeeded, and the plan bound beside it is a placeholder, never evidence; `stale` is a
  * dated last-known-good plan whose latest refresh failed. `generation` counts adopted plans and moves only on a successful
- * read, so a failed refresh can never certify a newer one. `identity` names what was read (a commit or the plan files).
+ * read, so a failed refresh can never certify a newer one. `identity` names what was read: a short commit/file reference,
+ * or a SHA-256 digest of the complete file metadata identity when that identity would grow with the number of shards.
  */
 export type PlanSourceOutcome =
   | { state: "loaded"; generation: number; identity: string; observedAt: string }
@@ -184,11 +186,16 @@ export interface PlanSourceHolder {
 /** BACKSTOP: the longest failure reason a response carries; a reader needs the cause, not an unbounded error text. */
 export const PLAN_SOURCE_REASON_MAX = 240;
 
+/** CAP: bound response/log metadata, not plan size. Short references remain readable; large identities are hashed in full. */
+export const PLAN_SOURCE_IDENTITY_MAX_BYTES = 1_024;
+
 const boundedReason = (reason: unknown): string => String((reason as Error)?.message ?? reason).slice(0, PLAN_SOURCE_REASON_MAX);
 
 /** The outcome of a plan read that succeeded: the next generation, dated by the clock that read it. */
-export function planSourceLoaded(prior: PlanSourceOutcome | undefined, identity: string, clock: Clock = systemClock): PlanSourceOutcome {
-  return { state: "loaded", generation: (prior?.generation ?? 0) + 1, identity, observedAt: clock.iso() };
+export function planSourceLoaded(prior: PlanSourceOutcome | undefined, identity: string, clock: Clock = systemClock): Extract<PlanSourceOutcome, { state: "loaded" }> {
+  const boundedIdentity = Buffer.byteLength(identity, "utf8") <= PLAN_SOURCE_IDENTITY_MAX_BYTES
+    ? identity : `sha256:${createHash("sha256").update(identity, "utf8").digest("hex")}`;
+  return { state: "loaded", generation: (prior?.generation ?? 0) + 1, identity: boundedIdentity, observedAt: clock.iso() };
 }
 
 /** The outcome of a failed read: a prior good plan stays, dated and named stale; with none, the source is unavailable. */
@@ -220,7 +227,7 @@ export function adoptPlanSource(
   }
   board.plan = loaded.plan;
   board.planSource = planSourceLoaded(board.planSource, loaded.identity, options.clock);
-  log("serve.plan_source_adopted", { generation: board.planSource.generation, identity: loaded.identity, tasks: loaded.plan.tasks.length });
+  log("serve.plan_source_adopted", { generation: board.planSource.generation, identity: board.planSource.identity, tasks: loaded.plan.tasks.length });
   return true;
 }
 
