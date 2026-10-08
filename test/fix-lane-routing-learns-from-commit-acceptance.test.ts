@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   FIX_ROUTING_HALF_LIFE_MS,
   FIX_ROUTING_LEARNER,
@@ -256,6 +257,16 @@ function fixtureRoot(prefix: string): string {
   return mkdtempSync(join(parent, prefix));
 }
 
+/** W1-T6360: the learner ranks only mounted Codex models, so a fixture arm must be in the balanced row to compete. */
+function mountCodexBalanced(root: string, row: string[]): void {
+  const mounts = parseYaml(readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8")) as {
+    capabilities: { codex: Record<string, Record<string, string[]>> };
+  };
+  mounts.capabilities.codex.balanced = { low: row, medium: row, high: row };
+  mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), stringifyYaml(mounts));
+}
+
 function codexResult(): WorkerResult {
   return {
     provider: "codex", sessionId: "codex-session", costUsd: 0, numTurns: 1, text: "done", blocks: ["done"], stderr: "",
@@ -340,6 +351,7 @@ test("W1-T5535: the ledger read is cached for a short time and a failed read is 
 
 test("W1-T5535: a codex arm that out-draws the served model is re-read and adopted", async () => {
   const root = fixtureRoot("rmd-fix-learner-reread-");
+  mountCodexBalanced(root, ["gpt-6-sol", "gpt-better"]);
   try {
     const asked: string[] = [];
     const rows = [...armRounds("codex", "gpt-6-sol", 30, 0), ...armRounds("codex", "gpt-better", 0, 30), ...armRounds("claude", "claude-sonnet-5-5", 30, 0)];
@@ -360,6 +372,7 @@ test("W1-T5535: a codex arm that out-draws the served model is re-read and adopt
 
 test("W1-T5535: a codex re-read that throws is logged and keeps the served capacity", async (t) => {
   const root = fixtureRoot("rmd-fix-learner-reread-throws-");
+  mountCodexBalanced(root, ["gpt-6-sol", "gpt-better"]);
   const errors: string[] = [];
   t.mock.method(console, "error", (line: unknown) => { errors.push(String(line)); });
   try {

@@ -53,6 +53,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "containment.probe": DONE_STEPS_PRICE_THE_RUN,
   "isolation.probe": DONE_STEPS_PRICE_THE_RUN,
   "risk_judge.decision": DONE_STEPS_PRICE_THE_RUN,
+  "ci_judge.spend": DONE_STEPS_PRICE_THE_RUN,
   "budget.warning": DONE_STEPS_PRICE_THE_RUN,
   "pr.open_deferred_to_existing": DONE_STEPS_PRICE_THE_RUN, // W1-T5520: the run's restated total, its verdict row follows
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,

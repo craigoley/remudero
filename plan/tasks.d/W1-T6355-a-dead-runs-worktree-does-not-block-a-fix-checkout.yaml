@@ -1,0 +1,35 @@
+- id: W1-T6355
+  title: "A DEAD RUN'S WORKTREE DOES NOT BLOCK A FIX CHECKOUT — the sweep declines a fix round's branch claim as registered_worktree_owner whenever any worktree has the branch checked out, even when the run that owned it has ended; #10027 (W1-T6153) escalated instead of being fixed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a fix claim is refused only by a LIVE owner
+  band_meaning: span
+  origin: "operator session 2026-10-08: W1-T6153 (#10027) ledger trace"
+  plan_refs: [W1-T5955]
+  files: [src/lib/sweep.ts, test/a-dead-runs-worktree-does-not-block-a-fix-checkout.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 (core ledger): W1-T6153 at 06:12:31Z wrote sweep.fix.dirty_recovery_untracked_refused then
+    sweep.fix.checkout_claim_declined reason registered_worktree_owner; it escalated (escalation.issue_opened
+    06:28Z, pr.stuck 06:34Z) and was never fixed. READ on origin/main: the checkout claim in src/lib/sweep.ts
+    declines whenever a registered worktree owns the branch (boundedWorktreeOwnerPath), without asking whether
+    that worktree's run is still alive (inflight lock / run.end / process).
+  design: |
+    Before declining, classify the owning worktree: held by a live run (inflight lock held, no terminal row) →
+    decline as today; owned by an ended run with a clean or only-untracked tree → release it through the existing
+    hardened worktree removal and take the claim; dirty with tracked changes → decline as today (never discard
+    work). Log which branch was taken.
+  acceptance:
+    - claim: "a branch held by an ended run's clean worktree is reclaimed and the fix claim succeeds"
+      proof: 'grep: test("W1-T6355: an ended run worktree is reclaimed for the fix claim" in test/a-dead-runs-worktree-does-not-block-a-fix-checkout.test.ts'
+    - claim: "a live owner or tracked changes still decline the claim"
+      proof: 'grep: test("W1-T6355: a live owner or tracked work still declines" in test/a-dead-runs-worktree-does-not-block-a-fix-checkout.test.ts'
+  falsifier: |
+    Keep the unconditional decline: the ended-run fixture is declined registered_worktree_owner and the first test
+    fails.

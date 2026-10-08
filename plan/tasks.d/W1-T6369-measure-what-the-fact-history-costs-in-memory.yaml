@@ -1,0 +1,46 @@
+- id: W1-T6369
+  title: "MEASURE WHAT THE FACT HISTORY COSTS IN MEMORY AND WHAT EACH NOW-VIEW READER NEEDS OF IT, BEFORE ANY STORAGE CHANGE — the board projection parses every fact row into memory (836,723 on core, about 373 MiB of one now@core instance's 522 MiB in replay) and the now view hands that whole array to its derivations every build"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — evidence and a design choice; no source change
+  band_meaning: span
+  origin: "operator session 2026-10-08: serve CPU and memory plan, the gigabyte-scale memory target brought forward"
+  plan_refs: [W1-T6253, W1-T6267, W1-T6272, W1-T6254]
+  files:
+    - plan/tasks.d/W1-T6369-measure-what-the-fact-history-costs-in-memory.yaml
+    - docs/recon/fact-history-memory.md
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (isolated replay over a private online backup of the production read model, main, heap after full GC per
+    stage): one now@core instance retains about 522 MiB; the board projection's ingest of all 836,723 fact rows is about
+    373 MiB of it (about 0.45 KB a row), the plan about 57 MiB, the snapshot through assembly about 65 MiB.
+    FROM THE SOURCE (board-projection.ts on main): the projection keeps `rows: Row[]`, each a full `JSON.parse` of the
+    fact body, spliced in timestamp order, and exposes it as `rows()`; now-view.ts hands `board.rows` to computeBoardSnapshot,
+    the feedback and dependency gates, the glance spend and assembleNowView every build.
+    OBSERVED in production (serve.memory 2026-10-07 23:48Z): the views worker 1,322 MiB and heavy views 1,043 MiB are the
+    largest holders, so the fact history, once or twice per lane, is the likely gigabyte-scale term. That is INFERRED until
+    measured per lane in production (the lane telemetry task) and per reader here.
+  design: |
+    A recon, no source change. In an isolated replay (no network, a private backup, a controlled clock):
+    (1) For each consumer of `board.rows`, record which fields it reads, which time window (full history, a day, an hour,
+    a task's rows), and whether it re-walks the whole array per build.
+    (2) Price candidate representations against the current one, by retained heap after GC and warm build CPU:
+    projected rows holding only the fields readers use; rows kept as compact strings parsed on demand; per-task indexes
+    over the fact store instead of one in-memory array; windowed history with full-history readers moved to SQL.
+    (3) For each candidate, name the correctness oracle (canonical equality of the now view's body and of every affected
+    reader's output against the current code across a build sequence with appends, rotations and a restart), and the
+    recovery case (a cold start, a lane move, a worker death).
+    (4) Recommend at most one implementation task, with its measured saving, its CPU cost and its oracle. No storage change
+    or state release ships from this recon.
+  acceptance:
+    - claim: "the recon names every board.rows consumer with the fields and window it reads, prices each candidate by retained heap and build CPU in replay, and names each candidate's correctness oracle and recovery case"
+      proof: "grep: correctness oracle in docs/recon/fact-history-memory.md"
+  falsifier: |
+    A candidate priced without a replay measurement, or recommended without an oracle that compares the now view's body to
+    the current code's, fails human verification.

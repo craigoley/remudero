@@ -235,6 +235,16 @@ export function fixRoutingWeights(
   };
 }
 
+/**
+ * W1-T6360: THE LEARNER RANKS ONLY WHAT THE LANE MOUNTS. The evidence arms for `provider` whose model the lane's
+ * current capability row offers. An arm the row no longer names (gpt-6-sol after the 2026-10-02 Sol 6.1 switch) is
+ * left out, so its history can never route a round back to it; its rows stay in the ledger, so a re-mount restores it.
+ */
+export function mountedFixArms(evidence: FixArmEvidence, provider: string, mounted: readonly string[]): FixRoutingCandidate[] {
+  const offered = new Set(mounted);
+  return evidence.arms.filter((arm) => arm.provider === provider && offered.has(arm.model)).map((arm) => ({ provider, model: arm.model }));
+}
+
 /** One provider's probability at the decision: the headroom auction's, the learned one's, and the mix. */
 export interface FixProviderProbability {
   provider: string;

@@ -1,0 +1,35 @@
+- id: W1-T6352
+  title: "A CODEX WORKER OVER ITS OUTPUT BUDGET KEEPS ITS RUN — codexWorkerOutputLimitError (src/lib/worker-provider.ts) fails the whole run when stdout passes a fixed retention budget; W1-T6337's first build (2026-10-08 07:49Z, 1,089,002 bytes) died that way and the task was then blocked as an independent failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — exceeding the retention budget bounds what is kept, never the verdict
+  band_meaning: span
+  origin: "operator session 2026-10-08: W1-T6337 run W1-T6337-1791445377598 verdict failed on bounded_output"
+  plan_refs: [W1-T6337]
+  files: [src/lib/worker-provider.ts, test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 (core ledger, 6 MB tail, ~201 verdicts 10-06..08): three runs ended `verdict: failed` with
+    "Codex worker stdout output exceeded its … retention budget": W1-T5941 1,089,767 B, W1-T6034 292,574 B and
+    W1-T6337 1,089,002 B. Each lost a whole worker run (and W1-T6337 was then blocked) for a size the retention
+    budget exists only to bound in memory. READ on origin/main: codexWorkerOutputLimitError builds a
+    CodexWorkerOutputLimitError (reasonClass "bounded_output") that the run treats as terminal.
+  design: |
+    Keep the budget as a memory bound, not a verdict: past it, retain the head and the tail (or spill the rest to
+    the run's log file) with an explicit truncation marker and byte count, and let the worker's own exit and
+    result decide the verdict. Record the truncation in the run's receipt. A worker that produces no parseable
+    result still fails as it does today.
+  acceptance:
+    - claim: "a worker whose stdout passes the budget but exits with a result keeps that result and records the truncation"
+      proof: 'grep: test("W1-T6352: output past the retention budget is truncated, not fatal" in test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts'
+    - claim: "the retained output stays within the budget"
+      proof: 'grep: test("W1-T6352: retained output never exceeds the budget" in test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts'
+  falsifier: |
+    Keep the throw: a fake Codex child that writes budget+1 bytes then a valid result makes the run fail and the
+    first test fails.
