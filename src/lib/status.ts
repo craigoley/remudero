@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { ghExec, ghExecFile } from "./github-transport.js";
+import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
@@ -4134,15 +4134,43 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = ghExec(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
+    raw = ghExec(requiredStatusChecksArgs(owner, repo, branch),
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     );
   } catch (e) {
     // THE FACT THIS TASK EXISTS TO PRESERVE. Classified at the point of failure, because nothing downstream can
     // recover it: an absent binary, an unprivileged token, a network error and a 404 on an unprotected branch
     // all land here and all used to become a bare `undefined`.
-    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
+    return unreadableRequiredContexts(branch, e);
   }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+/** W1-T6591: {@link readRequiredStatusCheckContexts} off the event loop — the same read and classification. */
+export async function readRequiredStatusCheckContextsAsync(
+  owner: string,
+  repo: string,
+  branch = "main",
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<RequiredContextsRead> {
+  let raw: string;
+  try {
+    raw = await readText(requiredStatusChecksArgs(owner, repo, branch));
+  } catch (e) {
+    return unreadableRequiredContexts(branch, e);
+  }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+function requiredStatusChecksArgs(owner: string, repo: string, branch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`];
+}
+
+function unreadableRequiredContexts(branch: string, e: unknown): RequiredContextsRead {
+  return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
+}
+
+function requiredContextsFromProtection(raw: string, branch: string): RequiredContextsRead {
   try {
     const parsed = JSON.parse(raw) as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
     const fromChecks = (parsed.checks ?? [])

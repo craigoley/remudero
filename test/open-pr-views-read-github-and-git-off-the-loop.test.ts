@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { buildOpenPrViews, buildOpenPrViewsAsync, createTickReadProducer } from "../src/run-task.js";
-import { createPlanFilingFileCache } from "../src/lib/open-prs-rest.js";
+import { createGhCallPacer, createPlanFilingFileCache, type GhCallPacer } from "../src/lib/open-prs-rest.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -116,20 +116,21 @@ test("W1-T6591: by default the views read through the async gh transport and CI 
   }
 });
 
+function pendingAnswer(args: string[]): unknown {
+  const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+  if (path.includes("/pulls?") && path.includes("state=closed")) return [];
+  if (path.includes("/issues?")) return [];
+  if (path.includes("/check-runs")) return { check_runs: [] };
+  if (path.endsWith("/status")) return { statuses: [{ context: "ci-gate", state: "pending" }] };
+  if (path.includes("/compare/")) return { ahead_by: 0 };
+  return answer(args);
+}
+
 test("W1-T6591: the read plane awaits its open-PR and post-fix CI reads", async () => {
   const root = makeTempDir("open-pr-views-off-loop");
   writeFileSync(join(root, "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  files: [src/a.ts]\n  depends_on: []\n  status: queued\n");
   const ledgerPath = join(root, "ledger.ndjson");
   writeFileSync(ledgerPath, "");
-  const pendingAnswer = (args: string[]): unknown => {
-    const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
-    if (path.includes("/pulls?") && path.includes("state=closed")) return [];
-    if (path.includes("/issues?")) return [];
-    if (path.includes("/check-runs")) return { check_runs: [] };
-    if (path.endsWith("/status")) return { statuses: [{ context: "ci-gate", state: "pending" }] };
-    if (path.includes("/compare/")) return { ahead_by: 0 };
-    return answer(args);
-  };
   const syncReads: string[] = [];
   const asyncReads: string[] = [];
   const produce = createTickReadProducer({ owner: O, repo: R, config: { root, claudeBin: process.execPath }, ledgerPath, checkoutRoot: root }, {
@@ -153,4 +154,84 @@ test("W1-T6591: the read plane awaits its open-PR and post-fix CI reads", async 
   assert.ok(asyncReads.some((read) => read.includes("state=open")), "the open list went through the async transport");
   assert.equal(syncReads.some((read) => read.includes("state=open") && read.includes("/pulls?")), false);
   for (const view of facts.openPrViews) assert.deepEqual(facts.postFixCiFailuresByPr.get(view.prNumber), EVIDENCE);
+});
+
+test("W1-T6591: one build pass per call reads each remote input once", async () => {
+  const ledger = ledgerFile();
+  const syncReads: string[] = [];
+  let syncPasses = 0;
+  const expected = buildOpenPrViews(O, R, ledger, { ...base, readCiGateRequired: () => { syncPasses += 1; return []; },
+    fetch: (args) => { syncReads.push(args.join(" ")); return answer(args); }, fetchCiFailureEvidence: () => EVIDENCE });
+  const reads: string[] = [];
+  let passes = 0;
+  let ciReads = 0;
+  const views = await buildOpenPrViewsAsync(O, R, ledger, {
+    ...base, readCiGateRequired: () => { passes += 1; return []; },
+    fetchAsync: (args) => { reads.push(args.join(" ")); return slow(1)(args); },
+    fetchCiFailureEvidenceAsync: async () => { ciReads += 1; return EVIDENCE; },
+  });
+  assert.equal(syncPasses, 1, "positive control: the synchronous build makes one pass");
+  assert.ok(reads.length >= 9, `positive control: the build read its inputs (${reads.length} reads)`);
+  assert.equal(passes, 1, `the async build ran ${passes} classification passes`);
+  assert.equal(ciReads, 1, "the one red PR's CI evidence was read once");
+  assert.deepEqual(reads, syncReads, "the same reads, in the same order, each exactly once");
+  assert.deepEqual(views, expected);
+});
+
+function rateLimited(): Error {
+  return Object.assign(new Error("gh: API rate limit exceeded"), { status: 1, stderr: "API rate limit exceeded\nRetry-After: 2" });
+}
+
+test("W1-T6591: the async list read awaits the pacer and backs off a rate limit", async () => {
+  let clock = 0;
+  const sleeps: number[] = [];
+  const pacer = createGhCallPacer({
+    minGapMs: 1_000, rateLimitGapMs: 5_000, now: () => clock,
+    sleepSync: () => { throw new Error("a blocking sleep on the event loop"); },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+  });
+  pacer.wait();
+  let listReads = 0;
+  const views = await buildOpenPrViewsAsync(O, R, ledgerFile(), {
+    ...base, pacer, fetchCiFailureEvidence: () => EVIDENCE,
+    fetchAsync: async (args) => {
+      if (args.some((arg) => arg.includes("state=open")) && ++listReads === 1) throw rateLimited();
+      return answer(args);
+    },
+  });
+  assert.equal(views.length, 3, "positive control: the retried list was built");
+  assert.equal(listReads, 2, "the rate-limited list read was retried once");
+  assert.equal(sleeps.length, 3, `the gap, the backoff and the widened gap were awaited: ${sleeps.join(", ")}`);
+  assert.equal(sleeps[0], 1_000, "the first read waited out the pacer's gap");
+  assert.ok(sleeps[1] >= 2_000 && sleeps[1] <= 2_500, `the backoff honoured Retry-After: ${sleeps[1]}`);
+  assert.ok(sleeps[2] > 1_000, `the retry waited the widened rate-limit gap: ${sleeps[2]}`);
+});
+
+test("W1-T6591: the async list read's budget reading arms the pacer's floor", async () => {
+  const pacer = createGhCallPacer({ sleepSync: () => { throw new Error("a blocking sleep on the event loop"); }, sleep: async () => {} });
+  const fetchAsync = async (args: string[], onRateLimit?: (reading: { remaining?: number; limit?: number; resource?: string }) => void) => {
+    if (args.some((arg) => arg.includes("state=open"))) onRateLimit?.({ remaining: 10, limit: 5_000, resource: "core" });
+    return answer(args);
+  };
+  const views = await buildOpenPrViewsAsync(O, R, ledgerFile(), { ...base, pacer, fetchAsync, fetchCiFailureEvidence: () => EVIDENCE });
+  assert.equal(views.length, 3, "positive control: the first pass read the list");
+  await assert.rejects(buildOpenPrViewsAsync(O, R, ledgerFile(), { ...base, pacer, fetchAsync }), /stood down/);
+});
+
+test("W1-T6591: the read plane paces its open-PR list on its pacer", async () => {
+  const root = makeTempDir("open-pr-views-off-loop");
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  let waits = 0;
+  const pacer: GhCallPacer = { wait: () => {}, waitAsync: async () => { waits += 1; }, recordResult: () => {} };
+  const produce = createTickReadProducer({ owner: O, repo: R, config: { root, claudeBin: process.execPath }, ledgerPath, checkoutRoot: root }, {
+    pacer, fetch: pendingAnswer, fetchAsync: async (args) => pendingAnswer(args),
+    changedFilesFetch: async () => [], commitTrailerIndex: () => new Map(), evidenceRootFor: () => undefined,
+    issues: { create: () => { throw new Error("write in read plane"); }, listOpen: () => [] },
+    viewsDeps: { requiredContexts: () => ["ci-gate"], readCiGateRequired: () => [], fetchCiFailureEvidence: () => EVIDENCE },
+  });
+  const facts = await produce({ plan: NO_PLAN });
+  assert.equal(facts.openPrError, undefined);
+  assert.deepEqual(facts.openPrViews.map((view) => view.prNumber), [1, 2, 3], "positive control: the list was read");
+  assert.ok(waits >= 1, "the list read awaited the read plane's pacer");
 });
