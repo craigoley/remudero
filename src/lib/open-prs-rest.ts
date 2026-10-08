@@ -78,9 +78,7 @@ function budgetFromRateLimitLikeReading(reading: {
   return { remaining, limit, resource };
 }
 
-/** W1-T6591 — ONE SET OF READ STEPS, TWO DRIVERS: each `gh` read is a yielded effect that
- *  {@link runGhReadSteps} calls and run-task.ts's `runStepsAsync` awaits, a failure thrown back in at
- *  the same `yield`. git-push.ts's `Steps` shape, restated: git-push → review.ts imports this module. */
+/** W1-T6591: git-push.ts's `Steps` (one set of reads, a sync and an async driver), restated to avoid an import cycle. */
 export type GhReadSteps<R> = Generator<() => unknown, R, unknown>;
 
 function* ghRead(read: GhApiFetcher, args: string[], onRateLimit?: Parameters<GhApiFetcher>[1]): GhReadSteps<unknown> {
@@ -397,15 +395,16 @@ export function* fetchOpenPrsRestSteps(owner: string, repo: string, fetch: GhApi
     budget = budgetFromRateLimitLikeReading(reading);
   })) as RestPullRow[];
   const result: OpenPrRest[] = [];
-  for (const row of rows) {
-    const pr = mapRestPr(row);
-    try {
-      result.push({ ...pr, statusCheckRollup: yield* rollupSteps(owner, repo, pr.headRefOid, fetch) });
-    } catch {
-      result.push({ ...pr, rollupUnreadable: true as const });
-    }
-  }
+  for (const row of rows) result.push(yield* openPrWithRollupSteps(owner, repo, mapRestPr(row), fetch));
   return withGhBudgetReading(result, budget);
+}
+
+function* openPrWithRollupSteps(owner: string, repo: string, pr: OpenPrRest, fetch: GhApiFetcher): GhReadSteps<OpenPrRest> {
+  try {
+    return { ...pr, statusCheckRollup: yield* rollupSteps(owner, repo, pr.headRefOid, fetch) };
+  } catch {
+    return { ...pr, rollupUnreadable: true as const };
+  }
 }
 
 /** The `rmd fix` single-PR read — same mapping, plus the `state` token `routeFix` gates on. */
@@ -2073,13 +2072,13 @@ export function* hydrateReviewReuseFactsSteps(
 ): GhReadSteps<Map<number, ReviewReuseFacts>> {
   const out = new Map<number, ReviewReuseFacts>();
   for (const p of orphanedPrs.slice(0, cap)) {
-    // Best-effort per PR: an unreadable compare leaves this PR out of the map entirely, so its
-    // `currentOwnDiffDigest` stays `undefined` and the reuse decision falls back to a full review.
-    // The reason is handed to `onUnreadable` rather than dropped — see tryFetchReviewReuseFacts.
+    // Best-effort per PR: an unreadable compare leaves `currentOwnDiffDigest` undefined, so the reuse
+    // decision falls back to a full review; the reason goes to `onUnreadable` (see tryFetchReviewReuseFacts).
     try {
       out.set(p.number, yield* reviewReuseFactsSteps(owner, repo, targetBranch, p.headRefOid, fetch));
     } catch (err) {
-      onUnreadable?.(p.number, err instanceof Error ? err.message : String(err));
+      const reason = err instanceof Error ? err.message : String(err);
+      onUnreadable?.(p.number, reason);
     }
   }
   return out;

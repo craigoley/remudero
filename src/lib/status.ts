@@ -4141,12 +4141,11 @@ export function readRequiredStatusCheckContexts(owner: string, repo: string, bra
     // THE FACT THIS TASK EXISTS TO PRESERVE. Classified at the point of failure, because nothing downstream can
     // recover it: an absent binary, an unprivileged token, a network error and a 404 on an unprotected branch
     // all land here and all used to become a bare `undefined`.
-    return unreadableRequiredContexts(branch, e);
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
   }
   return requiredContextsFromProtection(raw, branch);
 }
 
-/** W1-T6591: {@link readRequiredStatusCheckContexts} off the event loop — the same read and classification. */
 export async function readRequiredStatusCheckContextsAsync(
   owner: string,
   repo: string,
@@ -4157,17 +4156,13 @@ export async function readRequiredStatusCheckContextsAsync(
   try {
     raw = await readText(requiredStatusChecksArgs(owner, repo, branch));
   } catch (e) {
-    return unreadableRequiredContexts(branch, e);
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
   }
   return requiredContextsFromProtection(raw, branch);
 }
 
 function requiredStatusChecksArgs(owner: string, repo: string, branch: string): string[] {
   return ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`];
-}
-
-function unreadableRequiredContexts(branch: string, e: unknown): RequiredContextsRead {
-  return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
 }
 
 function requiredContextsFromProtection(raw: string, branch: string): RequiredContextsRead {

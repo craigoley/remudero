@@ -41433,7 +41433,6 @@ export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string
   }));
 }
 
-/** W1-T6591: the build's remote reads, each a step effect so one pass serves both drivers. */
 interface OpenPrViewReads {
   read: GhApiFetcher;
   openPrRows: () => unknown;
@@ -41493,8 +41492,6 @@ function* openPrViewSteps(
   const assessPendingOwner =
     deps.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
-  // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
-  // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
   const raw = (deps.openPrRows ?? (yield* step(io.openPrRows))) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
@@ -41983,7 +41980,6 @@ function* openPrViewSteps(
 
 type OpenPrCiFailureRead = (owner: string, repo: string, rollup: RollupCheck[] | undefined) => Promise<CiFailure[]>;
 
-/** W1-T6591: the open-PR list and its rollups, awaited under the same pacer, backoff and floor as the sync read. */
 export function fetchOpenPrsWithPostedIdsAsync(
   owner: string,
   repo: string,

@@ -8,6 +8,7 @@ import { createGhCallPacer, createPlanFilingFileCache, type GhCallPacer } from "
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { readRequiredStatusCheckContextsAsync } from "../src/lib/status.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T6591: the 2026-10-08 CPU profile caught buildOpenPrViews holding the daemon thread for 18.5 s
@@ -71,7 +72,7 @@ test("W1-T6591: the loop turns while open-PR views fetch", async () => {
   assert.deepEqual(views, expected, "the views are exactly what the synchronous build produces");
 });
 
-test("W1-T6591: only the settled pass commits the plan-filing cache and its telemetry", async () => {
+test("W1-T6591: the plan-filing cache and its telemetry match the synchronous build", async () => {
   const ledger = ledgerFile();
   const syncCache = createPlanFilingFileCache();
   const syncEvents: unknown[] = [];
@@ -103,12 +104,15 @@ test("W1-T6591: by default the views read through the async gh transport and CI 
   const listed = JSON.stringify([row(1)]);
   const runs = JSON.stringify({ check_runs: [{ id: 11, name: "ci-gate", status: "completed", conclusion: "failure" }] });
   const gh = ghShim([{ when: "state=open", stdout: listed }, { when: "check-runs", stdout: runs },
+    { when: "protection", stdout: JSON.stringify({ checks: [{ context: "ci-gate" }] }) },
     { when: "/status", stdout: "{\"statuses\":[]}" }, { when: "", stdout: "{}" }], { kind: "open-pr-views-off-loop" });
   const previous = process.env.PATH;
   process.env.PATH = `${gh.dir}:${previous}`;
   try {
-    const views = await buildOpenPrViewsAsync(O, R, ledgerFile(), base);
+    const views = await buildOpenPrViewsAsync(O, R, ledgerFile(), { readCiGateRequired: () => [], readMainPlan: () => NO_PLAN });
     assert.deepEqual(views.map((view) => view.prNumber), [1]);
+    assert.equal(views[0].checksState, "red", "the required contexts were read through the async transport");
+    assert.ok(gh.calls().some((call) => call.includes("protection/required_status_checks")));
     assert.deepEqual(views[0].ciFailures?.map((failure) => failure.name), ["ci-gate"]);
     assert.ok(gh.calls().some((call) => call.includes("state=open")), "the list was read through the shimmed gh");
   } finally {
@@ -234,4 +238,13 @@ test("W1-T6591: the read plane paces its open-PR list on its pacer", async () =>
   assert.equal(facts.openPrError, undefined);
   assert.deepEqual(facts.openPrViews.map((view) => view.prNumber), [1, 2, 3], "positive control: the list was read");
   assert.ok(waits >= 1, "the list read awaited the read plane's pacer");
+});
+
+test("W1-T6591: the async required-contexts read classifies exactly as the synchronous one", async () => {
+  const read = (text: string) => async () => text;
+  assert.deepEqual(await readRequiredStatusCheckContextsAsync(O, R, "main", read(JSON.stringify({ checks: [{ context: "ci-gate" }] }))),
+    { kind: "contexts", contexts: ["ci-gate"] });
+  assert.deepEqual(await readRequiredStatusCheckContextsAsync(O, R, "main", read(JSON.stringify({ contexts: [] }))), { kind: "none" });
+  assert.deepEqual(await readRequiredStatusCheckContextsAsync(O, R, "main", async () => { throw new Error("gh: Not Found (HTTP 404)\nmore"); }),
+    { kind: "unreadable", branch: "main", reason: "gh: Not Found (HTTP 404)" });
 });
