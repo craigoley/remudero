@@ -1,0 +1,31 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -252,0 +253,26 @@
++- id: light-gates-pre-push-ratchets
++  subsystem: ci
++  lifecycle: active
++  files:
++    - "plan/tasks.d/**"
++    - "test/**"
++    - ".github/workflows/ci.yml"
++    - "scripts/comment-load-baseline.json"
++    - "scripts/source-size-baseline.json"
++    - "scripts/comment-load-ratchet.mjs"
++    - "scripts/source-size-ratchet.mjs"
++  fact: >-
++    Before pushing a change that touches plan shards, tests, or the light-gates job in
++    .github/workflows/ci.yml, run `npm run --silent comment-load-signal` and
++    `npm run --silent source-size-ratchet`, and record any printed baseline row in the same commit
++    until both print OK. If the diff touches plan/, run `npm run --silent rule15-precheck` before the
++    push. Run `rmd census-membership` for the suites the diff can move. Do not record a number in
++    the negative-reachability, catch-erasure, or source-text-assertion-census ratchets.
++  evidence: >-
++    The light-gates job (.github/workflows/ci.yml, job name light-gates) refused nine pull requests
++    recorded as ci-learning:9301:light-gates (9301, 9358, 9362, 9369, 9379, 9382, 9388, 9396; 9362
++    appears twice), and each was repaired after the gate reported. The repaired files included plan
++    shards, test files, and the preflight author script. Recon did not establish each PR's specific
++    failure reason, so this entry names the pre-push checks rather than a single cause.
++  src: "ci-learning:9301:light-gates"
++  cited: "2026-10-08"
