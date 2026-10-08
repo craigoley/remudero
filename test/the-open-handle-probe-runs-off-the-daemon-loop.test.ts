@@ -15,7 +15,6 @@ import { test } from "node:test";
 // fails there on its own assertion rather than on a missing export.
 import * as cloneLib from "../src/lib/clone-reaper.js";
 import * as reaperLib from "../src/lib/object-reaper.js";
-import * as runTaskMod from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
@@ -48,12 +47,7 @@ async function ticksWhile<T>(pending: () => Promise<T>): Promise<{ value: T; tic
   }
 }
 
-const noSweeps = {
-  sweepTempDirs: () => ({ removed: [] }) as never,
-  reapClonesSurvey: () => ({ reaped: [], bytesReclaimed: 0 }) as never,
-  sweepWorkerHomes: () => ({ removed: [] }) as never,
-  workerHomeRoot: () => "/nowhere",
-};
+// The legacy probe remains bounded; dispatch no longer wires it.
 
 test("the awaited open-handle probe keeps a timer firing while lsof is pending", async () => {
   const dir = scratch("probe-tick");
@@ -64,38 +58,24 @@ test("the awaited open-handle probe keeps a timer firing while lsof is pending",
   assert.ok(ticks >= 10, `the loop must keep servicing timers while lsof runs (ticked ${ticks})`);
 });
 
-test("an open-handle probe past its bound is killed and the decision row names handle_probe timed_out", async () => {
+test("a legacy reaper open-handle probe past its bound is killed and names its timeout", async () => {
   const store = gitRepo({ kind: "probe-bound" });
-  const rows: Array<[string, Record<string, unknown>]> = [];
-  let wired: unknown;
+  let prunes = 0;
   const started = Date.now();
-  await withBinScript("lsof", "exec sleep 30", () =>
-    runTaskMod.logDiskReclaimRung({ root: scratch("probe-bound-root") } as never, (s, f) => rows.push([s, f]), {
-      ...noSweeps,
-      objectPolicy: () => ({ enabled: true }),
-      ratifications: new Map(),
-      objectRepoDir: () => store.dir,
-      objectInflightDir: () => scratch("probe-bound-inflight"),
-      // The REAL awaited reap; the rung's OWN default probe runs, only under a short bound.
-      reapObjects: (dir, inflight, d) => {
-        wired = d.openFileCountAsync;
-        return reaperLib.reapGitObjectsAsync(dir, inflight, {
-          ...d,
-          ...(d.openFileCountAsync ? { openFileCountAsync: (p: string) => cloneLib.defaultOpenFileCountAsync(p, 300) } : {}),
-          listWorktrees: () => [],
-          looseObjectCount: () => reaperLib.LOOSE_OBJECT_FLOOR + 1,
-          listProcesses: () => [],
-        });
-      },
+  const decision = await withBinScript("lsof", "exec sleep 30", () =>
+    reaperLib.reapGitObjectsAsync(store.dir, scratch("probe-bound-inflight"), {
+      openFileCountAsync: (p) => cloneLib.defaultOpenFileCountAsync(p, 300),
+      listWorktrees: () => [],
+      looseObjectCount: () => reaperLib.LOOSE_OBJECT_FLOOR + 1,
+      listProcesses: () => [],
+      runPrune: () => { prunes++; },
     }),
   );
-  assertWallClockBound(Date.now() - started, 15_000, "the hung lsof is killed at its bound, not waited out");
-  assert.equal(wired, cloneLib.defaultOpenFileCountAsync, "the rung wires the awaited lsof probe by default");
-  const declined = rows.find(([s]) => s === "run.disk_reclaim.objects_declined")?.[1];
-  assert.ok(declined, `a probe killed at its bound refuses (rows: ${JSON.stringify(rows.map(([s]) => s))})`);
-  assert.equal(declined.handle_probe, "timed_out", "the timeout is a named outcome, never a count");
-  assert.match(String(declined.reason), /open-handle probe timed out after 300 ms/);
-  assert.equal(rows.find(([s]) => s === "run.disk_reclaim.objects_decision"), undefined, "nothing is pruned");
+  assertWallClockBound(Date.now() - started, 15_000, "the hung lsof is killed at its bound");
+  assert.equal(decision.handleProbe, "timed_out", "a timeout is never reported as a count");
+  assert.match(String(decision.refusedBecause), /open-handle probe timed out after 300 ms/);
+  assert.equal(decision.pruned, 0);
+  assert.equal(prunes, 0, "an unread handle count authorizes no prune");
 });
 
 test("a handle probe that times out at the second end of the quiesced window refuses, named", async () => {

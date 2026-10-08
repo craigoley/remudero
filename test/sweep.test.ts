@@ -4227,10 +4227,12 @@ test("a stalled pull request is reported on the ledger, and a quiet pass writes 
 // W1-T520 detects the armed-and-behind set and only reports it (above). This selects AT MOST ONE
 // from that set — oldest head first — and, when `deps.updateBranch` is wired, asks GitHub to
 // update it. See `selectUpdateBranchTarget`'s own doc (lib/sweep.ts) for the full design.
+// Action candidates here have completed checks; pending-check deferral has separate controls.
 
 test("W1-T528: one pull request is updated per pass and it is the oldest head", async () => {
   const older = pr({
     prNumber: 501,
+    checksState: "green",
     prUrl: "url/501",
     taskId: "W1-A",
     autoMergeArmed: true,
@@ -4240,6 +4242,7 @@ test("W1-T528: one pull request is updated per pass and it is the oldest head", 
   });
   const younger = pr({
     prNumber: 502,
+    checksState: "green",
     prUrl: "url/502",
     taskId: "W1-B",
     autoMergeArmed: true,
@@ -4279,6 +4282,7 @@ test("W1-T528: one pull request is updated per pass and it is the oldest head", 
 test("W1-T528: a draft pull request is never updated", async () => {
   const draftOldest = pr({
     prNumber: 511,
+    checksState: "green",
     prUrl: "url/511",
     taskId: "W1-C",
     autoMergeArmed: true,
@@ -4289,6 +4293,7 @@ test("W1-T528: a draft pull request is never updated", async () => {
   });
   const notDraft = pr({
     prNumber: 512,
+    checksState: "green",
     prUrl: "url/512",
     taskId: "W1-D",
     autoMergeArmed: true,
@@ -4324,6 +4329,7 @@ test("W1-T528: a draft pull request is never updated", async () => {
 test("W1-T528: an in-flight run branch is skipped rather than raced", async () => {
   const inFlight = pr({
     prNumber: 521,
+    checksState: "green",
     prUrl: "url/521",
     taskId: "W1-T900",
     autoMergeArmed: true,
@@ -4334,6 +4340,7 @@ test("W1-T528: an in-flight run branch is skipped rather than raced", async () =
   });
   const settled = pr({
     prNumber: 522,
+    checksState: "green",
     prUrl: "url/522",
     taskId: "W1-E",
     autoMergeArmed: true,
@@ -4375,6 +4382,7 @@ test("W1-T528: an in-flight run branch is skipped rather than raced", async () =
 test("W1-T528: a conflicting update is reported and skipped", async () => {
   const target = pr({
     prNumber: 531,
+    checksState: "green",
     prUrl: "url/531",
     taskId: "W1-F",
     autoMergeArmed: true,
