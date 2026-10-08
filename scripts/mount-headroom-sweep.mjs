@@ -226,12 +226,16 @@ export function computeClassSweep(runs) {
     const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
     const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
-    const costs = settled.map((r) => r.costUsd);
+    // W1-T6466: an unpriced run (`costSource: "none"`) is counted, never a $0 cost sample.
+    const priced = settled.filter((r) => r.costSource !== "none");
+    const unpriced = settled.length - priced.length;
+    const costs = priced.map((r) => r.costUsd);
     const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
     const blockedCi = settled.filter((r) => r.verdict === BLOCKED_CI_VERDICT).length;
     const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
     const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
     const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+    const distinctPricedTasks = new Set(priced.map((r) => r.taskId)).size;
     out.push({
       taskClass,
       totalRuns: rs.length,
@@ -245,7 +249,8 @@ export function computeClassSweep(runs) {
       outcomes: { passing, blockedCi, redispatched: redispatchedCount },
       totalSettledCostUsd,
       distinctSettledTasks,
-      costPerCompletedTaskUsd: distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+      costPerCompletedTaskUsd: distinctPricedTasks === 0 ? null : round2(totalSettledCostUsd / distinctPricedTasks),
+      ...(unpriced > 0 ? { unpriced } : {}),
       ...(excludedCount > 0 ? { excludedCount } : {}),
     });
   }
@@ -629,12 +634,15 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
     for (const arm of cell.armsByKey.values()) {
       const settled = arm.runs.filter(isSettled);
       const turns = settled.map((r) => r.numTurns);
-      const costs = settled.map((r) => r.costUsd);
+      const priced = settled.filter((r) => r.costSource !== "none"); // W1-T6466
+      const unpriced = settled.length - priced.length;
+      const costs = priced.map((r) => r.costUsd);
       const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
       const blockedCi = settled.filter((r) => r.verdict === BLOCKED_CI_VERDICT).length;
       const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
       const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
       const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+      const distinctPricedTasks = new Set(priced.map((r) => r.taskId)).size;
       let eligibleCalls = 0;
       let measuredCalls = 0;
       let unreadableCalls = 0;
@@ -677,7 +685,8 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
         totalSettledCostUsd,
         distinctSettledTasks,
         costPerCompletedTaskUsd:
-          distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+          distinctPricedTasks === 0 ? null : round2(totalSettledCostUsd / distinctPricedTasks),
+        ...(unpriced > 0 ? { unpriced } : {}),
         windowShare: {
           provider: arm.provider,
           percentConsumedPerCompletedTask:
