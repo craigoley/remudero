@@ -83,6 +83,7 @@
         "hand-review-collides-with-the-daemon",
         "inherited-violation-not-authors",
         "lease-is-not-a-supersession-guard",
+        "lint-plan-refuses-before-pr",
         "required-check-poster",
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
