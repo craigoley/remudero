@@ -226,7 +226,7 @@ export function computeClassSweep(runs) {
     const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
     const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
-    // W1-T6466: an unpriced run (`costSource: "none"`) is counted, never a $0 cost sample.
+    // W1-T6466: unpriced runs are counted, not costed.
     const priced = settled.filter((r) => r.costSource !== "none");
     const unpriced = settled.length - priced.length;
     const costs = priced.map((r) => r.costUsd);
@@ -634,7 +634,7 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
     for (const arm of cell.armsByKey.values()) {
       const settled = arm.runs.filter(isSettled);
       const turns = settled.map((r) => r.numTurns);
-      const priced = settled.filter((r) => r.costSource !== "none"); // W1-T6466
+      const priced = settled.filter((r) => r.costSource !== "none");
       const unpriced = settled.length - priced.length;
       const costs = priced.map((r) => r.costUsd);
       const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
