@@ -24973,8 +24973,10 @@ export function ciLearningPlanOrigins(root: string): string[] {
 /** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
  *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
  *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
-export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void): (filingBranch?: string) => string {
-  return (filingBranch) => {
+export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise):
+  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  const mintSync = (filingBranch?: string) => {
     const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
     const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
     // The bridge supplies its actual landing identity, even when this manual command starts from
@@ -24986,6 +24988,31 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     );
     return held.taskId;
   };
+  return Object.assign(mintSync, {
+    async: async (filingBranch: string): Promise<string> => {
+      const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+        "--input-type=module", "--eval",
+        `import { format } from "node:util";
+         const rows = [];
+         console.log = (...args) => rows.push({ say: format(...args) });
+         const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+         try {
+           const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }))(process.argv[2]);
+           process.stdout.write(JSON.stringify({ id, rows }));
+         } catch (error) {
+           process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), rows }));
+         }`, root, filingBranch], { maxBuffer: 1 << 26 });
+      const result = JSON.parse(stdout) as { id: string; error?: string;
+        rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
+      if (stderr) process.stderr.write(stderr);
+      for (const row of result.rows) {
+        if ("say" in row) console.log(row.say);
+        else log?.(row.step, row.fields);
+      }
+      if (result.error !== undefined) throw new Error(result.error);
+      return result.id;
+    },
+  });
 }
 
 export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string; signatures?: readonly RuleSignature[] } = {}): number {
