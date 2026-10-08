@@ -3397,9 +3397,9 @@ export function fileCiLearningShards(
 // In-process, its synchronous work froze the daemon loop (one 365.7 s block, 2026-10-08) and a
 // restart killed it. The daemon only starts the child and reads its result row from the state file.
 
-/** The child's V8 heap cap, the garden child's figure (W1-T5365). */
+/** BACKSTOP: the child's V8 heap cap, the garden child's figure (W1-T5365). */
 export const MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB = 2048;
-/** A dead child's run is restarted this many times in all, then discarded. */
+/** BACKSTOP: a dead child's run gets this many attempts in all, then is discarded. */
 export const MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS = 2;
 const MEASUREMENT_CADENCE_CHILD_NICENESS = 10;
 /** The child entry's first argument; without it the entry module does nothing on import. */
@@ -3467,6 +3467,7 @@ export function measurementCadenceChildAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e) {
+    // ESRCH is no such process; EPERM is a live process under another uid.
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
 }
