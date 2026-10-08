@@ -104,7 +104,6 @@
         "scripts/comment-load-ratchet.mjs",
         "scripts/diff-coverage.mjs",
         "scripts/lib/inherited-violation.mjs",
-        "src/**",
         "src/lib/board-projection.ts",
         "src/lib/git-push.ts",
         "src/lib/ledger-projector.ts",

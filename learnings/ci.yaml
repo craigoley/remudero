@@ -168,12 +168,12 @@
 - id: claims-gate-lane
   subsystem: ci
   lifecycle: active
-  files: ["plan/claims.yaml", "src/**", "scripts/**", ".github/**"]
+  files: ["plan/claims.yaml", "plan/tasks.d/**", src/run-task.ts, "scripts/**", ".github/**"]
   fact: >-
-    Before opening a PR that changes code, scripts, or CI configuration covered by assertions in
-    plan/claims.yaml, run `npm run --silent claims` on the proposed tree and repair each failing
-    assertion or update its claim only when the system behavior intentionally changed. This
-    checks the same assertions the CI claims gate executes before spending a hosted CI cycle.
+    Before opening a PR from the task-authoring lane or changing the claims runner, scripts, or CI
+    configuration, run `npm run --silent claims` on the proposed tree. Repair each failing
+    assertion, or update its claim when system behavior intentionally changed. The claims gate
+    executes these same assertions in CI, including ones affected by other changed paths.
   evidence: >-
     The claims job runs `npm run --silent claims`, which executes every assertion in
     plan/claims.yaml; 26 pull requests in the window recorded as ci-learning:8684:claims were
