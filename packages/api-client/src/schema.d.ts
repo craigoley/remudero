@@ -321,11 +321,39 @@ export interface components {
       subscription: (RepoSubscriptionUsage) | (null);
       modelsused: (string)[] | null;
     };
-    /** NOT COMPUTED: no config key holds a per-repository proof policy, worker pool size or alert threshold. Every field is always null; see `not_computed.settings`. */
+    /** A repository's EFFECTIVE settings, read-only (W1-T5178). On the operating instance's own repository, `proofpolicy` and `workerpoolsize` come from the instance's plan/policy.yaml and `alertthreshold` from the repository's plan/alert-policy.yaml; each carries `configSource` and `source`, and a value with no readable source stays null with its reason in `reasons` (and `not_computed.settings`). A portfolio row for another repository carries only the three null values; its own instance's summary reports them. */
     RepoDashboardSettings: {
-      proofpolicy: null;
-      workerpoolsize: null;
-      alertthreshold: null;
+      /** The timeout the acceptance-proof executor enforces. */
+      proofpolicy: ({
+        timeoutMs: number;
+      }) | (null);
+      /** The instance's dispatch lane count (plan/policy.yaml sweep.dispatchLanes). */
+      workerpoolsize: number | null;
+      /** The alert disposition policy — severities eligible to act, and the critical path globs by category. */
+      alertthreshold: ({
+        actSeverities: (string)[];
+        criticalPaths: Record<string, (string)[]>;
+      }) | (null);
+      /** Whether each value is the organization default or a repository override; null when unread. */
+      configSource?: {
+        proofpolicy: "organization-default" | "repository-override" | null | null;
+        workerpoolsize: "organization-default" | "repository-override" | null | null;
+        alertthreshold: "organization-default" | "repository-override" | null | null;
+      };
+      /** The file (and key) each value was read from; null when unread. */
+      source?: {
+        proofpolicy: string | null;
+        workerpoolsize: string | null;
+        alertthreshold: string | null;
+      };
+      /** The newest read source file's modification time — when the settings last changed, never the read's own clock, so a re-materialize over unchanged files keeps the view's etag. Null when no source file was read. */
+      freshness?: string | null;
+      /** Why each null setting has no value. */
+      reasons?: {
+        proofpolicy?: string;
+        workerpoolsize?: string;
+        alertthreshold?: string;
+      };
     };
     /** One repository action. `path` is relative to the operating instance's `/v1/i/<instance>/` prefix: `toggleonoff` is POST control/pause or control/resume (write scope, chosen from the current flag), `viewlogs` is GET recent. `configure` and `test_run` are never available. */
     RepoAction: {

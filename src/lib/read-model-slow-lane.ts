@@ -66,10 +66,20 @@ export interface SlowLaneBodies {
 
 export type SlowLaneMessage =
   | { type: "log"; step: string; extra: Record<string, unknown> }
+  /** Posted BEFORE a unit's work starts, so a thread that dies inside it is attributed by its parent. */
+  | { type: "begin"; work: SlowLaneWork }
+  | { type: "end"; work: SlowLaneWork }
   | { type: "unit"; unit: string; ok: boolean; ms: number }
   | ({ type: "bodies" } & SlowLaneBodies)
   /** One instance's analytics refresh, finished or failed, for the read-model worker to commit. */
   | { type: "source_snapshot"; snapshot: SourceSnapshotWrite };
+
+/** One piece of work in flight on the lane's thread: the unit, the instance it reads, and how far it got. */
+export interface SlowLaneWork {
+  unit: string;
+  instance?: string;
+  phase: string;
+}
 
 interface SlowLaneUnit {
   name: string;
@@ -189,8 +199,13 @@ function analyticsUnit(
     attempted.set(instance.name, started);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error(`analytics refresh exceeded ${timeoutMs} ms`)), timeoutMs);
+    let work: SlowLaneWork = { unit: "analytics", instance: instance.name, phase: "read-checkpoint" };
     try {
-      const prior = checkpoints.has(instance.name) ? checkpoints.get(instance.name) : readAnalyticsCheckpoint(instance.stateDir);
+      const held = checkpoints.has(instance.name);
+      if (!held) post({ type: "begin", work });
+      const prior = held ? checkpoints.get(instance.name) : readAnalyticsCheckpoint(instance.stateDir);
+      work = { ...work, phase: held ? "scan" : "scan-from-disk-checkpoint" };
+      post({ type: "begin", work });
       const { snapshot, checkpoint } = await refresh(instance.stateDir, clock, controller.signal, prior);
       controller.signal.throwIfAborted();
       if (snapshot.benchmarkEvidence?.reason === "ledger-source-unreadable") throw new Error("the ledger could not be read");
@@ -203,6 +218,7 @@ function analyticsUnit(
       log("analytics.source_snapshot_failed", { instance: instance.name, ms: clock.now() - started, error: message });
     } finally {
       clearTimeout(timer);
+      post({ type: "end", work });
     }
   };
   return {
@@ -259,6 +275,8 @@ export function runSlowLaneWorker(
       running = true;
       for (const unit of units) {
         const started = clock.now();
+        const work: SlowLaneWork = { unit: unit.name, phase: "run" };
+        port.postMessage({ type: "begin", work } satisfies SlowLaneMessage);
         let ok = true;
         try {
           for (const built of (await unit.run()).views) port.postMessage({ type: "bodies", ...built } satisfies SlowLaneMessage);
@@ -266,6 +284,7 @@ export function runSlowLaneWorker(
           ok = false;
           log("read_model.slow_unit_failed", { unit: unit.name, error: String((error as Error)?.message ?? error) });
         }
+        port.postMessage({ type: "end", work } satisfies SlowLaneMessage);
         port.postMessage({ type: "unit", unit: unit.name, ok, ms: clock.now() - started } satisfies SlowLaneMessage);
       }
       running = false;
@@ -312,7 +331,10 @@ export function threadSlowLane(opts: {
   onBodies?: (built: SlowLaneBodies) => void;
   /** Each instance's analytics refresh, finished or failed. */
   onSnapshot?: (write: SourceSnapshotWrite) => void;
+  /** Times the work in flight when the thread dies. */
+  clock?: Clock;
 }): SlowLane {
+  const clock = opts.clock ?? systemClock;
   const baseMs = opts.config.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   let worker: Worker | undefined;
   let held = false;
@@ -325,21 +347,32 @@ export function threadSlowLane(opts: {
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
     worker = spawned;
     spawned.unref();
+    // What the thread said it was doing, held HERE, so a thread that dies mid-unit still names it.
+    const inFlight = new Map<string, SlowLaneWork & { sinceMs: number }>();
+    const inFlightNow = (): Array<SlowLaneWork & { runningMs: number }> =>
+      [...inFlight.values()].map(({ sinceMs, ...work }) => ({ ...work, runningMs: clock.now() - sinceMs }));
+    let termination: string | undefined;
     // Ahead of the lease, so a thread's first pass already knows which views are switched on.
     spawned.postMessage({ type: "views", modes });
     spawned.on("message", (msg: SlowLaneMessage) => {
-      if (msg.type === "log") opts.log(msg.step, msg.extra);
+      if (msg.type === "begin") inFlight.set(`${msg.work.unit}|${msg.work.instance ?? ""}`, { ...msg.work, sinceMs: clock.now() });
+      else if (msg.type === "end") inFlight.delete(`${msg.work.unit}|${msg.work.instance ?? ""}`);
+      else if (msg.type === "log") opts.log(msg.step, msg.extra);
       else if (msg.type === "bodies") opts.onBodies?.({ view: msg.view, version: msg.version, bodies: msg.bodies });
       else if (msg.type === "source_snapshot") opts.onSnapshot?.(msg.snapshot);
       else if (msg.ok) deaths = 0;
     });
-    spawned.on("error", (error) => opts.log("read_model.slow_lane_failed", { error: String(error?.message ?? error) }));
+    spawned.on("error", (error: Error & { code?: unknown }) => {
+      // Node's own code (ERR_WORKER_OUT_OF_MEMORY on a heap death), else the thrown error's name: not every death is an OOM.
+      termination = typeof error?.code === "string" ? error.code : String(error?.name ?? "error");
+      opts.log("read_model.slow_lane_failed", { error: String(error?.message ?? error), termination, inFlight: inFlightNow() });
+    });
     spawned.on("exit", (code) => {
       if (worker !== spawned || closed) return;
       worker = undefined;
       deaths++;
       const delayMs = Math.min(baseMs * 2 ** deaths, SLOW_LANE_MAX_RESPAWN_MS);
-      opts.log("read_model.slow_lane_exited", { code, deaths, respawnInMs: delayMs });
+      opts.log("read_model.slow_lane_exited", { code, termination: termination ?? "exit", inFlight: inFlightNow(), deaths, respawnInMs: delayMs });
       respawn = setTimeout(() => {
         respawn = undefined;
         if (closed) return;

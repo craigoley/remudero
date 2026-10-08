@@ -1,0 +1,34 @@
+- id: W1-T6356
+  title: "THE MANAGED CHECKOUT REFRESHES OFF THE DAEMON LOOP — refreshManagedCheckout (src/run-task.ts) runs git through execFileSync inside retryWhileLockBusy on the daemon thread; the 2026-10-08 round-4 CPU profile caught it as two unbroken blocks of 20.1 s and 29.5 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the checkout refresh never blocks the daemon thread
+  band_meaning: span
+  origin: "operator session 2026-10-08: round-4 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round4.cpuprofile, pid 373954)"
+  plan_refs: [W1-T4356, W1-T6259]
+  files: [src/run-task.ts, test/the-managed-checkout-refreshes-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 01:52-01:58Z (360 s Profiler session, W1-T6301 live): busy 311.6/361 s; the two longest
+    runs after the measurement-cadence fix were runTaskBody → retryWhileLockBusy → refreshManagedCheckout 20.1 s
+    and 29.5 s; spawn self-time 203 s across the window. READ on origin/main: refreshManagedCheckout's `git`
+    helper is execFileSync("git", ["-C", repoDir, ...]) and the whole refresh (fetch, reset, install check) runs
+    synchronously under retryWhileLockBusy.
+  design: |
+    Make the refresh asynchronous end to end: the git calls go through the hardened async leaf (hostWorktreeGit
+    or an async execFile), retryWhileLockBusy awaits it, and the lock and install-escalation semantics (W1-T4356,
+    W1-T4193) are unchanged. No other caller changes behaviour.
+  acceptance:
+    - claim: "the event loop keeps turning while a managed-checkout refresh's git runs"
+      proof: 'grep: test("W1-T6356: the loop turns during a managed checkout refresh" in test/the-managed-checkout-refreshes-off-the-daemon-loop.test.ts'
+    - claim: "a lock-busy refresh still retries and a failed install still escalates"
+      proof: 'grep: test("W1-T6356: lock retry and install escalation are unchanged" in test/the-managed-checkout-refreshes-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Keep execFileSync: a fake git that sleeps 200 ms blocks a setInterval tick for the whole sleep and the first
+    test fails.

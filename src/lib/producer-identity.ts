@@ -94,6 +94,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   GOVERNOR: producer("governor", "Governor"),
   MINT: producer("mint", "Task-Id Mint"),
   "MODEL-CATALOG": producer("model-catalog", "Model Catalog"),
+  "ESCALATION-ANSWERS": producer("escalation-answers", "Escalation Answers"),
   INCIDENT: producer("incident", "Incident Ingest"),
   inbox: producer("inbox", "Inbox"),
   "inbox-bakeoff": producer("inbox-bakeoff", "Inbox Bake-off"),

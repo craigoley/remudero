@@ -5,6 +5,7 @@ import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshRea
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
+import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
@@ -189,6 +190,7 @@ import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
@@ -289,7 +291,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1107,6 +1109,8 @@ import {
   renderVerbCensusDigestLine,
   priorVerifyHumanAgeBandKeys,
   runMeasurementCadenceReportAsync,
+  childMeasurementCadenceSpawn,
+  measurementCadenceChildRunner,
   runVerbCensus,
   verifyHumanCadence,
   wipeTestCadenceCheck,
@@ -2499,6 +2503,7 @@ export function buildSweepEffects(
       preserveDiverged: preserveAbandonedFixOwnerDivergence,
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
       preserveStagedResidue: preserveStagedFixOwnerResidue,
+      preserveUntracked: preserveAndClearUntrackedFixOwner,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -11131,7 +11136,8 @@ export async function runFixRung(opts: {
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
       }, deps.scopeAmendmentPortsIo);
       outcome = requestScopeAmendment({ taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
-        headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined }, ports);
+        headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined,
+        headRef: opts.branch }, ports);
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
@@ -13948,6 +13954,7 @@ export interface WorkerErrorVerdict {
  * absent means "not written"; `null` means "checked, no worker ran" (P48).
  */
 export function terminalVerdictFields(r: WorkerResult | null): {
+  provider?: WorkerResult["provider"];
   model: string | null;
   served_model: string | null;
   routed_model?: string;
@@ -13955,6 +13962,7 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   tokens?: WorkerResult["tokens"];
   worker_duration_ms?: number;
   total_cost_usd?: number;
+  notional_cost_usd?: number;
   /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
   spend_role?: "restated";
   success?: boolean;
@@ -13969,11 +13977,13 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   return {
     model: r.model,
     served_model: r.servedModel ?? null,
+    ...(r.provider ? { provider: r.provider } : {}),
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
     tokens: r.tokens,
     ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
     total_cost_usd: r.costUsd,
+    ...(r.provider === "codex" && r.notionalCostUsd !== undefined ? { notional_cost_usd: r.notionalCostUsd } : {}),
     spend_role: "restated",
     success,
   };
@@ -15667,59 +15677,72 @@ export function refreshManagedCheckout(
   repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  install?: (repoDir: string) => void,
+  install?: (repoDir: string) => void | Promise<void>,
   escalate?: (failure: StagedInstallFailure) => void,
-): ManagedCheckoutRefresh {
-  if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+): Promise<ManagedCheckoutRefresh> {
+  if (!existsSync(join(repoDir, "node_modules"))) return Promise.resolve({ kind: "unborrowed", release: () => {} });
   // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
   const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
+  // W1-T6356: the lock is taken SYNCHRONOUSLY (a cheap file create) so a busy lock still throws from the call itself, which is
+  // what retryWhileLockBusy's try/catch sees; only the git work after it is awaited.
   let lock: DrainLockHandle;
   try {
     lock = acquireDrainLock(lockPath);
   } catch (error) {
     throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
   }
-  const release = () => lock.release();
-  const git = (...args: string[]) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
+  const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
+  return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
+}
+
+/** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
+async function refreshHeldManagedCheckout(
+  repoDir: string,
+  release: () => void,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  runInstall: (repoDir: string) => void | Promise<void>,
+  git: (...args: string[]) => Promise<string>,
+): Promise<ManagedCheckoutRefresh> {
   const skip = (reason: string): ManagedCheckoutRefresh => {
     log("managed_checkout.refresh_skipped", { reason });
     return { kind: "skipped", reason, release };
   };
   try {
-    const dirty = git("status", "--porcelain");
+    const dirty = await git("status", "--porcelain");
     if (dirty) return skip(`checkout is dirty (${dirty.split("\n").length} changed path(s))`);
-    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    const branch = await git("rev-parse", "--abbrev-ref", "HEAD");
     if (branch !== "main") return skip(`checkout is on ${branch}, not main`);
     try {
-      git("fetch", "--quiet", "origin");
+      await git("fetch", "--quiet", "origin");
     } catch (error) {
       // Not a refusal: an unreachable origin leaves the checkout as it is, and `skip` ledgers the reason the refusal names.
       return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
     }
-    const beforeSha = git("rev-parse", "HEAD");
-    if (beforeSha === git("rev-parse", "origin/main")) {
+    const beforeSha = await git("rev-parse", "HEAD");
+    if (beforeSha === (await git("rev-parse", "origin/main"))) {
       // W1-T4933: code that is already current can still sit on a tree that predates its lockfile. A failed refresh keeps
       // the old tree (stagedInstall ledgered and escalated it); the dispatch goes on and W1-T4193 names any mismatch it causes.
       try {
-        runInstall(repoDir);
+        await runInstall(repoDir);
       } catch (error) {
         log("managed_checkout.install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
       }
       return { kind: "current", release };
     }
-    if (git("merge-base", "HEAD", "origin/main") !== beforeSha) return skip("checkout has diverged from origin/main");
+    if ((await git("merge-base", "HEAD", "origin/main")) !== beforeSha) return skip("checkout has diverged from origin/main");
     const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
       const held = path === repoDir ? undefined : readRunLock(path);
       return held?.kind === "corrupt" || (held?.kind === "live" && defaultIsPidAlive(held.info.pid));
     });
     if (borrower) return skip(`a live worker still borrows its node_modules (${borrower.path})`);
-    git("merge", "--ff-only", "--quiet", "origin/main");
-    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: git("rev-parse", "HEAD") });
+    await git("merge", "--ff-only", "--quiet", "origin/main");
+    log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: await git("rev-parse", "HEAD") });
     try {
-      runInstall(repoDir);
+      await runInstall(repoDir);
     } catch (error) {
       // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
-      git("reset", "--quiet", "--keep", beforeSha);
+      await git("reset", "--quiet", "--keep", beforeSha);
       throw new Error(`install failed after the fast-forward, reverted to ${beforeSha}: ${String((error as Error)?.message ?? error)}`);
     }
     return { kind: "fast_forwarded", release };
@@ -36538,6 +36561,12 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog");
       return gardenPass(backlogGardenSpec(d), d);
     }
+    // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
+    // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
+    case "scout": {
+      const d = deps("scout");
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+    }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
@@ -37118,6 +37147,7 @@ export async function daemonCommand(
      *  its own thread minting through `mintScopedToken`. */
     startGithubAppRefresh?: typeof startInstallationTokenRefresh;
     gitCredentialMint?: ScopedTokenMint;
+    ciJudgeIo?: CiJudgeIo;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -37198,7 +37228,7 @@ export async function daemonCommand(
     freshTreeReviewAvailable: true,
   };
   const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
-    (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args),
+    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args), () => target.isSelf ? kickCiJudge?.() : undefined),
     () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
       tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
       log }), log);
@@ -37224,6 +37254,10 @@ export async function daemonCommand(
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
+  const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
+  const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
+    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
+  })), log);
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -37817,6 +37851,14 @@ export async function daemonCommand(
   // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
   // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
   const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
+  // W1-T5723: the cadence runs in a child that a daemon restart adopts rather than kills.
+  const measurementCadenceChild = target.isSelf ? measurementCadenceChildRunner({
+    statePath: join(config.root, "state", "measurement-cadence-child.json"),
+    spawn: childMeasurementCadenceSpawn({
+      entry: fileURLToPath(new URL(`./measurement-cadence-child${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
+      cwd: repoRoot,
+    }),
+  }) : undefined;
   // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —
   // the ledger this reads and the marker/inbox files it writes both live under THIS process's
   // own config.root, never a drained target's. Without this line `deps.checkDigestCadence` is
@@ -38310,6 +38352,7 @@ export async function daemonCommand(
         // defaults to running: it writes nothing unless `escalate` is separately opted in).
         checkMeasurementCadence: measurementCadenceHooks?.checkMeasurementCadence,
         runMeasurementCadence: measurementCadenceHooks?.runMeasurementCadence,
+        measurementCadenceChild,
         // DIGEST CADENCE RUNG (W1-T2277's design, wired here). Same shape as the
         // measurement-cadence hooks immediately above and gated the same way — SAFE ON in
         // policy data (plan/policy.yaml's `digestCadence` row): sending a digest spends nothing
@@ -42656,7 +42699,9 @@ export interface RegisteredFixOwnerSnapshot {
   path: string;
   pathState: RegisteredFixOwnerSignal;
   attachmentState: "exact" | "detached_or_other" | "unknown";
-  treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "unknown";
+  /** W1-T6355: `untracked_only` is untracked paths with NO tracked change and no interrupted operation;
+   *  `untracked_dirty` is untracked paths beside tracked work, which always stays declined. */
+  treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "untracked_only" | "unknown";
   remoteState: "exact" | "changed" | "unknown";
   historyState: "contained" | "ahead" | "diverged" | "unknown";
   claimState: "clear" | "occupied" | "unknown";
@@ -42669,7 +42714,14 @@ export interface RegisteredFixOwnerSnapshot {
 }
 
 export type RegisteredFixOwnerRecoveryDecision =
-  | { kind: "reclaim-contained" | "publish-ahead" | "preserve-diverged" | "preserve-tracked-dirty" }
+  | {
+      kind:
+        | "reclaim-contained"
+        | "publish-ahead"
+        | "preserve-diverged"
+        | "preserve-tracked-dirty"
+        | "preserve-untracked-dirty";
+    }
   | {
       kind: "keep";
       reason:
@@ -42697,7 +42749,7 @@ export function decideRegisteredFixOwnerRecovery(
     return { kind: "keep", reason: "detached_or_wrong_branch" };
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
   if (snapshot.treeState === "untracked_dirty") return { kind: "keep", reason: "dirty_worktree" };
-  if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty")
+  if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty" && snapshot.treeState !== "untracked_only")
     return { kind: "keep", reason: "tree_probe_unreadable" };
   if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
   if (snapshot.remoteState !== "exact") return { kind: "keep", reason: "remote_head_unreadable" };
@@ -42707,6 +42759,13 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.processState === "occupied") return { kind: "keep", reason: "process_cwd_owner" };
   if (snapshot.processState !== "clear") return { kind: "keep", reason: "process_cwd_probe_unreadable" };
   if (snapshot.treeState === "tracked_dirty") return { kind: "preserve-tracked-dirty" };
+  // W1-T6355: untracked-only residue of an ended run (claim and process census clear above) is
+  // preserved then released, but only on a head the PR already contains -- ahead/diverged history
+  // beside untracked paths stays a no-touch decline.
+  if (snapshot.treeState === "untracked_only")
+    return snapshot.historyState === "contained"
+      ? { kind: "preserve-untracked-dirty" }
+      : { kind: "keep", reason: "dirty_worktree" };
   if (snapshot.historyState === "ahead") return { kind: "publish-ahead" };
   if (snapshot.historyState === "diverged") return { kind: "preserve-diverged" };
   return { kind: "reclaim-contained" };
@@ -42872,7 +42931,9 @@ export function captureRegisteredFixOwnerSnapshot(
       snapshot.treeState = "clean";
     } else {
       const untracked = hostWorktreeGit(ownerPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
-      snapshot.treeState = untracked.length === 0 ? "tracked_dirty" : "untracked_dirty";
+      snapshot.treeState = untracked.length === 0
+        ? "tracked_dirty"
+        : readOwnerHasTrackedWork(ownerPath) ? "untracked_dirty" : "untracked_only";
     }
   } catch (e) {
     return { ...snapshot, error: String(e) };
@@ -42916,6 +42977,20 @@ export function captureRegisteredFixOwnerSnapshot(
   snapshot.processState = process.state;
   if (process.state === "unknown") snapshot.processProbeReason = process.reason;
   return snapshot;
+}
+
+/** W1-T6355: tracked modifications, staged paths or an interrupted merge/cherry-pick/revert. */
+function readOwnerHasTrackedWork(ownerPath: string): boolean {
+  if (hostWorktreeGit(ownerPath, ["status", "--porcelain=v1", "--untracked-files=no"]).length > 0) return true;
+  return FIX_OWNER_OPERATION_MARKERS.some((marker) => {
+    try {
+      readFileSync(resolve(ownerPath, hostWorktreeGit(ownerPath, ["rev-parse", "--git-path", marker]).trim()));
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  });
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
@@ -43112,6 +43187,30 @@ function preserveTrackedDirtyPatch(
 // has confirmed the recovery ref reproduces that exact tree.
 export function resetTrackedDirtyFixOwner(ownerPath: string, localSha: string): void {
   hostWorktreeGit(ownerPath, ["reset", "--hard", localSha]);
+}
+
+/** W1-T6355: an ended run's UNTRACKED-ONLY owner. The untracked paths are recorded into the same
+ *  immutable, tree-verified recovery ref as tracked residue (patch built from a temporary index, so
+ *  the owner's own index is never touched), and only then cleared -- `git clean -fd`, never `-x`
+ *  or a forced worktree removal -- so the plain `git worktree remove` that follows can succeed. */
+export function preserveAndClearUntrackedFixOwner(
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  const observedHead = hostWorktreeGit(ownerPath, ["rev-parse", "HEAD"]).trim();
+  if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
+  if (readOwnerHasTrackedWork(ownerPath)) throw new Error("dirty owner has tracked work beside its untracked paths");
+  let patch = "";
+  temporaryIndexTree(ownerPath, localSha, (env) => {
+    hostWorktreeGit(ownerPath, ["add", "-A"], { env });
+    patch = hostWorktreeGit(ownerPath, ["diff", "--cached", "--binary", "--no-ext-diff", localSha], { env, maxBuffer: 1 << 26 });
+  });
+  const recoveryRef = preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
+  hostWorktreeGit(ownerPath, ["clean", "-fd"]);
+  return recoveryRef;
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {

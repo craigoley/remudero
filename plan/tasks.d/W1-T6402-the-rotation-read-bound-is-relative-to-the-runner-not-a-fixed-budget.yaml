@@ -1,0 +1,38 @@
+- id: W1-T6402
+  title: "THE ROTATION-READ BOUND IS RELATIVE TO ITS OWN RUNNER, NOT A FIXED MILLISECOND BUDGET — after W1-T6337 the 'emergency status answers within budget' test still fails CI at 152-159 ms of loop CPU against a fixed 150 ms, red on four PRs on 2026-10-08; a same-run baseline cancels runner load and still catches a real regression"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-08: clearing the red PR board"
+  plan_refs: [W1-T6337, W1-T2811, W1-T5719]
+  files: [test/operator-agent-scan-routes-never-block-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 in CI: `after a rotation lands the emergency status answers within budget and sees the new
+    stop` (test/operator-agent-scan-routes-never-block-the-loop.test.ts:190, assertWallClockBound(warm.busyMs,
+    WARM_ANSWER_BUDGET_MS = 150)) failed test-slow-shard on #10058 (158.6 ms), #10077, #10089, and #10084, whose head
+    already contains W1-T6337's fix (#10068, merged 11:27Z) and measured 152.3 ms of loop CPU (190 ms elapsed). Every
+    retry also failed. W1-T6337 lowered the cost (Mac median 43 -> ~29 ms per its own measurement) but a shared CI
+    runner's CPU contention still pushes a single measured read past a fixed 150 ms.
+    Operator ruling (no hard thresholds; tiered, self-healing): a fixed millisecond budget on an oversubscribed runner
+    reds healthy PRs and trains everyone to retry, which hides real regressions.
+  design: |
+    Bound the post-rotation read RELATIVE to a baseline measured in the same process moments earlier: measure the
+    loop CPU of K (e.g. 5) warm reads of the same route on the same service before the rotation lands, take their
+    median, and assert the post-rotation read costs at most R x that median (R chosen from measurement, e.g. 3) PLUS
+    keep an absolute ceiling far above any healthy run (e.g. 1000 ms) as the catastrophic-regression guard. Runner
+    load inflates baseline and subject together, so it cancels; a real regression (a rotation that re-reads the
+    corpus) still multiplies the subject alone. Keep the declaration through assertWallClockBound for the ceiling so
+    the W1-T2811 census population is unchanged; record R and K with the measurement that chose them.
+  acceptance:
+    - claim: "the post-rotation read is bounded relative to a same-run warm baseline, so runner load cancels and a real regression still fails"
+      proof: 'grep: test("W1-T6402: a rotation read is bounded by a same-run baseline, and a re-read of the corpus still fails" in test/operator-agent-scan-routes-never-block-the-loop.test.ts'
+  falsifier: |
+    Keep the fixed 150 ms budget: the fixture that slows baseline and subject alike by an injected CPU tax fails the
+    fixed bound while the relative bound passes, and an injected full corpus re-read on the subject alone still fails.

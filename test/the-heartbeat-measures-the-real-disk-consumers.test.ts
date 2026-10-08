@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -10,8 +10,14 @@ function measure(overrides: Record<string, string> = {}): Record<string, string>
   const dir = makeTempDir("heartbeat-consumers");
   try {
     const bin = join(dir, "bin");
-    for (const path of ["bin", "home", "state-root/state", "tmp/rmd-c-one", "tmp/rmd-c-two", "container-tmp/rmd-c-three"])
+    for (const path of ["bin", "scripts", "home", "state-root/state", "tmp/rmd-c-one", "tmp/rmd-c-two", "container-tmp/rmd-c-three"])
       mkdirSync(join(dir, path), { recursive: true });
+    // INSTALL_DIR and dependency probes belong to this fixture, not the host checkout.
+    // Copy the actual subject verbatim; do not stub its implementation or change its timeout.
+    const script = join(dir, "scripts", "fleet-heartbeat.sh");
+    const source = readFileSync(REAL_SCRIPT);
+    writeFileSync(script, source, { mode: 0o755 });
+    assert.deepEqual(readFileSync(script), source, "the isolated subject must remain byte-identical");
     mkdirSync(join(dir, "docker data"));
     writeFileSync(join(dir, "docker data", "image"), Buffer.alloc(8192, 1));
     const config = join(dir, "daemon.json");
@@ -72,7 +78,7 @@ case "$p" in
 esac
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 1000 90000000 1%% /\\n' "$device"`);
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
-    const result = spawnSync("bash", [REAL_SCRIPT], {
+    const result = spawnSync("bash", [script], {
       encoding: "utf8",
       timeout: 15_000,
       env: {
@@ -92,14 +98,17 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 10
       },
     });
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
-    return Object.fromEntries(result.stdout.split("\n").filter((line) => line.includes("="))
+    const beat = Object.fromEntries(result.stdout.split("\n").filter((line) => line.includes("="))
       .map((line) => { const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)]; }));
+    assert.equal(beat.install_dir, dir, "dependency probes must stay in the isolated install");
+    assert.equal(beat.tsx_present, "no", "a host-installed tsx cannot contaminate this fixture");
+    return beat;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("test/the-heartbeat-measures-the-real-disk-consumers.test.ts: real roots, devices and unknown", () => {
+test("test/the-heartbeat-measures-the-real-disk-consumers.test.ts: real roots, devices and unknown in an isolated byte-identical install", () => {
   const beat = measure();
   assert.equal(beat.consumer_docker_kb, "27000000");
   assert.equal(beat.consumer_docker_device, "/dev/data");

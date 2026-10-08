@@ -1,0 +1,55 @@
+- id: W1-T6407
+  title: "A HUMAN'S ANSWERS THAT KEEP BEING IGNORED RAISE ONE ALARM — before 2026-10-08 the escalation-answer reader ignored 143 of the operator's replies (escalation_answer.ignored, reason not-owner, author cao825) and accepted 0, silently, for days, until #10000's operatorGithubLogins was configured by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-08: root-causing the stuck-PR board"
+  plan_refs: [W1-T4471, W1-T4676, W1-T6248]
+  files: [src/lib/escalation-answers.ts, test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (operator session 2026-10-08; the counts are from that session's ledger read, and the filer
+    could not re-count them because the rows have since been compacted out of core's live ledger): the reader
+    ignored 143 replies (`escalation_answer.ignored`, reason `not-owner`, author_login cao825,
+    author_association MEMBER/COLLABORATOR) and accepted 0. The fix was configuration: #10000 (116f0bb6) added
+    `operatorGithubLogins`, and once it was set on 2026-10-08, 6 replies landed at 12:11Z. Every escalation
+    the operator answered in those days stayed unanswered to the fleet.
+    READ ON origin/main 33fc1ed4, src/lib/escalation-answers.ts:
+    - `operatorRefusal` (~:205-216) returns `bot`, `not-configured-operator` (a login list is configured and
+      the author is not on it) or `not-owner` (no list, and author_association is not OWNER).
+    - `readEscalationAnswers` (~:315-412) writes one `escalation_answer.ignored` row per refused comment and
+      counts it in `ignored`. A refused comment never joins `recordedOrigins`, so the same comment is
+      re-ignored and re-ledgered on every pass.
+    - The daemon caller (src/run-task.ts ~:45497-45501) logs only `unreadable > 0`. `ignored` is dropped, so
+      nothing surfaces a human being turned away.
+    G-6 (this module's header, ~:15-22) keeps the public's text off the fleet's prompts, so admitting the
+    login automatically is NOT an option. The fix is to make the refusal visible once.
+  design: |
+    1. In `readEscalationAnswers`, track refusals per non-bot login with a reason other than `bot`, keyed by
+       (login, reason), over the ledger's existing `escalation_answer.ignored` rows. Read them through the
+       ledger union, so compaction cannot reset the count, and count distinct comment origins, never raw
+       rows.
+    2. When one login has been refused on 3 or more distinct comments, or on comments seen across 2 or more
+       passes, raise ONE escalation through `tryEscalateAsync` with a stable referent
+       (`ESCALATION-ANSWERS:<login>`) so it dedupes. It names the login, the distinct-comment count, the
+       reason, the issues commented on, and the config key that would admit the login
+       (`operatorGithubLogins` in config.json, or the repository-owner rule when no list is configured). It
+       never admits the login and never copies comment text into the escalation.
+    3. Ledger `escalation_answer.refusal_alarm` {login, reason, comments, issue_url}. Once the login is
+       admitted (a later accepted answer from it) or the escalation is closed, do not re-raise for the same
+       (login, reason) until new refused comments arrive after the close.
+  acceptance:
+    - claim: "a non-bot login refused on three distinct comments raises exactly one escalation naming the login, count, reason and operatorGithubLogins, and later passes raise no second one"
+      proof: 'grep: test("W1-T6407: a human refused on three comments raises one alarm naming the config key" in test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts'
+    - claim: "a bot's ignored comments never raise the alarm and no refused text reaches the escalation"
+      proof: 'grep: test("W1-T6407: a bot refusal raises nothing and refused text is never copied" in test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts'
+  falsifier: |
+    Leave the reader as it is: the suite's login refused on many comments over many passes produces only
+    ignored rows and the fake issue gateway records zero escalations. Drop the dedupe and each pass raises a
+    new escalation.

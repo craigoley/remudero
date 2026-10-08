@@ -1,0 +1,34 @@
+- id: W1-T6353
+  title: "A FIX ROUND THAT CHANGES NOTHING RERUNS THE FAILED CHECKS — a ci-log fix round that ends `success` with no commit leaves the PR at strike 1/2 forever: no re-run, no strike, no escalation; #10012 sat ~4 h on a wall-clock flake its worker rightly declined to edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a no-commit fix round always moves the PR forward
+  band_meaning: span
+  origin: "operator session 2026-10-08: PR watch, #10012 parked at own-red strike 1/2 from 03:36Z"
+  plan_refs: [W1-T2811]
+  files: [src/lib/sweep.ts, test/a-fix-round-that-changes-nothing-reruns-the-failed-checks.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08: #10012's only fix round (fix.dispatch 03:36:34Z, PR-10012, mode ci-log, ci_failures
+    test-slow-shard (2/2) test/operator-agent-scan-routes-never-block-the-loop.test.ts) ended fix.done 0.6 s later
+    with worker verdict success, 15 s, $0.10, and pushed nothing. The failure was a WALL-CLOCK DEPENDENT bound
+    (W1-T2811: re-run on an idle host). From then on every sweep pass disposed it "own-red — ci-log fix, strike 1/2"
+    for ~4 h with no further round and no CI re-run, until the PR left the queue.
+  design: |
+    When a fix round's fix.done records no new head (the branch sha is unchanged), the sweep re-runs the failed
+    jobs once for that head (REST rerun-failed-jobs) and records it; a second no-commit round at the same head
+    counts as a strike, so the existing strike cap and escalation take over. Never re-run more than once per head.
+  acceptance:
+    - claim: "a no-commit fix round re-runs the failed checks once for that head"
+      proof: 'grep: test("W1-T6353: a fix round with no commit reruns the failed checks once" in test/a-fix-round-that-changes-nothing-reruns-the-failed-checks.test.ts'
+    - claim: "a second no-commit round at the same head counts a strike instead of re-running again"
+      proof: 'grep: test("W1-T6353: a repeated no-commit round at one head counts a strike" in test/a-fix-round-that-changes-nothing-reruns-the-failed-checks.test.ts'
+  falsifier: |
+    Leave the sweep as it is: after a no-commit fix.done the fake gateway records no rerun call and the strike
+    count stays 1, so the first test fails.

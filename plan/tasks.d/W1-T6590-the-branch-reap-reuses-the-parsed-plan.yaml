@@ -1,0 +1,32 @@
+- id: W1-T6590
+  title: "THE BRANCH REAP REUSES THE PARSED PLAN — automaticBranchReapSteps → reapBranchesSteps calls loadPlan synchronously (readMergedPlan → readWholeFile over every plan shard) on the daemon thread; the 2026-10-08 round-5 CPU profile caught it as the longest single block, 21.1 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a branch-reap pass reads the plan at most once and never synchronously on the loop
+  band_meaning: span
+  origin: "operator session 2026-10-08: round-5 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round5.cpuprofile, pid 113)"
+  plan_refs: [W1-T6247, W1-T5723]
+  files: [src/run-task.ts, test/the-branch-reap-reuses-the-parsed-plan.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 17:39:56-17:45:56Z (360 s Profiler session, every 10-08 loop fix live incl. W1-T5723,
+    W1-T6357, W1-T6361): busy 318.3/361 s; the LONGEST run was gardener resumeSteps → reapBranchesSteps →
+    automaticBranchReapSteps → readMergedPlan → loadPlan → readWholeFile 21.1 s (20.0 s in plan.ts file reads).
+    READ on origin/main: reapBranchesSteps does `(opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"))`
+    — a full synchronous shard read per pass. W1-T6247 already taught the sweep to reuse a parsed plan.
+  design: |
+    Give the reap pass the plan the daemon already parsed this tick (the same snapshot W1-T6247's sweep reuse uses),
+    or load it through the async/off-loop plan reader when no snapshot is fresh for the checkout's HEAD. Reap
+    decisions are unchanged.
+  acceptance:
+    - claim: "a branch-reap pass with a fresh parsed plan does no synchronous plan read"
+      proof: 'grep: test("W1-T6590: a branch reap reuses the parsed plan" in test/the-branch-reap-reuses-the-parsed-plan.test.ts'
+  falsifier: |
+    Keep the direct loadPlan call: a counting loadPlan seam records one synchronous read per reap pass and the test
+    fails.

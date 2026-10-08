@@ -1,0 +1,43 @@
+- id: W1-T6362
+  title: "A DEAD FIX OWNER'S STAGED WORK AT THE PR'S CURRENT HEAD IS PRESERVED AND ITS CHECKOUT RECLAIMED — W1-T5974 still refuses that case and escalates, so a fix worker killed mid-round blocks its PR's fix lane until a human answers (5 PRs, 19 declines, 5 escalations on the morning of 2026-10-08)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-08: a wave of BLOCKED 'fix checkout claim declined 3 times' escalations"
+  plan_refs: [W1-T5918, W1-T5974, W1-T3822, W1-T76, W1-T100]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-fix-owners-staged-work-is-preserved-and-its-checkout-reclaimed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 06:28-10:07Z: issues #10041, #10063, #10066, #10071, #10074 each read `fix checkout claim declined
+    3 times on #<pr> at head <sha> (registered worktree owner /home/node/Remudero/worktrees/sweep-W1-T<n>-<epoch>,
+    owner_dirty_staged_only_refused, staged <paths>)`. Core's live ledger holds 19 sweep.fix.checkout_claim_declined
+    rows with that refusal; each PR's head in the row equals the head the escalation names, i.e. the PR has NOT moved
+    past the dead owner.
+    - src/run-task.ts readFixOwnerResidue (~:43023-43056) sets `refusal: "owner_dirty_staged_only_refused"` whenever
+      there is no operation marker and staged paths exist.
+    - W1-T5974 (merged) releases this residue only when the owner's HEAD is no longer the PR's head; at the CURRENT
+      head it deliberately keeps W1-T5918's refusal ("it may be real unfinished work") and escalates. That is the
+      escalation wave: each one blocks the PR's fix lane until a human answers, and a fix worker killed by a daemon
+      restart (routine: freshness restarts, and now W1-T6249/W1-T6282 drain-and-recycles) leaves exactly this residue.
+    - Nothing is lost by reclaiming: preserveTrackedDirtyPatch (same file) already preserves a staged diff
+      (`git diff --cached --binary <localSha>`) and records where.
+  design: |
+    For a DEAD owner (no live fix worker holds the claim) whose residue is staged-only with no operation marker at the
+    PR's current head: preserve the staged diff with the existing preserveTrackedDirtyPatch path, ledger
+    `sweep.fix.owner_residue_preserved` {pr, worktree, paths, preserved_at}, then reset and reclaim the worktree so the
+    next fix round proceeds. The preserved patch is offered to the next fix round's prompt as prior partial work (by
+    path and location, never applied blindly). A LIVE owner is never touched. Remove the escalation for this case;
+    keep it for a preserve that fails.
+  acceptance:
+    - claim: "a dead fix owner's staged-only residue at the PR's current head is preserved and its checkout reclaimed instead of declined"
+      proof: 'grep: test("W1-T6362: a dead owner''s staged work at the current head is preserved and reclaimed" in test/a-dead-fix-owners-staged-work-is-preserved-and-its-checkout-reclaimed.test.ts'
+  falsifier: |
+    Keep W1-T5974's current-head refusal: the fixture's dead owner with a staged edit at the PR head is declined and
+    the test fails.

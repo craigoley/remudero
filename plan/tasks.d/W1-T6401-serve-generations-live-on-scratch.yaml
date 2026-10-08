@@ -1,0 +1,38 @@
+- id: W1-T6401
+  title: "SERVE GENERATIONS LIVE ON SCRATCH — deploy/serve-container.sh defaults SERVE_GENS_DIR to ~/rmd-serve-gens on the IOPS-throttled host root disk, and serve runs its node and tsx loader from there; a 2026-10-08 block trace showed serve as the root disk's heaviest reader (~2,200 reads, 31 MB in 20 s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — serve's generation tree lives on the local NVMe when scratch is mounted
+  band_meaning: span
+  origin: "operator session 2026-10-08: data-disk I/O research (no disk upgrade; move rebuildable I/O to scratch)"
+  plan_refs: [W1-T6364, W1-T6361]
+  files: [deploy/serve-container.sh, test/serve-generations-live-on-scratch.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 ~11:32:40-11:33:00Z (biotop, 20 s): pid 808093 — node --import
+    /home/node/rmd-serve-gens/b/node_modules/tsx/dist/loader.mjs in the serve container — did 2,167 reads / 30.8 MB on
+    nvme0n2 (the host root disk), the most of any process on that disk; nvme0n2 showed r_await 288 ms in an earlier
+    sample. READ on origin/main: serve-container.sh sets SERVE_GENS_DIR="${RMD_SERVE_GENS_DIR:-${HOME:-/root}/rmd-serve-gens}"
+    and bind-mounts it as /home/node/rmd-serve-gens; scratch_plan is already sourced in the same script for other
+    rebuildable I/O. The operator declined a disk upgrade and approved moving rebuildable data to /mnt/scratch.
+  design: |
+    When scratch_plan reports scratch on (and RMD_SERVE_GENS_DIR is unset), default SERVE_GENS_DIR to a
+    per-instance directory under the scratch base; otherwise keep ~/rmd-serve-gens. Confirm (read
+    src/lib/serve-supervisor-main.ts) that a missing or empty generations dir is rebuilt by the supervisor on start, so
+    a wiped /mnt/scratch heals; if it is not, the task includes seeding it on launch. The serve replace-on-mount-drift
+    path (test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts) must treat the new path as part of the
+    mount plan. An explicit RMD_SERVE_GENS_DIR still wins.
+  acceptance:
+    - claim: "with scratch on and no override, serve's generations dir is under the scratch base"
+      proof: 'grep: test("W1-T6401: serve generations default to scratch when scratch is on" in test/serve-generations-live-on-scratch.test.ts'
+    - claim: "with scratch off the generations dir stays at ~/rmd-serve-gens, and an explicit override still wins"
+      proof: 'grep: test("W1-T6401: scratch off or an override keeps the old generations dir" in test/serve-generations-live-on-scratch.test.ts'
+  falsifier: |
+    Keep the ~/rmd-serve-gens default: the dry-run plan with scratch on mounts ${HOME}/rmd-serve-gens and the first
+    test fails.

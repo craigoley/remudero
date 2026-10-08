@@ -1,0 +1,41 @@
+- id: W1-T6361
+  title: "THE WATCHDOG TICK SKIPS GIT AND NODE WORK WHEN NOTHING CHANGED — each of the three host watchdog timers (core, console, site rmd-relaunch.sh, every 5 min) runs git status --untracked-files=all, fetch, merge-base and diff on the state checkout plus a cold tsx bin/rmd progress-watchdog, all on the IOPS-throttled /mnt/rmd data disk; the operator declined a disk upgrade on 2026-10-08, so the reads have to go"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — an unchanged tick does no checkout walk and no cold node load
+  band_meaning: span
+  origin: "operator session 2026-10-08: data-disk I/O research (no disk upgrade; find other ways)"
+  plan_refs: [W1-T4356]
+  files: [deploy/install-host-units.sh, test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 11:12-11:21Z on the host: /mnt/rmd (nvme0n1) 10 s sample 207 r/s, r_await 260 ms, aqu-sz 54,
+    %util 38 — throttled IOPS, bursty (a later 20 s sample read 0). 13 s after rmd-site-fleet-watchdog fired, the
+    launcher's process tree read 12.0 MB/s (host node + tsx + esbuild from ~/rmd-site-state/remudero) while the disk
+    did 180 r/s. system.slice holds 423M lifetime read IOs on nvme0n1 of which live cgroups explain ~60M — the rest
+    is short-lived units such as these timers. READ on origin/main: deploy/install-host-units.sh renders
+    rmd-relaunch.sh, whose tick runs GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=all, git fetch
+    origin main, merge-base/rev-parse/diff over DEPLOY_LOGIC_PATHS, and read_progress_verdict's bin/rmd
+    progress-watchdog (tsx) every 5 min per instance, whether or not origin/main or the container changed.
+  design: |
+    Record, per instance, the origin/main sha, the install HEAD and the daemon container's id/state seen by the last
+    tick (a small file under the state dir). On a tick, read origin/main with one cheap call (git ls-remote or a
+    fetch whose result is compared to the recorded sha) and the container state with docker inspect; when all three
+    are unchanged and the last verdict was healthy, skip the checkout walk, merge-base/diff and the deploy-logic
+    steps. Keep the progress-watchdog stall check, but run it only every Nth unchanged tick or when its own cheap
+    precheck (ledger mtime advancing) fails. Any change, unreadable record or unhealthy last verdict runs the full
+    tick exactly as today.
+  acceptance:
+    - claim: "an unchanged tick runs no checkout walk and no deploy-logic git calls"
+      proof: 'grep: test("W1-T6361: an unchanged tick skips the checkout walk" in test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts'
+    - claim: "a changed origin/main, container or unhealthy last verdict runs the full tick"
+      proof: 'grep: test("W1-T6361: any change runs the full tick" in test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts'
+  falsifier: |
+    Keep the unconditional tick: a fake git on PATH records `status --untracked-files=all` on an unchanged tick and
+    the first test fails.

@@ -4,10 +4,10 @@
 # Why, what moves, the operator runbook and the rollback: docs/operator-guide.md "Scratch-disk mounts".
 #
 # INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch (the state
-# root's and repos/'s), the read model's DB files (rebuilt from the ledger on an empty dir), the
+# root's and repos/'s), managed repos (re-cloned on demand), the read model's DB files, the
 # per-spawn worker homes (made and reaped per spawn), each container's /tmp and the HOST-WIDE test
 # slots (one dir for every container and the host, src/lib/test-slot.ts) are bound here;
-# the ledger, repos, lanes, plan and every state file, the read-model switch file included, stay put.
+# the ledger, lanes, plan and every state file, the read-model switch file included, stay put.
 # DARK until RMD_SCRATCH=on or the switch file exists; an unmounted or unwritable scratch root makes
 # the launch run exactly as before and say why. Falsifier: test/scratch-mounts.test.ts.
 #
@@ -83,7 +83,7 @@ scratch_plan() {
   SCRATCH_CONTAINER_TMP=""
   SCRATCH_STATE_DIR="${state_dir}"
   if ! scratch_enabled; then
-    SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage and the read model stay on the state disk"
+    SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage, repos and the read model stay on the state disk"
     return 1
   fi
   if scratch_root_refused; then
@@ -102,6 +102,7 @@ scratch_plan() {
   SCRATCH_BINDS="${base}/worktrees	${SCRATCH_STATE_DEST}/worktrees
 ${base}/tmp	${SCRATCH_STATE_DEST}/tmp
 ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
+${base}/repos	${SCRATCH_STATE_DEST}/repos
 ${base}/repos-coverage	${SCRATCH_STATE_DEST}/repos/.remudero-coverage
 ${base}/read-model	${SCRATCH_READ_MODEL_DEST}
 ${base}/worker-homes	${SCRATCH_WORKER_HOME_DEST}
@@ -117,7 +118,7 @@ EOF
   SCRATCH_ARGS+=(-e "RMD_READ_MODEL_DB_DIR=${SCRATCH_STATE_DEST}/state:${SCRATCH_READ_MODEL_DEST}")
   SCRATCH_ARGS+=(-e "RMD_WORKER_HOME_DIR=${SCRATCH_STATE_DEST}:${SCRATCH_WORKER_HOME_DEST}")
   SCRATCH_ARGS+=(-e "RMD_TEST_SLOT_DIR=${SCRATCH_TEST_SLOT_DEST}")
-  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}; test slots shared at $(scratch_test_slot_dir)"
+  SCRATCH_NOTE="on — worktrees, tmp, coverage, repos, the read model, worker homes and /tmp under ${base}; test slots shared at $(scratch_test_slot_dir)"
   return 0
 }
 

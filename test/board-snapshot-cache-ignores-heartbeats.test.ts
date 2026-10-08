@@ -83,12 +83,15 @@ test("W1-T2919: heartbeat and gateway-telemetry rows do not invalidate the board
     // nothing happened.
     const before = foldDecisionFingerprint([], EMPTY_DECISION_FINGERPRINT);
     appendFileSync(ledgerPath, row("daemon.alive"));
+    appendFileSync(ledgerPath, row("board_gateway.fetch_ok", { prCount: 1, channel: "open" }));
+    appendFileSync(ledgerPath, row("board_snapshot.unchanged", { channel: "closed", rows: 1 }));
+    appendFileSync(ledgerPath, row("board_gateway.rollup", { fetch_ok: { open: 20 } }));
     appendFileSync(ledgerPath, row("board_gateway.fetch_bytes", { bytes: 1024 }));
     appendFileSync(ledgerPath, row("daemon.alive"));
     assert.equal(before.foldedUpTo, 0);
 
     const second = cache.get(deps);
-    assert.equal(counter.calls, 1, "three heartbeat/telemetry appends -> ZERO recomputes");
+    assert.equal(counter.calls, 1, "heartbeat and rollup appends cause zero recomputes");
     assert.equal(second, first, "and the SAME snapshot object is returned, not an equal copy");
 
     // A decision-relevant row invalidates exactly once, and then settles.
@@ -116,7 +119,10 @@ test("W1-T2919: the old line-count key WOULD have invalidated on those same appe
 // ── the step set, and the direction of its safety ──────────────────────────────────────────────
 
 test("W1-T2919: the irrelevant set is named in ONE place and a new step defaults to decision-relevant", () => {
-  assert.deepEqual([...BOARD_IRRELEVANT_STEPS].sort(), ["board_gateway.fetch_bytes", "daemon.alive", "daemon.pulse"]);
+  assert.deepEqual([...BOARD_IRRELEVANT_STEPS].sort(), [
+    "board_gateway.fetch_bytes", "board_gateway.fetch_ok", "board_gateway.rollup",
+    "board_snapshot.unchanged", "daemon.alive", "daemon.pulse",
+  ]);
   for (const step of BOARD_IRRELEVANT_STEPS) assert.equal(isDecisionRelevantRow({ step }), false, `${step} is excluded`);
 
   // THE SAFETY DIRECTION, ASSERTED. An INCLUSION list would default an unrecognised step to

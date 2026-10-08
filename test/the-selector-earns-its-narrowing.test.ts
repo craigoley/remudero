@@ -590,8 +590,8 @@ test("a retry-recovered file is ledgered once as flake evidence for the test gar
   await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
   await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
   assert.deepEqual(rows, [
-    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
-    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow", retry_outcome: "recovered", head_sha: "h" } },
+    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow", retry_outcome: "recovered", head_sha: "h" } },
   ], "a cached complete run is never reported twice");
 });
 

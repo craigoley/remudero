@@ -22,7 +22,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "diff-class.mjs");
 const { testOnlyRun } = (await import(pathToFileURL(SCRIPT).href)) as {
-  testOnlyRun: (files: unknown) => { mode: "files"; files: string[] } | { mode: "full" } | null;
+  testOnlyRun: (files: unknown, censusSuites?: (changed: string[]) => string[]) => { mode: "files"; files: string[] } | { mode: "full" } | null;
 };
 
 type CiJob = {
@@ -79,8 +79,11 @@ esac
 
 test("W1-T4395: a test-only diff runs the changed test files", () => {
   const changed = ["test/a-test-only-change-runs-its-own-tests.test.ts", "test/fast-lane-classifier.test.ts"];
-  assert.deepEqual(testOnlyRun(changed), { mode: "files", files: changed });
-  assert.equal(cli(changed), `files\n${changed.join("\n")}\n`);
+  // With no census walking them, exactly the changed files; the real run adds the censuses that do.
+  assert.deepEqual(testOnlyRun(changed, () => []), { mode: "files", files: changed });
+  const printed = cli(changed).trim().split("\n");
+  assert.equal(printed[0], "files");
+  assert.deepEqual(printed.slice(1, 1 + changed.length), changed, "the changed files lead the run");
   assert.match(CLASSIFY_STEP, /diff-class\.mjs --test-only-run --changed-files changed-files\.txt > test-only-run\.txt/, "the classify step records the decision");
   // The real step hands exactly the changed files to the candidate runner, instead of skipping.
   const run = runTestStep(`files\n${changed.join("\n")}\n`);

@@ -604,6 +604,7 @@ interface ViewUnit {
   startedAt?: number;
   peakMs?: number;
   heavy?: boolean;
+  lastBuiltAt?: number;
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -702,6 +703,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   let clocksMoved = false;
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
+  let heldLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
@@ -1079,6 +1081,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
+    let succeeded = false;
     let yielded = 0;
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
@@ -1088,10 +1091,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         yielded++;
         publish(view.name, view.version, key, data, sources, generation, buildStartedMs);
       }
+      succeeded = ready && yielded > 0;
     } catch (error) {
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
+    if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
@@ -1102,6 +1107,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (opts.lane && ready && yielded > 0 && peakMs > soloMs !== (opts.lane === "heavy")) {
       unit.heavy = opts.lane === "fast";
       opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs });
+      reportHeld(true);
     }
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? view.stages?.(scoped) : undefined;
@@ -1121,6 +1127,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return builtViews.has(view);
   };
   const owns = (unit: ViewUnit): boolean => opts.lane === undefined || (unit.heavy === true) === (opts.lane === "heavy");
+  function reportHeld(moved = false): void {
+    if (!viewsOnly || !opts.lane) return;
+    const now = clock.now();
+    if (!moved && now - heldLoggedAt < 10 * 60_000) return;
+    heldLoggedAt = now;
+    const held = units.filter((unit) => unit.lastBuiltAt !== undefined && !owns(unit)).map((unit) => ({
+      view: unit.view.name,
+      ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
+      minutesSinceBuild: Math.max(0, now - unit.lastBuiltAt!) / 60_000,
+    }));
+    log("read_model.view_lane_held", { lane: opts.lane, count: held.length, units: held });
+  }
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
@@ -1206,6 +1224,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
         materialize(now, now);
+        reportHeld();
         return postState(now);
       }
       // The oracle's slices wait while any instance is still applying a backlog.
@@ -1279,6 +1298,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
         Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt }, move.costMs === undefined ? {} : { costMs: move.costMs });
       }
+      reportHeld(true);
     },
     peer(entry: ReadModelBodyEntry): void {
       lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
@@ -1452,6 +1472,15 @@ export function threadViews(opts: {
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
   const reset: ReadModelViewsInput = { type: "lane", heavy: false, dueAt: 0 };
+  const heavyUnits = new Set<string>();
+  const reclaim = (lane: Lane, reason: "exit" | "respawn"): void => {
+    const survivor = other(lane);
+    const count = survivor.name === "fast" ? heavyUnits.size : 0;
+    heavyUnits.clear();
+    if (!survivor.worker) return;
+    survivor.worker.postMessage(reset);
+    opts.log("read_model.view_lane_reclaimed", { lane: survivor.name, from: lane.name, count, reason });
+  };
   const spawnLane = (lane: Lane): void => {
     const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name };
     const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
@@ -1460,6 +1489,14 @@ export function threadViews(opts: {
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
       if (msg.type === "view_lane") {
+        const id = JSON.stringify([msg.view, msg.instance]);
+        if (msg.heavy) heavyUnits.add(id);
+        else heavyUnits.delete(id);
+        opts.log("read_model.view_lane_moved", {
+          view: msg.view, ...(msg.instance !== undefined ? { instance: msg.instance } : {}),
+          from: lane.name, to: msg.heavy ? "heavy" : "fast", costMs: msg.costMs,
+          soloMs: READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE * READ_MODEL_VIEW_SHARE,
+        });
         if (!heavy.worker && !heavy.respawn && !closed) spawnLane(heavy);
         return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
       }
@@ -1473,14 +1510,14 @@ export function threadViews(opts: {
       if (lane.worker !== spawned || closed) return;
       lane.worker = undefined;
       lane.deaths++;
-      other(lane).worker?.postMessage(reset);
+      reclaim(lane, "exit");
       const delayMs = Math.min(opts.data.tickMs * 2 ** lane.deaths, READ_MODEL_MAX_BACKOFF_MS);
       opts.log("read_model.views_exited", { lane: lane.name, code, deaths: lane.deaths, respawnInMs: delayMs, ...(lane.building ? { view: lane.building.view } : {}) });
       lane.respawn = setTimeout(() => {
         lane.respawn = undefined;
         if (closed) return;
         spawnLane(lane);
-        other(lane).worker?.postMessage(reset);
+        reclaim(lane, "respawn");
       }, delayMs);
       lane.respawn.unref();
     });

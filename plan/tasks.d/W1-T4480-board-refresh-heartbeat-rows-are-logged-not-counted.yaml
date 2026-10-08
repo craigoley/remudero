@@ -15,7 +15,7 @@
     - src/lib/status.ts
     - src/lib/board-snapshot-cache.ts
     - src/lib/board.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-24: the `board_gateway.fetch_bytes` / `board_gateway.fetch_ok` pairs and

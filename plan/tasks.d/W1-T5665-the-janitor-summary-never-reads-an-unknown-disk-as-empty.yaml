@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5548 follow-ups"
   plan_refs: [W1-T5548, W1-T4770]
   files: [deploy/rmd-host-cleanup.sh, test/the-janitor-summary-never-reads-an-unknown-disk-as-empty.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

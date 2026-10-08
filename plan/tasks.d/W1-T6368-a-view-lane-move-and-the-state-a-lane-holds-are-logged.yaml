@@ -1,0 +1,45 @@
+- id: W1-T6368
+  title: "A VIEW'S LANE MOVES AND THE STATE A LANE STILL HOLDS FOR VIEWS IT NO LONGER BUILDS ARE LOGGED — a view moves between the fast and heavy views workers on a solo-budget overrun (`view_lane`), a dead lane's units are reclaimed by the other (`reset`), and nothing records either, so whether production holds a second cold copy of a heavy view (about 0.43 GB for now@core in replay) is unmeasured"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — telemetry rows for lane transitions and idle-held units; no state is released
+  band_meaning: span
+  origin: "operator session 2026-10-08: serve CPU and memory plan, the gigabyte-scale memory target (views 1.32 GB, heavy views 1.04 GB at 2026-10-07 23:48Z)"
+  plan_refs: [W1-T5885, W1-T6019, W1-T5480, W1-T6191]
+  files: [src/lib/read-model-worker.ts, test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED in production (serve.memory, 2026-10-07 23:48Z, RSS 4,502 MiB): the views worker heap 1,322 MiB and the heavy
+    views worker 1,043 MiB are the largest holders. OBSERVED in an isolated replay of the production read model on main
+    (836,723 fact rows): one now@core instance retains about 522 MiB after GC (the board projection's fact rows about
+    373 MiB), and a SECOND instance, as a lane move creates in the other worker, adds about 432 MiB; a cold rebuild after
+    a move costs about 26-35 s of CPU.
+    FROM THE SOURCE (read-model-worker.ts on main): both views workers construct every view at start; `owns()` only filters
+    which units a lane BUILDS, so a unit that moved away keeps the state its view object built in the lane it left. A lane
+    that dies sends `reset` and the surviving lane reclaims every unit cold. W1-T6019 (queued) records that after each
+    restart or handoff every heavy unit's first build runs on the fast lane, then moves. None of this is logged:
+    `view_lane` is relayed between the workers and never written, and slow_view's lane is the process lane.
+    So production duplication is INFERRED, not observed. This task measures it; it changes no placement and releases no
+    state. Any release is a separate task that must first prove handoff, recovery and correctness in replay.
+  design: |
+    (1) threadViews' `view_lane` relay writes one `read_model.view_lane_moved` row per move: view, instance, from lane, to
+    lane, the cost that moved it and the solo budget. A lane death's `reset` writes `read_model.view_lane_reclaimed` with
+    the surviving lane and the count of units it took.
+    (2) Each views worker reports, at most once per 10 minutes and on a lane move, the units it HOLDS but does not own:
+    a unit it has built at least once whose lane is now the other one, with view, instance and minutes since its last
+    build here. Counts and names only; no body, key or row content.
+    (3) Placement, budgets, schedules and retention are unchanged. Nothing is released.
+  acceptance:
+    - claim: "a move writes one view_lane_moved row naming view, instance, from and to; a dead lane's reclaim is logged with its count; and a lane reports a unit it built and no longer owns as held, without releasing it"
+      proof: "unit test: test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts"
+    - claim: "the views relay writes the move row"
+      proof: "grep: view_lane_moved in src/lib/read-model-worker.ts"
+  falsifier: |
+    Drop the relay's row: the move is not logged and the test fails. Report an owned unit as held, or release a held unit's
+    state: the held-report assertions fail.

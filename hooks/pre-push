@@ -190,11 +190,12 @@ fi
 # WHEN a small subset runs, never WHETHER any of them do. `rmd census-membership` keeps its verb
 # and its purpose as a report an author can run by hand.
 
-# BEGIN census precheck — the census QUESTIONS, without the runner W1-T3225 removed.
+# BEGIN census precheck — counts and the suites admitted after W1-T3225.
 # Three suites (clock-signature, comment-load, fixture-copy) cost a CI round each in one session,
 # because a census names none of a caller's symbols. scripts/census-precheck.mjs imports each one's
-# own counter, reads files and spawns only read-only git. It blocks only growth this branch causes
-# against origin/main's merge base; a census main already fails is not this push's to answer for.
+# own counter, reads files and spawns git plus bounded TAP suite children. A head-failing suite
+# runs again in a detached merge-base worktree borrowing node_modules (W1-T5663). Only head-red,
+# base-green refuses; an unreadable base is not measured. Counts block only this branch's growth.
 if has census-precheck.mjs; then
   if [ "$own_tree" -eq 1 ]; then
     node "$gate_root/scripts/census-precheck.mjs" --base origin/main
@@ -207,9 +208,9 @@ if has census-precheck.mjs; then
         let runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
         try {
           const p = await at("/src/lib/git-push.ts");
-          const run = p.createPrePushSandboxRunner(process.cwd());
           runSuites = ({ root, files }) => {
             try {
+              const run = p.createPrePushSandboxRunner(root);
               return m.runCensusSuitesViaChild({ root, files, run: (_file, _args, options) => run(process.execPath,
                 ["--test", "--test-reporter=tap", "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
             } catch (e) {

@@ -18,9 +18,11 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
+import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
 import {
   readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
   selectorShadowFlakeLedger,
@@ -45,6 +47,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "hot-file",
   "host-resource",
   "backlog",
+  // W1-T5454: the scout files the recurring failure-shaped ledger step no task or scorecard covers.
+  "scout",
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
   "flow",
   "flow-remedy",
@@ -129,6 +133,7 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
     return { intervalFor: (i) => Math.max(1_000, Math.min(i, HOST_RESOURCE_MIN_INTERVAL_MS)), minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   }
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }
@@ -401,6 +406,17 @@ export function selectorShadowGardenPass(
         { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
     } catch (e) {
       d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
+    }
+    // W1-T6406: the flake-incident garden runs in the pass that ledgers its evidence, on the same checkout,
+    // so it needs no second child process and no second garden branch form. It reads the ledger union, so
+    // a failed run read above does not stop it from judging what earlier passes recorded.
+    try {
+      await runFlakeIncidentGardener(d, {
+        mintTaskId,
+        readChangedPaths: (baseSha, headSha) => readSelectorShadowChangedPaths(owner, repo, { baseSha, headSha }, io.readJson),
+      });
+    } catch (e) {
+      d.log("flake_incident.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
   };
 }

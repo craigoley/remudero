@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 35.00
   priority: 3
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator ask 2026-10-03: proactivity — a gardener that improves the plan, task list and repository, flowing through the system with no human review"
   plan_refs: ["W1-T4110", "W1-T4941", "W1-T4802", "W1-T5114", "W1-T5361"]

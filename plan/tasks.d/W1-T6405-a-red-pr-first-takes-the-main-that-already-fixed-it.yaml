@@ -1,0 +1,56 @@
+- id: W1-T6405
+  title: "A RED PR FIRST TAKES THE MAIN THAT ALREADY FIXED IT — on 2026-10-08 #10058, #10084 and #10089 were red on failures main had already fixed (W1-T6337's #10068 at 11:27Z, the census fix #10102 at 12:54Z), and the stalled-stage rung escalated 'own-red … DIAGNOSIS: unknown signature' (e.g. #10072 for #10058) instead of refreshing the branch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-08: root-causing the stuck-PR board"
+  plan_refs: [W1-T6024, W1-T2671, W1-T5696, W1-T78, W1-T5900, W1-T6353]
+  files: [src/lib/sweep.ts, test/a-red-pr-first-takes-the-main-that-already-fixed-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 (operator session): #10058, #10084 and #10089 were red on failures already fixed on
+    main: the operator-agent-scan rotation test (W1-T6337, fixed by #10068 b896fc35 at 11:27:36Z) and the
+    wall-clock census (#10102 33fc1ed4 at 12:54:28Z). The clarification rung escalated instead. The filer
+    re-read issue #10072: "PR stage stalled: #10058 … own-red for 45 minutes (BACKSTOP 45) … DIAGNOSIS:
+    unknown signature". #10043 (#10027) and #10075 (#10022) have the same shape.
+    WHY, READ ON origin/main 33fc1ed4 (src/lib/sweep.ts):
+    - The sweep already probes a red PR's failing test files on CURRENT main (W1-T6024, ~:14848-14871,
+      `sweep.base_reproduction`). A `clear` verdict means the tests pass on main. It refreshes the branch only
+      when `previouslyReproduced` (~:14898-14900), i.e. an earlier probe on an OLDER main reproduced the
+      failure. When main's fix landed before the first probe, the first probe already reads `clear`. Nothing
+      was ever reproduced, so the sweep falls through to the fix rung and treats the red as the PR's own.
+    - W1-T2671's base-gap refresh (`decideRedBaseRefresh`, ~:4673) refreshes only when a file main changed
+      matches a failing test or source PATH. A fix that lands in src/ without touching the failing test's own
+      path (#10068 changed src/lib/ledger-union.ts and its own new test, not
+      test/operator-agent-scan-routes-never-block-the-loop.test.ts) cannot match.
+    - W1-T5696 refreshes reviewed PRs by distance and file overlap only. It never runs for a red PR.
+    - `reportStuckStage` (~:12640-12700) composes the "unknown signature" diagnosis and escalates. It has no
+      arm for "the failure is gone on main".
+  design: |
+    1. In the base-reproduction arm, a `clear` verdict (every failing test file passes on current main) on a
+       PR that is behind main (behindBy > 0 from the same compare W1-T2671 reads) refreshes the branch once
+       per (PR, head, main sha). It no longer needs `previouslyReproduced`. Ledger
+       `sweep.base_fixed.refresh` {pr, head_sha, main_sha, test_files, outcome}. No fix round is dispatched
+       and no strike is spent on that pass.
+    2. After the refresh the new head's CI decides. Still red at the new head is the PR's own red, and the
+       fix rung proceeds as today. One refresh per head, so this cannot loop.
+    3. `reportStuckStage`: before escalating an own-red stage, run the same check (behind main, and a `clear`
+       probe at the current main sha recorded for this head). If it holds, request the refresh and record
+       `pr.stuck` with diagnosis `fixed-on-main` instead of escalating. Escalate only when the refreshed head
+       is still red.
+    4. Unrunnable or partial probes keep today's behaviour (W1-T6024's hold).
+  acceptance:
+    - claim: "a red PR behind main whose failing test files all pass on current main is refreshed once without a fix strike, even when no earlier probe reproduced the failure"
+      proof: 'grep: test("W1-T6405: a red already fixed on main refreshes the branch before any fix round" in test/a-red-pr-first-takes-the-main-that-already-fixed-it.test.ts'
+    - claim: "a stalled own-red stage whose failure is fixed on main is refreshed and diagnosed fixed-on-main instead of escalated"
+      proof: 'grep: test("W1-T6405: a stalled own-red fixed on main refreshes instead of escalating" in test/a-red-pr-first-takes-the-main-that-already-fixed-it.test.ts'
+  falsifier: |
+    Keep the `previouslyReproduced` gate: the suite's PR, whose first probe already reads `clear` on a main
+    that fixed it, goes to a fix round and the fake update-branch records zero calls. Keep reportStuckStage
+    as it is: the same PR past its backstop escalates "unknown signature".

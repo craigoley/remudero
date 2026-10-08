@@ -87,6 +87,8 @@ export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   shadowObservations: GuardObservation[];
   /** W1-T4711: `neverWorked` runs kept out of the class sample this action was derived from; absent when none. */
   excludedCount?: number;
+  /** W1-T6466: runs of unknown cost (`costSource: "none"`) kept out of the class costs; absent when none. */
+  unpriced?: number;
 }
 
 export interface ConfigCanary {
@@ -198,30 +200,45 @@ const settledImplement = (r: RunSummary) => r.type === "implement" && r.verdict 
 
 /** Settled implement costs per class, `neverWorked` runs skipped and counted per class (W1-T4711):
  *  a $0 refusal is no sample of what the class costs. */
-export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number> } {
+export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number>; unpriced: Map<string, number> } {
   const byClass = new Map<string, number[]>();
   const excluded = new Map<string, number>();
+  const unpriced = new Map<string, number>();
   for (const r of runs.filter(settledImplement)) {
     const key = r.taskClass ?? "unknown";
     if (r.neverWorked) excluded.set(key, (excluded.get(key) ?? 0) + 1);
+    else if (r.costSource === "none") unpriced.set(key, (unpriced.get(key) ?? 0) + 1); // W1-T6466: unknown, not $0
     else byClass.set(key, [...(byClass.get(key) ?? []), r.costUsd]);
   }
-  return { byClass, excluded };
+  return { byClass, excluded, unpriced };
 }
 
 /** Distinct settled tasks among `runs`, how many merged, and their summed cost; a `neverWorked` run
  *  is no canary outcome, only `excludedCount` (W1-T4726). */
 export function cohortOutcome(runs: RunSummary[]): CohortOutcome & { excludedCount?: number } {
   const tasks = new Map<string, boolean>();
+  const pricedTasks = new Set<string>();
   let costUsd = 0;
   let excludedCount = 0;
+  let unpriced = 0;
   for (const r of runs) {
     if (r.verdict === "incomplete") continue;
     if (r.neverWorked) { excludedCount++; continue; }
     tasks.set(r.taskId, (tasks.get(r.taskId) ?? false) || r.verdict === "merged");
+    // W1-T6466: an unpriced run keeps its merge outcome but adds no cost; its $0 is unknown, not free.
+    if (r.costSource === "none") { unpriced++; continue; }
+    pricedTasks.add(r.taskId);
     costUsd += r.costUsd;
   }
-  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd, ...(excludedCount > 0 ? { excludedCount } : {}) };
+  const merged = [...tasks.values()].filter(Boolean).length;
+  const pricedMerged = [...tasks].filter(([id, m]) => m && pricedTasks.has(id)).length;
+  return {
+    tasks: tasks.size,
+    merged,
+    costUsd: unpriced > 0 && pricedTasks.size === 0 ? null : costUsd,
+    ...(unpriced > 0 ? { unpriced, pricedMerged } : {}),
+    ...(excludedCount > 0 ? { excludedCount } : {}),
+  };
 }
 
 /** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`; `neverWorked`
@@ -474,7 +491,7 @@ function shuffled<T>(items: T[], rng: () => number): T[] {
 /** The class whose queued budgets are furthest from its observed costs, as one canary over a random
  *  cohort of them. The cohort is at most half the mismatched shards, so the rest can judge it. */
 export function budgetCandidate(inv: ConfigInventory, rng: () => number): ConfigGardenAction | undefined {
-  const { byClass, excluded } = settledClassCosts(inv.runs);
+  const { byClass, excluded, unpriced } = settledClassCosts(inv.runs);
   let best: { taskClass: string; costs: number[]; budget: number; off: QueuedBudget[] } | undefined;
   for (const [taskClass, costs] of [...byClass].sort(([a], [b]) => a.localeCompare(b))) {
     if (costs.length < BUDGET_MIN_SAMPLES) continue;
@@ -490,11 +507,12 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
   const overrun = best.costs.filter((c) => c > best!.budget).length / best.costs.length;
   const cohortPop = population({ kind: "tasks", taskClass: best.taskClass, taskIds: [] });
   const excludedCount = excluded.get(best.taskClass) ?? 0;
+  const unpricedCount = unpriced.get(best.taskClass) ?? 0;
   return {
     class: "recalibrate-budget",
     target: best.taskClass,
     scope: `budget:${best.taskClass}`,
-    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}`,
+    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}${unpricedCount > 0 ? ` unpriced: ${unpricedCount} run(s) of unknown cost excluded.` : ""}`,
     edits: cohort.map((q) => ({ path: q.shard, from: q.line, to: `  budget_usd: ${usd(best!.budget)}` })),
     cohort: { kind: "tasks", taskClass: best.taskClass, taskIds: cohort.map((q) => q.id) },
     candidate: `budget_usd ${usd(best.budget)} for ${cohort.length} queued ${best.taskClass} shard(s)`,
@@ -503,6 +521,7 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
     shadowMetrics: [{ metricName: "shadow_overrun_rate", unit: "fraction", direction: "max", abortThreshold: BUDGET_MAX_SHADOW_OVERRUN }],
     shadowObservations: [{ metricName: "shadow_overrun_rate", value: overrun, denominator: best.costs.length, freshness: "verified", comparisonPopulation: cohortPop, observedAt: inv.nowIso }],
     ...(excludedCount > 0 ? { excludedCount } : {}),
+    ...(unpricedCount > 0 ? { unpriced: unpricedCount } : {}),
   };
 }
 

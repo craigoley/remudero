@@ -291,8 +291,10 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   onMalformedRow?: (finding: LedgerMalformedRowFinding) => void;
   /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
    * line lets a bounded audit projection seed a later live-file overlay without reserializing
-   * JSON and changing its identity. */
-  onAcceptedRecord?: (row: Record<string, unknown>, raw: string) => void;
+   * JSON and changing its identity. Under a per-step window, `fingerprint` is the line's
+   * {@link fingerprintLedgerLine}, the one the window kept: a caller that keeps lines past the row
+   * keeps that, because the line pins the whole decoded chunk it was sliced from. */
+  onAcceptedRecord?: (row: Record<string, unknown>, raw: string, fingerprint?: string) => void;
   /** Cancels the active source and refuses to open a later rotation. An abort is never swallowed
    * by the best-effort corrupt-file boundary below. */
   signal?: AbortSignal;
@@ -519,8 +521,9 @@ export async function* openLedgerUnion(
         }
         if (!recordMatchesFilters(parsed, opts, minimumTs)) continue;
         const step = typeof parsed.step === "string" ? parsed.step : "";
-        if (replayedInsideWindow(step, opts.dedupeSeed === undefined ? line : fingerprintLedgerLine(line))) continue;
-        opts.onAcceptedRecord?.(parsed, line);
+        const fingerprint = opts.dedupeWindowPerStep === undefined ? undefined : fingerprintLedgerLine(line);
+        if (fingerprint !== undefined && replayedInsideWindow(step, fingerprint)) continue;
+        opts.onAcceptedRecord?.(parsed, line, fingerprint);
         yield parsed;
       }
       if (pendingLiveBad) opts.onMalformedRow?.(lastLiveByte !== 0x0a

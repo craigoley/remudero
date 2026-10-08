@@ -86,7 +86,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T4268 re-baselined fix: it now carries GH_PR_EDIT_FALLBACK_LINES
   // (test/gh-pr-edit-fallback-contract.test.ts pins the new text itself).
   // W1-T5532 intentionally adds the typed FIX_OUTCOME contract; its exact wording is pinned above.
-  assert.equal(sha256(fix), "8abe0126c9034cf2bb055b8f479e717f8843e0d763cad58977b50e639035a7b1");
+  // W1-T6465 re-baselined fix: NEEDS_SCOPE now tells the worker to keep out-of-scope edits saved
+  // (test/a-fix-round-that-needs-scope-gets-it.test.ts pins the new text itself).
+  assert.equal(sha256(fix), "178ed4a5d6104ffbd54cb01067dbc57c30d84c2cfcab13904eb785f1d2d491af");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted

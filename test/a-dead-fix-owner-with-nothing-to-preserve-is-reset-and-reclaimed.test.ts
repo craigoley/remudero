@@ -4,7 +4,7 @@
  * `preserveTrackedDirtyFixOwner` throw "dirty owner has no HEAD-relative tracked diff", so the
  * sweep declined the PR's repair on every pass (#9362/#9379). The interrupted merge now has its
  * residue recorded, is reset, removed and reclaimed in the same pass; staged-only content with no
- * operation marker is refused by name. Every fixture is a REAL git repository built with porcelain
+ * operation marker is classified by name (W1-T6362 then preserves and reclaims it for a dead owner). Every fixture is a REAL git repository built with porcelain
  * commands and a repo-local identity.
  */
 import assert from "node:assert/strict";
@@ -405,7 +405,7 @@ function realpathOf(p: string): string {
   return execFileSync("realpath", [p], { encoding: "utf8" }).trim();
 }
 
-test("W1-T5918: staged-only content, an untracked path, a live claim or an occupied process census keeps the owner and dispatches nothing", async () => {
+test("W1-T5918: an untracked path, a live claim or an occupied process census keeps the owner and dispatches nothing", async () => {
   const cases: Array<{
     name: string;
     epoch: string;
@@ -414,7 +414,8 @@ test("W1-T5918: staged-only content, an untracked path, a live claim or an occup
     reason: string;
     preserved: boolean;
   }> = [
-    { name: "staged-only", epoch: "1791000000006", dirty: (f) => stageOnly(f, ["clean.txt"]), reason: "owner_dirty_staged_only_refused", preserved: true },
+    // W1-T6362: a dead owner's staged-only residue is no longer kept -- it is preserved and reclaimed
+    // (test/a-dead-fix-owners-staged-work-is-preserved-and-its-checkout-reclaimed.test.ts).
     {
       name: "untracked",
       epoch: "1791000000007",

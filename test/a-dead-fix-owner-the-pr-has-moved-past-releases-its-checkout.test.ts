@@ -4,9 +4,11 @@
  * W1-T5918's residue reader refused every staged-only residue, and the sweep returned without a
  * head-stamped decline, so every later fix round was refused against that dead worktree and nothing
  * escalated. A staged-only residue on a head the PR has moved past is now preserved from the index
- * into a recovery ref, reset, removed and reclaimed in one pass; one on the PR's CURRENT head is
- * still refused, as a head-stamped decline that FIX_CLAIM_DECLINE_BACKSTOP escalates exactly once,
- * naming the worktree and the staged paths. Every fixture is a REAL git repository.
+ * into a recovery ref, reset, removed and reclaimed in one pass. (W1-T6362 extended the same
+ * preserve-and-reclaim to a dead owner on the PR's CURRENT head, which this task still refused; that
+ * case and its preserve-failure escalation are pinned in
+ * test/a-dead-fix-owners-staged-work-is-preserved-and-its-checkout-reclaimed.test.ts.) Every
+ * fixture is a REAL git repository.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -25,8 +27,7 @@ import {
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
 } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -40,8 +41,6 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 const sha = (repo: string, ref: string): string => git(repo, "rev-parse", ref).trim();
-const status = (repo: string): string => git(repo, "status", "--porcelain=v1");
-const realpathOf = (p: string): string => execFileSync("realpath", [p], { encoding: "utf8" }).trim();
 
 interface Fixture {
   root: string;
@@ -245,53 +244,6 @@ test("a dead fix owner whose staged-only residue sits on a head the PR has moved
     assert.equal(proof.residue_discarded, false);
     assert.equal(registeredFixWorktreeOwner(f.repoDir, `refs/heads/${f.branch}`), undefined, "the dead worktree is released");
     assert.equal(steps(logs, "fix.dispatch").length, 1, "the same pass dispatches exactly one repair worker");
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
-  }
-});
-
-test("a staged-only residue on the PR's current head is still refused, head-stamped, and escalated once naming the worktree and paths", async () => {
-  const f = fixture("1791263072317");
-  try {
-    const prHead = f.ownerSha;
-    const before = status(f.ownerPath);
-    const ledgerPath = join(f.root, "ledger.ndjson");
-    writeFileSync(ledgerPath, "");
-    const escalations: string[] = [];
-    const logs: Log[] = [];
-    const order: string[] = [];
-    await withGh(f, prHead, async () => {
-      const effects = effectsFor(f, prHead, logs, order, ledgerPath);
-      for (let i = 0; i < FIX_CLAIM_DECLINE_BACKSTOP + 2; i++) {
-        await runSweep([view(prHead)], {
-          arm: () => {},
-          close: () => {},
-          dispatchFix: effects.dispatchFix,
-          escalate: (_pr, reason) => void escalations.push(reason),
-          runId: `SWEEP-W1T5974-${i}`,
-          readLedger: () => readLedgerLines(ledgerPath),
-          ledgerPath,
-        });
-      }
-    });
-
-    const declines = steps(logs, "sweep.fix.checkout_claim_declined");
-    assert.equal(declines.length, FIX_CLAIM_DECLINE_BACKSTOP, "every pass below the backstop re-attempts, then the sweep stands down");
-    for (const d of declines) {
-      assert.equal(d.extra?.owner_recovery_reason, "owner_dirty_staged_only_refused");
-      assert.equal(d.extra?.head_sha, prHead, "the decline names its head, so the backstop counts it");
-      assert.deepEqual(d.extra?.staged_paths, [STAGED]);
-    }
-    assert.equal(escalations.length, 1, "escalated exactly once, not declined silently on every pass");
-    for (const named of [`#${PR}`, realpathOf(f.ownerPath), "owner_dirty_staged_only_refused", STAGED]) {
-      assert.ok(escalations[0].includes(named), `the escalation names ${named}: ${escalations[0]}`);
-    }
-    assert.equal(order.includes("preserve-staged"), false, "current-head residue is never preserved-and-reset");
-    assert.equal(order.includes("reset"), false);
-    assert.equal(steps(logs, "fix.dispatch").length, 0);
-    assert.equal(status(f.ownerPath), before, "the owner is untouched");
-    assert.equal(git(f.repoDir, "for-each-ref", "refs/rmd-recovery/"), "");
-    assert.equal(registeredFixWorktreeOwner(f.repoDir, `refs/heads/${f.branch}`), realpathOf(f.ownerPath));
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

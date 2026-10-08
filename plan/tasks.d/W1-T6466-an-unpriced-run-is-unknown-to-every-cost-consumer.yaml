@@ -1,0 +1,37 @@
+- id: W1-T6466
+  title: "AN UNPRICED RUN IS UNKNOWN TO EVERY COST CONSUMER, NOT FREE — W1-T5664 (#10091) and W1-T5526 mark a run whose price is unknown `costSource: \"none\"` with `costUsd: 0`, but nothing outside retro.ts reads that marker, so cost anomaly medians, config-gardener spend, experiment cost-per-merge and the mount headroom sweep all average the run in as $0"
+  repo: remudero
+  depends_on: [W1-T5664]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-08: #10091 deviation 1, operator approved the follow-up"
+  plan_refs: [W1-T5664, W1-T5526]
+  files: [src/lib/cost-anomaly.ts, src/lib/config-gardener.ts, src/lib/experiment-promotion.ts, src/lib/retro-closure.ts, scripts/mount-headroom-sweep.mjs, test/an-unpriced-run-is-unknown-to-every-cost-consumer.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-08 on origin/main after #10091: src/lib/retro.ts RunSummary carries `costSource?: "none"` (~:293) and
+    gatherRuns sets it for an unpriced Codex row (~:409-439), keeping `costUsd: 0` because a truly absent cost would
+    change the type across consumers the W1-T5664 shard ruled out. Those consumers read `costUsd` as a real number:
+    src/lib/cost-anomaly.ts:231-239 (class median and the multiplier test), src/lib/config-gardener.ts:207-224 (per-class
+    costs and the spend total), src/lib/experiment-promotion.ts:567-587 (cost per merge), retro-closure's ClosureRun
+    (fed from retro.ts ~:2042-2043), and scripts/mount-headroom-sweep.mjs. Every unpriced run therefore drags a median
+    or average toward $0 and reads cheaper than it was. The #10091 build first tried this widening and its consumer
+    edits were dropped (see W1-T6465), so the PR body flagged it as deviation 1.
+  design: |
+    Each consumer EXCLUDES a run whose `costSource` is "none" from cost math (medians, sums, per-merge ratios) and
+    COUNTS it separately, reporting `unpriced: <n>` beside the figure it would have skewed. A consumer whose inputs are
+    all unpriced reports the figure as unknown (null), never 0. No consumer prices a run itself. Keep `costUsd: 0` on
+    the RunSummary (no type change); the marker is the contract. Add the marker to ClosureRun so retro-closure can
+    honour it.
+  acceptance:
+    - claim: "an unpriced run is excluded from every cost consumer's math and counted as unpriced, never averaged in as $0"
+      proof: 'grep: test("W1-T6466: an unpriced run is counted, not averaged in as free, by every cost consumer" in test/an-unpriced-run-is-unknown-to-every-cost-consumer.test.ts'
+  falsifier: |
+    Leave a consumer reading costUsd blindly: the fixture with one $9 priced run and three unpriced runs reports a
+    median of 0 and the test fails.

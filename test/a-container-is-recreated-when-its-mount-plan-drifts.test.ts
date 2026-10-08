@@ -94,6 +94,7 @@ function liveInspect(f: Fixture, container: string, edit: (live: { Mounts: Recor
     [`${base}/worktrees`, "/home/node/Remudero/worktrees"],
     [`${base}/tmp`, "/home/node/Remudero/tmp"],
     [`${base}/remudero-coverage`, "/home/node/Remudero/.remudero-coverage"],
+    [`${base}/repos`, "/home/node/Remudero/repos"],
     [`${base}/repos-coverage`, "/home/node/Remudero/repos/.remudero-coverage"],
     [`${base}/read-model`, "/home/node/rmd-scratch/read-model"],
     [`${base}/worker-homes`, "/home/node/rmd-scratch/worker-homes"],

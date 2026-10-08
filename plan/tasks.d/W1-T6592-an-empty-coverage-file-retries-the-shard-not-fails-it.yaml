@@ -1,0 +1,35 @@
+- id: W1-T6592
+  title: "AN EMPTY COVERAGE FILE RETRIES THE SHARD, NOT FAILS IT — when every test passes but one child process leaves an empty V8 coverage JSON, node's coverage reporter throws ERR_OPERATION_FAILED and exits 1, the shard produces no lcov, and scripts/test-with-retry.mjs's FLAKE-RETRY names no failed file so nothing is retried; #10132 (W1-T6403) exhausted both strikes on exactly this"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — an all-pass shard whose only defect is an empty coverage file recovers its lcov
+  band_meaning: span
+  origin: "operator session 2026-10-08: PR #10132 coverage-shard (7/8) red attribution"
+  plan_refs: [W1-T4398, W1-T3207]
+  files: [scripts/test-with-retry.mjs, test/an-empty-coverage-file-retries-the-shard-not-fails-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08: #10132 head c77cc4d27, coverage-shard (7/8) job 113454634911 ended `# tests 3222 / # pass
+    3222 / # fail 0`, then `Warning: Could not report code coverage. Error [ERR_OPERATION_FAILED]: coverage file is
+    empty: /tmp/node-coverage-…/coverage-31722-….json`; node exited 1, the ratchet printed "no lcov produced …
+    FAILING", and FLAKE-RETRY had no failed file to retry. The fleet's ci-log fix rounds then found nothing to change
+    and the PR reached strikes-exhausted. None of the PR's test files run in shard 7 — the empty file came from a child
+    (likely a SIGKILL-exercising test) that died before writing coverage. Logs saved at
+    ~/Remudero-notes/p10132/shard7.log.
+  design: |
+    In test-with-retry.mjs's coverage first pass, recognise the empty-coverage-file signature with an all-pass TAP
+    summary: drop the empty raw JSON(s) from the coverage dir (they carry no data) and rebuild lcov from the remaining
+    raw files, recording a FLAKE-RETRY-RECOVERED line naming the dropped file; if lcov still cannot be built, retry the
+    shard's coverage pass once. A real test failure or a non-empty corrupt file still fails exactly as today.
+  acceptance:
+    - claim: "an all-pass shard with one empty coverage JSON still produces lcov and reports the recovery"
+      proof: 'grep: test("W1-T6592: an empty coverage file is dropped and lcov is still produced" in test/an-empty-coverage-file-retries-the-shard-not-fails-it.test.ts'
+  falsifier: |
+    Keep today's behaviour: a fixture coverage dir with one empty JSON and an all-pass summary yields no lcov and a
+    non-zero exit, so the test fails.

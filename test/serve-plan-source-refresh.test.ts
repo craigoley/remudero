@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -118,4 +119,46 @@ test("a failure reason is bounded text, and a board without an outcome records n
   const untracked: PlanSourceHolder = { plan: { tasks: [], byId: new Map() } };
   assert.equal(await reloadServePlan(untracked, "/repo", REF, { read: async () => { throw new Error("x"); } }), false);
   assert.equal(untracked.planSource, undefined, "an untracked board is not qualified retroactively");
+});
+
+test("a large plan source identity is bounded without losing changes beyond its prefix", () => {
+  const identity = "shard.yaml=123:456:789\n".repeat(15_000);
+  const loaded = planSourceLoaded(undefined, identity, fixedClock(0));
+  assert.equal(loaded.state, "loaded");
+  if (loaded.state !== "loaded") throw new Error("a successful read must be loaded");
+  assert.ok(Buffer.byteLength(loaded.identity) <= 1_024, "source metadata must fit a bounded response");
+  assert.equal(loaded.identity, `sha256:${createHash("sha256").update(identity).digest("hex")}`);
+  assert.equal(Buffer.byteLength(loaded.identity), 71);
+  assert.deepEqual(planSourceLoaded(undefined, identity, fixedClock(0)), loaded, "the same complete identity has a stable digest");
+  const changed = planSourceLoaded(undefined, identity + "last-shard.yaml=987:654:321", fixedClock(0));
+  assert.equal(changed.state, "loaded");
+  if (changed.state !== "loaded") throw new Error("a successful read must be loaded");
+  assert.notEqual(changed.identity, loaded.identity, "truncating the common prefix would conceal the last shard change");
+  assert.equal(loaded.generation, 1);
+  assert.equal(loaded.observedAt, "1970-01-01T00:00:00.000Z");
+});
+
+test("a bounded plan source identity survives a failed refresh without recertifying stale evidence", () => {
+  const identity = "x".repeat(200_000);
+  const loaded = planSourceLoaded(undefined, identity, fixedClock(0));
+  const stale = planSourceFailed(loaded, new Error("git read failed"), fixedClock(1_000));
+  assert.ok(stale.state === "stale" && Buffer.byteLength(stale.identity) <= 1_024, "stale evidence stays bounded");
+  assert.deepEqual(stale, {
+    state: "stale", generation: 1,
+    identity: `sha256:${createHash("sha256").update(identity).digest("hex")}`,
+    observedAt: "1970-01-01T00:00:00.000Z",
+    failure: { reason: "git read failed", failedAt: "1970-01-01T00:00:01.000Z" },
+  });
+  const next = planSourceLoaded(stale, "ref:/repo@" + REF, fixedClock(2_000));
+  assert.deepEqual(next, { state: "loaded", generation: 2, identity: "ref:/repo@" + REF, observedAt: "1970-01-01T00:00:02.000Z" });
+});
+
+test("plan source identities preserve short references and bound UTF-8 bytes rather than characters", () => {
+  for (const identity of ["plan-files", "ref:/repo@" + REF, "😀".repeat(256)]) {
+    const source = planSourceLoaded(undefined, identity, fixedClock(0));
+    assert.equal(source.state === "loaded" && source.identity, identity);
+  }
+  const identity = "😀".repeat(257);
+  const source = planSourceLoaded(undefined, identity, fixedClock(0));
+  assert.equal(source.state === "loaded" && source.identity, `sha256:${createHash("sha256").update(identity).digest("hex")}`);
 });

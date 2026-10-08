@@ -32,6 +32,8 @@ export interface ClosureRun {
   startTs: string;
   verdict: string;
   costUsd: number;
+  /** W1-T6466: `none` when the run's price is unknown — its `costUsd: 0` is not free (see retro.ts). */
+  costSource?: "none";
   taskClass?: string;
   subtype?: string;
   reason?: string;
@@ -66,7 +68,10 @@ export interface ClassClosure {
   merged: number;
   open: number;
   mergeRate: MergeRate;
+  /** `null` at zero merges, or when no merged run in the class was priced (W1-T6466). */
   costPerMerge: number | null;
+  /** W1-T6466: in-window runs of unknown cost kept out of `costPerMerge`; absent when none. */
+  unpriced?: number;
   lastMergeTs?: string;
 }
 
@@ -118,10 +123,16 @@ export function closureByClass(
   }
   const costByClass = new Map<string, number>();
   const attemptsByClass = new Map<string, number>();
+  const unpricedByClass = new Map<string, number>();
+  const unpricedRunIds = new Set<string>();
   for (const r of windowed) {
     const c = r.taskClass ?? UNKNOWN_CLASS;
     classes.add(c);
-    costByClass.set(c, (costByClass.get(c) ?? 0) + r.costUsd);
+    // W1-T6466: an unpriced run is counted, never summed in as a free $0.
+    if (r.costSource === "none") {
+      unpricedByClass.set(c, (unpricedByClass.get(c) ?? 0) + 1);
+      unpricedRunIds.add(r.runId);
+    } else costByClass.set(c, (costByClass.get(c) ?? 0) + r.costUsd);
     attemptsByClass.set(c, (attemptsByClass.get(c) ?? 0) + 1);
   }
   const openByClass = new Map<string, number>();
@@ -149,6 +160,8 @@ export function closureByClass(
         ? { kind: "refused", merged, denominator, floor: CLOSURE_POPULATION_FLOOR }
         : { kind: "rate", value: round(merged / denominator), merged, denominator };
     const cost = costByClass.get(taskClass) ?? 0;
+    const unpriced = unpricedByClass.get(taskClass) ?? 0;
+    const pricedMerged = mergedIds.filter((id) => !unpricedRunIds.has(id)).length;
     const lastMergeTs = mergedIds
       .map((id) => mergeTsByRun.get(id) ?? startOfRun.get(id))
       .filter((ts): ts is string => typeof ts === "string")
@@ -160,7 +173,8 @@ export function closureByClass(
       merged,
       open,
       mergeRate,
-      costPerMerge: merged === 0 ? null : round(cost / merged),
+      costPerMerge: merged === 0 ? null : unpriced === 0 ? round(cost / merged) : pricedMerged === 0 || !costByClass.has(taskClass) ? null : round(cost / pricedMerged),
+      ...(unpriced > 0 ? { unpriced } : {}),
       ...(lastMergeTs !== undefined ? { lastMergeTs } : {}),
     });
   }
@@ -174,6 +188,13 @@ export function mergeRateCell(rate: MergeRate, population: "attempts" | "filings
     : `REFUSED (population ${rate.denominator} below floor ${rate.floor}, P48; ${rate.merged} of ${rate.denominator} ${population})`;
 }
 
+/** The cost-per-merge cell: the figure, or `n/a`, with `unpriced: <n>` beside it (W1-T6466). */
+function closureCostCell(r: ClassClosure): string {
+  const unpriced = r.unpriced ? ` (unpriced: ${r.unpriced})` : "";
+  if (r.costPerMerge !== null) return `$${r.costPerMerge.toFixed(3)}${unpriced}`;
+  return r.merged === 0 ? "n/a (0 merged)" : `n/a${unpriced}`;
+}
+
 /** The `## Closure by task class` section, a markdown table with one row per class. */
 export function renderClosureByClass(rows: readonly ClassClosure[]): string {
   const head = ["## Closure by task class", ""];
@@ -185,7 +206,7 @@ export function renderClosureByClass(rows: readonly ClassClosure[]): string {
     ...rows.map(
       (r) =>
         `| ${r.taskClass} | ${r.filed} | ${r.merged} | ${r.open} | ${mergeRateCell(r.mergeRate, typeof r.filed === "number" ? "filings" : "attempts")} | ` +
-        `${r.costPerMerge === null ? "n/a (0 merged)" : `$${r.costPerMerge.toFixed(3)}`} | ${r.lastMergeTs ?? "(none)"} |`,
+        `${closureCostCell(r)} | ${r.lastMergeTs ?? "(none)"} |`,
     ),
   ].join("\n");
 }

@@ -11,6 +11,7 @@ import {
   ADHOC_LANE_REAP_GRACE_MS,
   adhocLaneRoot,
   reapStaleWorktrees,
+  reapStaleWorktreesAsync,
   runAdhocLaneReapRung,
   unmanagedWorktreeLanes,
 } from "../src/lib/worker.js";
@@ -99,17 +100,17 @@ function laneFixture(): { root: string; repo: string; lane: string; branch: stri
 
 // ── acceptance 2: removal goes through the parent, not a bare recursive delete ─────────────────
 
-test("W1-T2847 (acceptance 2): an armed lane reap removes the worktree THROUGH ITS PARENT — the admin record dies with the directory, never stranded prunable", () => {
+test("W1-T2847 (acceptance 2): an armed lane reap removes the worktree THROUGH ITS PARENT — the admin record dies with the directory, never stranded prunable", async () => {
   const { root, repo, lane, branch } = laneFixture();
   assert.ok(existsSync(lane), "fixture: the lane exists before the pass");
 
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
-  const summary = runAdhocLaneReapRung(cfg(root), (s, f) => lines.push([s, f]), {
+  const summary = await runAdhocLaneReapRung(cfg(root), (s, f) => lines.push([s, f]), {
     enabled: () => true, // ARMED, deliberately: this is the only test here that deletes
     // The branch is local-only in this fixture, so git's own ls-remote would fail-close to KEEP.
     // Answering "not live upstream" is what makes the removal path reachable at all.
     reap: ((r: string, o: Record<string, unknown>) =>
-      reapStaleWorktrees(r, {
+      reapStaleWorktreesAsync(r, {
         ...o,
         branchIsLiveUpstream: () => false,
       })) as never,
@@ -133,12 +134,12 @@ test("W1-T2847 (acceptance 2): an armed lane reap removes the worktree THROUGH I
 
 // ── acceptance 3: a live upstream branch is kept however old ───────────────────────────────────
 
-test("W1-T2847 (acceptance 3): a lane whose branch is still live upstream is NEVER reaped, however far past the ceiling it is", () => {
+test("W1-T2847 (acceptance 3): a lane whose branch is still live upstream is NEVER reaped, however far past the ceiling it is", async () => {
   const { root, repo, lane } = laneFixture();
-  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+  const summary = await runAdhocLaneReapRung(cfg(root), () => {}, {
     enabled: () => true, // armed, so a keep here is the doctrine and not the survey
     reap: ((r: string, o: Record<string, unknown>) =>
-      reapStaleWorktrees(r, {
+      reapStaleWorktreesAsync(r, {
         ...o,
         branchIsLiveUpstream: () => true, // an open, unmerged PR
       })) as never,
@@ -155,10 +156,10 @@ test("W1-T2847 (acceptance 3): a lane whose branch is still live upstream is NEV
 
 // ── acceptance 4: survey first — ledger what it WOULD reclaim before it may delete ─────────────
 
-test("W1-T2847 (acceptance 4a): the rung ships DISARMED — the reaper is called in dry-run and the survey still counts what it would reclaim", () => {
+test("W1-T2847 (acceptance 4a): the rung ships DISARMED — the reaper is called in dry-run and the survey still counts what it would reclaim", async () => {
   let sawDryRun: boolean | undefined;
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
-  runAdhocLaneReapRung(cfg("/nonexistent-root"), (s, f) => lines.push([s, f]), {
+  await runAdhocLaneReapRung(cfg("/nonexistent-root"), (s, f) => lines.push([s, f]), {
     root: () => "/fake-lane-root",
     // NO `enabled` supplied — this is the SHIPPED default, which is the claim under test.
     reap: ((_r: string, o: { dryRun?: boolean }) => {
@@ -174,11 +175,11 @@ test("W1-T2847 (acceptance 4a): the rung ships DISARMED — the reaper is called
   assert.equal(row[1]?.root, "/fake-lane-root", "and which root it surveyed");
 });
 
-test("W1-T2847 (acceptance 4b): a DISARMED pass over a real aged lane deletes nothing while still counting it", () => {
+test("W1-T2847 (acceptance 4b): a DISARMED pass over a real aged lane deletes nothing while still counting it", async () => {
   const { root, repo, lane } = laneFixture();
-  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+  const summary = await runAdhocLaneReapRung(cfg(root), () => {}, {
     reap: ((r: string, o: Record<string, unknown>) =>
-      reapStaleWorktrees(r, {
+      reapStaleWorktreesAsync(r, {
         ...o,
         branchIsLiveUpstream: () => false,
       })) as never,
@@ -192,10 +193,10 @@ test("W1-T2847 (acceptance 4b): a DISARMED pass over a real aged lane deletes no
 
 // ── the wiring: which root and which ceiling the rung actually passes ──────────────────────────
 
-test("W1-T2847: the rung passes adhocLaneRoot and the LANE ceiling — not worktreesDir and not the run-scoped grace", () => {
+test("W1-T2847: the rung passes adhocLaneRoot and the LANE ceiling — not worktreesDir and not the run-scoped grace", async () => {
   let sawRoot: string | undefined;
   let sawOpts: { maxAgeMs?: number } = {};
-  runAdhocLaneReapRung(cfg("/srv/rmd-root"), () => {}, {
+  await runAdhocLaneReapRung(cfg("/srv/rmd-root"), () => {}, {
     reap: ((r: string, o: typeof sawOpts) => {
       sawRoot = r;
       sawOpts = o;
@@ -206,9 +207,9 @@ test("W1-T2847: the rung passes adhocLaneRoot and the LANE ceiling — not workt
   assert.equal(sawOpts.maxAgeMs, ADHOC_LANE_REAP_GRACE_MS, "and its own human-scaled ceiling");
 });
 
-test("W1-T2847: an unreadable lane root is best-effort — the rung ledgers the error and never throws into the dispatch", () => {
+test("W1-T2847: an unreadable lane root is best-effort — the rung ledgers the error and never throws into the dispatch", async () => {
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
-  const summary = runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
+  const summary = await runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
     reap: (() => {
       throw new Error("boom");
     }) as never,
@@ -219,9 +220,9 @@ test("W1-T2847: an unreadable lane root is best-effort — the rung ledgers the 
   assert.match(String(err[1]?.error), /boom/);
 });
 
-test("W1-T2847: an activity-unknown keep earns its own row — the reaper declining to decide is what bounds growth", () => {
+test("W1-T2847: an activity-unknown keep earns its own row — the reaper declining to decide is what bounds growth", async () => {
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
-  runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
+  await runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
     reap: (() => summaryOf({ kept: ["board"], keptReasons: [{ name: "board", reason: "activity-unknown" }] })) as never,
   });
   const row = lines.find(([s]) => s === "adhoc_lane.reap.undecidable");
@@ -260,12 +261,12 @@ test("W1-T2847 (wiring): runTaskBody CALLS runAdhocLaneReapRung — beside the w
 
 // ── W1-T2962: registered unmanaged lanes are reaped by candidate, never by parent walk ─────────
 
-test("W1-T2962: the registration-driven rung ships DISARMED and still counts", () => {
+test("W1-T2962: the registration-driven rung ships DISARMED and still counts", async () => {
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
   const unmanaged = ["/srv/rmd-root/atbase", "/Users/someone/board"];
   let unmanagedDryRun: boolean | undefined;
   let unmanagedCandidates: readonly string[] | undefined;
-  const summary = runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
+  const summary = await runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
     repoDir: "/srv/repo",
     reap: ((_root: string, o: { dryRun?: boolean; candidatePaths?: readonly string[] }) => {
       if (o.candidatePaths) {
@@ -289,9 +290,9 @@ test("W1-T2962: the registration-driven rung ships DISARMED and still counts", (
   assert.equal(row[1]?.reaped, 2, "the survey counts what it would reclaim");
 });
 
-test("W1-T2847: with NO repoDir the report is skipped entirely rather than guessing a registration", () => {
+test("W1-T2847: with NO repoDir the report is skipped entirely rather than guessing a registration", async () => {
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
-  runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
+  await runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
     reap: (() => summaryOf()) as never,
     listUnmanaged: (() => {
       throw new Error("must not be called without a repoDir");
@@ -300,7 +301,7 @@ test("W1-T2847: with NO repoDir the report is skipped entirely rather than guess
   assert.equal(lines.find(([s]) => s === "adhoc_lane.unmanaged"), undefined);
 });
 
-test("W1-T2962: an unregistered directory is never a candidate", () => {
+test("W1-T2962: an unregistered directory is never a candidate", async () => {
   const root = mkdtempSync(join(realpathSync(tmpdir()), `${RMD_TMP_PREFIX}adhoc-lane-unregistered-`));
   const config = cfg(join(root, "rmd-root"));
   const repo = join(root, "repo");
@@ -308,7 +309,7 @@ test("W1-T2962: an unregistered directory is never a candidate", () => {
   mkdirSync(unregistered, { recursive: true });
   const porcelain = ["worktree " + repo, "HEAD abc", "branch refs/heads/main", ""].join("\n");
   let candidatePasses = 0;
-  runAdhocLaneReapRung(config, () => {}, {
+  await runAdhocLaneReapRung(config, () => {}, {
     repoDir: repo,
     root: () => join(config.root, "lanes"),
     reap: ((_root: string, o: { candidatePaths?: readonly string[] }) => {
@@ -339,13 +340,13 @@ function unmanagedLaneFixture(): { root: string; repo: string; lane: string; bra
   return { root: join(root, "rmd-root"), repo, lane, branch };
 }
 
-test("W1-T2962: a lane with a live upstream branch survives a registration-driven pass", () => {
+test("W1-T2962: a lane with a live upstream branch survives a registration-driven pass", async () => {
   const { root, repo, lane } = unmanagedLaneFixture();
-  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+  const summary = await runAdhocLaneReapRung(cfg(root), () => {}, {
     repoDir: repo,
     enabled: () => true,
     reap: ((r: string, o: Record<string, unknown>) =>
-      reapStaleWorktrees(r, {
+      reapStaleWorktreesAsync(r, {
         ...o,
         branchIsLiveUpstream: () => true,
       })) as never,
@@ -402,13 +403,13 @@ function aliasedLaneFixture(): { root: string; repo: string; lane: string; realL
   return { root: f.root, repo: f.repo, lane: alias, realLane: f.lane };
 }
 
-test("W1-T2950: a lane reached through a path ALIAS still resolves to its registration, so a live branch is kept however old", () => {
+test("W1-T2950: a lane reached through a path ALIAS still resolves to its registration, so a live branch is kept however old", async () => {
   const { root, repo, realLane } = aliasedLaneFixture();
   let upstreamProbed = false;
-  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+  const summary = await runAdhocLaneReapRung(cfg(root), () => {}, {
     enabled: () => true, // ARMED: a keep here is the doctrine, not the survey
     reap: ((r: string, o: Record<string, unknown>) =>
-      reapStaleWorktrees(r, {
+      reapStaleWorktreesAsync(r, {
         ...o,
         branchIsLiveUpstream: () => {
           upstreamProbed = true;

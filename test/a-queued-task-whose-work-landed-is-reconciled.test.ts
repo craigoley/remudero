@@ -75,7 +75,8 @@ test("W1-T4861: a queued task whose proofs now hold is proposed done with its co
   for (const proof of proofs) assert.equal(grepProofHolds(repo.dir, proof.slice("  proof: ".length)), true);
   const task = loadPlan(join(repo.dir, "plan/tasks.yaml")).byId.get("W1-T1")!;
   assert.equal(task.status, "done");
-  assert.equal(task.retirement, "closed", "completion preserves the gardener's closed reason");
+  assert.equal(task.retirement, undefined, "a built task carries no retirement, which only a blocked task's reader reads");
+  assert.match(readFileSync(join(repo.dir, shard), "utf8"), /# plan gardener: \w+ W1-T1 commit [0-9a-f]+ — \S/, "the marker keeps the reason and commit");
   assert.ok(readFileSync(join(repo.dir, shard), "utf8").includes(commit));
   assert.deepEqual(retirementCandidates(planInventory(repo.dir, deps.stateDir), repo.dir), []);
 });

@@ -1,0 +1,33 @@
+- id: W1-T6354
+  title: "BASE REPRODUCTION PROBES ONLY TEST FILES, ONCE PER HEAD — sweep.base_reproduction treats helper files named in a failing stack (test/helpers/wall-clock-bound.ts, test/helpers/delegation-profile-fixture.ts) as tests, reports them 'unexecutable test path', and repeats the same probe every ~12 min on an unchanged head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the base probe runs each real test file once per head
+  band_meaning: span
+  origin: "operator session 2026-10-08: W1-T6153 (#10027) ledger trace"
+  plan_refs: []
+  files: [src/run-task.ts, test/base-reproduction-probes-only-test-files-once-per-head.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 (core ledger): W1-T6153's sweep.base_reproduction rows at 06:28, 06:48, 07:00, 07:12 and
+    07:23Z each report outcome passes for the real test plus outcome unrunnable "Error: unexecutable test path:
+    test/helpers/wall-clock-bound.ts" and "…test/helpers/delegation-profile-fixture.ts". READ on origin/main: the
+    probe in src/run-task.ts parses each candidate as `unit test: <file>` and throws for a non-test path; nothing
+    filters helper files before probing, and nothing remembers the answer for the same head.
+  design: |
+    Filter the probe's candidates to files the proof dialect can execute as tests (the *.test.ts set the selector
+    already knows) before probing, so helpers never reach it; and memo the base outcome per (base sha, file) so an
+    unchanged head does not re-probe each sweep. A genuinely missing or unreadable test file keeps its current outcome.
+  acceptance:
+    - claim: "helper files named in a failing stack are not probed as tests"
+      proof: 'grep: test("W1-T6354: helper files are never probed as tests" in test/base-reproduction-probes-only-test-files-once-per-head.test.ts'
+    - claim: "an unchanged base sha is probed once, not once per sweep"
+      proof: 'grep: test("W1-T6354: a base sha is probed once per file" in test/base-reproduction-probes-only-test-files-once-per-head.test.ts'
+  falsifier: |
+    Keep the unfiltered list: the fake executor sees test/helpers/wall-clock-bound.ts and the first test fails.

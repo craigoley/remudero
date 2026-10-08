@@ -1,0 +1,46 @@
+- id: W1-T6465
+  title: "A FIX ROUND THAT NEEDS SCOPE GETS IT — every scope amendment in core's live ledger on 2026-10-08 was refused (5 no-task-trailer, 3 path-not-changed, 1 instrument-path; 0 created), so a task whose declared files are too narrow discards the worker's correct edits every round: #10091 shipped uncompilable until a hand fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-08: root-causing #10091 (W1-T5664)"
+  plan_refs: [W1-T5664, W1-T2653, W1-T5118]
+  files: [src/lib/proof-amendment.ts, src/lib/prompt-render.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-gets-it.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 in core's live ledger: `fix.scope_amendment` outcomes = 5 refused `no-task-trailer`, 3 refused
+    `path-not-changed`, 1 refused `instrument-path`, 0 created; `fix.commit_refused` = 15 "non-test paths need scope" and
+    5 "every change the worker made is outside its declared files". W1-T5664 (#10091): its fix worker edited exactly the
+    five consumers the change needed (src/lib/config-gardener.ts, cost-anomaly.ts, retro-closure.ts,
+    experiment-promotion.ts, scripts/mount-headroom-sweep.mjs), logged `fix.scope_needed` for them at 12:14:42Z and
+    12:17:16Z, the amendment was refused `path-not-changed`, the commit was refused, and the PR stayed uncompilable
+    (typecheck + a coverage shard red) until an operator hand fix.
+    Two defects, both in src/lib/proof-amendment.ts requestScopeAmendment (~:490-508):
+    1. `no-task-trailer`: it requires `trailerTaskId === taskId` from a `Remudero-Task:` trailer, but a fleet build PR
+       identifies its task by its run-<taskId>-<epochMs> head ref (the fix prompt itself says "only a run-<taskId>-<epochMs>
+       head is creditable"; head-identity-gate accepts either form).
+    2. `path-not-changed`: it admits only paths in `changedPaths` (the worker's working-tree + round commits, run-task.ts
+       ~:12829-12831), but the fix prompt (src/lib/prompt-render.ts, the FIX_OUTCOME footer) says only "NEEDS_SCOPE
+       <path> … non-test paths go to scope escalation" — it never tells the worker to LEAVE those edits saved, so a
+       worker that reverts out-of-scope edits before reporting is refused for the very paths it needs.
+  design: |
+    1. Identity: accept the task from the PR's head ref when it is run-<taskId>-<epochMs> for the same task, exactly as
+       head-identity-gate does; keep refusing a PR that names a different task or none.
+    2. Prompt: the NEEDS_SCOPE line tells the worker to keep the out-of-scope edits saved in the worktree (uncommitted)
+       when it reports, because the amendment admits only paths it actually changed.
+    3. Keep every other refusal (plan/, test/, instrument paths, invalid paths) unchanged.
+    Measure after merge: `fix.scope_amendment` outcomes on core include `created`/`resumed`, and a narrow-scope task's
+    PR lands its consumer edits via the amendment instead of an operator fix.
+  acceptance:
+    - claim: "a fleet PR identified by its run-<taskId> head ref, whose worker left the needed edits saved, gets its scope amendment created"
+      proof: 'grep: test("W1-T6465: a run-branch fix round with saved out-of-scope edits gets its scope amendment" in test/a-fix-round-that-needs-scope-gets-it.test.ts'
+  falsifier: |
+    Keep the trailer-only identity: the fixture PR on run-W1-T1-<epoch> with no trailer is refused `no-task-trailer` and
+    the test fails.

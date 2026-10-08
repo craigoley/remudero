@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-gra
 import { createService } from "../src/lib/service.js";
 import { adoptPlanSource, planSourceFailed, reloadServePlan, type PlanSourceHolder } from "../src/lib/serve-plan-reload.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { planFilesIdentity } from "../src/lib/thread-plan.js";
 
 // W1-T5639: a source that was never read is repaired by the next successful read, in place: no restart,
 // no rebuilt route, and no reply replay. The inbox memo is keyed by plan object identity, so a new plan reclassifies.
@@ -125,4 +127,42 @@ test("adoptPlanSource installs what serve read only while the source is unavaila
   assert.deepEqual(logs.map(([step]) => step), ["serve.plan_source_adopted"]);
   assert.equal(adoptPlanSource(board, () => { throw new Error("must not read a loaded source"); }), false, "a loaded source is never re-read");
   assert.equal(board.planSource?.state, "loaded");
+});
+
+test("real plan file metadata keeps inbox thread responses below the console bound after adoption and refresh failure", async () => {
+  const fx = fixture();
+  try {
+    const shardDir = join(fx.root, "plan", "tasks.d");
+    mkdirSync(shardDir);
+    for (let i = 0; i < 2_048; i++) {
+      writeFileSync(join(shardDir, `W1-T${String(i).padStart(6, "0")}-${"source".repeat(12)}.yaml`), "[]\n");
+    }
+    const identity = planFilesIdentity(join(fx.root, "plan", "tasks.yaml"));
+    assert.ok(Buffer.byteLength(identity) > 131_072, "positive control: the real file metadata alone exceeds the console response bound");
+    const logs: Array<Record<string, unknown> | undefined> = [];
+    assert.equal(adoptPlanSource(fx.board, () => ({ plan: fx.real, identity }), { clock: fixedClock(0), log: (_step, extra) => logs.push(extra) }), true);
+    const ledgerBefore = readFileSync(fx.ledgerPath, "utf8");
+    const loaded = await fx.get("/v1/inbox/threads");
+    assert.equal(loaded.status, 200);
+    assert.ok(Array.isArray(loaded.body.threads));
+    assert.ok(loaded.body.threads.length > 0, "the bounded response still includes a real thread");
+    assert.ok(Buffer.byteLength(JSON.stringify(loaded.body)) < 131_072, "the thread list fits the existing console response bound");
+    assert.equal(loaded.body.planSource.identity, `sha256:${createHash("sha256").update(identity).digest("hex")}`);
+    assert.equal(logs[0]?.identity, loaded.body.planSource.identity, "the adoption receipt does not repeat the raw file manifest");
+    assert.equal(adoptPlanSource(fx.board, () => { throw new Error("a loaded source must not be re-read"); }), false);
+    assert.equal(await reloadServePlan(fx.board, "/repo", "c".repeat(40), {
+      read: async () => { throw new Error("forced refresh failure"); }, clock: fixedClock(1_000),
+    }), false);
+    const stale = await fx.get("/v1/inbox/threads");
+    assert.equal(stale.status, 200);
+    assert.equal(stale.body.planSource.state, "stale");
+    assert.equal(stale.body.planSource.identity, loaded.body.planSource.identity);
+    assert.equal(stale.body.planSource.generation, 1);
+    assert.equal(stale.body.planSource.observedAt, "1970-01-01T00:00:00.000Z");
+    assert.equal(stale.body.planSource.failure.failedAt, "1970-01-01T00:00:01.000Z");
+    assert.ok(Buffer.byteLength(JSON.stringify(stale.body)) < 131_072);
+    assert.equal(readFileSync(fx.ledgerPath, "utf8"), ledgerBefore, "qualification neither mutates operator decisions nor replays replies");
+  } finally {
+    fx.close();
+  }
 });

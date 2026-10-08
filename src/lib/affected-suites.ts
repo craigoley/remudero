@@ -398,6 +398,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(viewSchemas) && files.some((f) => viewSchemaEdges.includes(f))) {
     pathReaders.push(viewSchemas);
   }
+  const viewEtags = "test/view-etags-are-deterministic.test.ts";
+  const viewEtagsEdges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
+  if (input.files.has(viewEtags) && files.some((f) => viewEtagsEdges.includes(f))) {
+    pathReaders.push(viewEtags);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

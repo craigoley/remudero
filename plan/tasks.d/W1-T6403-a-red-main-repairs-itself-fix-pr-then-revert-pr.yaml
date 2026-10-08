@@ -1,0 +1,83 @@
+- id: W1-T6403
+  title: "A RED MAIN REPAIRS ITSELF — A FIX PR FIRST, THEN A REVERT PR: #10092 turned main red at 12:14:50Z on 2026-10-08 (the wall-clock census measured 32 files/52 sites against a recorded 33/53), core logged main.health.observed red 12 times and repaired nothing, every PR's CI failed the same census, and a human fixed it in #10102 at 12:54Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-08: root-causing the stuck-PR board; operator ruling on red-main repair"
+  plan_refs: [W1-T5490, W1-T5519, W1-T5806, W1-T5843, W1-T6024, W1-T90, W1-T1033, W1-T2204]
+  files: [src/lib/main-health-rung.ts, src/run-task.ts, test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 (operator session; the census fact re-read on origin/main by the filer):
+    - #10092 (769d8053, "test(review): witness timer progress after child readiness", merged 12:14:49Z) removed
+      one wall-clock bound, so test/a-wall-clock-bound-declares-itself.test.ts measured 32 files/52 sites against
+      the recorded RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 33 / _SITES = 53. The census passes at 769d8053^
+      and fails at 769d8053. #10102 (33fc1ed4, merged 12:54:28Z) only re-recorded 32/52.
+    - Core's ledger logged `main.health.observed` state=red 12 times after 12:14Z. Nothing acted on it. Every
+      open PR's CI failed the same census in the meantime.
+    WHAT EXISTS, READ ON origin/main 33fc1ed4:
+    - src/lib/main-health-rung.ts observes main (`deps.log("main.health.observed", …)` ~:620). On red it either
+      requeues an infrastructure-classified failure (`main.health.ci_requeued`, ~:700-735) or raises the one
+      MAIN-HEALTH escalation (`escalationFor`, ~:389). That escalation's own text says "This observer never
+      auto-reverts or pauses unrelated dispatch" (~:408).
+    - The first red merge is already found. `mainHealthFirstRedCommitFromRunHistory` (src/lib/sweep.ts ~:6306)
+      walks the run history to the first red run after a green one and names its PR (W1-T5843). W1-T5806's
+      `findMetPrs` (main-health-rung.ts ~:205) names the PRs a red merge met. Both feed only the issue text.
+    - W1-T5490 (merged) stands fix rounds down while main is red. W1-T6024 (merged) holds a PR whose failing
+      test files reproduce on main. Both keep PRs from paying for main's red. Neither repairs main.
+    - W1-T5519 (merged) is the one self-repair of main: `repairRequestedShard` (src/run-task.ts ~:36190-36262)
+      opens a plan-only PR for a duplicate-key shard, deduped per blob in `opened.json`. It covers that one
+      case only.
+    - `dispatchAlertFixRun` (src/run-task.ts ~:51181, W1-T90) already runs a fresh worker on a fresh branch
+      off origin/main. The worker commits, pushes and opens its own PR. That is the seam for a fix PR that is
+      not tied to any task's branch.
+    RULING (operator, 2026-10-08): when main is red, find the first red merge, open a PRIORITY fix PR through
+    the normal flow carrying the failing check, its output and the offending merge; if main is still red after
+    a bounded, tiered window, open a REVERT PR of the offending merge through normal review and CI. Never a
+    force-push, never a direct push to main. This SUPERSEDES the "NOTHING AUTO-REVERTS A MERGE" stance in
+    W1-T1033 and W1-T2204 (Q3) for this path only: the revert is a PR, so review, CI and branch protection
+    still judge it. Rule 19: one concern across the rung and its daemon wiring in src/run-task.ts, and it
+    writes to main through PRs, so the band is high (blast-radius).
+  design: |
+    1. LOCATE. On a red observation whose failing checks are not all infrastructure-requeued, name the
+       offending merge. Use the first-red boundary the rung already computes (`firstRedCommit`). When that is
+       absent or "window-exhausted", fall back to bisecting main's linear merges: run the failing check's
+       failing test files (the `baseReproductionFiles` the sweep already extracts) at each merge's parent and
+       child, nearest the head first, and stop at the first parent-green/child-red pair. Reuse the
+       base-reproduction probe that W1-T6024 runs on main, never a new runner. Ledger
+       `main.repair.located` {head_sha, offending_sha, offending_pr, failing_checks, test_files, method}. If
+       no single merge is located, ledger `main.repair.unlocated` with the reason and keep today's escalation.
+    2. FIX FIRST. Open one priority fix PR through `dispatchAlertFixRun`'s fresh-branch path (or a sibling of
+       it). Its prompt carries the failing check names, the failing test titles and log excerpt
+       (`mainHealthFailingTestTitles`), the offending merge's sha, PR number and diff stat, and the instruction
+       to repair main, not to revert. It enters the normal review/CI/arm flow and is admitted ahead of
+       ordinary dispatch. Ledger `main.repair.fix_opened` {offending_sha, pr_url}. Dedupe on offending_sha:
+       one fix PR per offending merge.
+    3. THEN REVERT, TIERED. Keep watching main health. Main still red on a later observation after the fix
+       PR closed unmerged, or after it has made no progress (no new head, no merge) across two daemon ticks,
+       is the trigger. Then open ONE revert PR: `git revert --no-edit <offending_sha>` on a fresh branch off
+       origin/main, pushed and opened through the same REST PR path, with a body naming the failing check,
+       the fix PR and why it was not enough. Ledger `main.repair.revert_opened`. If the revert does not apply
+       cleanly, ledger `main.repair.revert_refused` with the conflicting paths and escalate. Never force-push
+       and never push to main.
+    4. CLOSE OUT. Once main reads green on its own head (`isMainGreenOnItsOwnHead`), ledger
+       `main.repair.resolved` {by: fix|revert|other} and close any repair PR this lane opened that is now
+       redundant, with a comment. Update the escalation text at main-health-rung.ts ~:408 to describe this
+       lane. The MAIN-HEALTH escalation is raised only when locate, fix and revert have all been refused.
+  acceptance:
+    - claim: "a red main whose first red merge is located opens exactly one fix PR carrying the failing check and the offending merge, and a second observation of the same red opens no second fix PR"
+      proof: 'grep: test("W1-T6403: a located red merge opens one fix PR with its failing check and offending merge" in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts'
+    - claim: "a main still red after its fix PR stalls opens one revert PR of the offending merge through the PR path, never a push to main"
+      proof: 'grep: test("W1-T6403: a fix PR that stalls is followed by one revert PR of the offending merge" in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts'
+  falsifier: |
+    Remove the fix-PR arm: the suite's red main with a located first red merge only escalates, and the fake
+    PR opener records zero calls. Remove the revert tier: a fix PR closed unmerged with main still red opens
+    nothing. A revert that targets `main` directly, or a second fix PR for the same offending sha, fails the
+    suite's dedupe and branch assertions.

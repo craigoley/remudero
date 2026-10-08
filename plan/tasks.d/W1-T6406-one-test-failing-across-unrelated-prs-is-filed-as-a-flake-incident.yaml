@@ -1,0 +1,67 @@
+- id: W1-T6406
+  title: "ONE TEST FAILING ACROSS UNRELATED PRS IS FILED AS A FLAKE INCIDENT AUTOMATICALLY — on 2026-10-08 'after a rotation lands the emergency status answers within budget and sees the new stop' failed CI on #10058, #10077, #10084 and #10089, four PRs whose diffs do not touch it, and was filed by hand as W1-T6402; every existing ci-friction filer files per gate, never per test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-08: root-causing the stuck-PR board; SRE ruling 2026-09-23 that CI flakes are incidents"
+  plan_refs: [W1-T6402, W1-T2904, W1-T4112, W1-T3998, W1-T4999, W1-T5000, W1-T5001, W1-T6353]
+  files: [src/lib/selector-shadow-gardener.ts, src/lib/flake-incident-gardener.ts, src/lib/garden-registry.ts, test/one-test-failing-across-unrelated-prs-is-filed-as-a-flake-incident.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 (operator session): the test `after a rotation lands the emergency status answers
+    within budget and sees the new stop` (test/operator-agent-scan-routes-never-block-the-loop.test.ts) failed
+    CI on #10058, #10077, #10084 and #10089. None of the four diffs touches that file or its subject. A human
+    noticed and filed it as W1-T6402 (filing PR #10103, merged 13:03Z). The SRE ruling (2026-09-23) is that CI flakes
+    are incidents.
+    WHAT EXISTS, READ ON origin/main 33fc1ed4:
+    - scripts/test-with-retry.mjs prints `FLAKE-RETRY: <headline> — <names>` per retried attempt, and
+      `flakeLedgerLines` (~:236) writes `test.flake_retry` rows, but only into the CI runner's own state,
+      which is discarded. scripts/flake-retry-aggregate.mjs (W1-T2904) counts them per run, informationally.
+    - The fleet's only durable per-test flake evidence is `selectorShadowFlakeLedger`
+      (src/lib/selector-shadow-gardener.ts ~:1097). It writes `test.flake_retry` {file, ci_run_id, shard}
+      for RETRY-RECOVERED files read from PR CI coverage-shard logs (`FLAKE_RETRY_FILES` /
+      `FLAKE_RETRY_RECOVERED`, ~:269-270). The run list it reads already carries each run's `pull_requests`
+      (`SELECTOR_SHADOW_RUN_FIELDS`, ~:220). The row drops the PR number and the test name, and a retry that
+      ALSO failed (the case that reds a PR) is never recorded.
+    - The test gardener's RETIER-FLAKER (src/lib/test-gardener.ts ~:240, W1-T4112) moves a file retried 3+
+      times to the slow tier. That is a tiering lever, not an incident, and it is blind to PRs.
+    - The ci-friction gardener (src/lib/ci-friction-gardener.ts) prices rounds per GATE/check
+      (`redChecksByHead`, ~:341) and files through `renderMachineShard` (src/lib/machine-filing.ts ~:100).
+      W1-T3998 and W1-T4999..W1-T5001 are its per-gate filings. No filer is keyed on a test.
+    Rule 19: one concern (a cross-PR test flake becomes one incident task) across the evidence reader, a new
+    gardener and the garden registry, so the band is high with band_meaning: span.
+  design: |
+    1. EVIDENCE. Extend the selector-shadow flake ledger row with `pr_numbers` (from the run's
+       `pull_requests`), the test titles when the log names them, and `retry_outcome`
+       (`recovered` | `also_failed`), recording the also-failed case it drops today. Read nothing new from
+       GitHub: these lines are already in the logs the gardener reads.
+    2. GARDENER. A new `flake-incident` garden (registered in garden-registry.ts like its siblings) reads the
+       `test.flake_retry` union through `readLedgerUnionRecordsSync`. It groups by test file (and title when
+       known) over a recent window. A test is a flake incident when it failed on N or more distinct PRs whose
+       changed files include neither the test file nor a source path its own source names. Use the PR file
+       lists the sweep already holds, and treat an unreadable list as touching, so it is never counted. N and
+       the window are policy values with a tiered response: one PR is noise; two raise a ledger
+       `flake_incident.watch` row; at the policy N the gardener files.
+    3. FILE ONE TASK through `renderMachineShard` (the same path ci-friction uses, so the machine-filing judge
+       rules on it). The task names the test, the PRs, the run ids, the counts per retry outcome, and whether
+       retries also failed. Its origin key is `flake-incident:<test file>#<title>`. Never file while an open
+       (non-merged, non-retired) task with that origin exists. Ledger `flake_incident.filed` or
+       `flake_incident.skipped` {reason: open-task <id>}.
+  acceptance:
+    - claim: "one test failing on enough distinct PRs that do not touch it files exactly one machine task naming the test, the PRs and the retry outcomes, and a second pass with that task still open files nothing"
+      proof: 'grep: test("W1-T6406: a test failing across unrelated PRs files one flake incident" in test/one-test-failing-across-unrelated-prs-is-filed-as-a-flake-incident.test.ts'
+    - claim: "a PR whose diff touches the failing test file is not counted toward the incident"
+      proof: 'grep: test("W1-T6406: a PR that touches the test is not evidence of a flake" in test/one-test-failing-across-unrelated-prs-is-filed-as-a-flake-incident.test.ts'
+    - claim: "the garden registry runs the flake-incident gardener"
+      proof: "grep: runFlakeIncidentGardener( in src/lib/garden-registry.ts"
+  falsifier: |
+    Drop the per-PR grouping and the suite's four unrelated PRs failing one test file nothing. Drop the
+    open-task dedupe and the second pass files a duplicate. Count a PR whose diff edits the test and the
+    touching-PR fixture files an incident.

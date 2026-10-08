@@ -564,7 +564,12 @@ export function findScopeConflict(activePromotions: PromotionScopeCandidate[], c
 export interface CohortOutcome {
   tasks: number;
   merged: number;
-  costUsd: number;
+  /** Summed cost of the PRICED runs; `null` when every run was unpriced (W1-T6466) — unknown, never 0. */
+  costUsd: number | null;
+  /** W1-T6466: runs whose price is unknown (`costSource: "none"`), kept out of `costUsd`; absent when none. */
+  unpriced?: number;
+  /** W1-T6466: merged tasks that have a priced run — the denominator matching `costUsd`; absent means `merged`. */
+  pricedMerged?: number;
 }
 
 export const CANARY_MERGE_RATE_DROP = "merge_rate_drop";
@@ -583,8 +588,8 @@ export function cohortGuardMetrics(opts: { maxMergeRateDrop?: number; maxCostRat
 }
 
 /** A task that never merged still spent: with no merge, the whole cost is charged to one. */
-function costPerMerged(o: CohortOutcome): number {
-  return o.costUsd / Math.max(o.merged, 1);
+function costPerMerged(o: CohortOutcome): number | null {
+  return o.costUsd === null ? null : o.costUsd / Math.max(o.pricedMerged ?? o.merged, 1);
 }
 
 /** The two cohort guard observations, verified and dated `observedAt`, over `comparisonPopulation`. */
@@ -592,10 +597,19 @@ export function cohortGuardObservations(canary: CohortOutcome, rest: CohortOutco
   const denominator = Math.min(canary.tasks, rest.tasks);
   const rate = (o: CohortOutcome) => (o.tasks > 0 ? o.merged / o.tasks : 0);
   const restCost = costPerMerged(rest);
+  const canaryCost = costPerMerged(canary);
   const base = { denominator, freshness: "verified" as const, comparisonPopulation, observedAt };
+  // W1-T6466: a side with no priced run has an UNKNOWN cost per merge; the ratio is then reported with
+  // denominator 0 so the guard reads `unmeasurable` instead of comparing against a free cohort.
+  const ratioKnown = restCost !== null && canaryCost !== null;
   return [
     { metricName: CANARY_MERGE_RATE_DROP, value: rate(rest) - rate(canary), ...base },
-    { metricName: CANARY_COST_PER_MERGED_RATIO, value: restCost > 0 ? costPerMerged(canary) / restCost : 1, ...base },
+    {
+      metricName: CANARY_COST_PER_MERGED_RATIO,
+      value: ratioKnown && restCost > 0 ? canaryCost / restCost : 1,
+      ...base,
+      ...(ratioKnown ? {} : { denominator: 0 }),
+    },
   ];
 }
 

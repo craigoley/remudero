@@ -1,0 +1,36 @@
+- id: W1-T6364
+  title: "MANAGED REPOS LIVE ON SCRATCH — scratch_plan (deploy/scratch-mounts.sh) binds worktrees, tmp, coverage, repos/.remudero-coverage, the read model and worker homes to /mnt/scratch, but the managed clones themselves (<state>/repos, 1.1 GB on core) stay on the IOPS-throttled /mnt/rmd data disk the operator declined to upgrade on 2026-10-08"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the managed clones' git object reads move to the local NVMe
+  band_meaning: span
+  origin: "operator session 2026-10-08: data-disk I/O research; operator approved moving rebuildable host data to scratch"
+  plan_refs: [W1-T6361]
+  files: [deploy/scratch-mounts.sh, test/scratch-mounts.test.ts, test/managed-repos-live-on-scratch.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 11:12-11:21Z: /mnt/rmd (nvme0n1) r_await 260 ms, aqu-sz 54 at 38 % util (IOPS-throttled);
+    remudero-daemon read 0.56M IOs / 19 GB in 8,666 s (~65 r/s average), INFERRED mostly git object reads in
+    <state>/repos/<repo>/.git. /mnt/scratch (nvme1n1) reads at 0.07 ms. READ on origin/main: scratch_plan's
+    SCRATCH_BINDS already includes ${base}/repos-coverage -> ${SCRATCH_STATE_DEST}/repos/.remudero-coverage
+    but not repos itself; run-task.ts clones `repos/<repo>` with `gh repo clone` whenever it is missing, so an
+    empty scratch repos dir self-heals on the next dispatch.
+  design: |
+    Add ${base}/repos -> ${SCRATCH_STATE_DEST}/repos to SCRATCH_BINDS, ordered BEFORE the nested
+    repos/.remudero-coverage bind so Docker mounts the parent first. scratch_prepare creates it like the others;
+    the boot-time restore list includes it. A first launch onto an empty scratch repos dir re-clones on demand;
+    no data migration is required (the old clones stay on /mnt/rmd as a rollback). Update the scratch-mounts
+    census/pins that list the binds.
+  acceptance:
+    - claim: "the scratch plan binds the managed repos dir to scratch, before its nested coverage bind"
+      proof: 'grep: test("W1-T6364: the scratch plan binds repos before its nested coverage dir" in test/managed-repos-live-on-scratch.test.ts'
+    - claim: "with scratch off, repos stay on the state disk as today"
+      proof: 'grep: test("W1-T6364: scratch off leaves repos on the state disk" in test/managed-repos-live-on-scratch.test.ts'
+  falsifier: |
+    Leave SCRATCH_BINDS unchanged: the rendered -v list has no ${base}/repos entry and the first test fails.

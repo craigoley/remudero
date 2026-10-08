@@ -1,0 +1,31 @@
+- id: W1-T6357
+  title: "THE WORKTREE REAPER SIZES LANES OFF THE DAEMON LOOP — laneSizeBytes (src/lib/worker.ts) runs `du -sk` through execFileSync for every lane the reaper considers; the 2026-10-08 round-4 CPU profile caught runAdhocLaneReapRung → reapStaleWorktrees → laneSizeBytes as one 26.8 s block"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — sizing a lane never blocks the daemon thread
+  band_meaning: span
+  origin: "operator session 2026-10-08: round-4 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round4.cpuprofile, pid 373954)"
+  plan_refs: [W1-T6259]
+  files: [src/lib/worker.ts, test/the-worktree-reaper-sizes-lanes-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 01:52-01:58Z: a 33.4 s busy run was runTaskBody → runAdhocLaneReapRung (27.0 s) →
+    reapStaleWorktrees → laneSizeBytes 26.8 s. READ on origin/main: laneSizeBytes is
+    execFileSync("du", ["-sk", path]) per lane, synchronously, and every lane walk also costs disk reads.
+  design: |
+    Size lanes asynchronously (async execFile `du`, bounded concurrency) and only for lanes the reaper will
+    actually act on; reuse a size measured within the same pass. Keep/reap decisions and their ledger rows are
+    unchanged.
+  acceptance:
+    - claim: "the event loop keeps turning while lanes are sized"
+      proof: 'grep: test("W1-T6357: the loop turns while the reaper sizes lanes" in test/the-worktree-reaper-sizes-lanes-off-the-daemon-loop.test.ts'
+    - claim: "the reaper's keep and reap decisions are unchanged"
+      proof: 'grep: test("W1-T6357: reap decisions match the synchronous sizing" in test/the-worktree-reaper-sizes-lanes-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Keep execFileSync du: a fake du that sleeps 200 ms blocks a setInterval tick and the first test fails.
