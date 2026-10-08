@@ -1,0 +1,2 @@
+- claim: the test-slow-shard lane receives the serialized-suite guidance through a matched learning
+  proof: "grep: ci-learning:9362:test-slow-shard (1/2) in learnings/ci.yaml"
