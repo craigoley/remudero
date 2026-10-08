@@ -45,7 +45,7 @@ import {
 } from "./wipe-test.js";
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, type Task, type TaskRisk } from "./plan.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -3472,23 +3472,23 @@ export function measurementCadenceChildAlive(pid: number): boolean {
   }
 }
 
-export function measurementCadenceChildRunner(deps: {
+export function measurementCadenceChildRunner(opts: {
   statePath: string;
   spawn: MeasurementCadenceChildSpawn;
   isAlive?: (pid: number) => boolean;
   newRunId?: () => string;
-  now?: () => Date;
+  clock?: Clock;
   pollMs?: number;
 }): MeasurementCadenceChildRunner {
-  const isAlive = deps.isAlive ?? measurementCadenceChildAlive;
-  const now = deps.now ?? (() => systemClock.date());
-  const newRunId = deps.newRunId ?? (() => `MEASUREMENT-CADENCE-CHILD-${now().getTime()}`);
-  const pollMs = deps.pollMs ?? MEASUREMENT_CADENCE_CHILD_POLL_MS;
+  const isAlive = opts.isAlive ?? measurementCadenceChildAlive;
+  const clock = opts.clock ?? systemClock;
+  const newRunId = opts.newRunId ?? (() => `MEASUREMENT-CADENCE-CHILD-${clock.now()}`);
+  const pollMs = opts.pollMs ?? MEASUREMENT_CADENCE_CHILD_POLL_MS;
 
   const settle = (runId: string, pid: number): Promise<MeasurementCadenceRunResult> =>
     new Promise((resolve, reject) => {
       const look = () => {
-        const read = readChildState(deps.statePath);
+        const read = readChildState(opts.statePath);
         const state = read.kind === "ok" && read.state.runId === runId ? read.state : undefined;
         if (state?.status === "done" && state.result) return resolve(state.result);
         if (state?.status === "failed") return reject(new Error(`measurement cadence child ${runId} failed: ${state.error ?? "no error recorded"}`));
@@ -3499,8 +3499,8 @@ export function measurementCadenceChildRunner(deps: {
     });
 
   const launch = (runId: string, attempt: number): { pid: number; settled: Promise<MeasurementCadenceRunResult> } => {
-    const pid = deps.spawn(runId, deps.statePath);
-    writeChildState(deps.statePath, { runId, pid, attempt, startedAt: now().toISOString(), status: "running" });
+    const pid = opts.spawn(runId, opts.statePath);
+    writeChildState(opts.statePath, { runId, pid, attempt, startedAt: clock.iso(), status: "running" });
     return { pid, settled: settle(runId, pid) };
   };
 
@@ -3512,11 +3512,11 @@ export function measurementCadenceChildRunner(deps: {
 
   return {
     pending: () => {
-      const read = readChildState(deps.statePath);
+      const read = readChildState(opts.statePath);
       return read.kind === "ok" && read.state.status === "running";
     },
     start: ({ fire }) => {
-      const read = readChildState(deps.statePath);
+      const read = readChildState(opts.statePath);
       if (read.kind === "unreadable") {
         const previous = { runId: "unknown", pid: -1, rule: "unreadable" as const, detail: read.error };
         return fire ? startFresh(previous) : { kind: "discarded", runId: "unknown", pid: -1, attempt: 0, previous };
@@ -3531,7 +3531,7 @@ export function measurementCadenceChildRunner(deps: {
         const { pid, settled } = launch(state.runId, attempt);
         return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once" } };
       }
-      writeChildState(deps.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}` });
+      writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}` });
       const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const };
       return fire ? startFresh(previous) : { kind: "discarded", runId: state.runId, pid: state.pid, attempt: state.attempt, previous };
     },
