@@ -284,3 +284,55 @@ test("(iii) a recycle without a STALLED verdict behaves as before: waited for an
   assert.equal(other.status, 1);
   assert.ok(existsSync(g.lockPath), "a non-STALLED verdict reclaims nothing");
 });
+
+test("the launcher forwards the STALLED verdict and its progress age to the recycle in RMD_RECYCLE_VERDICT", () => {
+  // The REAL launcher, rendered by deploy/install-host-units.sh, with a fake rmd (the verdict), a
+  // fake docker (the container is running) and a fake recycle-container.sh that records its env.
+  const root = mkdtempSync(join(tmpdir(), "rmd-frozen-launcher-"));
+  const stateDir = join(root, "state-root");
+  const stub = join(root, "stubbin");
+  const daemonTree = join(stateDir, "remudero");
+  for (const d of [join(stateDir, "state"), stub, join(stateDir, "daemon-install", "deploy"), join(daemonTree, "bin"), join(daemonTree, "src")]) {
+    mkdirSync(d, { recursive: true });
+  }
+  writeFileSync(join(daemonTree, "src", "run-task.ts"), "// fixture\n");
+  const verdictFile = join(root, "verdict.json");
+  const recycleLog = join(root, "recycle.log");
+  writeFileSync(
+    verdictFile,
+    `${JSON.stringify({ state: "STALLED", action: "recycle", progressAgeMs: 2_400_000, failedBoots15m: 0, reason: "fixture" })}\n`,
+  );
+  const exe = (p: string, body: string) => {
+    writeFileSync(p, body);
+    chmodSync(p, 0o755);
+  };
+  exe(join(daemonTree, "bin", "rmd"), `#!/usr/bin/env bash\nif [ "$1" = progress-watchdog ]; then cat "${verdictFile}"; fi\nexit 0\n`);
+  exe(join(stateDir, "daemon-install", "deploy", "recycle-container.sh"), `#!/usr/bin/env bash\necho "VERDICT=$RMD_RECYCLE_VERDICT" >> "${recycleLog}"\nexit 0\n`);
+  exe(
+    join(stub, "docker"),
+    '#!/usr/bin/env bash\ncase "$1" in\n  ps) echo fake-container-id ;;\n  top) echo "PID COMMAND"; echo "1 node bin/rmd daemon" ;;\n  image) echo sha256:image-one ;;\n  inspect) echo 1 ;;\nesac\nexit 0\n',
+  );
+  exe(join(stub, "findmnt"), "#!/usr/bin/env bash\nexit 0\n");
+  const launcher = join(root, "rmd-relaunch.sh");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    RMD_STATE_DIR: stateDir,
+    RMD_UNIT_DIR: join(root, "systemd"),
+    RMD_BIN_DIR: join(root, "bin"),
+    RMD_LAUNCHER_PATH: launcher,
+    RMD_REVIVAL_LOG: join(root, "revivals.log"),
+    RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+    RMD_CASH_SECRET_DIR: join(root, "no-secrets"),
+    PATH: `${stub}:${process.env.PATH ?? ""}`,
+  };
+  delete env.RMD_RECYCLE_VERDICT;
+  const install = spawnSync("bash", ["deploy/install-host-units.sh", "--install"], { encoding: "utf8", cwd: REPO_ROOT, env });
+  assert.equal(install.status, 0, `render failed: ${install.stderr}`);
+  const tick = spawnSync("bash", [launcher], { encoding: "utf8", env });
+  assert.equal(tick.status, 0, tick.stderr);
+  assert.equal(
+    existsSync(recycleLog) ? readFileSync(recycleLog, "utf8") : "",
+    "VERDICT=STALLED progressAgeMs=2400000\n",
+    "the recycle is told which verdict triggered it",
+  );
+});

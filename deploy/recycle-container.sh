@@ -55,8 +55,9 @@
 # gone strands the fleet on the far side of the only remedy that could clear it. So the wait below
 # (section 5) makes ONE narrow, positive exception — never a staleness judgement, a fact `docker
 # inspect` states outright — and reclaims (moves aside, never deletes) an inflight lock whose `host`
-# is BOTH container-id-shaped and reported by docker as absent or not running. Every other lock,
-# under any name, is still only ever read and reported, exactly as this paragraph always said.
+# is BOTH container-id-shaped and reported by docker as absent or not running. W1-T6597 adds one
+# more, only under a STALLED verdict: a lock held by the drain.lock holder pid itself, PROVEN frozen
+# by the ledger. Every other lock, under any name, is still only ever read and reported.
 #
 # PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh and
 # deploy/host-update.sh, this script's siblings. It runs on a host that may have no node, no rmd and
@@ -387,6 +388,15 @@ RECYCLE_WAIT_DISTRIBUTION_NOTE="115 implement.done rows carrying worker_duration
 # worse bug than the deadlock it fixes, so the margin is deliberately lopsided: raise this rather
 # than lower it, and re-derive from `implement.done` before you do.
 HUNG_WORKER_AGE_S="${RMD_RECYCLE_HUNG_AGE_S:-7200}"
+
+# W1-T6597: THE VERDICT THAT TRIGGERED THIS RECYCLE, as the launcher's progress watchdog forwards it
+# ("STALLED progressAgeMs=<n>"). Empty for a deploy or a manual run, which behave exactly as before.
+# The stall bound mirrors STALL_RECYCLE_AFTER_MS (src/lib/progress-watchdog.ts, 30 min): a daemon pid
+# with no ledger row of any step inside it is frozen. See reclaim_frozen_daemon_holdings below.
+RECYCLE_VERDICT="${RMD_RECYCLE_VERDICT:-}"
+RECYCLE_VERDICT_STATE="${RECYCLE_VERDICT%% *}"
+STALL_BOUND_S="${RMD_RECYCLE_STALL_BOUND_S:-1800}"
+STALL_LEDGER_TAIL_LINES="${RMD_RECYCLE_STALL_LEDGER_LINES:-200000}"
 
 # Where the "what this recycle actually did" record goes. The ledger is append-only NDJSON that the
 # daemon already owns and every other post-hoc reconstruction reads, and it survives the container
@@ -1324,6 +1334,122 @@ reclaim_dead_inflight_locks() {
   done
 }
 
+# ── W1-T6597: A STALLED RECYCLE RECLAIMS ONLY WHAT A FROZEN DAEMON HOLDS ─────────────────────────
+#
+# OBSERVED 2026-10-08: the core daemon (pid 110) wedged in a compute loop; the watchdog named it
+# STALLED and this script refused twice, after 3000s each, on "1 lane-holding and 1 lane-less" — the
+# lock was pid 110's own fix claim and the lane-less worker its own idle CI-JUDGE child. Both
+# reclaims above need a DEAD holder; pid 110 was alive and spinning, so only an operator got out.
+#
+# UNDER A STALLED VERDICT ONLY, AND ONLY ON PROOF — never on a lock's or a worker's age:
+#   (a) the lock's pid and host equal drain.lock's holder (the daemon process itself), and that
+#       host is this recycle's running target container;
+#   (b) that pid wrote no ledger row of any step, daemon.pulse included (W1-T5651), inside the
+#       last STALL_BOUND_S — read from a ledger tail that provably reaches back past the bound.
+# With both, the daemon's own inflight locks MOVE to inflight/reclaimed with a reason naming the
+# verdict and the holder's worktree, and its direct lane-less children stop counting as busy.
+# Worktrees, worker homes and logs are never touched. A failed clause is named once and the wait
+# below runs exactly as without a verdict; a lock naming any other pid is never touched.
+FROZEN_DAEMON_CHILDREN=" "
+STALL_PROOF_FAILED=""
+
+epoch_to_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null || true
+}
+
+# Prints `frozen`, `row <ts>` (the pid wrote inside the bound), or `uncovered <first ts>` (the tail
+# read does not reach back past the bound, so the absence of a row proves nothing).
+pid_ledger_activity() {
+  local pid="$1" cutoff="$2"
+  [ -f "${LEDGER_FILE}" ] || { echo "uncovered (no ledger at ${LEDGER_FILE})"; return 0; }
+  tail -n "${STALL_LEDGER_TAIL_LINES}" "${LEDGER_FILE}" 2>/dev/null | awk -v pid="${pid}" -v cutoff="${cutoff}" '
+    !match($0, /"ts":"[^"]*"/) { next }
+    { ts = substr($0, RSTART + 6, RLENGTH - 7) }
+    first == "" { first = ts }
+    ts >= cutoff && $0 ~ ("\"actor_pid\":" pid "[,}]") { hit = ts }
+    END {
+      if (hit != "") print "row " hit
+      else if (first == "" || first >= cutoff) print "uncovered " (first == "" ? "(no timestamped row)" : first)
+      else print "frozen"
+    }' || true
+}
+
+# The worktree(s) a lock's holder was using: checked out at the claimed branch for a
+# `fix-branch--<owner>--<repo>--<branch>` claim, or named `run-|sweep-<taskId>-*` for a task lock.
+holder_worktrees() {
+  local key d gitdir ref found=""
+  key="$(basename "$1" .lock)"
+  for d in "${STATE_DIR}/worktrees"/*; do
+    [ -f "${d}/.git" ] || continue
+    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1)"
+    case "${gitdir}" in "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;; esac
+    ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g')"
+    case "${key}" in
+      fix-branch--*) [ -n "${ref}" ] && [ "${key%"--${ref}"}" != "${key}" ] || continue ;;
+      *) case "$(basename "${d}")" in "run-${key}-"*|"sweep-${key}-"*) : ;; *) continue ;; esac ;;
+    esac
+    found="${found}worktree: ${d}"$'\n'
+  done
+  [ -n "${found}" ] || found="worktree: none found under ${STATE_DIR}/worktrees for ${key}"$'\n'
+  printf '%s' "${found}"
+}
+
+reclaim_frozen_daemon_holdings() {
+  local dpid dhost target_id cutoff activity f reclaimed_dir reclaimed_path cpid cppid
+  dpid="$(lock_pid_field "${DRAIN_LOCK}")"
+  dhost="$(lock_host_field "${DRAIN_LOCK}")"
+  target_id="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if ! printf '%s' "${dpid}" | grep -Eq '^[0-9]+$' || ! printf '%s' "${dhost}" | grep -Eq "${INFLIGHT_CONTAINER_ID_RE}"; then
+    STALL_PROOF_FAILED="clause (a): no readable container-shaped drain.lock holder at ${DRAIN_LOCK}"
+  elif [ "${target_id#"${dhost}"}" = "${target_id}" ]; then
+    STALL_PROOF_FAILED="clause (a): drain.lock host ${dhost} is not the target ${CONTAINER_NAME} (${target_id:-unresolved})"
+  elif [ "$(docker inspect --format '{{.State.Running}}' "${dhost}" 2>/dev/null || true)" != "true" ]; then
+    STALL_PROOF_FAILED="clause (a): drain.lock host ${dhost} is not running"
+  else
+    cutoff="$(epoch_to_iso "$(($(date -u +%s) - STALL_BOUND_S))")"
+    activity="uncovered (this host's date cannot compute the cutoff)"
+    [ -z "${cutoff}" ] || activity="$(pid_ledger_activity "${dpid}" "${cutoff}")"
+    case "${activity}" in
+      frozen) : ;;
+      "row "*) STALL_PROOF_FAILED="clause (b): pid ${dpid} wrote a ledger row at ${activity#row }, inside the ${STALL_BOUND_S}s stall bound" ;;
+      *) STALL_PROOF_FAILED="clause (b): the ledger read does not reach back ${STALL_BOUND_S}s (${activity}), so no row from pid ${dpid} proves nothing" ;;
+    esac
+  fi
+  if [ -n "${STALL_PROOF_FAILED}" ]; then
+    echo "recycle-container: STALLED verdict (${RECYCLE_VERDICT}) — frozen-daemon ownership NOT proven, ${STALL_PROOF_FAILED}." >&2
+    echo "  Its holdings are waited for as healthy work, exactly as without a verdict (W1-T6597)." >&2
+    return 0
+  fi
+
+  echo "recycle-container: STALLED verdict (${RECYCLE_VERDICT}) — drain.lock holder pid ${dpid} on ${dhost} is the target daemon and wrote no ledger row in ${STALL_BOUND_S}s: FROZEN (W1-T6597)." >&2
+  for f in "${INFLIGHT_DIR}"/*.lock; do
+    [ -e "${f}" ] || continue
+    [ "$(lock_pid_field "${f}")" = "${dpid}" ] && [ "$(lock_host_field "${f}")" = "${dhost}" ] || continue
+    echo "  RECLAIMING ${f} — the frozen daemon's own; printed in full before it is moved, never deleted:" >&2
+    sed 's/^/    /' "${f}" >&2 2>/dev/null || true
+    echo >&2
+    reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
+    mkdir -p "${reclaimed_dir}"
+    reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    {
+      printf 'reclaimed by recycle-container.sh (W1-T6597) pid %s at %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+      printf 'verdict: %s\nholder: pid %s host %s — the drain.lock holder, no ledger row in %ss\n' \
+        "${RECYCLE_VERDICT}" "${dpid}" "${dhost}" "${STALL_BOUND_S}"
+      holder_worktrees "${f}"
+      printf 'kept: worktrees, worker homes and logs are untouched — recover the work from the worktree above\n'
+    } > "${reclaimed_path}.reason"
+    mv "${f}" "${reclaimed_path}"
+    sed 's/^/    /' "${reclaimed_path}.reason" >&2
+  done
+  while read -r cpid cppid; do
+    [ "${cppid:-}" = "${dpid}" ] || continue
+    FROZEN_DAEMON_CHILDREN="${FROZEN_DAEMON_CHILDREN}${cpid} "
+    echo "  lane-less child ${cpid} of frozen daemon pid ${dpid} no longer counts as busy" >&2
+  done <<CHILDREN
+$(docker exec "${CONTAINER_NAME}" ps -eo pid,ppid --no-headers 2>/dev/null || true)
+CHILDREN
+}
+
 # ── W1-T2598: THE OLDEST IN-FLIGHT WORK THIS RUN ACTUALLY OBSERVED, NAMED IN A TIMEOUT REFUSAL ────
 # A refusal that says only "waited 3000s" makes the operator take the bound's sizing on faith. This
 # reads every blocking lock's own `startedAt` and every lane-less worker's own age (`ps -eo etimes`,
@@ -1374,6 +1500,10 @@ WORKERS
   printf '%s' "${max}"
 }
 
+if [ "${RECYCLE_VERDICT_STATE}" = "STALLED" ]; then
+  reclaim_frozen_daemon_holdings
+fi
+
 waited=0
 while :; do
   reclaim_dead_inflight_locks
@@ -1388,6 +1518,7 @@ while :; do
   lane_less_hung=""
   while read -r wpid wage wargs; do
     [ -n "${wpid:-}" ] || continue
+    case "${FROZEN_DAEMON_CHILDREN}" in *" ${wpid} "*) continue ;; esac
     case "${wargs}" in
       *sweep-fix-settings-*) : ;;
       *) lane_less_busy=$((lane_less_busy + 1)); continue ;;
@@ -1431,6 +1562,7 @@ WORKERS
     OLDEST_AGE_S="$(oldest_inflight_age_s)"
     echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
     echo "  WAIT_SECONDS=${WAIT_SECONDS} was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2
+    [ -z "${STALL_PROOF_FAILED}" ] || echo "  STALLED verdict, but frozen-daemon ownership was not proven — ${STALL_PROOF_FAILED} (W1-T6597)." >&2
     if [ -n "${OLDEST_AGE_S}" ] && [ "${OLDEST_AGE_S}" -gt 0 ] 2>/dev/null; then
       echo "  the oldest in-flight work this run observed was ${OLDEST_AGE_S}s old — a wait of at" >&2
       echo "  least ${OLDEST_AGE_S}s (RMD_RECYCLE_WAIT_S=${OLDEST_AGE_S}) would have covered it." >&2
