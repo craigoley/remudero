@@ -1,0 +1,57 @@
+- id: W1-T6404
+  title: "A GREEN PR GITHUB STILL CALLS FAILED GETS A FRESH COMMIT — #10010 was armed at 11:32:52Z on 2026-10-08 with the latest run of every required check green, yet GitHub kept mergeable_state=blocked and a FAILURE rollup because superseded failed runs on the same sha still counted; W1-T5492's direct merge was refused (12:42:11Z, direct-merge-failed) and only a hand-pushed merge of main cleared it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-08: root-causing the stuck-PR board"
+  plan_refs: [W1-T5492, W1-T3920, W1-T5694, W1-T528, W1-T5921]
+  files: [src/lib/sweep.ts, test/a-green-pr-github-still-calls-failed-gets-a-fresh-commit.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-08 on #10010, head e7f3f8d9 (pushed 08:58:17Z by remudero-fleet[bot]):
+    - Operator session: the latest runs of both required checks (ci-gate, remudero-review) were green and
+      mergeable=true, but mergeable_state=blocked and the head's statusCheckRollup state was FAILURE. Older
+      failed runs on the SAME sha still counted: ci-gate failure 09:33:20Z, acceptance-author-gate failure
+      08:59:02Z. The merge-queue ruleset is disabled, so merges are direct by the remudero-fleet App.
+    - Core's live ledger, read by the filer: `automerge.armed` 11:32:53Z. From 12:13:44Z the sweep recorded
+      `automerge.armed_idle` and then about 30 `sweep.disposed` rows of "first idle sighting; awaiting a later
+      pass". At 12:42:11Z it recorded `automerge.armed_idle_refused` outcome `direct-merge-failed`. No
+      update-branch or refresh row was written for #10010 in that window.
+    - It cleared only when a new commit was pushed by hand (6efff21b, 12:40:28Z, merge of origin/main).
+    WHY THE DAEMON SAW GREEN: `checksStateFromRollup` (src/lib/sweep.ts ~:5840) judges the gate after
+    `dedupeRollupByLatestAttempt` (~:5708, W1-T5694), i.e. the newest run per check. GitHub's own rollup does
+    not dedupe that way, so the two disagree on the same sha.
+    WHAT EXISTS: W1-T5492 (merged) is the armed-idle path (~:14001-14011 and ~:14405). It merges directly on a
+    second idle sighting, and that merge is refused for the same rollup. W1-T3920's `staleBlocked` refresh
+    (`openPrsBehindMain`, ~:9410-9421) does press update-branch for an armed, blocked, green PR, but only when
+    `behindBy > 0`. It did not fire for #10010 in this window. The builder must find out why: the distance
+    unmeasured for that PR, the single update per pass going to another PR, or the PR not being behind. The
+    fix must also cover a PR that is NOT behind main, which the distance-gated lane can never refresh.
+  design: |
+    1. Extend the armed-idle path. After `automerge.armed_idle_refused` at a head where the daemon's
+       latest-run-per-required-check is all green and GitHub still reports mergeable_state `blocked` (or a
+       failing rollup) on a later pass at the same head, mint a fresh sha ONCE per (PR, head). Merge main into
+       the branch through the existing `updateBranch` effect, the same one W1-T528/W1-T3920 use. If the
+       branch is already up to date, push the empty-commit re-push the absent-check-suite remedy already
+       uses (`repushAbsent`). Ledger `automerge.stale_rollup_refreshed` {pr, head_sha, outcome,
+       superseded_failures: [{check, run_id, completed_at}]}.
+    2. The new head runs CI and review through the normal flow and merges normally. The idle sighting
+       clears on the head change, as today.
+    3. Spend it once per head: a second refusal at the NEW head escalates through the existing armed-idle
+       refusal path rather than looping. Name W1-T3920's non-firing cause in the PR description, and fix it
+       if it is a defect in the same predicate.
+  acceptance:
+    - claim: "an armed PR whose latest run per required check is green but whose direct merge is refused at the same head is refreshed once with a fresh commit, and the refresh is ledgered with the superseded failures"
+      proof: 'grep: test("W1-T6404: a refused armed-idle merge on a green head refreshes the branch once" in test/a-green-pr-github-still-calls-failed-gets-a-fresh-commit.test.ts'
+    - claim: "a second refusal at the refreshed head does not refresh again"
+      proof: 'grep: test("W1-T6404: a refreshed head is never refreshed twice" in test/a-green-pr-github-still-calls-failed-gets-a-fresh-commit.test.ts'
+  falsifier: |
+    Leave the armed-idle path as it is: the suite's armed PR at a not-behind head with a superseded failed run
+    and a refused direct merge records `armed_idle_refused` on every pass, and the fake update-branch records
+    zero calls.
