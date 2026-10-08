@@ -9552,7 +9552,7 @@ export function queuedBehindMainSkips(
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
  *  set, never a second predicate recomputing the same two facts. ONE PER PASS, OLDEST HEAD FIRST —
  *  updating mints a NEW head and a verdict is input-pinned, so updating the whole stalled set each
- *  pass costs N+(N-1)+…+1 reviews. TWO EXCLUSIONS: a DRAFT, and an IN-FLIGHT HEAD. */
+ *  pass costs N+(N-1)+…+1 reviews. Excludes drafts, in-flight workers and pending checks. */
 export function selectUpdateBranchTarget(
   prs: readonly OpenPrView[],
   now: number,
@@ -9584,6 +9584,9 @@ export function selectUpdateBranchTarget(
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
+    // Let current-head checks finish before an ordinary refresh replaces that head. Red stale-gate
+    // recovery remains eligible; the bounded CI-timeout recovery has its own decision and effect.
+    if (view.checksState === "pending") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
