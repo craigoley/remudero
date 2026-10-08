@@ -15,24 +15,10 @@ import { acquireDrainLock } from "../src/lib/drain-lock.js";
 import { retryWhileLockBusy } from "../src/lib/lock-busy-retry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { isManagedCheckoutLockBusy, refreshManagedCheckout } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
-
-/** A clone sitting exactly at its bare origin's main, with its own node_modules — the refresh reads it as `current`. */
-function currentClone(): string {
-  const origin = gitRepo({ bare: true, kind: "w1-t6356-origin" });
-  const clone = gitRepo({ cloneFrom: origin.dir, kind: "w1-t6356-clone" });
-  writeFileSync(join(clone.dir, "README.md"), "x\n");
-  writeFileSync(join(clone.dir, ".gitignore"), "node_modules\n");
-  clone.git("add", "-A");
-  clone.git("commit", "--quiet", "-m", "seed");
-  clone.git("push", "--quiet", "origin", "HEAD:main");
-  clone.git("fetch", "--quiet", "origin");
-  mkdirSync(join(clone.dir, "node_modules"), { recursive: true });
-  return clone.dir;
-}
+import { currentManagedClone } from "./helpers/current-managed-clone.js";
 
 test("W1-T6356: the loop turns during a managed checkout refresh", async (t) => {
-  const repoDir = currentClone();
+  const repoDir = currentManagedClone();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6356-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   // A fake git ahead of the real one on PATH: every call sleeps 200 ms, then runs the real git.
@@ -69,7 +55,7 @@ test("W1-T6356: the loop turns during a managed checkout refresh", async (t) => 
 });
 
 test("W1-T6356: lock retry and install escalation are unchanged", async (t) => {
-  const repoDir = currentClone();
+  const repoDir = currentManagedClone();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6356-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const lockPath = join(root, "state", "refresh.lock");
