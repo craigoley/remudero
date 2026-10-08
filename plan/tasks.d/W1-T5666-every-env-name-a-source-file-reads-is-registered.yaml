@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, the ENV_REGISTRY census scans src only and RMD_SCRATCH_ROOT is unregistered"
   plan_refs: [W1-T5631]
   files: [src/lib/config-schema.ts, test/env-var-registry.test.ts, test/every-env-name-a-source-file-reads-is-registered.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
