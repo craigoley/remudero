@@ -5,6 +5,7 @@ import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshRea
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
+import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
@@ -189,6 +190,7 @@ import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
+import { scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
@@ -289,7 +291,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -36537,6 +36539,12 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog");
       return gardenPass(backlogGardenSpec(d), d);
     }
+    // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
+    // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
+    case "scout": {
+      const d = deps("scout");
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+    }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
@@ -37117,6 +37125,7 @@ export async function daemonCommand(
      *  its own thread minting through `mintScopedToken`. */
     startGithubAppRefresh?: typeof startInstallationTokenRefresh;
     gitCredentialMint?: ScopedTokenMint;
+    ciJudgeIo?: CiJudgeIo;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -37197,7 +37206,7 @@ export async function daemonCommand(
     freshTreeReviewAvailable: true,
   };
   const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
-    (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args),
+    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args), () => target.isSelf ? kickCiJudge?.() : undefined),
     () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
       tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
       log }), log);
@@ -37223,6 +37232,10 @@ export async function daemonCommand(
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
+  const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
+  const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
+    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
+  })), log);
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,

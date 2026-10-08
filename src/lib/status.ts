@@ -20,7 +20,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
-import type { BoardSnapshotCache } from "./board-snapshot-cache.js";
+import { boardRefreshRollup, type BoardSnapshotCache } from "./board-snapshot-cache.js";
 import type { ChangedFilesCache } from "./changed-files-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
@@ -4574,9 +4574,8 @@ export function buildBatchedGithub(
     exec?: (args: string[]) => string;
     /** W1-T2387: injectable stand-in for the real `git log` read; mirrors {@link ghGateway}'s own seam. */
     commitTrailerIndex?: () => Map<string, PrRef[]> | null;
-    /** Observability hook (W1-T181), called on every fetch attempt: the payload size after a successful read,
-     *  then the outcome for EVERY `fetchAll`. Real callers wire it to the ledger, so the next approach to a
-     *  ceiling is observable in advance and a failure is ledgered with its classified reason. */
+    /** Observability hook: changes and failures keep full rows; every successful read is counted
+     *  in a five-minute rollup (W1-T4480). */
     log?: (event: string, extra?: Record<string, unknown>) => void;
     /** INJECTABLE stand-in for the batched escalation-issue fetch (W1-T182), mirroring `fetchAll`'s role for
      *  PRs — a fixture array or a throwing fake proves the join is O(1) and fails closed, without shelling. */
@@ -4623,6 +4622,26 @@ export function buildBatchedGithub(
   const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
+  const rollup = boardRefreshRollup(opts.log);
+  const writtenCounts = new Map<string, number>();
+  const failedChannels = new Set<string>();
+  const writtenFetches = new Map<string, { mode: string; truncated: boolean }>();
+  const recordFetchOk = (prCount: number, channel: string): void => {
+    rollup?.fetchOk(channel);
+    if (writtenCounts.get(channel) !== prCount || failedChannels.has(channel)) {
+      log("board_gateway.fetch_ok", { prCount, channel });
+      writtenCounts.set(channel, prCount);
+      failedChannels.delete(channel);
+    }
+  };
+  const recordFetchBytes = (bytes: number, restCalls: number, mode: string, truncated: boolean, half: string): void => {
+    rollup?.fetch(half, mode, restCalls, bytes, truncated);
+    const previous = writtenFetches.get(half);
+    if (!previous || previous.mode !== mode || previous.truncated !== truncated || truncated) {
+      log("board_gateway.fetch_bytes", { bytes, restCalls, mode, truncated, half });
+      writtenFetches.set(half, { mode, truncated });
+    }
+  };
   // W1-T4771: off-loop mode (serve). The pacer it runs under refuses rather than sleeping the thread, and a due
   // read is only ever REQUESTED of the background walk, at most once per `warmRetryGapMs`, so a walk that keeps
   // failing is not respawned by every board read.
@@ -4736,19 +4755,7 @@ export function buildBatchedGithub(
         lastClosedFloor = fetched.truncated ? fetched.closedFloor : undefined;
       }
       if (half === "open" && !fetched.truncated) snapshotCache?.commitOpen?.(fetched.rows, now());
-      // W1-T181: log the payload size on every SUCCESSFUL fetch, so the next approach to whatever ceiling is
-      // set above is observable in advance instead of arriving as a silent outage. Call count and mode are
-      // W1-T265 additions — that change's whole claim is the count, so it is measured here.
-      log("board_gateway.fetch_bytes", {
-        bytes,
-        restCalls: fetched.calls,
-        mode: fetched.mode,
-        truncated: fetched.truncated,
-        // W1-T2323: WHICH HALF, in the ledger, so "did the split actually stop the daemon paying for the closed
-        // walk" is a measurement over these rows rather than a claim. Before this task every row was implicitly
-        // both.
-        half: fetched.half,
-      });
+      recordFetchBytes(bytes, fetched.calls, fetched.mode, fetched.truncated, fetched.half);
       return fetched.rows;
   };
   /** W1-T2323: TRUE ONLY WHEN THIS GATEWAY OWNS ITS OWN FETCHES. An injected `opts.fetchAll` returns the WHOLE
@@ -4888,7 +4895,7 @@ export function buildBatchedGithub(
         // gateway's reads, and run-task.ts's sweep enumeration, keeps three polite callers off second zero.
         all = paceGhEntry(activePacer(opts.fetchAll !== undefined), isGhRateLimitError, fetch);
         record({ failed: false, reason: undefined });
-        log("board_gateway.fetch_ok", { prCount: all.length, channel });
+        recordFetchOk(all.length, channel);
       } catch (err) {
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
         record({ failed: true, reason: classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) });
@@ -4896,6 +4903,7 @@ export function buildBatchedGithub(
         // classifying "unknown" and nothing surfacing it. `console.error` guarantees this reaches whatever log
         // the process is redirected into even if a caller never wires `opts.log`; the injectable log ALSO fires.
         console.error(`board gateway: batched PR fetch failed (${lastFetchFailureReason()}): ${e?.message ?? String(err)}`);
+        failedChannels.add(channel);
         log("board_gateway.fetch_failed", { reason: lastFetchFailureReason(), message: e?.message ?? String(err), channel });
         // W1-T181 design (v): a bare [] here is what converted "I could not read GitHub" into "GitHub says there
         // are zero PRs". The [] below is now always PAIRED with the failure flags, which
@@ -5108,6 +5116,7 @@ export function buildBatchedGithub(
     if (!outcome.ok) {
       openOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      failedChannels.add("open");
       log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "open" });
       return;
     }
@@ -5116,8 +5125,8 @@ export function buildBatchedGithub(
     openEpoch += 1;
     lastOpenTruncated = outcome.truncated;
     if (!outcome.truncated) snapshotCache?.commitOpen?.(outcome.rows, now());
-    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "open" });
-    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "open" });
+    recordFetchOk(outcome.rows.length, "open");
+    recordFetchBytes(outcome.bytes, outcome.calls, outcome.mode, outcome.truncated, "open");
     // W1-T2323's own cross-half invalidation, replayed here verbatim for the async path — see `openRows`'s doc
     // for why a PR leaving the open set is the merge or close itself, observed.
     if (previouslyOpen) {
@@ -5137,6 +5146,7 @@ export function buildBatchedGithub(
     if (!outcome.ok) {
       mergedOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      failedChannels.add("merged");
       log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "merged" });
       return;
     }
@@ -5146,8 +5156,8 @@ export function buildBatchedGithub(
     lastClosedTruncated = outcome.truncated;
     knownBoardPrs = new Map(outcome.rows.map((r) => [r.number, r]));
     if (!outcome.truncated) snapshotCache?.commitClosed(outcome.rows);
-    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "merged" });
-    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "closed" });
+    recordFetchOk(outcome.rows.length, "merged");
+    recordFetchBytes(outcome.bytes, outcome.calls, outcome.mode, outcome.truncated, "closed");
   };
   const applyIssuesOutcome = (outcome: PrewarmChannelOutcome<BoardIssueRest>): void => {
     if (!outcome.ok) {
