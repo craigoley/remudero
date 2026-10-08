@@ -165,6 +165,22 @@
   src: "ci-learning:8684:lint-plan"
   cited: "2026-10-08"
 
+- id: test-slow-shard-runs-one-suite-at-a-time
+  subsystem: ci
+  lifecycle: active
+  files: ["test/**", scripts/test-tier-manifest.json, .github/workflows/ci.yml]
+  fact: >-
+    Run only one full `node --test` suite at a time: concurrent full-suite runs hit the deny floor
+    and make `test-slow-shard (1/2)` refuse the pull request. A single test file or
+    `--test-name-pattern` run is fine; `rmd preflight --coverage` already runs its coverage shards
+    sequentially. Do not background or parallelize full-suite runs.
+  evidence: >-
+    The W1-T6152 task record groups nine repaired refusals under this gate and names
+    `ci-learning:9362:test-slow-shard (1/2)` as their source; this entry carries the serialized-run
+    instruction into matching test-lane context.
+  src: "ci-learning:9362:test-slow-shard (1/2)"
+  cited: "2026-10-08"
+
 - id: comment-load-ratchet-lane
   subsystem: ci
   lifecycle: active
