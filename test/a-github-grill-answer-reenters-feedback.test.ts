@@ -139,6 +139,8 @@ test("GitHub grill delivery names real queue failures identity collisions and mi
     assert.throws(() => answerEscalatedFeedback(f.repo, f.state, f.answer), /unavailable reply/);
     writeFileSync(replyPath, bytes.replace('github-answer:issue#42:comment:123', 'different-origin'));
     assert.throws(() => answerEscalatedFeedback(f.repo, f.state, f.answer), /identity/);
+    writeFileSync(replyPath, bytes.replace(`reply_to: ${f.id}`, 'reply_to: fb-another-target'));
+    assert.throws(() => answerEscalatedFeedback(f.repo, f.state, f.answer), /identity/);
     rmSync(replyPath); rmSync(join(queuedFeedbackDir(f.state), `${f.id}.yaml`));
     mkdirSync(replyPath);
     assert.throws(() => answerEscalatedFeedback(f.repo, f.state, f.answer), /queueing/);

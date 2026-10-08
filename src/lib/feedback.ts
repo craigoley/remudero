@@ -752,7 +752,8 @@ export function answerEscalatedFeedback(repoRoot: string, stateRoot: string, ans
   }
   const entries = [...listFeedback(repoRoot), ...listFeedback(stateRoot), ...queued.values()] as FeedbackEntry[];
   const existing = entries.find(entry => entry.submission_key === key);
-  if (entries.some(entry => entry.id === replyId && entry.submission_key !== key) || (existing && existing.id !== replyId)) {
+  if (entries.some(entry => entry.id === replyId && entry.submission_key !== key) ||
+      (existing && (existing.id !== replyId || existing.reply_to !== targetId))) {
     throw new FeedbackError("GitHub grill reply identity does not match its origin");
   }
   if (target.status === "answered" && target.answered_by === replyId) {
