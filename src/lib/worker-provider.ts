@@ -1,10 +1,11 @@
 import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import {
@@ -125,6 +126,7 @@ interface CodexWorkerResult {
   text: string;
   blocks: string[];
   stderr: string;
+  outputTruncation?: CodexOutputTruncation;
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -1935,6 +1937,14 @@ export interface ParsedCodexEvents {
   subtype: string;
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
+  outputTruncation?: CodexOutputTruncation;
+}
+
+export interface CodexOutputTruncation {
+  limitBytes: number;
+  retainedBytes: number;
+  droppedBytes: number;
+  spilledBytes: number;
 }
 
 /** PRIMARY CONTROL (W1-T4595): the most stdout one Codex worker may RETAIN (W1-T3490's heap), not stream. */
@@ -2034,38 +2044,72 @@ class CodexJsonlAccumulator {
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
   private keptBytes = 0;
+  private droppedBytes = 0;
+  private spilledBytes = 0;
+  private spilling = false;
+  private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
 
-  constructor(private nowMs: number) {}
+  constructor(private nowMs: number, private readonly pendingFile?: string) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
-    this.pending += chunk;
-    for (;;) {
-      const newline = this.pending.indexOf("\n");
-      if (newline < 0) return;
-      this.consumeLine(this.pending.slice(0, newline));
-      this.pending = this.pending.slice(newline + 1);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf("\n", offset);
+      const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
+      if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
+        writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
+        this.spilledBytes += this.pendingLineBytes();
+        this.pending = "";
+        this.spilling = true;
+      }
+      if (this.spilling) {
+        appendFileSync(this.pendingFile!, part);
+        this.spilledBytes += Buffer.byteLength(part);
+      } else {
+        this.pending += part;
+      }
+      if (newline < 0) break;
+      this.consumePending();
+      offset = newline + 1;
     }
   }
 
-  finish(): ParsedCodexEvents {
-    if (this.pending.trim()) this.consumeLine(this.pending);
+  private consumePending(): void {
+    const line = this.spilling ? readFileSync(this.pendingFile!, "utf8") : this.pending;
     this.pending = "";
+    this.spilling = false;
+    this.consumeLine(line);
+    if (this.pendingFile) this.boundRetained();
+  }
+
+  finish(): ParsedCodexEvents {
+    if (this.spilling || this.pending.trim()) this.consumePending();
+    const text = this.blocks.at(-1) ?? "";
+    if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
+    else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
+    this.keptBytes = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     return {
       sessionId: this.sessionId,
-      text: this.blocks.at(-1) ?? "",
+      text,
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
       tokenUsageState: this.usageTurns === 0 ? "unavailable"
-        : this.missingUsageTurns > 0 || this.errors.length > 0 || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
+        : this.missingUsageTurns > 0 || this.failed || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
-      isError: this.errors.length > 0,
-      subtype: this.errors.length > 0 ? "error_codex" : "success",
+      isError: this.failed,
+      subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+      ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
+        limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
+        retainedBytes: this.retainedBytes(),
+        droppedBytes: this.droppedBytes,
+        spilledBytes: this.spilledBytes,
+      } } : {}),
     };
   }
 
@@ -2082,6 +2126,41 @@ class CodexJsonlAccumulator {
     return this.pendingLineBytes() + this.keptBytes;
   }
 
+  private truncationMarker(bytes: number): string {
+    return `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
+  }
+
+  private boundText(text: string, limit: number): string {
+    const raw = Buffer.from(text);
+    if (raw.length <= limit) return text;
+    const allowance = Math.max(0, limit - 80);
+    let head = Math.floor(allowance / 2);
+    let tail = raw.length - (allowance - head);
+    while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
+    while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
+    const dropped = tail - head;
+    this.droppedBytes += dropped;
+    return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
+  }
+
+  private boundRetained(): void {
+    const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
+    const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
+    if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
+    const blockBudget = budget - bytes(this.errors);
+    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
+    if (bytes(this.blocks) > blockBudget) {
+      if (this.blocks.length === 1) this.blocks[0] = this.boundText(this.blocks[0]!, blockBudget);
+      else {
+        const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
+        this.blocks[0] = this.boundText(this.blocks[0]!, headBudget);
+        this.blocks[1] = this.boundText(this.blocks[1]!, blockBudget - Buffer.byteLength(this.blocks[0]!));
+      }
+    }
+    this.keptBytes = bytes(this.blocks) + bytes(this.errors);
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
@@ -2091,6 +2170,7 @@ class CodexJsonlAccumulator {
       this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      this.failed = true;
       return;
     }
     const eventType = typeof event.type === "string" ? event.type : undefined;
@@ -2128,6 +2208,7 @@ class CodexJsonlAccumulator {
       }
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      this.failed = true;
       this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
@@ -4723,7 +4804,8 @@ async function spawnCodexWorkerInPrivateTemp(
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
-  const stdout = new CodexJsonlAccumulator(startedAt);
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"));
+  const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let stderr = "";
@@ -4785,19 +4867,14 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   process.stdout.on("data", (chunk: Buffer) => {
     if (outputLimit || timedOut) return;
-    const text = chunk.toString("utf8");
-    stdoutBytes += Buffer.byteLength(text, "utf8");
+    const text = stdoutDecoder.write(chunk);
+    stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
       return;
     }
     const observedAt = Date.now();
     stdout.push(text, observedAt);
-    const retained = stdout.retainedBytes();
-    if (retained > CODEX_WORKER_STDOUT_MAX_BYTES) {
-      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_MAX_BYTES, retained);
-      return;
-    }
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
     armClockBound();
@@ -4811,7 +4888,14 @@ async function spawnCodexWorkerInPrivateTemp(
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
+    if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "worker.output_truncated",
+      output_truncation: parsed.outputTruncation,
+    });
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
@@ -4828,6 +4912,7 @@ async function spawnCodexWorkerInPrivateTemp(
       maxTurns: undefined,
       text: parsed.text,
       blocks: parsed.blocks,
+      ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
