@@ -1027,9 +1027,7 @@ function parseLedgerContent(path: string, content: string, onTorn?: (raw: string
   return withReadMeta(out, torn, true);
 }
 
-/** W1-T6358: the live ledger read ONCE through one descriptor, for a selection pass to share: the raw text and
- *  file identity (for the incremental lifetime overlay) plus the parsed rows and their single index. An absent
- *  file is `identity: undefined` with no content read; any other open or read error propagates. */
+/** W1-T6358: one fd read a selection pass shares; absent is `identity: undefined`, other errors propagate. */
 export interface LedgerSnapshot {
   identity: string | undefined;
   content: string;
@@ -1934,7 +1932,6 @@ export function evaluateDispatchBreakerDetailed(
     maxDispatches?: number;
     ledgerFs?: LedgerFsDeps;
     openHeadBranches?: OpenHeadBranchesSource;
-    /** W1-T6358: a pass-shared read; when given, `ledgerPath` is not read and no index is built here. */
     snapshot?: Pick<LedgerSnapshot, "lines" | "index">;
   } = {},
 ): DispatchBreakerDetail {
