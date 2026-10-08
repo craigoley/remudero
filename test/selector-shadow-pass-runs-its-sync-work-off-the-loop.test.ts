@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import promises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -10,11 +10,11 @@ import { promisify } from "node:util";
 import * as shadow from "../src/lib/selector-shadow-gardener.js";
 import { ciLearningTaskIdMinter } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const execAsync = promisify(execFile);
 
-function fixture() {
-  const root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-loop-`));
+function fixture(root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-loop-`))) {
   for (const path of ["test/nested", "plan/tasks.d", "state"]) fs.mkdirSync(join(root, path), { recursive: true });
   fs.writeFileSync(join(root, "test/nested/example.test.ts"), "");
   fs.writeFileSync(join(root, "plan/tasks.yaml"), "[]\n");
@@ -80,11 +80,11 @@ test("W1-T5003: a timer keeps firing while a selector-shadow pass files a miss",
 });
 
 test("W1-T5003: an idle selector-shadow pass does not re-walk an unchanged test tree", async (t) => {
-  const h = fixture();
-  const git = (...args: string[]) => execFileSync("git", ["-C", h.root, ...args], { encoding: "utf8" });
-  git("init", "-q");
+  const repo = gitRepo({ seedCommit: false, kind: "selector-loop" });
+  const h = fixture(repo.dir);
+  const git = repo.git;
   git("add", "test");
-  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture");
+  git("commit", "-qm", "fixture");
   let walks = 0;
   const count = (path: unknown) => { if (String(path) === join(h.root, "test")) walks++; };
   const originalSync = fs.readdirSync;
@@ -108,7 +108,7 @@ test("W1-T5003: an idle selector-shadow pass does not re-walk an unchanged test 
   fs.writeFileSync(join(h.root, "test/nested/added.test.ts"), "");
   assert.equal((await idle()).fullSuiteSize, 2, "untracked tests invalidate the cached count");
   git("add", "test");
-  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "new tree");
+  git("commit", "-qm", "new tree");
   assert.equal((await idle()).fullSuiteSize, 2, "a committed tree change also invalidates the count");
   const afterChange = walks;
   await idle();
@@ -133,11 +133,11 @@ test("W1-T5003: asynchronous plan reads preserve the validated plan and report i
 });
 
 test("W1-T5003: a persisted suite count is reused and a corrupt count is recomputed", async (t) => {
-  const h = fixture();
-  const git = (...args: string[]) => execFileSync("git", ["-C", h.root, ...args], { encoding: "utf8" });
-  git("init", "-q");
+  const repo = gitRepo({ seedCommit: false, kind: "selector-loop" });
+  const h = fixture(repo.dir);
+  const git = repo.git;
   git("add", "test");
-  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture");
+  git("commit", "-qm", "fixture");
   const cachePath = join(h.root, "state/selector-shadow-suite-size.json");
   fs.writeFileSync(cachePath, JSON.stringify({ root: h.root, tree: git("rev-parse", "HEAD:test").trim(), size: 1 }));
   const original = promises.readdir;
