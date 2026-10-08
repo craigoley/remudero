@@ -81,10 +81,11 @@ test("W1-T5629: a codex worker prices its routed model's tokens at base rate, an
   assert.equal(result.costUsd, 0, "the cash figure is unchanged: a subscription bills no per-request dollar");
   close(result.notionalCostUsd, BASE_RATE_USD, "the notional is the base-rate price of the session's tokens");
   assert.notEqual(result.notionalCostUsd, LONG_CONTEXT_USD, "a session sum never takes the per-request long-context tier");
-  const unpriced = await runCodexAs("gpt-6-sol");
+  // W1-T5664 prices gpt-6-sol and gpt-5.6-sol notionally; a model no table prices stays absent.
+  const unpriced = await runCodexAs("unknown-model");
   assert.equal(unpriced.costUsd, 0);
   assert.equal(unpriced.notionalCostUsd, undefined, "an unpriced model is absent, never $0");
-  assert.equal(codexNotionalCostUsd("gpt-5.6-sol", { input: 10, output: 10, cacheRead: 0 }), undefined);
+  assert.equal(codexNotionalCostUsd("unknown-model", { input: 10, output: 10, cacheRead: 0 }), undefined);
   // Cached input never exceeds input, even when a provider reports it so.
   close(codexNotionalCostUsd("gpt-6.1-sol", { input: 100, output: 0, cacheRead: 500 }), (100 * 0.1) / 1_000_000);
 });
