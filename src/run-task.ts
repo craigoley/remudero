@@ -51356,13 +51356,10 @@ export async function dispatchAlertFixRun(
   }
 }
 
-/** W1-T6403 — the synthetic task id a red-main repair PR carries, one per offending merge. */
 export function mainRepairTaskId(offendingSha: string): string {
   return `MAIN-REPAIR-${offendingSha.slice(0, 12)}`;
 }
 
-/** W1-T6403 — the priority fix worker's prompt: the failing checks, their output and the offending
- *  merge, and the instruction to REPAIR main rather than revert it (the revert is the lane's next tier). */
 export function mainRepairFixPrompt(request: MainRepairFixRequest, taskId: string, diffStat: string): string {
   const pr = request.offendingPr !== undefined ? ` (PR #${request.offendingPr})` : "";
   return [
@@ -51397,7 +51394,6 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, taskId: strin
     .join("\n");
 }
 
-/** `git show --stat` of the offending merge, read inside the fix worktree. */
 async function mainRepairDiffStat(worktreePath: string, sha: string): Promise<string> {
   const { stdout } = await baseReproductionExecFile("git", ["-C", worktreePath, "show", "--stat", "--format=", sha], {
     timeout: 30_000,
@@ -51406,11 +51402,7 @@ async function mainRepairDiffStat(worktreePath: string, sha: string): Promise<st
   return String(stdout).trim().slice(0, 4_000);
 }
 
-/**
- * W1-T6403 — the repair lane's priority fix run: {@link dispatchAlertFixRun}'s fresh-branch path, on
- * the branch the rung named, with {@link mainRepairFixPrompt}. Returns the PR url, or undefined when
- * the worker opened none. It runs outside the dispatch queue, so it is admitted ahead of ordinary work.
- */
+/** W1-T6403 — {@link dispatchAlertFixRun}'s fresh-branch path for the priority fix PR; returns its url. */
 export async function dispatchMainRepairFixRun(
   owner: string,
   repo: string,
@@ -51470,7 +51462,6 @@ export async function dispatchMainRepairFixRun(
   }
 }
 
-/** The git and REST calls {@link openMainRepairRevertPr} makes; injectable so a test never pushes. */
 export interface MainRepairRevertDeps {
   worktreeAdd: AlertFixDispatchDeps["worktreeAdd"];
   worktreeRemove: AlertFixDispatchDeps["worktreeRemove"];
@@ -51485,13 +51476,8 @@ const REAL_MAIN_REPAIR_REVERT_DEPS: MainRepairRevertDeps = {
   gh: (args) => ghJsonAsync(args),
 };
 
-/**
- * W1-T6403 — the repair lane's revert tier: the offending merge reverted on a FRESH branch off
- * origin/main, that branch pushed by an explicit `HEAD:refs/heads/<branch>` refspec, and a PR opened
- * against main through the REST pulls endpoint, so review, CI and branch protection judge it like any
- * other. `--no-commit` then a conventional commit, because the commit-msg hook refuses git's own
- * `Revert "…"` subject. A revert that does not apply is aborted and returned with its conflicting paths.
- */
+/** W1-T6403 — revert on a fresh branch, push THAT branch (never main), open a REST PR against main.
+ *  `--no-commit` + a conventional commit: the commit-msg hook refuses git's own `Revert "…"` subject. */
 export async function openMainRepairRevertPr(
   owner: string,
   repo: string,
@@ -51564,8 +51550,6 @@ function pullNumberOf(prUrl: string): string {
   return n;
 }
 
-/** W1-T6403 — the daemon's {@link MainRepairDeps}: the fix run, the revert PR, REST PR reads and closes,
- *  and W1-T6024's base-reproduction probe for the bisect fallback. */
 export function buildMainRepairEffects(
   owner: string,
   repo: string,
