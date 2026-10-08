@@ -1,3 +1,4 @@
+import { observeCiRefreshDeferrals } from "../src/lib/ci-refresh-prevention.ts";
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
 import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
@@ -58,7 +59,8 @@ async function readSource(source, asOf, resolutions) {
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
     if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
       || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
-        || row.step === "ci_learning_cadence.run_failed" || String(row.step).endsWith(".gardener_judged")
+        || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
+        || String(row.step).endsWith(".gardener_judged")
         || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
       if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
     }
@@ -124,6 +126,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
       .sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
     const validCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
     const selfImprovement = { windowStart, sourceComplete: false, efficacyClaim: "none",
+      ciRefreshDeferrals: observeCiRefreshDeferrals(learningRows, asOf, windowStart),
       ciLearning: lastCiLearning ? { at: lastCiLearning.ts, status: lastCiLearning.status ?? null,
         filed: validCount(lastCiLearning.filed), refused: validCount(lastCiLearning.refused),
         recurredLessons: validCount(lastCiLearning.lesson_recurrences?.recurrenceCount),
