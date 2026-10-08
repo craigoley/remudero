@@ -95,3 +95,9 @@ Learnings used when offered: 19%. Dangling Why pointers: 1.
 - retire rollup-dedupe-by-latest-attempt: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 21%. Dangling Why pointers: 1.
+
+## Pass 2026-10-08T09:17:53.791Z
+
+- retire required-check-poster: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 21%. Dangling Why pointers: 1.

@@ -1,0 +1,35 @@
+- id: W1-T6358
+  title: "THE DRAIN READS THE LEDGER ONCE PER PASS — runnableCandidates → dispatchEligibleCandidates → isDispatchEligible reaches a synchronous readLedgerLines per candidate; the 2026-10-08 round-4 CPU profile caught it as 17.3 s inside one 21.0 s daemon block (11.7 s self in readLedgerLines)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — one drain pass reads the live ledger at most once
+  band_meaning: span
+  origin: "operator session 2026-10-08: round-4 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round4.cpuprofile, pid 373954)"
+  plan_refs: [W1-T6259]
+  files: [src/lib/drain.ts, test/the-drain-reads-the-ledger-once-per-pass.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 01:52-01:58Z: busy run 21.0 s — daemon → runnableCandidates → dispatchEligibleCandidates →
+    isDispatchEligible 17.3 s → readLedgerLines (src/lib/status.ts) 11.7 s; readLedgerLines was 11.1 s of self
+    time across the window. The same caller showed 81.5 s in the 2026-10-07 post-W1-T6246 profile. READ on
+    origin/main: drain.ts already hoists deps.readLedgerLines out of the per-task filter in runDrain
+    (resolveReleasedIds), but the eligibility path the daemon's candidate selection takes still reaches a
+    ledger read per candidate.
+  design: |
+    Name the exact eligibility predicate that reads the ledger (profile at origin/main), then read the live ledger
+    once per selection pass and pass the parsed rows (or a derived index) into every candidate's eligibility check.
+    Eligibility answers are unchanged.
+  acceptance:
+    - claim: "one candidate-selection pass over N candidates reads the ledger once"
+      proof: 'grep: test("W1-T6358: one selection pass reads the ledger once" in test/the-drain-reads-the-ledger-once-per-pass.test.ts'
+    - claim: "every candidate's eligibility answer matches the per-candidate read"
+      proof: 'grep: test("W1-T6358: eligibility answers are unchanged" in test/the-drain-reads-the-ledger-once-per-pass.test.ts'
+  falsifier: |
+    Keep the per-candidate read: a counting ledger reader records N reads for N candidates and the first test
+    fails.

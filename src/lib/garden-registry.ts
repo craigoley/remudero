@@ -21,6 +21,7 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
+import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
 import {
   readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
   selectorShadowFlakeLedger,
@@ -45,6 +46,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "hot-file",
   "host-resource",
   "backlog",
+  // W1-T5454: the scout files the recurring failure-shaped ledger step no task or scorecard covers.
+  "scout",
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
   "flow",
   "flow-remedy",
@@ -129,6 +132,7 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
     return { intervalFor: (i) => Math.max(1_000, Math.min(i, HOST_RESOURCE_MIN_INTERVAL_MS)), minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   }
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }

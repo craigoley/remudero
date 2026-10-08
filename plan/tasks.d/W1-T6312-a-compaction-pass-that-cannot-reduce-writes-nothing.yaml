@@ -1,0 +1,45 @@
+- id: W1-T6312
+  title: "A LEDGER COMPACTION PASS THAT CANNOT REDUCE THE ARCHIVE COUNT WRITES NOTHING — the daemon's compaction rung rewrote the same 15 single-day August archives under their own names every 30 to 70 minutes (2026-10-07: 21 passes, each 15 sources, 195,775 rows, 0 duplicates collapsed, count stuck at 408 > 400), and each rewrite's new mtimes made every analytics resume refuse with archive-rewritten and rescan all 409 rotations"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — the compaction executor's no-progress write
+  band_meaning: span
+  origin: "operator session 2026-10-08: serve CPU and memory plan, slow-lane OOM attribution (75 heap deaths 2026-10-06 19:00Z to 10-08 00:46Z)"
+  plan_refs: [W1-T4262]
+  files: [src/lib/ledger-compact.ts, test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED in the production ledger (read-only), 2026-10-06 to 10-08:
+    - ledger_compaction.ran fired 21 times on 10-07 and twice by 00:42Z on 10-08, each "over bound — 40N archive(s) > 400",
+      each with source_count 15, rows_written 195,775, duplicates_collapsed 0, archive_name
+      ledger.2026-08-22T23-59-57-233Z.ndjson.gz. The archive count never fell.
+    - The 15 sources are 2026-08-08 to 08-22, each the only rotation of its UTC day. compactRotations writes one archive
+      per UTC day of the rows, named for the day's newest row, so each source is rewritten under its own name. On disk
+      the 15 files share one mtime (00:42:07-08Z), and each rewrite reads 15 archives and writes them back.
+    - Each rewrite changes those archives' size/mtime, so every analytics resume refuses (archive-rewritten) and rescans
+      all 409 rotations: serve's analytics cache logged a full / archive-rewritten scan within about two minutes of each
+      pass (about 45-50 s of CPU each), and the slow lane's unbounded rescan died on its 1 GB heap after 26 of 27 passes.
+    - Rows are unchanged by the rewrite: an isolated replay over the archives before and after the 01:41Z pass gave
+      identical analytics state, tail and snapshot digests; only the source (mtime) digest differed.
+    A separate PR stops a full rescan from needing 2.4 GB. This task stops the rewrite that triggers it.
+  design: |
+    (1) Before writing, the compaction executor partitions its selected sources' rows by UTC day exactly as
+    compactRotations does. If the pass would write as many archives as it read (or more), it writes nothing, moves
+    nothing to cold storage and returns the existing "nothing eligible" outcome with a reason naming the no-reduction case.
+    (2) Selection prefers rotations that share a UTC day with another eligible rotation, so a corpus whose oldest
+    eligible days are single rotations still reaches days that do reduce, once those age past the floor.
+    (3) Nothing about the bound, the age floor or the rung's interval changes.
+  acceptance:
+    - claim: "a pass over rotations that are each alone in their UTC day writes nothing and leaves every source's bytes and mtime unchanged, and a pass whose rotations share a UTC day still merges them into one archive"
+      proof: "unit test: test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts"
+    - claim: "the executor names the no-reduction outcome when it declines to write"
+      proof: "grep: no-reduction in src/lib/ledger-compact.ts"
+  falsifier: |
+    Delete the no-reduction check: the single-day corpus is rewritten in place and its mtimes change, so the test fails.
+    Make the check refuse every pass: the two-rotation day is left unmerged and the test's merge case fails.

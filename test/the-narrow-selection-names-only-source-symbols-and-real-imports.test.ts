@@ -70,6 +70,49 @@ test("soundness: a test that reads a changed non-code file by path is still sele
   assert.deepEqual(sel.narrow, ["test/reads-doc.test.ts"]);
 });
 
+test("W1-T6338: dashboard and settings changes select the view schema suite in the narrow arm", () => {
+  const suite = "test/every-view-body-matches-its-schema.test.ts";
+  const edges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
+  const files = new Map<string, string>([
+    [suite, 'import { test } from "node:test";\n'],
+    ...edges.map((path): [string, string] => [path, 'export const value = 1;\n']),
+    ["src/lib/unrelated.ts", 'export const value = 2;\n'],
+  ]);
+  const selectEdge = (changed: string[], tree = files) =>
+    affected.selectAffectedSuites(changed, { files: tree, pathReaders: [], symbolSuites: [] });
+
+  for (const edge of edges) {
+    const selected = selectEdge([edge]);
+    assert.equal(selected.fullRun, false);
+    assert.ok(selected.narrow?.includes(suite), `${edge} must select ${suite}`);
+    assert.ok(selected.suites.includes(suite), `${edge} must select ${suite} in the floor`);
+  }
+  assert.ok(!selectEdge(["src/lib/unrelated.ts"]).narrow?.includes(suite));
+  assert.ok(!selectEdge(edges, new Map([...files].filter(([path]) => path !== suite))).narrow?.includes(suite));
+});
+
+test("W1-T6339: dashboard and settings changes select the view etag suite in the narrow arm", () => {
+  const suite = "test/view-etags-are-deterministic.test.ts";
+  const edges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
+  const files = new Map<string, string>([
+    [suite, 'import { test } from "node:test";\n'],
+    ...edges.map((path): [string, string] => [path, 'export const value = 1;\n']),
+    ["src/lib/unrelated.ts", 'export const value = 2;\n'],
+  ]);
+  const selectEdge = (changed: string[], tree = files) =>
+    affected.selectAffectedSuites(changed, { files: tree, pathReaders: [], symbolSuites: [] });
+
+  for (const edge of edges) {
+    const selected = selectEdge([edge]);
+    assert.equal(selected.fullRun, false);
+    assert.ok(selected.narrow?.includes(suite), `${edge} must select ${suite}`);
+    assert.ok(selected.suites.includes(suite), `${edge} must select ${suite} in the floor`);
+    assert.ok(selected.reasons.includes(`${suite}: reads a changed file by path`), `${edge} selects ${suite} by its recorded edge`);
+  }
+  assert.ok(!selectEdge(["src/lib/unrelated.ts"]).narrow?.includes(suite));
+  assert.ok(!selectEdge(edges, new Map([...files].filter(([path]) => path !== suite))).narrow?.includes(suite));
+});
+
 test("an import-only or deleted source file names no symbol, so a caller knows to run the floor", () => {
   const files: Record<string, string> = { "src/user.ts": 'import { heavy } from "./heavy.js";\nexport const user = heavy;\n' };
   const read = (p: string) => {

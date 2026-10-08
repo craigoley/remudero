@@ -1,0 +1,2 @@
+- claim: the task-authoring lane receives the prompt-surface-gate remedy through a matched learning
+  proof: "grep: ci-learning:9856:prompt-surface-gate in learnings/ci.yaml"
