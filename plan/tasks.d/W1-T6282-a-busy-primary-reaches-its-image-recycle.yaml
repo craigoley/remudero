@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: core hand-recycled twice (15:38Z, 22:19Z) for the same starvation"
   plan_refs: [W1-T6249, W1-T6260, W1-T4844, W1-T4917, W1-T341]
   files: [deploy/install-host-units.sh, src/lib/deployer.ts, test/a-busy-primary-reaches-its-image-recycle.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
