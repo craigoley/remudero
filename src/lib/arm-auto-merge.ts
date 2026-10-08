@@ -554,6 +554,10 @@ export interface ArmDeps<A extends boolean = false> {
   /** W1-T5615 — OPTIONAL. Set only by W1-T5492's armed-idle fallback: GitHub already holds an arm,
    *  so the plan-PR hold is skipped and the direct path (which updates a behind plan PR) runs. */
   armStanding?: true;
+  /** W1-T6595 — OPTIONAL. Set only by the sweep's `mergeable` disposition, which observed required
+   *  checks green and review success at this head. A mergeable plan PR GitHub reads `blocked` then
+   *  takes the direct path, as a `clean` one does, instead of waiting on a state that never settles. */
+  checksGreenReviewed?: true;
   /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
    *  {@link readMergeFacts} above drives. */
   sleepSync?: (ms: number) => void;
@@ -1223,7 +1227,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1420,12 +1424,14 @@ function planPrUnknownElapsedMs(rows: Array<Record<string, unknown>>, prUrl: str
 /**
  * W1-T5615 — a plan-touching (or unreadable) PR, never armed. GitHub's `mergeable_state` reads
  * `clean` or `behind` only once the required checks pass: then the direct path merges a current
- * head or updates a behind one. Any other state, unreadable facts, or a missing seam holds it
+ * head or updates a behind one. A caller that observed checks green and review success
+ * (`checksGreenReviewed`, W1-T6595) also takes it on a mergeable `blocked` head. Any other state, unreadable facts, or a missing seam holds it
  * unarmed, and the sweep's next `mergeable` pass tries again.
  */
 function* attemptPlanPrMergeSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps &
+    Partial<Pick<ArmDeps<true>, "checksGreenReviewed">>,
   planTouch: "touched" | "unreadable",
   priorHeadSha?: string,
 ): Steps<ArmAttemptResult> {
@@ -1447,7 +1453,10 @@ function* attemptPlanPrMergeSteps(
     }
   }
   const unknown = error === undefined && planPrMergeabilityUnknown(facts);
-  if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind")) {
+  // W1-T6595: the sweep reached here having SEEN checks green and review success, so `blocked` on a
+  // mergeable head is not "checks pending". #10141 sat ~45 min on it while a review merged it at once.
+  const greenBlocked = deps.checksGreenReviewed === true && facts.mergeable === "MERGEABLE" && facts.mergeableState === "blocked";
+  if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" || greenBlocked)) {
     const fresh = facts;
     const preflight = yield* directMergePreflightSteps(
       prUrl,
@@ -1863,7 +1872,7 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
     case "stack-parent-refused":
       return "the PR declares stacked parents that are not all merged, or their state could not be read (W1-T4581) — arm and direct merge both refused";
     case "plan-pr-held":
-      return "a plan PR (or one whose file list was unreadable) is never armed for GitHub auto-merge (W1-T5615) — its checks were not yet green or its merge facts were unreadable; held unarmed for a later pass, which merges it directly or updates it first";
+      return "a plan PR (or one whose file list was unreadable) is never armed for GitHub auto-merge (W1-T5615) — its mergeability was unknown or unsettled, or its merge facts were unreadable; held unarmed for a later pass, which merges it directly or updates it first";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }
