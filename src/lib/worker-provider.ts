@@ -1,3 +1,4 @@
+import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -3429,6 +3430,8 @@ export interface OpenWeightWorkerResult {
   model: string;
   routedModel?: string;
   effort: string;
+  /** Counts of actual adapter fetch invocations by observed parameter, including failures. */
+  requestEfforts: readonly CashRequestEffortCount[];
   selectionAssignmentId?: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   modelUsage: Record<string, never>;
@@ -4149,6 +4152,7 @@ export function cashServedModel(named: readonly (string | undefined)[]): { serve
 function openWeightResult(input: {
   model: string;
   effort: string;
+  requestEfforts: readonly CashRequestEffortCount[];
   /** W1-T4650: {@link cashResponseModel} of every response received, in order. */
   servedModels: readonly (string | undefined)[];
   startedAt: number;
@@ -4204,6 +4208,7 @@ function openWeightResult(input: {
     childEnvKeys: [],
     model: input.model,
     effort: input.effort,
+    requestEfforts: [...input.requestEfforts],
     tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: input.cacheReadTokens ?? 0, cacheCreation: input.cacheCreationTokens ?? 0 },
     modelUsage: {},
     ...cashServedModel(input.servedModels),
@@ -4276,6 +4281,7 @@ export async function spawnFoundryClaudeWorker(
   let text = "";
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
+  const requestEfforts: CashRequestEffortCount[] = [];
   let pending: { requestId: string; reservedUsd: number } | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
@@ -4322,6 +4328,7 @@ export async function spawnFoundryClaudeWorker(
       const deadline = setTimeout(() => abort.abort(), timeoutMs);
       let response: Response;
       try {
+        recordCashRequestEffort(requestEfforts, body, "foundry-messages");
         response = await (args.fetchImpl ?? fetch)(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
@@ -4377,7 +4384,7 @@ export async function spawnFoundryClaudeWorker(
         if (payload.stop_reason !== "end_turn") throw new Error(`cash ${label} ended without a complete turn (${String(payload.stop_reason)})`);
         if (!text.trim()) throw new Error(`cash ${label} ended with no visible text`);
         return reconcileBoundedProviderAttempt(openWeightResult({
-          model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
+          model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
           actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
@@ -4412,7 +4419,7 @@ export async function spawnFoundryClaudeWorker(
       budgetSettledUsd += billed;
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
-      model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
+      model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
       promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
       actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
@@ -4455,6 +4462,7 @@ export async function spawnOpenWeightWorker(
   let sessionId = "";
   let text = "";
   const servedModels: Array<string | undefined> = [];
+  const requestEfforts: CashRequestEffortCount[] = [];
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
   // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
@@ -4550,6 +4558,7 @@ export async function spawnOpenWeightWorker(
       const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
       let response: Response;
       try {
+        recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
         response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
           method: "POST",
           headers: { "content-type": "application/json", "api-key": key },
@@ -4616,7 +4625,7 @@ export async function spawnOpenWeightWorker(
       }
       if (calls.length === 0) {
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -4702,6 +4711,7 @@ export async function spawnOpenWeightWorker(
       openWeightResult({
         model: selection.model,
         effort: selection.effort,
+        requestEfforts,
         servedModels,
         startedAt,
         clock,
