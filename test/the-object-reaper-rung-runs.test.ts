@@ -1,31 +1,12 @@
-/**
- * test/the-object-reaper-rung-runs.test.ts — W1-T4022: the object reaper's three refusals were
- * each individually correct, and their conjunction never passed on a working fleet — but the
- * AMENDED finding was worse: the rung never even REACHED that conjunction. Two defaults were
- * wrong before any of the three conditions were ever evaluated:
- *
- *   (1) `logDiskReclaimRung` read its policy from `loadPolicy(policyPath(config.root))` —
- *       `config.root`, on the daemon, is not a plan-bearing checkout and carries no
- *       `plan/policy.yaml` at all. That load THREW on every tick and was silently swallowed by
- *       the rung's own best-effort catch, so the object reaper never ran once in production
- *       (measured: 0 `objects_declined` rows in four days).
- *   (2) Production injected no open-file counter, so `objectReapRefusal`'s third arm fell back to
- *       its fail-closed default `() => 1` and refused UNCONDITIONALLY, making the other two
- *       conditions moot even on a genuinely idle host.
- *
- * This file proves both are fixed, plus the three additions the task's acceptance also names: a
- * CONSECUTIVE REFUSAL streak (so a single busy tick and a three-week block stop reading
- * identically), a QUIESCED WINDOW bracketing the one destructive call (so a stale sample cannot
- * authorise a prune), and that none of the three original refusal conditions was ever weakened to
- * get there — see src/lib/object-reaper.ts's own doc comments for that half of the evidence.
- */
+// Dispatch-time reaping is retired; policy and recovery belong to the cadence rung.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, symlinkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { clockFromIsoFn } from "../src/lib/clock.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as cloneReaperLib from "../src/lib/clone-reaper.js";
 import {
@@ -34,7 +15,7 @@ import {
   recordRefusalStreak,
   readRefusalStreak,
 } from "../src/lib/object-reaper.js";
-import { logDiskReclaimRung } from "../src/run-task.js";
+import { logDiskReclaimRung, runRepositoryMaintenanceRung } from "../src/run-task.js";
 
 const noSweeps = {
   sweepTempDirs: () => ({ removed: [] }) as never,
@@ -63,79 +44,66 @@ const quietDeps = {
   looseObjectCount: () => LOOSE_OBJECT_FLOOR + 1,
 };
 
-// ── claim 1: the rung loads the DAEMON's policy, so it runs at all ─────────────────────────────
+// The cadence rung loads shipped policy; dispatch does not load the retired object policy.
 
-test("W1-T4022: the disk reclaim rung loads the daemon policy and runs", async () => {
-  // config.root deliberately carries NO plan/policy.yaml — mirrors exactly the daemon checkout
-  // the amended note measured: `loadPolicy(policyPath(config.root))` threw here on every tick.
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}no-policy-`));
-  assert.equal(existsSync(join(root, "plan", "policy.yaml")), false, "the fixture really has no policy.yaml");
-
-  let reached = false;
-  let sawDryRun: boolean | undefined;
-  const out = await logDiskReclaimRung({ root } as never, () => {}, {
-    ...noSweeps,
-    objectRepoDir: () => "/unused-repo",
-    objectInflightDir: () => "/unused-inflight",
-    // Deliberately NOT overriding `objectPolicy` — production's own default must resolve on its
-    // own, against the REAL shipped plan/policy.yaml (via loadDefaultPolicy()), not config.root's.
-    reapObjects: ((_r: string, _i: string, d: { dryRun?: boolean }) => {
-      reached = true;
-      sawDryRun = d.dryRun;
-      return { pruned: 0, looseBefore: 9000 };
-    }) as never,
-  });
-
-  assert.equal(reached, true, "the rung must reach its reaper even when config.root has no plan/policy.yaml");
-  // The shipped plan/policy.yaml ships objectReap.enabled: true (pinned by
-  // test/object-reaper-rung-wiring.test.ts), so loading the daemon's REAL policy — not
-  // config.root's absent one, silently swallowed — is what decided this, not a fallback.
-  assert.equal(sawDryRun, false, "the real shipped policy decided this, not a swallowed load failure defaulting to survey");
-  assert.equal(out.objectsPruned, 0);
-});
-
-test("W1-T4022: a policy load failure is logged, not silently folded into the generic catch", async () => {
+test("the maintenance rung loads shipped policy when the daemon root has no plan", async () => {
+  const root = scratch();
+  const store = gitRepo({ kind: "maintenance-shipped-policy" });
+  assert.equal(existsSync(join(root, "plan", "policy.yaml")), false);
+  symlinkSync(store.dir, join(root, "remudero"), "dir");
+  writeFileSync(join(store.dir, ".git", "gc.log"), "previous failure\n");
   const rows: Array<[string, Record<string, unknown>]> = [];
-  await logDiskReclaimRung({ root: "/wherever" } as never, (s, f) => rows.push([s, f]), {
-    ...noSweeps,
-    objectPolicy: () => {
-      throw new Error("policy.yaml is not valid YAML");
-    },
-    reapObjects: (() => {
-      throw new Error("must never be reached — the policy load already failed");
-    }) as never,
-  });
-  const err = rows.find(([s]) => s === "run.disk_reclaim.policy_error");
-  assert.ok(err, "a policy-load failure must be its own named, logged line");
-  assert.match(String(err?.[1].error), /policy\.yaml is not valid YAML/);
+  await runRepositoryMaintenanceRung({ root } as never, (s, f) => rows.push([s, f]),
+    { activeLanes: 0, disk: "unknown", queueBusy: false });
+  const completed = rows.find(([s]) => s === "repository_maintenance.complete")?.[1];
+  assert.ok(completed, JSON.stringify(rows));
+  assert.equal(completed.kind, "gc");
+  assert.equal(completed.gc_log_before, "present");
+  assert.equal(completed.gc_log_after, "absent");
+  assert.equal(existsSync(join(store.dir, ".git", "gc.log")), false);
 });
 
-// ── claim 2: the open-file refusal reads a REAL count, not the fail-closed constant ────────────
-
-test("W1-T4022: the open-file refusal reads a real count", async () => {
-  let captured: { openFileCount?: unknown; openFileCountAsync?: unknown } | undefined;
-  await logDiskReclaimRung({ root: scratch() } as never, () => {}, {
+test("dispatch does not load retired object policy, probe handles or invoke a reaper", async () => {
+  const calls: string[] = [];
+  const rows: string[] = [];
+  const out = await logDiskReclaimRung({ root: scratch() } as never, (s) => rows.push(s), {
     ...noSweeps,
-    objectPolicy: () => ({ enabled: false }),
-    reapObjects: ((_r: string, _i: string, d: { openFileCount?: unknown; openFileCountAsync?: unknown }) => {
-      captured = d;
-      return { pruned: 0, looseBefore: 9000 };
-    }) as never,
+    objectPolicy: () => { calls.push("policy"); throw new Error("retired policy must not load"); },
+    objectOpenFileCount: () => { calls.push("handles"); return 0; },
+    reapObjects: () => { calls.push("reap"); return { pruned: 50, looseBefore: 9000 }; },
   });
-  // 2026-10-06: the REAL lsof-backed counter is now the AWAITED, bounded one, off the daemon loop.
-  assert.equal(
-    captured?.openFileCountAsync,
-    cloneReaperLib.defaultOpenFileCountAsync,
-    "production must wire the REAL lsof-backed counter (src/lib/clone-reaper.ts) as the DEFAULT " +
-      "— not the fail-closed `() => 1` object-reaper.ts falls back to when nothing supplies one, " +
-      "which refused unconditionally and made the other two conditions moot",
-  );
-  assert.equal(captured?.openFileCount, undefined, "the sync lsof walk must not also be wired onto the loop");
+  assert.deepEqual(calls, [], "dispatch invokes no object-maintenance seams");
+  assert.deepEqual(rows, [], "dispatch emits no object-maintenance decisions");
+  assert.equal(out.objectsPruned, 0);
+  assert.equal(out.objectsWouldPrune, 0);
+});
+
+// Maintenance relies on Git's object-database lock rather than a recursive handle survey.
+
+test("production maintenance recovers without surveying open handles under the git store", async () => {
+  const root = scratch();
+  const store = gitRepo({ kind: "maintenance-no-lsof" });
+  symlinkSync(store.dir, join(root, "remudero"), "dir");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const invoked = join(root, "lsof-invoked");
+  writeFileSync(join(bin, "lsof"), `#!/bin/sh\necho invoked > '${invoked}'\nexit 2\n`);
+  chmodSync(join(bin, "lsof"), 0o755);
+  writeFileSync(join(store.dir, ".git", "gc.log"), "previous failure\n");
+  const rows: Array<[string, Record<string, unknown>]> = [];
+  const previous = process.env.PATH;
+  try {
+    process.env.PATH = `${bin}:${previous}`;
+    await runRepositoryMaintenanceRung({ root } as never, (s, f) => rows.push([s, f]),
+      { activeLanes: 0, disk: "unknown", queueBusy: false });
+  } finally { process.env.PATH = previous; }
+  assert.equal(existsSync(invoked), false, "Git's maintenance lock replaces the recursive lsof survey");
+  assert.ok(rows.some(([s]) => s === "repository_maintenance.complete"), JSON.stringify(rows));
+  assert.equal(existsSync(join(store.dir, ".git", "gc.log")), false);
 });
 
 test("W1-T4022: an injected real open-file count of zero is not treated as held", () => {
-  // The behavioural half of the claim above: driven through the REAL reaper, not a double, an
-  // empty directory that a REAL counter reports as unheld must actually proceed.
+  // The retained legacy export still honors a real empty handle count.
   const { repoDir } = repoWithGcLog();
   const r = reapGitObjects(repoDir, "/no-inflight", {
     listWorktrees: () => [],

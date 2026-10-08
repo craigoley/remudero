@@ -144,7 +144,7 @@ describe("test/a-gardens-async-checkout-lands-and-disposes-off-the-loop.test.ts"
       const started = github.events().filter((row) => row.phase === "start");
       assert.equal(started.length, 2, "both create and probe reached the real transport");
       assert.ok(started.every((row) => observed.has(row.id)), "the loop serviced both children");
-      assert.deepEqual(f.rows.filter(([step]) => step.includes("garden_branch")), [["plan.garden_branch_retracted", { branch: ws.branch }]]);
+      assert.deepEqual(f.rows.filter(([step]) => step.includes("garden_head")), [["plan.garden_head_deleted", { branch: ws.branch }]]);
     } finally {
       clearInterval(timer);
       await ws.dispose();
@@ -181,7 +181,7 @@ describe("test/a-gardens-async-checkout-lands-and-disposes-off-the-loop.test.ts"
     try {
       await withLiveWritesAllowed(() => assert.rejects(ws.land(landing), /produced no html_url\/number/));
       assert.deepEqual(malformed.heads(), ["main"]);
-      assert.deepEqual(malformed.rows.filter(([step]) => step.includes("garden_branch")), [["plan.garden_branch_retracted", { branch: ws.branch }]]);
+      assert.deepEqual(malformed.rows.filter(([step]) => step.includes("garden_head")), [["plan.garden_head_deleted", { branch: ws.branch }]]);
     } finally { await ws.dispose(); malformed.close(); }
 
     const refused = fixture();

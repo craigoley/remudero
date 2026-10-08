@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { parseDocument } from "yaml";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
@@ -21,9 +23,11 @@ import {
   ciFrictionRemedyRationale,
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
+  ownerSearchTerms,
   parseCiFrictionOrigin,
   type CiFrictionCauseState,
   type CiFrictionOwner,
+  type CiFrictionOwnershipEvidence,
   type CiFrictionRemedyTask,
   type OwnerSearch,
   type RemedyRound,
@@ -602,18 +606,79 @@ export function readCiFrictionPlanState(repoRoot: string, git?: CiFrictionGit): 
   return { tasks, ...(degraded ? { degraded } : {}), ...(unreadable.length > 0 ? { unreadable } : {}) };
 }
 
-/** The production owner search: literal `git grep -c` over fetched main's `src/` and `scripts/`, never a
- *  test file. A term no file names is an empty list, never an error. */
+/** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
+ *  Missing paths are absence; failed git reads or unsupported identities refuse the pass. */
 export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
+  let revision: string | undefined;
+  const pinned = (): string => {
+    if (!revision) {
+      const source = git(["rev-parse", "--verify", `${refName}^{commit}`]).trim();
+      if (!/^[0-9a-f]{40}$/.test(source)) throw new Error(`ci-friction ownership: invalid revision for ${refName}`);
+      revision = source;
+    }
+    return revision;
+  };
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const workflowWitnesses = new Map<string, unknown>();
+  const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
+    pin: () => gitCiFrictionOwnerSearch(git, refName),
+    workflowOwner: (family) => {
+      const source = pinned();
+      const paths = git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
+        .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort();
+      const matches: Array<{ file: string; jobId: string; witness: unknown }> = [];
+      const unsupported: string[] = [];
+      for (const file of paths) {
+        const document = parseDocument(git(["show", `${source}:${file}`]));
+        if (document.errors.length > 0) throw new Error(`ci-friction workflow ${file} at ${source}: ${document.errors.map(error => error.message).join("; ")}`);
+        const workflow = document.toJS();
+        if (!workflow || typeof workflow !== "object" || !workflow.jobs || typeof workflow.jobs !== "object" || Array.isArray(workflow.jobs))
+          throw new Error(`ci-friction workflow ${file} at ${source}: unsupported jobs input`);
+        for (const [jobId, raw] of Object.entries(workflow.jobs)) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`ci-friction workflow ${file}: unsupported job ${jobId}`);
+          const job = raw as { name?: unknown; strategy?: { matrix?: Record<string, unknown> } };
+          const name = job.name === undefined ? jobId : job.name;
+          if (typeof name !== "string") throw new Error(`ci-friction workflow ${file}: unsupported name for ${jobId}`);
+          const matrixName = /^(.*?)\s*\(\$\{\{\s*matrix\.([\w-]+)\s*\}\}\/(\d+)\)$/.exec(name);
+          let declared = name;
+          if (name.includes("${{")) {
+            const values = matrixName ? job.strategy?.matrix?.[matrixName[2]!] : undefined;
+            if (!matrixName || !Array.isArray(values) || values.length === 0 || !values.every(value => Number.isSafeInteger(value) && Number(value) > 0)) {
+              const prefix = name.split("${{")[0]!.replace(/[ (/-]+$/, "");
+              if (!prefix || identity(prefix) === identity(family) || identity(family).startsWith(`${identity(prefix)}-`) || identity(jobId) === identity(family)) unsupported.push(`${file}:${jobId}`);
+              continue;
+            }
+            declared = matrixName[1]!;
+          }
+          if (identity(declared) !== identity(family)) continue;
+          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined } });
+        }
+      }
+      if (unsupported.length > 0) throw new Error(`ci-friction workflow ownership unsupported for ${family} at ${source}: ${unsupported.join(", ")}`);
+      if (matches.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${matches.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
+      const match = matches[0];
+      if (!match) return undefined;
+      workflowWitnesses.set(`${identity(family)}:${match.file}`, match.witness);
+      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`] };
+    },
+    evidence: (key, details, owner) => {
+      const source = pinned();
+      const family = key.startsWith("check:") ? ownerSearchTerms(key, details).at(-1) : undefined;
+      const witnesses = (owner?.files ?? []).map(file => ({ file,
+        witness: (family ? workflowWitnesses.get(`${identity(family)}:${file}`) : undefined) ?? git(["rev-parse", `${source}:${file}`]).trim() }));
+      return { revision: source, fingerprint: digest({ key, witnesses }) };
+    },
     filesContaining: (term) => {
+      const source = pinned();
       let out = "";
       try {
         // -w: a term found only inside larger identifiers ("ci" in "decision") names no code path.
-        out = git(["grep", "-c", "-F", "-w", "-e", term, refName, "--", "src", "scripts"]);
+        out = git(["grep", "-c", "-F", "-w", "-e", term, source, "--", "src", "scripts"]);
       } catch (e) {
         // `git grep` exits 1 when nothing matches: no owner, which the ladder escalates.
-        if ((e as { status?: number }).status !== 1) throw e;
+        const failure = e as { status?: number; stderr?: unknown };
+        if (failure.status !== 1 || String(failure.stderr ?? "").trim()) throw e;
       }
       return out.split("\n").flatMap((line) => {
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
@@ -625,14 +690,11 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       });
     },
     fileExists: (file) => {
-      try {
-        git(["cat-file", "-e", `${refName}:${file}`]);
-        return true;
-      } catch (error) {
-        // `cat-file -e` signals a missing path only by failing: absent, and nothing else is claimed.
-        void error;
-        return false;
-      }
+      const source = pinned();
+      const listed = git(["ls-tree", "-r", "--name-only", source, "--", file]).split("\n");
+      if (!listed.includes(file)) return false;
+      git(["cat-file", "-e", `${source}:${file}`]);
+      return true;
     },
   };
 }
@@ -754,13 +816,21 @@ export function appendCiFrictionTrendRow(logPath: string, atIso: string, priced:
 export type CiFrictionGardenClass = "draft";
 export const CI_FRICTION_GARDEN_CLASSES: readonly CiFrictionGardenClass[] = ["draft"];
 
+export interface CiFrictionOwnershipReconsideration {
+  origin: string;
+  oldRefusal: string;
+  evidence: CiFrictionOwnershipEvidence;
+  owner: CiFrictionOwner;
+  decision: "draft";
+}
+
 /** One cause the pass acts on: drafted at a rung against its owner, or escalated to a person. */
 export interface CiFrictionGardenAction extends GardenAction<CiFrictionGardenClass> {
   price: CiFrictionCausePrice;
   origin: string;
   rung: number;
   /** Where the cause stands — a `draft` carries its owner, an `escalate` its reason. */
-  decision: { kind: "draft"; owner: CiFrictionOwner; prior?: CiFrictionDraft["prior"] } | { kind: "escalate"; why: string; prior?: CiFrictionDraft["prior"] };
+  decision: { kind: "draft"; owner: CiFrictionOwner; prior?: CiFrictionDraft["prior"]; reconsideration?: CiFrictionOwnershipReconsideration } | { kind: "escalate"; why: string; prior?: CiFrictionDraft["prior"]; holdReason?: "no-owner" | "ladder-exhausted"; evidence?: CiFrictionOwnershipEvidence };
   /** Every cause priced in the pass, which ranks this one's dispatch priority. */
   priced?: CiFrictionCausePrice[];
 }
@@ -823,6 +893,7 @@ export function ciFrictionLadder(input: {
   tasks: readonly CiFrictionRemedyTask[];
   receipts: ReadonlySet<string>;
   escalated: ReadonlySet<string>;
+  holds?: readonly LedgerRecord[];
   ownerSearch: OwnerSearch;
   nowMs: number;
 }): Pick<CiFrictionInventory, "next" | "ladder"> {
@@ -845,20 +916,37 @@ export function ciFrictionLadder(input: {
     line.rung = s.rung;
     if (s.prior?.effect) line.effect = s.prior.effect.reason;
     const origin = ciFrictionRungOrigin(key, s.rung);
-    if (input.escalated.has(origin)) {
+    const held = input.escalated.has(origin);
+    if (held) line.state = "escalated";
+    const hold = input.holds?.filter(row => row.step === "ci-friction.remedy_escalated" && row.origin === origin).at(-1);
+    const legacyRefusal = `no code in src/ or scripts/ names ${key}, so no remedy can be drafted against it`;
+    const noOwnerHold = hold && (hold.hold_reason === "no-owner" || (hold.hold_reason === undefined && hold.why === legacyRefusal));
+    if (held && (s.state !== "draft" || !noOwnerHold)) {
       line.state = "escalated";
       continue;
     }
     if (next) continue;
     if (s.state === "escalate") {
-      next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior } };
+      next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior, holdReason: "ladder-exhausted" } };
       continue;
     }
     const details = remedyRounds.filter((r) => r.causeKey === key && r.detail).map((r) => r.detail!);
     const owner = locateCiFrictionOwner(key, details, input.ownerSearch);
+    const evidence = input.ownerSearch.evidence?.(key, details, owner);
+    let reconsideration: CiFrictionOwnershipReconsideration | undefined;
+    if (held) {
+      line.state = "escalated";
+      const previous = hold?.ownership_evidence as CiFrictionOwnershipEvidence | undefined;
+      const consumed = input.holds?.some(row => row.step === "ci-friction.scorecard" &&
+        Array.isArray(row.ownership_reconsiderations) && row.ownership_reconsiderations.some(item =>
+          item?.origin === origin && item?.evidence?.fingerprint === evidence?.fingerprint));
+      if (!owner || !evidence || consumed || previous?.fingerprint === evidence.fingerprint || typeof hold?.why !== "string") continue;
+      reconsideration = { origin, oldRefusal: hold.why, evidence, owner, decision: "draft" };
+      line.state = "draft";
+    }
     next = owner
-      ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior } }
-      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: `no code in src/ or scripts/ names ${key}, so no remedy can be drafted against it`, prior: s.prior } };
+      ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior, ...(reconsideration ? { reconsideration } : {}) } }
+      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : ""), prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";
   }
   return { next, ladder };
@@ -941,13 +1029,14 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     inventory: () => {
       const records = sources.ledgerRecords();
+      const plan = sources.planState();
+      const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
       const ledgerRounds = ciFrictionRoundsFromLedger(records);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
-        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), sources.ownerSearch)];
+        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), ownerSearch)];
       const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
-      const plan = sources.planState();
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
       if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
       const { next, ladder } = ciFrictionLadder({
@@ -956,7 +1045,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         tasks: plan.tasks,
         receipts: new Set(landedCiFrictionOrigins(records)),
         escalated: new Set(escalatedCiFrictionOrigins(records)),
-        ownerSearch: sources.ownerSearch,
+        holds: records,
+        ownerSearch,
         nowMs: clock.now(),
       });
       const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
@@ -968,9 +1058,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     unfinished: (inv) => inv.next !== undefined,
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.next ? inv.next.origin : ""}`,
     candidates: (inv) => draftCandidates(inv),
-    scorecard: (inv) => {
+    scorecard: (inv, plan) => {
       appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
       return {
+        ownership_reconsiderations: plan.actions.flatMap(action => action.decision.kind === "draft" && action.decision.reconsideration ? [action.decision.reconsideration] : []),
         prevention_sources: inv.preventionSources?.registrations ?? [],
         prevention_source_unavailable: inv.preventionSources?.unavailable ?? null,
         prevention_source_scope: "owning-file-build-not-runtime-or-efficacy",
@@ -991,7 +1082,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       if (action.decision.kind === "escalate") {
         // No PR: the receipt row holds the cause at this rung so the next pass moves on to the next one.
         const issue = deps.escalate ? deps.escalate(ciFrictionEscalation(action)) : undefined;
-        deps.log("ci-friction.remedy_escalated", { origin: action.origin, rung: action.rung, why: action.decision.why, issue_url: issue ?? null });
+        deps.log("ci-friction.remedy_escalated", { origin: action.origin, rung: action.rung, why: action.decision.why,
+          hold_reason: action.decision.holdReason, ownership_evidence: action.decision.evidence, issue_url: issue ?? null });
         return undefined;
       }
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
