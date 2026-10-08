@@ -10,7 +10,7 @@ import { readDiskFreeBytes, readDiskTotalBytes } from "../src/lib/daemon-health.
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   ADHOC_LANE_REAP_GRACE_MS,
-  reapStaleWorktrees,
+  reapStaleWorktreesAsync,
   runAdhocLaneReapRung,
   writeRunLock,
 } from "../src/lib/worker.js";
@@ -56,7 +56,7 @@ function recorder() {
 
 const fullDisk = () => ({ freeBytes: 0, totalBytes: 100 });
 
-test("W1-T4065: a remote-less linked lane reclaims shared history but keeps its own unpushed work", () => {
+test("W1-T4065: a remote-less linked lane reclaims shared history but keeps its own unpushed work", async () => {
   for (const enabled of [false, true]) {
     const { lanes, config } = fixture();
     const parent = gitRepo({ branch: "trunk" });
@@ -64,9 +64,9 @@ test("W1-T4065: a remote-less linked lane reclaims shared history but keeps its 
     const unpushed = parent.addWorktree(join(lanes, "unpushed"), "unpushed");
     unpushed.git("commit", "--allow-empty", "-m", "lane-only work");
     const rec = recorder();
-    const summary = runAdhocLaneReapRung(config, rec.log, {
+    const summary = await runAdhocLaneReapRung(config, rec.log, {
       enabled: () => enabled, diskHeadroom: fullDisk,
-      reap: (root, opts) => reapStaleWorktrees(root, {
+      reap: (root, opts) => reapStaleWorktreesAsync(root, {
         ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
       }),
     });
@@ -83,7 +83,7 @@ test("W1-T4065: a remote-less linked lane reclaims shared history but keeps its 
   }
 });
 
-test("W1-T4065: remote refs keep unpublished shared commits and a primary checkout keeps its own history", () => {
+test("W1-T4065: remote refs keep unpublished shared commits and a primary checkout keeps its own history", async () => {
   for (const remoteRefs of [false, true]) {
     const { lanes, config } = fixture();
     const parent = gitRepo();
@@ -93,9 +93,9 @@ test("W1-T4065: remote refs keep unpublished shared commits and a primary checko
     }
     const candidate = remoteRefs ? parent.addWorktree(join(lanes, "candidate"), "candidate") : parent;
     const rec = recorder();
-    const summary = runAdhocLaneReapRung(config, rec.log, {
+    const summary = await runAdhocLaneReapRung(config, rec.log, {
       enabled: () => true, diskHeadroom: fullDisk,
-      reap: (root, opts) => reapStaleWorktrees(root, {
+      reap: (root, opts) => reapStaleWorktreesAsync(root, {
         ...opts, candidatePaths: [candidate.dir], newestActivity: () => ({ mtimeMs: 0, complete: true }),
         branchIsLiveUpstream: () => false,
       }),
@@ -107,15 +107,15 @@ test("W1-T4065: remote refs keep unpublished shared commits and a primary checko
   }
 });
 
-test("W1-T4065: an unreadable remote-less parent head keeps the lane as undecidable", () => {
+test("W1-T4065: an unreadable remote-less parent head keeps the lane as undecidable", async () => {
   const { lanes, config } = fixture();
   const parent = gitRepo();
   const candidate = parent.addWorktree(join(lanes, "candidate"), "candidate");
   writeFileSync(join(parent.dir, ".git", "HEAD"), "ref: refs/heads/missing\n");
   const rec = recorder();
-  const summary = runAdhocLaneReapRung(config, rec.log, {
+  const summary = await runAdhocLaneReapRung(config, rec.log, {
     enabled: () => true, diskHeadroom: fullDisk,
-    reap: (root, opts) => reapStaleWorktrees(root, {
+    reap: (root, opts) => reapStaleWorktreesAsync(root, {
       ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
     }),
   });
@@ -126,7 +126,7 @@ test("W1-T4065: an unreadable remote-less parent head keeps the lane as undecida
   assert.ok(rec.rows.some((row) => row.step === "adhoc_lane.reap.work_undecidable" && row.extra?.error));
 });
 
-test("W1-T4065: every pass census records kept lanes by reason and bytes", () => {
+test("W1-T4065: every pass census records kept lanes by reason and bytes", async () => {
   const { lanes, config } = fixture();
   const alive = lane(lanes, "alive");
   writeRunLock(alive, { pid: process.pid, run_id: "live", startedAt: new Date().toISOString() });
@@ -136,13 +136,13 @@ test("W1-T4065: every pass census records kept lanes by reason and bytes", () =>
   const outside = makeTempDir("lane-census-outside");
   const external = lane(outside, "external", 0);
   const rec = recorder();
-  const summary = runAdhocLaneReapRung(config, rec.log, {
+  const summary = await runAdhocLaneReapRung(config, rec.log, {
     enabled: () => true,
     diskHeadroom: () => ({ freeBytes: 100, totalBytes: 100 }),
     sizeBytes: (path) => ({ alive: 10, recent: 20, unknown: 30, doomed: 40, external: 50 })[path.split("/").at(-1)!],
     repoDir: outside,
     listUnmanaged: () => [external],
-    reap: (root, opts) => reapStaleWorktrees(root, {
+    reap: (root, opts) => reapStaleWorktreesAsync(root, {
       ...opts,
       isPidAlive: () => true,
       newestActivity: (path) => ({ mtimeMs: path === external || path.endsWith("recent") ? Date.now() : 0,
@@ -162,17 +162,17 @@ test("W1-T4065: every pass census records kept lanes by reason and bytes", () =>
 
   const empty = fixture();
   const quiet = recorder();
-  runAdhocLaneReapRung(empty.config, quiet.log);
+  await runAdhocLaneReapRung(empty.config, quiet.log);
   assert.deepEqual(quiet.census().kept_by_reason, {});
   assert.deepEqual(quiet.census().reaped, { count: 0, bytes: 0, bytes_unknown: 0 });
 });
 
-test("W1-T4065: the grace shortens when disk headroom shrinks", () => {
+test("W1-T4065: the grace shortens when disk headroom shrinks", async () => {
   for (const fraction of [1, 0.5, 0.1, 0]) {
     const { lanes, config } = fixture();
     const candidate = lane(lanes, "terminal", ADHOC_LANE_REAP_GRACE_MS / 4);
     const rec = recorder();
-    runAdhocLaneReapRung(config, rec.log, {
+    await runAdhocLaneReapRung(config, rec.log, {
       enabled: () => true,
       diskHeadroom: () => ({ freeBytes: fraction * 100, totalBytes: 100 }),
     });
@@ -182,7 +182,7 @@ test("W1-T4065: the grace shortens when disk headroom shrinks", () => {
   }
 });
 
-test("W1-T4065: a lane holding live work is never reaped at any grace", () => {
+test("W1-T4065: a lane holding live work is never reaped at any grace", async () => {
   for (const fraction of [0, 0.01, 1]) {
     const { lanes, root, config } = fixture();
     const pidLane = lane(lanes, "pid");
@@ -195,11 +195,11 @@ test("W1-T4065: a lane holding live work is never reaped at any grace", () => {
     mkdirSync(join(root, "state", "inflight"), { recursive: true });
     writeFileSync(join(root, "state", "inflight", "W1-T4065.lock"), "{}");
     const rec = recorder();
-    runAdhocLaneReapRung(config, rec.log, {
+    await runAdhocLaneReapRung(config, rec.log, {
       enabled: () => true,
       diskHeadroom: () => ({ freeBytes: fraction * 100, totalBytes: 100 }),
       isPidAlive: () => true,
-      reap: (r, opts) => reapStaleWorktrees(r, {
+      reap: (r, opts) => reapStaleWorktreesAsync(r, {
         ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }),
         branchIsLiveUpstream: (branch) => branch === "open",
       }),
@@ -213,14 +213,14 @@ test("W1-T4065: a lane holding live work is never reaped at any grace", () => {
   }
 });
 
-test("W1-T4065: byte measurement uses disk usage before removal and does not follow symlinks", () => {
+test("W1-T4065: byte measurement uses disk usage before removal and does not follow symlinks", async () => {
   const { lanes, config } = fixture();
   const candidate = lane(lanes, "sized");
   const outside = makeTempDir("lane-census-target");
   writeFileSync(join(outside, "large"), Buffer.alloc(1024 * 1024));
   symlinkSync(outside, join(candidate, "linked"));
   const rec = recorder();
-  runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: fullDisk });
+  await runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: fullDisk });
   assert.equal(existsSync(candidate), false);
   assert.equal(existsSync(outside), true);
   assert.ok(rec.census().reaped.bytes > 0);
@@ -228,61 +228,61 @@ test("W1-T4065: byte measurement uses disk usage before removal and does not fol
   assert.equal(rec.census().reaped.bytes_unknown, 0);
 });
 
-test("W1-T4065: survey census reports reclaimable bytes without removing the lane", () => {
+test("W1-T4065: survey census reports reclaimable bytes without removing the lane", async () => {
   const { lanes, config } = fixture();
   const candidate = lane(lanes, "survey");
   const rec = recorder();
-  runAdhocLaneReapRung(config, rec.log, { diskHeadroom: fullDisk });
+  await runAdhocLaneReapRung(config, rec.log, { diskHeadroom: fullDisk });
   assert.equal(existsSync(candidate), true);
   assert.equal(rec.census().dry_run, true);
   assert.equal(rec.census().reaped.count, 1);
   assert.ok(rec.census().reaped.bytes > 0);
 });
 
-test("W1-T4065: missing or invalid disk readings preserve the full grace", () => {
+test("W1-T4065: missing or invalid disk readings preserve the full grace", async () => {
   for (const reading of [{}, { freeBytes: 10, totalBytes: 0 }, { freeBytes: NaN, totalBytes: 100 },
     { freeBytes: -1, totalBytes: 100 }, { freeBytes: 100, totalBytes: Infinity }]) {
     const { lanes, config } = fixture();
     const candidate = lane(lanes, "young", ADHOC_LANE_REAP_GRACE_MS / 2);
     const rec = recorder();
-    runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: () => reading });
+    await runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: () => reading });
     assert.equal(existsSync(candidate), true);
     assert.equal(rec.census().grace_ms, ADHOC_LANE_REAP_GRACE_MS);
     assert.equal(rec.census().free_fraction, null);
   }
   const rec = recorder();
   const { config, lanes } = fixture();
-  runAdhocLaneReapRung(config, rec.log);
+  await runAdhocLaneReapRung(config, rec.log);
   const fraction = readDiskFreeBytes(lanes)! / readDiskTotalBytes(lanes)!;
   assert.ok(Math.abs(rec.census().free_fraction! - fraction) < 0.01, "default uses the host reading");
 });
 
-test("W1-T4065: failed measurement and failed passes remain visible in the census", () => {
+test("W1-T4065: failed measurement and failed passes remain visible in the census", async () => {
   const { lanes, config } = fixture();
   lane(lanes, "unknown-bytes", 0);
   const rec = recorder();
-  runAdhocLaneReapRung(config, rec.log, { sizeBytes: () => { throw new Error("du denied"); } });
+  await runAdhocLaneReapRung(config, rec.log, { sizeBytes: () => { throw new Error("du denied"); } });
   assert.deepEqual(rec.census().kept_by_reason["recent-activity"], { count: 1, bytes: 0, bytes_unknown: 1 });
   assert.ok(rec.rows.some((r) => String(r.extra?.error).includes("du denied")));
   const failed = recorder();
-  assert.equal(runAdhocLaneReapRung(config, failed.log, { reap: () => { throw new Error("reap denied"); } }), null);
+  assert.equal(await runAdhocLaneReapRung(config, failed.log, { reap: () => { throw new Error("reap denied"); } }), null);
   assert.match(failed.census().error!, /reap denied/);
 });
 
-test("W1-T4065: corrupt locks and unreadable git never become permission to reap", () => {
+test("W1-T4065: corrupt locks and unreadable git never become permission to reap", async () => {
   const { lanes, config } = fixture();
   const corrupt = lane(lanes, "corrupt");
   writeFileSync(`${corrupt}.lock`, "garbage");
   const broken = lane(lanes, "broken");
   writeFileSync(join(broken, ".git"), "not a git pointer");
   const rec = recorder();
-  runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: fullDisk });
+  await runAdhocLaneReapRung(config, rec.log, { enabled: () => true, diskHeadroom: fullDisk });
   assert.equal(existsSync(corrupt), true);
   assert.equal(existsSync(broken), true);
   assert.equal(rec.census().kept_by_reason["work-undecidable"]?.count, 2);
 });
 
-test("W1-T4065: unreadable lock identity and throwing disk readings keep work and explain failures", (t) => {
+test("W1-T4065: unreadable lock identity and throwing disk readings keep work and explain failures", async (t) => {
   const { lanes, config } = fixture();
   const candidate = lane(lanes, "protected");
   const original = fs.lstatSync;
@@ -293,7 +293,7 @@ test("W1-T4065: unreadable lock identity and throwing disk readings keep work an
   syncBuiltinESMExports();
   try {
     const rec = recorder();
-    runAdhocLaneReapRung(config, rec.log, {
+    await runAdhocLaneReapRung(config, rec.log, {
       enabled: () => true,
       diskHeadroom: () => { throw new Error("headroom unavailable"); },
     });
@@ -309,22 +309,24 @@ test("W1-T4065: unreadable lock identity and throwing disk readings keep work an
   }
 });
 
-test("W1-T4065: default du failures and malformed output report unknown bytes", (t) => {
-  const original = childProcess.execFileSync;
+test("W1-T4065: default du failures and malformed output report unknown bytes", async (t) => {
+  const original = childProcess.execFile;
   for (const failure of ["invalid", "empty", "throw"]) {
     const { lanes, config } = fixture();
     lane(lanes, "candidate");
-    t.mock.method(childProcess, "execFileSync", (file: string, ...args: unknown[]) => {
+    t.mock.method(childProcess, "execFile", (file: string, ...args: unknown[]) => {
       if (file === "du") {
-        if (failure === "throw") throw new Error("du unavailable");
-        return failure === "empty" ? "" : "not a size";
+        const callback = args.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
+        queueMicrotask(() => callback(failure === "throw" ? new Error("du unavailable") : null,
+          failure === "empty" ? "" : "not a size", ""));
+        return;
       }
       return Reflect.apply(original, childProcess, [file, ...args]);
     });
     syncBuiltinESMExports();
     try {
       const rec = recorder();
-      runAdhocLaneReapRung(config, rec.log, { diskHeadroom: fullDisk });
+      await runAdhocLaneReapRung(config, rec.log, { diskHeadroom: fullDisk });
       assert.deepEqual(rec.census().reaped, { count: 1, bytes: 0, bytes_unknown: 1 });
       assert.ok(rec.rows.some((r) => r.step === "adhoc_lane.reap.measurement_error" && r.extra?.error));
     } finally {
@@ -334,19 +336,19 @@ test("W1-T4065: default du failures and malformed output report unknown bytes", 
   }
 });
 
-test("W1-T4065: published work remains reclaimable and a failed unmanaged pass retains the root census", () => {
+test("W1-T4065: published work remains reclaimable and a failed unmanaged pass retains the root census", async () => {
   const { lanes, config } = fixture();
   const parent = gitRepo();
   parent.git("update-ref", "refs/remotes/origin/main", parent.git("rev-parse", "HEAD"));
   const published = parent.addWorktree(join(lanes, "published"), "published");
   const rec = recorder();
   let passes = 0;
-  const result = runAdhocLaneReapRung(config, rec.log, {
+  const result = await runAdhocLaneReapRung(config, rec.log, {
     enabled: () => true, diskHeadroom: fullDisk,
     repoDir: parent.dir, listUnmanaged: () => ["/unmanaged"],
     reap: (root, opts) => {
       if (++passes === 2) throw new Error("unmanaged scan failed");
-      return reapStaleWorktrees(root, {
+      return reapStaleWorktreesAsync(root, {
         ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
       });
     },
@@ -358,10 +360,10 @@ test("W1-T4065: published work remains reclaimable and a failed unmanaged pass r
   assert.match(rec.census().error!, /unmanaged scan failed/);
 });
 
-test("W1-T4065: an unreadable population is distinct from an empty pass", () => {
+test("W1-T4065: an unreadable population is distinct from an empty pass", async () => {
   const { root, config } = fixture();
   const rec = recorder();
-  runAdhocLaneReapRung(config, rec.log, { root: () => join(root, "absent") });
+  await runAdhocLaneReapRung(config, rec.log, { root: () => join(root, "absent") });
   assert.equal(rec.census().reaped.count, 0);
   assert.match(rec.census().error!, /ENOENT/);
   assert.ok(rec.rows.some((r) => r.step === "adhoc_lane.reap.enumeration_error"));
