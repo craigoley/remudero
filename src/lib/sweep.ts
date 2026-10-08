@@ -12790,6 +12790,19 @@ export async function runSweep(
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const diagnoses: string[] = [];
+    const stalledFiles = baseReproductionFiles(pr.ciFailures ?? []);
+    if (fields.blocker === "own-red" && mainTipSha !== undefined &&
+        (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0 &&
+        stalledFiles.some(file => !reproductionCache.has(probeCacheKey(mainTipSha, file)))) {
+      if (deps.reproduceFailingTestsOnMain) {
+        const probe = await probeMain(pr, stalledFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
+        if (probe.verdict === "unrunnable" || probe.files.some(file => file.outcome === "unrunnable")) {
+          const reason = probe.setup_error ?? probe.reason ??
+            probe.files.filter(file => file.outcome === "unrunnable").map(file => file.reason ?? "probe returned no outcome").join("; ");
+          diagnoses.push(`main reproduction unrunnable (${boundedBaseProbeReason(reason)})`);
+        }
+      } else diagnoses.push("main reproduction unavailable (probe seam unwired)");
+    }
     // W1-T6405 — an own-red whose failing test files all pass at main's CURRENT tip, on a head behind
     // that main, is not this PR's red: take main once instead of escalating, and let the refreshed
     // head's own CI decide. A red that survives the refresh is a new own-red stage and escalates.
@@ -12999,6 +13012,33 @@ export async function runSweep(
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
+  const probeMain = async (pr: OpenPrView, reproductionFiles: readonly string[], mainSha: string,
+    reproduce: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>) => {
+    const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainSha, file)));
+    let probed: BaseProbeResult = [];
+    try {
+      if (reproductionFiles.length > BASE_REPRODUCTION_MAX_FILES) probed = Object.assign([], { reason: "too many test files" });
+      else if (missing.length > 0) probed = await reproduce(pr, missing, mainSha);
+    } catch (error) {
+      const reason = boundedBaseProbeReason(error);
+      probed = baseProbeSetupFailure(missing, reason);
+    }
+    const files = probed.reason === undefined ? reproductionFiles.map((file): BaseProbeFile => {
+      const cached = reproductionCache.get(probeCacheKey(mainSha, file));
+      const result = cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
+        { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
+      return probed.setup_error !== undefined && result.outcome === "unrunnable" ?
+        { file, outcome: "unrunnable", duration_ms: result.duration_ms, cached: result.cached } :
+        { ...result, ...(result.reason === undefined ? {} : { reason: boundedBaseProbeReason(result.reason) }) };
+    }) : [];
+    const verdict = decideBaseReproduction(reproductionFiles, files);
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, files, verdict,
+      ...(probed.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probed.setup_error) }),
+      ...(probed.reason === undefined ? {} : { reason: boundedBaseProbeReason(probed.reason) }) };
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
+    if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainSha, file.file), file);
+    return row;
+  };
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
@@ -15039,29 +15079,8 @@ export async function runSweep(
               }
               const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
-                const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainTipSha, file)));
-                let probed: BaseProbeResult = [];
-                try {
-                  if (reproductionFiles.length > BASE_REPRODUCTION_MAX_FILES) probed = Object.assign([], { reason: "too many test files" });
-                  else if (missing.length > 0) probed = await deps.reproduceFailingTestsOnMain(pr, missing, mainTipSha);
-                } catch (error) {
-                  const reason = boundedBaseProbeReason(error);
-                  probed = baseProbeSetupFailure(missing, reason);
-                }
-                const files = probed.reason === undefined ? reproductionFiles.map((file): BaseProbeFile => {
-                  const cached = reproductionCache.get(probeCacheKey(mainTipSha, file));
-                  const result = cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
-                    { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
-                  return probed.setup_error !== undefined && result.outcome === "unrunnable" ?
-                    { file, outcome: "unrunnable", duration_ms: result.duration_ms, cached: result.cached } :
-                    { ...result, ...(result.reason === undefined ? {} : { reason: boundedBaseProbeReason(result.reason) }) };
-                }) : [];
-                const verdict = decideBaseReproduction(reproductionFiles, files);
-                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, files, verdict,
-                  ...(probed.setup_error === undefined ? {} : { setup_error: boundedBaseProbeReason(probed.setup_error) }),
-                  ...(probed.reason === undefined ? {} : { reason: boundedBaseProbeReason(probed.reason) }) };
-                appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
-                if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainTipSha, file.file), file);
+                const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
+                const { verdict } = row;
                 if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
