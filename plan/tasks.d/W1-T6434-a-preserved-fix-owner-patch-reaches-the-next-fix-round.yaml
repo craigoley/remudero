@@ -1,0 +1,33 @@
+- id: W1-T6434
+  title: "A PRESERVED FIX-OWNER PATCH REACHES THE NEXT FIX ROUND — W1-T6362 now preserves a dead fix worker's staged work in refs/rmd-recovery/fix-dirty/... and reclaims the checkout, but the next fix round's prompt is never told that partial work exists, so it re-derives it from scratch"
+  repo: remudero
+  depends_on: [W1-T6362]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-08: W1-T6362 builder's unbuilt design point (#10111)"
+  plan_refs: [W1-T6362, W1-T5974, W1-T5918]
+  files: [src/lib/prompt-render.ts, src/lib/sweep.ts, test/a-preserved-fix-owner-patch-reaches-the-next-fix-round.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-08: #10111 (W1-T6362) writes a dead owner's staged residue at the PR's current head to an immutable
+    refs/rmd-recovery/fix-dirty/... ref, ledgers sweep.fix.owner_residue_preserved {pr_number, head_sha, staged_paths,
+    recovery_ref, ...}, reclaims the worktree and dispatches a new fix round. Its design also said the preserved patch
+    is "offered to the next fix round's prompt as prior partial work"; that needs src/lib/prompt-render.ts's
+    FixEvidence (~:225), outside W1-T6362's files, so it was not built. Today the next round starts blind.
+  design: |
+    When dispatching a fix round for a PR whose current head has a sweep.fix.owner_residue_preserved row, add the
+    preserved patch to FixEvidence as PRIOR PARTIAL WORK: the recovery ref, the staged paths, and a bounded diff
+    excerpt (size-capped, never secrets), with an instruction that it is unverified prior work to evaluate, never
+    apply blindly. A head with no preserved row renders exactly as today.
+  acceptance:
+    - claim: "a fix round dispatched after a preserved dead-owner residue is told the recovery ref, paths and a bounded excerpt"
+      proof: 'grep: test("W1-T6434: a preserved fix-owner patch is offered to the next fix round as prior partial work" in test/a-preserved-fix-owner-patch-reaches-the-next-fix-round.test.ts'
+  falsifier: |
+    Omit the evidence: the rendered prompt for the fixture PR with a preserved row names no recovery ref and the test
+    fails.
