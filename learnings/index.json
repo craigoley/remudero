@@ -91,6 +91,7 @@
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
         "skipped-check-deadlock",
+        "squash-trailer-gate-task-authoring-lane",
         "strikes-exhausted-counts-rows"
       ],
       "globs": [
