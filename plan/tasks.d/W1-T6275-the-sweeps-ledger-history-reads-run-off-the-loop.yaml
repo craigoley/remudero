@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: steady-state daemon CPU profile (lanes/claude/daemon-cpu-steady.cpuprofile)"
   plan_refs: [W1-T5689, W1-T4817, W1-T6246]
   files: [src/lib/sweep.ts, test/the-sweeps-ledger-history-reads-run-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

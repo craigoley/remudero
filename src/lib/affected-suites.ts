@@ -371,12 +371,26 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(dependencyCensus) && changedSrcTypeScript) {
     pathReaders.push(dependencyCensus);
   }
+  const gitLeafCensus = "test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts";
+  if (input.files.has(gitLeafCensus) && changedSrcTypeScript) {
+    pathReaders.push(gitLeafCensus);
+  }
+  // W1-T5557: this suite scans tracked src/**/*.ts for env literals through git ls-files, outside the maps.
+  const envRegistry = "test/env-var-registry.test.ts";
+  if (input.files.has(envRegistry) && changedSrcTypeScript) {
+    pathReaders.push(envRegistry);
+  }
   // W1-T4994: a coverage shard failed on this suite at 39737b73 and the narrow selector missed it. The suite
   // drives runSweep and buildSweepEffects, so a change to the sweep, status or run-task seams must select it.
   const verdictReuse = "test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts";
   const verdictReuseSeams = ["src/lib/sweep.ts", "src/lib/status.ts", "src/run-task.ts"];
   if (input.files.has(verdictReuse) && files.some((f) => verdictReuseSeams.includes(f))) {
     pathReaders.push(verdictReuse);
+  }
+  const claimsCheck = "test/claims-check.test.ts";
+  const claimsCheckEdges = ["src/lib/plan.ts", "src/run-task.ts", "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts"];
+  if (input.files.has(claimsCheck) && files.some((f) => claimsCheckEdges.includes(f))) {
+    pathReaders.push(claimsCheck);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

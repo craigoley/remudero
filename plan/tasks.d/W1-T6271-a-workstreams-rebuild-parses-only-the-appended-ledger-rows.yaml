@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item M3), from an isolated replay of current main after PR 9922"
   plan_refs: [W1-T5050, W1-T6253, W1-T5758]
   files: [src/lib/workstreams-view.ts, test/a-workstreams-rebuild-parses-only-the-appended-ledger-rows.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

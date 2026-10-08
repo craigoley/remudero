@@ -2913,7 +2913,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -3950,7 +3950,7 @@ export function syncPlanFromOrigin(
 ): SyncedPlan {
   let staleDispatch = false;
   try {
-    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+    fetchOriginRetryingRefLock(args => execFileSync("git", ["-C", repoDir, ...args], { stdio: "pipe" }).toString());
   } catch (err) {
     if (!opts.allowStale) {
       throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
@@ -4062,7 +4062,7 @@ export async function syncPlanFromOriginAsync(
   const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
   let staleDispatch = false;
   try {
-    await runGit(["fetch", "--quiet", "origin"]);
+    await fetchOriginRetryingRefLockAsync(args => runGit(args), undefined, 3, PLAN_SYNC_GIT_TIMEOUT_MS);
   } catch (err) {
     if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
     staleDispatch = true;

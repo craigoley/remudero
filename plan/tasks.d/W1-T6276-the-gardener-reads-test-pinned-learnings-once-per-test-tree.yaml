@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: steady-state daemon CPU profile (lanes/claude/daemon-cpu-steady.cpuprofile)"
   plan_refs: [W1-T5689]
   files: [src/lib/knowledge-gardener.ts, test/the-gardener-reads-test-pinned-learnings-once-per-test-tree.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

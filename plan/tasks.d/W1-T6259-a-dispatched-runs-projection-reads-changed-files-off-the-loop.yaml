@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: post-W1-T6246 daemon CPU profile (lanes/claude/daemon-cpu-after.cpuprofile)"
   plan_refs: [W1-T6246, W1-T5689, W1-T2392]
   files: [src/run-task.ts, test/a-dispatched-runs-projection-reads-changed-files-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

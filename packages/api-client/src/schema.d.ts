@@ -102,7 +102,7 @@ export interface components {
       /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER by src/lib/service.ts's dispatch gate, which `enforceWriteTiers` turns on and `rmd serve`'s production wiring sets (W1-T500). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's credential was missing, alongside `required_scope: write`. */
       required_tier?: "low" | "middle" | "high";
     };
-    /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. */
+    /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. GET /v1/status also carries BoardRow's sparse enrichment below; the bare SSE projection may omit that enrichment. */
     StatusProjection: {
       /** The plan task id (plan/tasks.yaml's `id`). */
       taskId: string;
@@ -115,6 +115,32 @@ export interface components {
       prNumber?: number;
       prUrl?: string;
       prState?: string;
+      /** The board row's plan title, or its escalation title for a task-less escalation. */
+      title?: string;
+      risk?: "low" | "medium" | "high";
+      /** The last ledger activity naming this task; absent when none was observed. */
+      lastActivityAt?: string;
+      /** Observed accumulated spend for the current in-flight run, including measured zero. */
+      liveSpendUsd?: number;
+      /** Observed accumulated turns for the current in-flight run. */
+      liveTurns?: number;
+      /** The run is in flight but has no spend evidence yet; not a measured zero. */
+      liveSpendPending?: true;
+      /** An open escalation not superseded by a later dispatch; unreadable state keeps it visible. */
+      needsHuman?: true;
+      escalationIssueUrl?: string;
+      escalationTitle?: string;
+      /** The escalation's current open state could not be confirmed. */
+      escalationUnverified?: true;
+      escalationOpenedAt?: string;
+      /** Human verification is required and the task has not been credited merged. */
+      verifyHumanPending?: true;
+      /** An open PR suggests running, without recent worker activity or a live lock. */
+      processUnevidenced?: true;
+      /** A dispatched run has neither a terminal verdict nor current PR or activity evidence. */
+      orphaned?: true;
+      /** The row's observed remudero-review state; absent when no PR is attributed. */
+      reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
       /** Trailer search hits rejected by the ownership/anchor asserts, each with a machine-readable reason. Present only when a candidate was actually rejected. */
       rejected_candidates?: ({
         pr: string;
