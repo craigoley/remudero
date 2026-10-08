@@ -44,3 +44,15 @@
   falsifier: |
     A candidate priced without a replay measurement, or recommended without an oracle that compares the now view's body to
     the current code's, fails human verification.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.9
+    reasons:
+      - "The task is a recon (measurement) task. Per the description and declared files, it adds one plan YAML and one doc under docs/recon/, and the title says \"before any storage change\"."
+      - "The declared files show nothing that touches secrets, auth, permissions, deletion, or merge, deploy or review policy. The description does not say it needs an operator-only decision."
+      - "It has an auto-verify grep acceptance check, so the finding can be checked. The author class is operator, and the plan refs are consistent with the title."
+      - "The family track record is mixed (1 merged, 1 declined). That is a minor caution and does not outweigh a docs-only recon."
+      - "the judge said proceed, but W1-T6369: at verify: auto it fails lint (rule15-filing)"
+    judged_at: "2026-10-08T14:11:13.892Z"
+    pin: "8979d26a595f33b654b61d57b1a8a276ca724efb1f46266db2398a89877d5a53"
