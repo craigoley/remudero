@@ -13,7 +13,7 @@ raw: "Root planner incident: rmd plan --mode=create run
   reserved IDs and the operator can retry without duplicate or lost work."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/10140
 summary:
