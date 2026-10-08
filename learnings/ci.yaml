@@ -266,6 +266,23 @@
   src: "ci-learning:8075:CodeQL"
   cited: "2026-10-07"
 
+- id: analyze-javascript-typescript-findings-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["src/**", "scripts/**"]
+  error_signatures: ["Analyze (javascript-typescript)", "security-and-quality"]
+  fact: >-
+    Before retrying Analyze (javascript-typescript), inspect its `security-and-quality` findings
+    for the changed JavaScript and TypeScript code, repair each finding, and confirm the rerun is
+    clear. A green final run alone does not identify which finding caused an earlier refusal.
+  evidence: >-
+    The task record tracks six repaired pull requests (#9362, #9379, #9624, #9703, #9704, #9712).
+    Their merged PR records show different repair causes and successful final Analyze runs, so no
+    single shared finding is asserted here; this entry directs the affected source lanes to the
+    gate's findings before retrying.
+  src: "ci-learning:9362:Analyze (javascript-typescript)"
+  cited: "2026-10-08"
+
 - id: light-gates-pre-push-ratchets
   subsystem: ci
   lifecycle: active
