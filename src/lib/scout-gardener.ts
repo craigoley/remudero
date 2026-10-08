@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -12,6 +11,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { renderMachineShard } from "./machine-filing.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /**
  * lib/scout-gardener.ts (W1-T5454) — the fleet looks for work nobody has asked for.
@@ -246,12 +246,22 @@ export function scoutFilings(selected: readonly ScoutSymptom[], mint: () => stri
 
 /** Tasks that reached main in `sinceIso..`, by their `Remudero-Task:` trailer, with the instant they merged. */
 export function readMergedTasks(repoRoot: string, sinceIso: string): Map<string, number> {
-  const git = (args: string[]) => spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  const ref = git(["rev-parse", "--verify", "--quiet", "origin/main"]).status === 0 ? "origin/main" : "HEAD";
-  const out = git(["log", ref, `--since=${sinceIso}`, "--grep=^Remudero-Task:", "--format=%x01%cI%n%B"]);
-  if (out.status !== 0) throw new Error(`scout gardener: git log ${ref} failed: ${String(out.stderr).trim()}`);
+  const git = (args: string[]) => hostWorktreeGit(repoRoot, args, { maxBuffer: 64 * 1024 * 1024 });
+  let ref = "HEAD";
+  try {
+    git(["rev-parse", "--verify", "--quiet", "origin/main"]);
+    ref = "origin/main";
+  } catch {
+    // origin/main is absent here (a fresh clone or a fixture repo): the scout reads HEAD's history instead.
+  }
+  let stdout: string;
+  try {
+    stdout = git(["log", ref, `--since=${sinceIso}`, "--grep=^Remudero-Task:", "--format=%x01%cI%n%B"]);
+  } catch (error) {
+    throw new Error(`scout gardener: git log ${ref} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const merged = new Map<string, number>();
-  for (const chunk of String(out.stdout).split("\u0001")) {
+  for (const chunk of stdout.split("\u0001")) {
     const [stamp, ...body] = chunk.split("\n");
     const at = Date.parse(stamp ?? "");
     if (!Number.isFinite(at)) continue;
