@@ -9419,9 +9419,9 @@ export function openPrsBehindMain(
       pr.checksState === "green" &&
       pr.reviewState === "success" &&
       pr.isDraft !== true;
-    // W1-T6022: a READY PR (armed, or the `mergeable` row's match) below the gate whose base files were read.
+    // W1-T6022: READY means green checks and review success; an arm alone can still be awaiting CI.
     const readyBelowGate = !staleBlocked && behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold &&
-      baseChangedFilesByPr !== undefined && pr.isDraft !== true && (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+      baseChangedFilesByPr !== undefined && pr.isDraft !== true && checksGreenReviewSuccess(pr);
     if (!staleBlocked && !readyBelowGate && behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
     // W1-T5696: a distance refresh must buy something. Without a base-file map at all (a caller that
     // never read the compare's files) the legacy `distance` refresh is unchanged; with one, a PR whose
@@ -15916,7 +15916,7 @@ export async function runSweep(
     const readyCandidate = deps.baseChangedFilesByPr !== undefined && refreshPrs.some((pr) => {
       const behindBy = behindMainByPr.get(pr.prNumber) ?? 0;
       return behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold && pr.isDraft !== true &&
-        (pr.autoMergeArmed === true || checksGreenReviewSuccess(pr));
+        checksGreenReviewSuccess(pr);
     });
     const readyFacts: ReadyRefreshFacts = {
       incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&

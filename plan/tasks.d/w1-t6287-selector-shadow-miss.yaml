@@ -4,9 +4,10 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 2.5
+  priority: 4
   risk: low
   status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts"
@@ -18,11 +19,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.87
+    confidence: 0.92
     reasons:
-      - "The filed plan limits the remedy to one selector edge in src/lib/affected-suites.ts; the declared file matches that scope."
-      - "The stated task adds a named test to narrow selection, with no described sensitive access, deletion, irreversible action, or merge, deploy, infrastructure, or review policy change."
-      - "Filing-time verification is auto; no failing gate is reported. The family has no recorded declines, though no merged precedent either."
-      - "No diff exists yet; the supplied grep acceptance checks the named path's presence, so behavioral correctness remains for CI and review."
-    judged_at: "2026-10-08T00:09:22.925Z"
-    pin: "27028c994fb1cfddf439f38b03863b9deaa750d5df924dd8e062ff12e116da4f"
+      - "The filed remedy targets one missing test-selector edge, declares only src/lib/affected-suites.ts, and supplies an automatic grep acceptance proof for the named test path."
+      - "The supplied scope describes no secrets, permissions, deletion, irreversible action, policy change, or operator preference decision."
+      - "The selector-shadow-miss family has 3 merged and 0 declined tasks; the supplied filing-time gates report no concerning condition."
+    judged_at: "2026-10-08T03:16:19.084Z"
+    pin: "4a03dfc4344f15b794155179773075f01522795518aa5cafb3e3139bab580983"

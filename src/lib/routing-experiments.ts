@@ -58,6 +58,13 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     claudeModel: new RegExp(`^${model}$`), codexModel: /^gpt-6\.1-sol$/,
     startedOn: "2026-10-02", revisitOn: "2026-10-02", reviewCadence: "daily" as const, minTasksPerArm: 20,
   })),
+  ...["low", "medium", "high"].map((effort) => ({
+    id: `haiku55-vs-luna6-${effort}`, capability: "economy", effort,
+    arms: { claude: "haiku55", codex: "luna6" },
+    claudeModel: /^claude-haiku-5-5$/, codexModel: /^gpt-6-luna$/,
+    startedOn: "2026-10-07", revisitOn: "2026-10-07", reviewCadence: "daily" as const,
+    minTasksPerArm: 20,
+  })),
 ];
 
 /** A generic lane label cannot be the randomization unit for independent work. */
