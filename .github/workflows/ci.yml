@@ -64,13 +64,16 @@ env:
 #
 # INVARIANT: `cancel-in-progress` is true only on `pull_request`. A push to `main` (or a
 # `merge_group` run — W1-T4406, matched by the same `|| github.ref` fallback since it has no PR
-# number either) groups by `github.ref` so those runs share one FIFO queue and are never
-# cancelled — this is the lane running the full suite and the coverage aggregate against `main` or
+# number either) groups by `github.ref`. Explicit `max` preserves up to 100 pending runs;
+# the default `single` silently replaces an older PENDING run even when cancellation is false.
+# PRs keep `single` plus cancellation; main/merge_group never cancel an in-flight run.
+# This is the lane running the full suite and the coverage aggregate against `main` or
 # the queue's own merge commit, and cancelling a slower in-flight run would drop coverage data for
 # a tree about to land.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 
 jobs:
   squash-trailer-gate:

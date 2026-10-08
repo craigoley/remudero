@@ -58,6 +58,82 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
 });
 
+test('author preflight refuses shared bare configuration before a real split-config migration can poison sibling worktrees', (t) => {
+  const f = fixture(), bare = gitRepo({ bare: true, kind: 'author-bare-topology' });
+  t.after(() => bare.cleanup());
+  bare.git('fetch', f.root, 'refs/heads/main:refs/heads/main',
+    'refs/heads/run-unfiled-author-fixture:refs/heads/author');
+  bare.git('remote', 'add', 'origin', f.root);
+  bare.git('config', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main');
+  const paths = [join(bare.dir, 'first'), join(bare.dir, 'second')];
+  for (const path of paths) bare.git('worktree', 'add', '--detach', path, 'author');
+  const git = (path: string, ...args: string[]) => bare.git('-C', path, ...args);
+  const receipt = () => JSON.parse(readFileSync(join(paths[0], 'coverage/preflight-author.json'), 'utf8'));
+  let selected = 0;
+  const select = () => { selected++; return { fullRun: true, suites: [], reasons: ['fixture'] }; };
+  for (const path of paths) assert.equal(git(path, 'rev-parse', '--is-inside-work-tree'), 'true');
+  for (const argv of [[], ['--dry-run']]) {
+    assert.equal(mod.main(argv, { root: paths[0], select }), 1);
+    assert.equal(receipt().gitTopology.state, 'hazardous-common-config');
+    assert.match(receipt().error, /owned, idle worktreeConfig migration/);
+    assert.deepEqual(receipt().steps, []);
+    assert.equal(receipt().testSlot, undefined);
+  }
+  assert.equal(selected, 0);
+  assert.equal(bare.git('config', '--local', '--get', 'core.bare'), 'true', 'the gate never migrates shared state');
+  // Positive defect control: this real Git transition breaks BOTH linked working trees.
+  bare.git('config', '--local', 'extensions.worktreeConfig', 'true');
+  for (const path of paths) assert.equal(git(path, 'rev-parse', '--is-inside-work-tree'), 'false');
+  assert.equal(mod.main([], { root: paths[0], select }), 1);
+  assert.equal(receipt().gitTopology.state, 'not-worktree');
+  assert.equal(selected, 0);
+  // Only the fixture owner performs Git's documented main-worktree migration.
+  bare.git('config', '--worktree', 'core.bare', 'true');
+  bare.git('config', '--local', '--unset', 'core.bare');
+  assert.equal(bare.git('rev-parse', '--is-bare-repository'), 'true');
+  for (const path of paths) assert.equal(git(path, 'rev-parse', '--is-inside-work-tree'), 'true');
+  assert.equal(mod.main(['--dry-run'], { root: paths[0], select }), 0);
+  assert.equal(selected, 1);
+  assert.equal(receipt().gitTopology.state, 'safe');
+  assert.equal(receipt().verdict, 'not-run', 'a dry-run topology control is not author assurance');
+});
+
+test('author preflight refuses shared core.worktree before selection without changing the operator configuration', () => {
+  const f = fixture();
+  f.git('config', '--local', 'core.worktree', f.root);
+  let selected = 0;
+  const select = () => { selected++; return { fullRun: true, suites: [], reasons: ['fixture'] }; };
+  assert.equal(mod.main([], { root: f.root, select }), 1);
+  assert.equal(selected, 0);
+  assert.equal(f.receipt().gitTopology.state, 'hazardous-common-config');
+  assert.equal(f.git('config', '--local', '--get', 'core.worktree'), f.root);
+  assert.deepEqual(f.receipt().steps, []);
+  f.git('config', '--local', '--unset', 'core.worktree');
+  assert.equal(mod.main(['--dry-run'], { root: f.root, select }), 0);
+  assert.equal(selected, 1);
+});
+
+test('author preflight preserves unreadable or ambiguous Git topology as refusal rather than safe admission', () => {
+  for (const result of [
+    { status: 128, stdout: '', stderr: 'fixture unreadable config', signal: null },
+    { status: null, stdout: '', stderr: '', signal: 'SIGTERM' },
+    { status: null, stdout: '', stderr: '', signal: null, error: new Error('fixture Git spawn failure') },
+    { status: 0, stdout: 'unavailable\n', stderr: '', signal: null },
+    { status: 1, stdout: 'false\n', stderr: '', signal: null },
+  ]) {
+    const f = fixture();
+    let selected = false;
+    const spawn = ((file: string, args: string[], opts: Parameters<typeof spawnSync>[2]) =>
+      file === 'git' && args.includes('core.bare')
+        ? { ...result, pid: 0, output: [] } : spawnSync(file, args, opts)) as typeof spawnSync;
+    assert.equal(mod.main([], { root: f.root, spawn, select: () => { selected = true; return {}; } }), 1);
+    assert.equal(selected, false);
+    assert.equal(f.receipt().gitTopology.state, 'unknown');
+    assert.match(f.receipt().error, /shared Git core.bare is (unreadable|ambiguous)/);
+    assert.deepEqual(f.receipt().steps, []);
+  }
+});
+
 test('author preflight refuses a real shallow boundary before selection or expensive validation even when every object is present', () => {
   const f = fixture();
   const head = f.git('rev-parse', 'HEAD');
