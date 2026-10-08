@@ -27,6 +27,7 @@ import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
+  armOutcomeReason,
   decideArmReprobeFromFacts,
   armFailureAction,
   baseBranchRequiresMergeQueue,
@@ -1986,11 +1987,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId) => {
+  // W1-T6595: `checksGreenReviewed` carries what the `mergeable` disposition observed, so a green,
+  // reviewed plan PR GitHub reads `blocked` reaches the direct merge a local review would make.
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined, checksGreenReviewed: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId, checksGreenReviewed) => {
     const prNumber = prNumberFromRef(prUrl);
     const armDeps = realArmDepsAsync(() => config);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
-      { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl) });
+      { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl),
+        ...(checksGreenReviewed ? { checksGreenReviewed: true as const } : {}) });
   };
   let mainCommitRead: Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> | undefined;
   const readMainCommit = (): Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> => {
@@ -2263,7 +2267,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         async (prUrl, taskId) => {
           const result = await (idleDeps
             ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
-            : sweepArmImpl(prUrl, taskId));
+            : sweepArmImpl(prUrl, taskId, checksGreenReviewSuccess(pr)));
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
@@ -9078,7 +9082,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "mergeable",
     when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
-    reason: () => "review success, required checks green — arming auto-merge",
+    // W1-T6595: a plan PR is never armed (W1-T5615), so its row says what the sweep does instead.
+    reason: (pr) => (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"))
+      ? MERGEABLE_PLAN_PR_REASON
+      : "review success, required checks green — arming auto-merge",
   },
   {
     // W1-T176 — a required check with ZERO observed runs is DETERMINISTIC-ACTION, not
@@ -9495,6 +9502,10 @@ export function distanceRefreshCause(
 }
 
 /** P22's "required contexts green, review success": the `mergeable` disposition row's own match. */
+/** W1-T6595 — the `mergeable` row's reason for a plan PR, which is merged directly, never armed. */
+export const MERGEABLE_PLAN_PR_REASON =
+  "review success, required checks green — a plan PR is never armed (W1-T5615): merging directly";
+
 function checksGreenReviewSuccess(pr: Pick<OpenPrView, "checksState" | "reviewState">): boolean {
   return pr.checksState === "green" && pr.reviewState === "success";
 }
@@ -14674,6 +14685,10 @@ export async function runSweep(
                 const stillIdle = !["direct-merged", "head-unavailable", "ledger-refused", "hold-refused",
                   "draft-refused", "stack-parent-refused"].includes(armOutcomeName ?? "unknown");
                 recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown" });
+              }
+              // W1-T6595: a held plan PR's row names the hold, never an arm that was not attempted.
+              if (armOutcomeName === "plan-pr-held") {
+                reason = `review success, required checks green — held: ${armOutcomeReason("plan-pr-held", "")}`;
               }
               if (!armOutcomeArmed(armOutcomeName) || (armedIdleDue && armOutcomeName === undefined)) {
                 acted = false;
