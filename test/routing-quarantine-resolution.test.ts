@@ -126,3 +126,74 @@ test("the real daily CLI reads its default private resolution file and preserves
     assert.notEqual(spawnSync(process.execPath, command, { encoding: "utf8" }).status, 0);
   } finally { f.close(); }
 });
+
+test("the private resolution reader uses the checked descriptor when its pathname becomes a symlink", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.outDir);
+    const file = join(f.outDir, "quarantine-resolutions.json");
+    const replaced = join(f.dir, "replacement.json");
+    writeFileSync(file, JSON.stringify(manifest([entry()])), { mode: 0o600 });
+    writeFileSync(replaced, JSON.stringify(manifest([])), { mode: 0o600 });
+    const preload = join(f.dir, "swap-after-stat.mjs");
+    writeFileSync(preload, `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const target=${JSON.stringify(file)}, replacement=${JSON.stringify(replaced)};
+const original=fs.lstatSync(target), realLstat=fs.lstatSync, realFstat=fs.fstatSync;
+let swapped=false;
+const swap=(s)=>{if(!swapped&&s.ino===original.ino&&s.dev===original.dev){swapped=true;fs.unlinkSync(target);fs.symlinkSync(replacement,target);}return s;};
+fs.lstatSync=(path,...args)=>swap(realLstat(path,...args));
+fs.fstatSync=(fd,...args)=>swap(realFstat(fd,...args));
+syncBuiltinESMExports();process.on('exit',()=>{if(!swapped)process.exitCode=99;});`);
+    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
+      "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
+    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const saved = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
+    assert.equal(saved.sources[0].routingResolvedFutureRows, 1, "the opened original supplies the resolution");
+    assert.equal(saved.sources[0].reports[0].sourceQuality.state, "observed");
+  } finally { f.close(); }
+});
+
+test("a private resolution file growing after descriptor inspection still hits the real byte bound", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.outDir);
+    const file = join(f.outDir, "quarantine-resolutions.json");
+    writeFileSync(file, JSON.stringify(manifest([])), { mode: 0o600 });
+    const preload = join(f.dir, "grow-after-stat.mjs");
+    writeFileSync(preload, `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const target=${JSON.stringify(file)}, original=fs.lstatSync(target), real=fs.fstatSync;
+let grown=false;fs.fstatSync=(fd,...args)=>{const s=real(fd,...args);if(!grown&&s.ino===original.ino&&s.dev===original.dev){grown=true;fs.appendFileSync(target,' '.repeat(65537));}return s;};
+syncBuiltinESMExports();process.on('exit',()=>{if(!grown)process.exitCode=99;});`);
+    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
+      "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
+    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /exceed the private input byte bound/);
+  } finally { f.close(); }
+});
+
+test("the private resolution reader refuses directories, oversized files and nonblocking FIFOs", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.outDir);
+    const file = join(f.outDir, "quarantine-resolutions.json");
+    const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
+    const command = ["--import", "tsx", script, "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir];
+    const run = () => spawnSync(process.execPath, command,
+      { cwd: join(import.meta.dirname, ".."), encoding: "utf8", timeout: 10_000 });
+    mkdirSync(file);
+    assert.notEqual(run().status, 0);
+    rmSync(file, { recursive: true });
+    writeFileSync(file, " ".repeat(65_537), { mode: 0o600 });
+    assert.notEqual(run().status, 0);
+    rmSync(file);
+    const created = spawnSync("mkfifo", [file], { encoding: "utf8" });
+    assert.equal(created.status, 0, created.stderr);
+    const fifo = run();
+    assert.equal(fifo.error, undefined, "opening a FIFO must refuse without waiting for a writer");
+    assert.notEqual(fifo.status, 0);
+  } finally { f.close(); }
+});

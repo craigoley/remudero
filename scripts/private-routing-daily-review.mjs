@@ -1,6 +1,6 @@
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -182,14 +182,26 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const resolutionPath = values["quarantine-resolutions"] ?? join(values["out-dir"], "quarantine-resolutions.json");
   if (!isAbsolute(resolutionPath)) throw new Error("quarantine resolutions require an absolute private path");
   let quarantineResolutions;
+  let resolutionFd;
   try {
-    const st = lstatSync(resolutionPath);
+    // Validate and read the same opened object; replacing the pathname cannot redirect the read.
+    resolutionFd = openSync(resolutionPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(resolutionFd);
     if (!st.isFile() || (st.mode & 0o777) !== 0o600 || st.size > 64 * 1024)
       throw new Error("quarantine resolutions require a bounded regular private file");
-    quarantineResolutions = JSON.parse(readFileSync(resolutionPath, "utf8"));
+    const bytes = Buffer.alloc(64 * 1024 + 1);
+    let length = 0, count;
+    do {
+      count = readSync(resolutionFd, bytes, length, bytes.length - length, null);
+      length += count;
+    } while (count > 0 && length < bytes.length);
+    if (length > 64 * 1024) throw new Error("quarantine resolutions exceed the private input byte bound");
+    quarantineResolutions = JSON.parse(bytes.subarray(0, length).toString("utf8"));
   } catch (error) {
     if (values["quarantine-resolutions"] || error.code !== "ENOENT") throw error;
     // An absent optional manifest preserves the original unqualified source warnings.
+  } finally {
+    if (resolutionFd !== undefined) closeSync(resolutionFd);
   }
   const result = await dailyRoutingReview({ sources, outDir: values["out-dir"], quarantineResolutions });
   console.log(result.text.trimEnd());
