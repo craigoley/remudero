@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,9 +10,10 @@ import type { GardenCheckout, GardenerDeps } from "../src/lib/gardener.js";
 import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
 import type { PlanInventory } from "../src/lib/plan-gardener.js";
 import {
-  SCOUT_SURVIVAL_WINDOW_MS, SCOUT_UNPRIORITIZED_SHARE_BOUND, SCOUT_WINDOW_MS, scoutGardenSpec, type ScoutSources,
+  SCOUT_SURVIVAL_WINDOW_MS, SCOUT_UNPRIORITIZED_SHARE_BOUND, SCOUT_WINDOW_MS, readMergedTasks, scoutGardenSpec, type ScoutSources,
 } from "../src/lib/scout-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 8, 12);
@@ -30,7 +32,7 @@ function task(id: string, fields: Partial<Task> = {}): Task {
 }
 const planOf = (open: Task[], all: Task[] = open): PlanInventory => ({ open, all, shards: new Map() });
 
-function fixture(opts: { ledger?: Record<string, unknown>[]; open?: Task[]; all?: Task[]; merged?: Record<string, number>; mergedLastDay?: number } = {}) {
+function fixture(opts: { ledger?: Record<string, unknown>[]; open?: Task[]; all?: Task[]; merged?: Record<string, number>; mergedLastDay?: number; mint?: () => string } = {}) {
   const logs: Array<{ step: string; fields?: Record<string, unknown> }> = [];
   const deps: GardenerDeps = {
     repoRoot: "/unused", stateDir: "/unused", clock: fixedClock(NOW), log: (step, fields) => logs.push({ step, fields }),
@@ -45,7 +47,7 @@ function fixture(opts: { ledger?: Record<string, unknown>[]; open?: Task[]; all?
     mergedLastDay: () => opts.mergedLastDay ?? 5,
     pricedSteps: () => new Set(["fix.commit_refused"]),
     fileExists: (p) => p === "src/lib/widget.ts",
-    mintTaskId: () => `W1-T${++next}`,
+    mintTaskId: opts.mint ?? (() => `W1-T${++next}`),
   };
   return { spec: scoutGardenSpec(deps, sources), logs };
 }
@@ -153,4 +155,69 @@ test("W1-T5454: the default ledger read keeps only failure-shaped rows inside th
   });
   const inv = spec.inventory();
   assert.deepEqual(inv.symptoms.map((s) => [s.step, s.older, s.newer]), [["disk.probe_unavailable", 2, 3]]);
+});
+
+function commitAt(dir: string, iso: string, message: string): void {
+  execFileSync("git", ["-C", dir, "commit", "-q", "--allow-empty", "-m", message], {
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso,
+    },
+  });
+}
+
+test("W1-T5454: merged tasks are read from the trailers on main's history, earliest merge winning", () => {
+  const repo = gitRepo({ kind: "scout-merged" });
+  commitAt(repo.dir, "2026-01-01T00:00:00Z", "feat: long ago (#1)\n\nRemudero-Task: W1-T1");
+  commitAt(repo.dir, "2026-10-01T10:00:00Z", "feat: first (#2)\n\nRemudero-Task: W1-T2");
+  commitAt(repo.dir, "2026-10-02T10:00:00Z", "fix: two at once (#3)\n\nRemudero-Task: W1-T3\nRemudero-Task: W1-T4");
+  commitAt(repo.dir, "2026-10-03T10:00:00Z", "fix: a rerun of the first (#4)\n\nRemudero-Task: W1-T2");
+  commitAt(repo.dir, "2026-10-03T11:00:00Z", "chore: mentions Remudero-Task: W1-T9 inline, not as a trailer (#5)");
+  // No origin/main in this fixture: HEAD's history is read instead.
+  const merged = readMergedTasks(repo.dir, "2026-09-01T00:00:00Z");
+  assert.deepEqual([...merged.entries()].sort(([a], [b]) => a.localeCompare(b)), [
+    ["W1-T2", Date.parse("2026-10-01T10:00:00Z")],
+    ["W1-T3", Date.parse("2026-10-02T10:00:00Z")],
+    ["W1-T4", Date.parse("2026-10-02T10:00:00Z")],
+  ]);
+
+  // With an origin/main, that ref is the history: a commit only HEAD holds has not merged.
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  commitAt(repo.dir, "2026-10-04T10:00:00Z", "feat: local only (#6)\n\nRemudero-Task: W1-T7");
+  const onMain = readMergedTasks(repo.dir, "2026-09-01T00:00:00Z");
+  assert.equal(onMain.has("W1-T7"), false, "a commit absent from origin/main is not a merge");
+  assert.equal(onMain.has("W1-T3"), true);
+});
+
+test("W1-T5454: a merge history that cannot be read is an error, never an empty answer", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scout-nogit-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.throws(() => readMergedTasks(dir, "2026-09-01T00:00:00Z"), /scout gardener: git log HEAD failed/);
+});
+
+test("W1-T5454: the scorecard counts what the pass saw and what it proposes", () => {
+  const ledger = rows("widget.sync_failed", 3, 4, { file: "src/lib/widget.ts" });
+  const { spec } = fixture({ ledger });
+  const inv = spec.inventory();
+  const plan = { actions: spec.candidates(inv, () => 0), acting: ["file-uncovered-symptom" as const] };
+  assert.deepEqual(spec.scorecard(inv, plan), {
+    symptoms: 1, covered: 0, uncovered: 1, proposed: 1, merge_budget: 5, open: 0, unprioritized_share: 0, blocked: false, survival: [],
+  });
+});
+
+test("W1-T5454: a record the lint refuses is logged and never written", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scout-refused-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // An id that cannot render into a parseable record is refused by the renderer, not thrown.
+  const { spec, logs } = fixture({ ledger: rows("widget.sync_failed", 3, 4), mint: () => "W1-T9: [" });
+  const inv = spec.inventory();
+  const plan = { actions: spec.candidates(inv, () => 0), acting: ["file-uncovered-symptom" as const] };
+  assert.equal(spec.apply(workspace(root), plan, {}), undefined, "nothing written means nothing to land");
+  const refused = logs.find((l) => l.step === "scout.record_refused");
+  assert.ok(refused, "the refusal is logged");
+  assert.equal(refused.fields?.step, "widget.sync_failed");
+  assert.match(String(refused.fields?.reason), /^unparseable: /);
+  assert.equal(existsSync(join(root, "plan")), false, "no shard directory was created");
 });
