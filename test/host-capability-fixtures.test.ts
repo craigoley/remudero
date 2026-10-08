@@ -137,6 +137,15 @@ const CHMOD_REMEDY =
 const DECLARED: readonly Declared[] = [
   {
     kind: "chmod",
+    file: "routing-quarantine-resolution.test.ts",
+    key: "0o644",
+    count: 1,
+    reason:
+      "The daily collector refuses a resolution file unless its stat mode is exactly 0600. " +
+      "This fixture tests that explicit mode policy before reading, so the refusal holds at every uid.",
+  },
+  {
+    kind: "chmod",
     file: "worktree-reap-liveness.test.ts",
     key: "0o000",
     count: 3,
