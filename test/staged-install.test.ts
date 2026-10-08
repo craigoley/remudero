@@ -55,6 +55,15 @@ function withRoot(body: (root: string) => void): void {
   }
 }
 
+async function withRootAsync(body: (root: string) => Promise<void>): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4933-`));
+  try {
+    await body(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 /** A working clone sitting exactly at its bare origin's main, which holds `files` — refreshManagedCheckout reads it as `current`. */
 const currentWithOrigin = (files: Record<string, string>): string => {
   const origin = gitRepo({ bare: true, kind: "w1-t4933-origin" });
@@ -67,8 +76,8 @@ const currentWithOrigin = (files: Record<string, string>): string => {
   return clone.dir;
 };
 
-test("W1-T4933: a current checkout with a stale install is reinstalled on a lockfile change", () => {
-  withRoot((root) => {
+test("W1-T4933: a current checkout with a stale install is reinstalled on a lockfile change", async () => {
+  await withRootAsync(async (root) => {
     // A real clone sitting exactly at origin/main — refreshManagedCheckout returns `current` and (before this task) never installed.
     const repoDir = currentWithOrigin({
       ".gitignore": "node_modules\n",
@@ -80,7 +89,7 @@ test("W1-T4933: a current checkout with a stale install is reinstalled on a lock
     writeFileSync(installHashMarkerPath(repoDir), "hash-of-the-2026-09-24-inputs");
 
     const steps: string[] = [];
-    const out = refreshManagedCheckout(
+    const out = await refreshManagedCheckout(
       repoDir,
       join(root, "state", "refresh.lock"),
       (step) => void steps.push(step),
@@ -290,12 +299,12 @@ test("W1-T4933: the escalation names the repo and the hash and offers an actiona
   assert.ok(e.options.some((o) => o.label === e.recommendation));
 });
 
-test("W1-T4933: a failed install on a current checkout keeps the dispatch going and ledgers why", () => {
-  withRoot((root) => {
+test("W1-T4933: a failed install on a current checkout keeps the dispatch going and ledgers why", async () => {
+  await withRootAsync(async (root) => {
     const repoDir = currentWithOrigin({ "README.md": "x\n" });
     mkdirSync(join(repoDir, "node_modules"));
     const rows: Array<[string, Record<string, unknown> | undefined]> = [];
-    const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), (s, x) => void rows.push([s, x]), () => {
+    const out = await refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), (s, x) => void rows.push([s, x]), () => {
       throw new Error("npm ci exited 1");
     });
     out.release();

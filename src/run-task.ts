@@ -15664,25 +15664,37 @@ export type ManagedCheckoutRefresh = { release: () => void } & (
  * there keeps the old tree and the dispatch goes on. A dirty, diverged or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
  * caller's run.lock marks its own borrower, so a peer dispatch never mutates the tree under a worktree it could not yet see.
  */
-export async function refreshManagedCheckout(
+export function refreshManagedCheckout(
   repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   install?: (repoDir: string) => void | Promise<void>,
   escalate?: (failure: StagedInstallFailure) => void,
 ): Promise<ManagedCheckoutRefresh> {
-  if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+  if (!existsSync(join(repoDir, "node_modules"))) return Promise.resolve({ kind: "unborrowed", release: () => {} });
   // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
   const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
+  // W1-T6356: the lock is taken SYNCHRONOUSLY (a cheap file create) so a busy lock still throws from the call itself, which is
+  // what retryWhileLockBusy's try/catch sees; only the git work after it is awaited.
   let lock: DrainLockHandle;
   try {
     lock = acquireDrainLock(lockPath);
   } catch (error) {
     throw new ManagedCheckoutRefreshRefusedError(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
   }
-  const release = () => lock.release();
-  // W1-T6356: async, so a fetch over a slow origin never holds the daemon loop (the 2026-10-08 profile: 20.1 s and 29.5 s blocks).
+  // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
   const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
+  return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
+}
+
+/** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
+async function refreshHeldManagedCheckout(
+  repoDir: string,
+  release: () => void,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  runInstall: (repoDir: string) => void | Promise<void>,
+  git: (...args: string[]) => Promise<string>,
+): Promise<ManagedCheckoutRefresh> {
   const skip = (reason: string): ManagedCheckoutRefresh => {
     log("managed_checkout.refresh_skipped", { reason });
     return { kind: "skipped", reason, release };
