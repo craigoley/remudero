@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0b4fc85f2c80fec5
   attempts: 0
   files:
     - scripts/proof-discrimination-baseline.json

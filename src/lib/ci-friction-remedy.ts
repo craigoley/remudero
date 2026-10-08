@@ -221,6 +221,14 @@ export interface OwnerSearch {
    *  with its hit count. */
   filesContaining: (term: string) => Array<{ file: string; hits: number }>;
   fileExists: (file: string) => boolean;
+  pin?: () => OwnerSearch;
+  workflowOwner?: (family: string) => CiFrictionOwner | undefined;
+  evidence?: (key: string, details: readonly string[], owner?: CiFrictionOwner) => CiFrictionOwnershipEvidence;
+}
+
+export interface CiFrictionOwnershipEvidence {
+  fingerprint: string;
+  revision: string;
 }
 
 export interface CiFrictionOwner {
@@ -283,7 +291,13 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     return search.fileExists(file) ? { files: [file], why: [`${file}: main merged into the PR over a change to it`] } : undefined;
   }
   const terms = ownerSearchTerms(key, details);
-  const matches = terms.map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
+  const family = key.startsWith("check:") ? terms.at(-1) : undefined;
+  const distinctive = family && key.startsWith("check:ci-log:") ? terms.slice(0, -1) : [];
+  const generic = (term: string) => /^(ci|test|tests|coverage|build|check|checks)$/i.test(term.replace(/\s*\(\d+\/\d+\)\s*$/, "").trim());
+  const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
+  const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;
+  if (workflow) return { ...workflow, ...(testPath ? { failingTest: testPath } : {}) };
+  const matches = signatures.length > 0 ? signatures : terms.filter(term => !generic(term)).map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
   // Specificity is relative to this cause's own search, measured in distinct files, not hit volume.
   const breadth = (m: typeof matches[number]) => new Set(m.files.map((f) => f.file)).size;
   const narrowest = Math.min(...matches.map(breadth));
