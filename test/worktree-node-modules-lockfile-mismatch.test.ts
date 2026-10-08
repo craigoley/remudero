@@ -710,13 +710,13 @@ test("W1-T4933: default staged install failure reaches the dispatch escalation g
   }
 });
 
-test("W1-T4356: a checkout without its own node_modules is not borrowed, so it is never touched or locked", () => {
+test("W1-T4356: a checkout without its own node_modules is not borrowed, so it is never touched or locked", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-unborrowed-`));
   try {
     const { repoDir, before } = behindMain(root);
     rmSync(join(repoDir, "node_modules"), { recursive: true });
     const lockPath = join(root, "state", "refresh.lock");
-    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
+    const out = await refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
     assert.equal(out.kind, "unborrowed");
     assert.equal(existsSync(lockPath), false, "no lock is taken");
     out.release();
@@ -726,14 +726,14 @@ test("W1-T4356: a checkout without its own node_modules is not borrowed, so it i
   }
 });
 
-test("W1-T4356: a current checkout keeps its code and its lock is held until released (W1-T4933: its install is refreshed)", () => {
+test("W1-T4356: a current checkout keeps its code and its lock is held until released (W1-T4933: its install is refreshed)", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-current-`));
   try {
     const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
     mkdirSync(join(repoDir, "node_modules"));
     const lockPath = join(root, "state", "refresh.lock");
     const installs: string[] = [];
-    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, (dir) => void installs.push(dir));
+    const out = await refreshManagedCheckout(repoDir, lockPath, refreshLog().log, (dir) => void installs.push(dir));
     assert.equal(out.kind, "current");
     assert.deepEqual(installs, [repoDir], "W1-T4933: code that is current still has its install compared with its lockfile");
     assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), (e: unknown) =>
@@ -745,7 +745,7 @@ test("W1-T4356: a current checkout keeps its code and its lock is held until rel
   }
 });
 
-test("W1-T4356: an off-main, unfetchable, diverged or borrowed checkout is skipped with its reason and never moved", () => {
+test("W1-T4356: an off-main, unfetchable, diverged or borrowed checkout is skipped with its reason and never moved", async () => {
   const cases: Array<[string, (repoDir: string, root: string) => void, RegExp]> = [
     ["off-main", (dir) => void gitIn(dir, "checkout", "-q", "-b", "operator-branch"), /checkout is on operator-branch, not main/],
     ["unfetchable", (dir, root) => void gitIn(dir, "remote", "set-url", "origin", join(root, "gone.git")), /could not fetch origin/],
@@ -763,7 +763,7 @@ test("W1-T4356: an off-main, unfetchable, diverged or borrowed checkout is skipp
       arrange(repoDir, root);
       const head = gitIn(repoDir, "rev-parse", "HEAD").trim();
       const { lines, log } = refreshLog();
-      const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), log, () => assert.fail("never installs"));
+      const out = await refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), log, () => assert.fail("never installs"));
       out.release();
       assert.equal(out.kind, "skipped", name);
       assert.match(out.kind === "skipped" ? out.reason : "", reason, name);
@@ -775,7 +775,7 @@ test("W1-T4356: an off-main, unfetchable, diverged or borrowed checkout is skipp
   }
 });
 
-test("W1-T4356: the default install is ensureInstallFresh, which reinstalls only when the lockfile hash moved", () => {
+test("W1-T4356: the default install is ensureInstallFresh, which reinstalls only when the lockfile hash moved", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-default-`));
   try {
     const { repoDir, after } = behindMain(root);
@@ -783,7 +783,7 @@ test("W1-T4356: the default install is ensureInstallFresh, which reinstalls only
     const seedHash = hashInstallInputs(join(root, "seed"));
     mkdirSync(dirname(installHashMarkerPath(repoDir)), { recursive: true });
     writeFileSync(installHashMarkerPath(repoDir), seedHash);
-    const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), refreshLog().log);
+    const out = await refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), refreshLog().log);
     out.release();
     assert.equal(out.kind, "fast_forwarded");
     assert.equal(gitIn(repoDir, "rev-parse", "HEAD").trim(), after);
@@ -793,13 +793,13 @@ test("W1-T4356: the default install is ensureInstallFresh, which reinstalls only
   }
 });
 
-test("W1-T4356: a checkout git cannot read is refused and its lock released", () => {
+test("W1-T4356: a checkout git cannot read is refused and its lock released", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-unreadable-`));
   try {
     const repoDir = join(root, "not-a-repo");
     mkdirSync(join(repoDir, "node_modules"), { recursive: true });
     const lockPath = join(root, "state", "refresh.lock");
-    assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), ManagedCheckoutRefreshRefusedError);
+    await assert.rejects(refreshManagedCheckout(repoDir, lockPath, refreshLog().log), ManagedCheckoutRefreshRefusedError);
     assert.equal(existsSync(lockPath), false, "a refusal never strands the lock");
   } finally {
     rmSync(root, { recursive: true, force: true });
