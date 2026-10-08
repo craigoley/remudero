@@ -5,7 +5,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { MessageChannel, Worker } from "node:worker_threads";
-import { createLedgerRotationMemo, ledgerRotationEntries, replyToRotationDigestRequest } from "../src/lib/ledger-union.js";
+import { createLedgerRotationMemo, ledgerRotationEntries, registerRotationDigestCodec } from "../src/lib/ledger-union.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const holder = "landed-rotation";
@@ -38,13 +38,20 @@ function digestCodecFixture() {
   return { requests: identifiedRequests, replies };
 }
 
-test("the digest codec replies preserve valid rows and reject corrupt shapes and json errors", async () => {
+test("the digest codec registers only its worker kind and replies with valid rows and json errors", async () => {
   const { requests, replies } = digestCodecFixture();
   const { port1, port2 } = new MessageChannel();
   try {
+    assert.doesNotThrow(() => registerRotationDigestCodec(null, "rotation-digest-codec"));
+    for (const kind of [undefined, "unrelated-worker"]) {
+      registerRotationDigestCodec(port1, kind);
+      assert.equal(port1.listenerCount("message"), 0, "other workers must not install the digest codec");
+    }
+    registerRotationDigestCodec(port1, "rotation-digest-codec");
+    assert.equal(port1.listenerCount("message"), 1, "the codec worker installs its message handler");
     for (let index = 0; index < requests.length; index++) {
       const received = once(port2, "message");
-      replyToRotationDigestRequest(requests[index], port1);
+      port2.postMessage(requests[index]);
       assert.deepEqual(await received, [replies[index]], `codec reply for request ${index}`);
     }
   } finally {

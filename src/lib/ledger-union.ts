@@ -964,9 +964,16 @@ export function replyToRotationDigestRequest(
   }
 }
 
-if (!isMainThread && workerData?.kind === ROTATION_DIGEST_CODEC) {
-  parentPort!.on("message", replyToRotationDigestRequest);
+export function registerRotationDigestCodec(
+  port: Pick<MessagePort, "on" | "postMessage"> | null,
+  kind: unknown,
+): void {
+  if (port && kind === ROTATION_DIGEST_CODEC) {
+    port.on("message", (request: DigestCodecRequest) => replyToRotationDigestRequest(request, port));
+  }
 }
+
+registerRotationDigestCodec(parentPort, workerData?.kind);
 
 let digestCodecWorker: Worker | undefined;
 let digestCodecId = 0;
