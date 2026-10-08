@@ -105,7 +105,7 @@ test('author static admission holds one real slot from static preflight through 
   writeFileSync(join(f.root, 'src/run-task.ts'), `
     import assert from 'node:assert/strict';
     import { readFileSync, writeFileSync } from 'node:fs';
-    const { acquireTestSlot } = await import(${JSON.stringify(slotModule)});
+    import { acquireTestSlot } from ${JSON.stringify(slotModule)};
     const claim=JSON.parse(process.env.RMD_TEST_SLOT_PARENT ?? 'null');
     assert.ok(claim, 'static preflight must already hold a parent slot');
     const before=readFileSync(claim.path,'utf8');

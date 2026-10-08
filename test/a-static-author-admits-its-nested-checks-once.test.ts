@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { acquireTestSlot, resolveTestSlotDir, testSlotProcessFacts, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
+import { acquireTestSlot, resolveTestSlotDir, testSlotHasAncestor, testSlotProcessFacts, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const probe = `
@@ -145,4 +145,7 @@ test("author static admission: kernel identity has real defaults and unknown fac
   assert.deepEqual(testSlotProcessFacts(5, () => "bad proc", () => " 1 Mon Oct 5 00:00:00 2026\n"),
     { start: "ps:Mon Oct 5 00:00:00 2026", parent: 1 });
   assert.equal(testSlotProcessFacts(5, () => { throw Error("no proc"); }, () => "bad ps"), undefined);
+  assert.equal(testSlotHasAncestor(1, 2_000_000_000), false, 'an unknown real process never certifies ancestry');
+  assert.equal(testSlotHasAncestor(7, 3, () => ({ parent: 3, start: 'loop' })), false);
+  assert.equal(testSlotHasAncestor(7, 1000, (pid) => ({ parent: pid + 1, start: 'unbounded' })), false);
 });

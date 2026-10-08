@@ -197,12 +197,13 @@ export function testSlotProcessFacts(pid: number,
   return undefined;
 }
 
-function isTestSlotAncestor(pid: number): boolean {
-  let child = process.pid;
+/** Bounded ancestry measurement; production borrowing always uses the actual defaults. */
+export function testSlotHasAncestor(pid: number, childPid = process.pid, factsFor = testSlotProcessFacts): boolean {
+  let child = childPid;
   const seen = new Set<number>();
   for (let depth = 0; depth < 64 && child > 1 && !seen.has(child); depth += 1) {
     seen.add(child);
-    const facts = testSlotProcessFacts(child);
+    const facts = factsFor(child);
     if (!facts) return false;
     if (facts.parent === pid) return true;
     child = facts.parent;
@@ -224,7 +225,7 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
         held.processStart !== claim.start || held.host !== hostname() ||
         held.concurrency !== claim.concurrency || !Number.isSafeInteger(held.concurrency) || held.concurrency! < 1) return { rejected: "different-holder" };
     if (testSlotProcessFacts(held.pid)?.start !== held.processStart) return { rejected: "dead-or-reused-owner" };
-    if (!isTestSlotAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
+    if (!testSlotHasAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
     return { lease: { outcome: "acquired", concurrency: held.concurrency!, waitedMs: 0,
       note: `inherited live parent test slot (${claim.path}); --test-concurrency=${held.concurrency}`,
       childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
