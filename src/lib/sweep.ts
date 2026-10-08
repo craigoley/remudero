@@ -7461,6 +7461,33 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
+/** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
+ *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
+export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
+
+/** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
+ *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else
+ *  `undefined`. Behind 0 or unknown is no evidence: the head already carries main, or nothing says. */
+export function fixedOnMainTestFiles(
+  pr: OpenPrView,
+  mainTipSha: string | undefined,
+  behindMainByPr: ReadonlyMap<number, number> | undefined,
+  probes: ReadonlyMap<string, BaseProbeFile>,
+): string[] | undefined {
+  const files = baseReproductionFiles(pr.ciFailures ?? []);
+  if (mainTipSha === undefined || files.length === 0 || (behindMainByPr?.get(pr.prNumber) ?? 0) <= 0) return undefined;
+  const recorded = files.map((file) => probes.get(probeCacheKey(mainTipSha, file)));
+  if (recorded.some((probe) => probe === undefined)) return undefined;
+  return decideBaseReproduction(files, recorded as BaseProbeFile[]) === "clear" ? files : undefined;
+}
+
+/** W1-T6405 — the one ledger row of a fixed-on-main refresh, written by the fix rung and the stalled-stage rung alike. */
+export function baseFixedRefreshRow(
+  runId: string, pr: OpenPrView, mainSha: string, testFiles: readonly string[], outcome: string,
+) {
+  return { run_id: runId, task_id: pr.taskId ?? "SWEEP", step: BASE_FIXED_REFRESH_STEP, pr_number: pr.prNumber,
+    head_sha: pr.headSha, main_sha: mainSha, test_files: [...testFiles], outcome };
+}
 
 /** Per `pr@head`: the check a prior pass stood down as a base red, whether its one refresh was
  *  spent, and (W1-T6024) whether a probe reproduced its red on main before main next went green. */
@@ -7478,7 +7505,7 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
     if (typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
     const key = `${line.pr_number}@${line.head_sha}`;
     if (line.step === BASE_RED_STOOD_DOWN_STEP && typeof line.check_name === "string") stoodDown.set(key, line.check_name);
-    if (line.step === BASE_RED_REFRESH_STEP) refreshed.add(key);
+    if (line.step === BASE_RED_REFRESH_STEP || line.step === BASE_FIXED_REFRESH_STEP) refreshed.add(key);
     if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
   return { stoodDown, refreshed, reproducedBeforeGreen };
@@ -12665,6 +12692,34 @@ export async function runSweep(
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const diagnoses: string[] = [];
+    // W1-T6405 — an own-red whose failing test files all pass at main's CURRENT tip, on a head behind
+    // that main, is not this PR's red: take main once instead of escalating, and let the refreshed
+    // head's own CI decide. A red that survives the refresh is a new own-red stage and escalates.
+    const fixedFiles = fields.blocker === "own-red"
+      ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
+    if (fixedFiles !== undefined && mainTipSha !== undefined) {
+      const refreshKey = `${pr.prNumber}@${pr.headSha}`;
+      const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+      let outcome = typeof prior?.outcome === "string" ? prior.outcome : undefined;
+      if (prior === undefined && !baseRedHistory.refreshed.has(refreshKey) && deps.updateBranch) {
+        // This pass's ONE base-red refresh went to another PR: the next pass takes this one.
+        if (baseRedRefreshPr !== undefined && baseRedRefreshPr !== pr.prNumber) return;
+        baseRedRefreshPr = pr.prNumber;
+        try { outcome = await deps.updateBranch(pr); }
+        catch (error) { outcome = `error: ${String(error)}`; }
+        appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome));
+        baseRedHistory.refreshed.add(refreshKey);
+      }
+      if (outcome === "updated" || outcome === "head-moved") {
+        const row = { pr_number: pr.prNumber, ...fields, diagnosis: "fixed-on-main", bound_minutes: bound.minutes,
+          bound_kind: bound.kind, main_sha: mainTipSha, test_files: fixedFiles, refresh_outcome: outcome };
+        record("pr.stuck", row);
+        stuckStages.set(key, row);
+        return;
+      }
+      diagnoses.push(`fixed-on-main (branch refresh ${outcome ?? "unavailable"})`);
+    }
     if (stageRows.some(row => row.step === "review.posted") &&
         !stageRows.some(row => row.step === "automerge.armed")) diagnoses.push("review loop");
     const lastFix = currentRows.findLast(row => belongs(row) && row.step === "fix.done" && row.pushed_head_sha === pr.headSha);
@@ -14897,16 +14952,23 @@ export async function runSweep(
                 }
                 const previouslyReproduced = reproductionHistory.some((line) => line.step === "sweep.base_reproduction" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.verdict === "reproduced" && line.main_sha !== mainTipSha);
-                if (verdict === "clear" && previouslyReproduced && !baseRedHistory.refreshed.has(key)) {
+                // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
+                // reproduced — a head BEHIND that main still takes it once before any fix round.
+                const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
+                if (verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key)) {
                   acted = false;
                   if (deps.updateBranch && baseRedRefreshPr === undefined) {
                     baseRedRefreshPr = pr.prNumber;
                     let outcome: string;
                     try { outcome = await deps.updateBranch(pr); }
                     catch (error) { outcome = `error: ${String(error)}`; }
-                    appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
+                    appendLine(deps.ledgerPath, fixedOnMain
+                      ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, outcome)
+                      : { ...row, step: BASE_RED_REFRESH_STEP, outcome });
                     baseRedHistory.refreshed.add(key);
-                    standDownReason = `base reproduction clear at main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched`;
+                    standDownReason = fixedOnMain
+                      ? `failing test file(s) ${reproductionFiles.join(", ")} already fixed on main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched or strike spent`
+                      : `base reproduction clear at main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched`;
                   } else {
                     standDownReason = `base reproduction clear at main ${mainTipSha}; this pass's branch refresh is spent or unwired — no fix dispatched`;
                   }
