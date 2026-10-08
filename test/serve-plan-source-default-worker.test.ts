@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -102,9 +103,11 @@ test("real default worker and Plan-view agree on the adopted generation after an
     view = await get("/v1/plan/view");
   }
   const expected = planFilesIdentity(join(repoRoot, "plan", "tasks.yaml"));
+  const publicIdentity = Buffer.byteLength(expected) <= 1_024 ? expected : `sha256:${createHash("sha256").update(expected).digest("hex")}`;
   assert.equal(view.body.planSource.state, "loaded", "serve adopted the plan once the default worker published one");
   assert.equal(view.body.planSource.generation, 1);
-  assert.equal(view.body.planSource.identity, expected, "Plan-view names the generation the worker projected from");
+  assert.ok(Buffer.byteLength(view.body.planSource.identity) <= 1_024, "source metadata stays bounded even for the real core plan");
+  assert.equal(view.body.planSource.identity, publicIdentity, "Plan-view identifies the complete generation the worker projected from");
   assert.ok(snapshots.includes(expected), "and the worker published that same generation");
   assert.ok(view.body.sections.length > 0 || view.body.progress.total > 0, "the adopted plan has real tasks");
   assert.equal((await get("/v1/status")).status, 200, "the board worker and Plan-view now agree");

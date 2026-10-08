@@ -74,6 +74,7 @@
     "ci.yaml": {
       "entries": [
         "a-board-wide-plan-red-is-main",
+        "analyze-javascript-typescript-gate-pre-push-steps",
         "body-fetch-guards-on-http-not-size",
         "ci-shard-one-eight-refuses-conflict-markers",
         "claims-gate-lane",
@@ -100,7 +101,9 @@
       ],
       "globs": [
         ".github/**",
+        ".github/workflows/ci-gate.yml",
         ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml",
         "docs/comment-standard.md",
         "hooks/pre-commit",
         "learnings/ci.yaml",

@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T6154: the Analyze (javascript-typescript) gate lesson must reach the lane
+  that trips it through a matched learning and an executable acceptance proof.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
