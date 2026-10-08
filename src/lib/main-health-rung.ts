@@ -8,6 +8,7 @@ import {
 import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "./base-reproduction.js";
 import { appendLedger } from "./ledger.js";
+import { clockFromMillisFn, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import {
   CHECK_REQUEUE_STEP,
@@ -128,7 +129,16 @@ export interface MainHealthRungDeps {
   /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
   /** W1-T6403: the red-main repair lane — a fix PR first, then a revert PR. Absent, a red escalates as before. */
-  repair?: MainRepairDeps;
+  repair?: {
+    /** One priority fix run on `request.branch` off origin/main; the PR url, or undefined when none opened. */
+    openFixPr(request: MainRepairFixRequest): Promise<string | undefined>;
+    /** Revert on `request.branch` off origin/main, push that branch, open the PR against `request.base`. */
+    openRevertPr(request: MainRepairRevertRequest): Promise<MainRepairRevertResult>;
+    readPr(prUrl: string): Awaitable<MainRepairPrState>;
+    closePr(prUrl: string, comment: string): Awaitable<void>;
+    /** W1-T6024's base-reproduction probe, run at any sha — the bisect fallback's only runner. */
+    reproduce?(sha: string, files: readonly string[]): Promise<BaseProbeResult>;
+  };
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -487,19 +497,6 @@ export interface MainRepairPrState {
   headSha?: string;
 }
 
-/** The effects the repair lane drives. `openFixPr` and `openRevertPr` run OFF the observe path (a fix
- *  worker takes minutes), so the sweep that awaits this rung is never held by them. */
-export interface MainRepairDeps {
-  /** One priority fix run on `request.branch` off origin/main; the PR url, or undefined when none opened. */
-  openFixPr(request: MainRepairFixRequest): Promise<string | undefined>;
-  /** Revert on `request.branch` off origin/main, push that branch, open the PR against `request.base`. */
-  openRevertPr(request: MainRepairRevertRequest): Promise<MainRepairRevertResult>;
-  readPr(prUrl: string): Awaitable<MainRepairPrState>;
-  closePr(prUrl: string, comment: string): Awaitable<void>;
-  /** W1-T6024's base-reproduction probe, run at any sha — the bisect fallback's only runner. */
-  reproduce?(sha: string, files: readonly string[]): Promise<BaseProbeResult>;
-}
-
 /** The current repair episode, read back from the ledger: rows since the last `main.repair.resolved`. */
 export interface MainRepairEpisode {
   offendingSha?: string;
@@ -544,7 +541,7 @@ type Located = { offendingSha: string; offendingPr?: number; method: "first-red-
 export async function bisectOffendingMerge(
   firstParents: readonly string[],
   files: readonly string[],
-  reproduce: NonNullable<MainRepairDeps["reproduce"]>,
+  reproduce: NonNullable<NonNullable<MainHealthRungDeps["repair"]>["reproduce"]>,
 ): Promise<{ offendingSha: string } | { reason: string }> {
   const verdictAt = async (sha: string) => decideBaseReproduction(files, await reproduce(sha, files));
   const [head] = firstParents;
@@ -569,20 +566,15 @@ interface RedContext {
   failures: readonly CiFailure[];
 }
 
-interface RepairLaneDeps {
-  owner: string;
-  repo: string;
-  ledgerPath: string;
-  runId: string;
-  fetch: GhApiFetcher;
-  mergeReader: MainHealthMergeReader;
-  log: MainHealthRungDeps["log"];
-  now: () => number;
-  repair: MainRepairDeps;
-}
-
-/** The lane's per-process state. Dedupe lives in the ledger; this holds only what is in flight. */
-function buildRepairLane(deps: RepairLaneDeps) {
+/** The lane composes the rung's effect port and resolved readers with repo identity and a Clock. */
+function buildRepairLane(
+  deps: Pick<MainHealthRungDeps, "ledgerPath" | "runId" | "fetch" | "log"> &
+    Required<Pick<MainHealthRungDeps, "mergeReader" | "repair">> & {
+      owner: string;
+      repo: string;
+      clock: Clock;
+    },
+) {
   const { repair } = deps;
   let job: Promise<void> | undefined;
   let bisected: { headSha: string; unlocated?: string } | undefined;
@@ -660,7 +652,7 @@ function buildRepairLane(deps: RepairLaneDeps) {
 
   const startFix = (ctx: RedContext, located: Pick<Located, "offendingSha" | "offendingPr">): void => {
     const startedIn = generation;
-    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}fix-${located.offendingSha.slice(0, 12)}-${deps.now()}`;
+    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}fix-${located.offendingSha.slice(0, 12)}-${deps.clock.now()}`;
     record("main.repair.fix_dispatched", { offending_sha: located.offendingSha, branch, priority: true });
     const request: MainRepairFixRequest = {
       headSha: ctx.headSha,
@@ -710,7 +702,7 @@ function buildRepairLane(deps: RepairLaneDeps) {
     }
     if (pr.state === "closed") return `fix PR ${episode.fixPrUrl} closed unmerged while main stayed red`;
     const key = `${pr.state}:${pr.headSha ?? ""}`;
-    const at = deps.now();
+    const at = deps.clock.now();
     if (fixProgress?.url !== episode.fixPrUrl || fixProgress.key !== key) {
       fixProgress = { url: episode.fixPrUrl, key, sinceMs: at, observations: 0 };
       return undefined;
@@ -727,7 +719,7 @@ function buildRepairLane(deps: RepairLaneDeps) {
   const startRevert = (ctx: RedContext, episode: MainRepairEpisode, why: string): void => {
     const offendingSha = episode.offendingSha!;
     const startedIn = generation;
-    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}revert-${offendingSha.slice(0, 12)}-${deps.now()}`;
+    const branch = `${MAIN_REPAIR_BRANCH_PREFIX}revert-${offendingSha.slice(0, 12)}-${deps.clock.now()}`;
     const request: MainRepairRevertRequest = {
       headSha: ctx.headSha,
       offendingSha,
@@ -871,9 +863,10 @@ export function buildMainHealthRung(
       return (Array.isArray(rows) ? rows : []).map((row) => row.filename).filter((f): f is string => typeof f === "string");
     });
   const freshMs = Math.max(0, deps.freshMs ?? 0);
-  const now = deps.now ?? Date.now;
+  const clock = clockFromMillisFn(deps.now);
+  const now = clock.now;
   const repairLane = deps.repair
-    ? buildRepairLane({ owner, repo, ledgerPath: deps.ledgerPath, runId: deps.runId, fetch: deps.fetch, mergeReader, log: deps.log, now, repair: deps.repair })
+    ? buildRepairLane({ owner, repo, ledgerPath: deps.ledgerPath, runId: deps.runId, fetch: deps.fetch, mergeReader, log: deps.log, clock, repair: deps.repair })
     : undefined;
   // W1-T6403: a red the lane is repairing is re-observed every tick, so its CI logs are read once per red signature.
   let ciEvidenceCache: { signature: string; failures?: CiFailure[]; unavailable?: string } | undefined;

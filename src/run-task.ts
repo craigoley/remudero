@@ -563,7 +563,7 @@ import {
 import {
   buildMainHealthRung,
   MAIN_REPAIR_BRANCH_PREFIX,
-  type MainRepairDeps,
+  type MainHealthRungDeps,
   type MainRepairFixRequest,
   type MainRepairRevertRequest,
   type MainRepairRevertResult,
@@ -51433,7 +51433,7 @@ export async function dispatchMainRepairFixRun(
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
-      outPath: join(config.root, "tmp", `main-repair-settings-${taskId}-${Date.now()}.json`),
+      outPath: join(config.root, "tmp", `main-repair-settings-${taskId}-${systemClock.now()}.json`),
     });
     // A red main blocks every PR, so the repair rides the fix lane's mount at the HIGH band.
     const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
@@ -51464,14 +51464,10 @@ export async function dispatchMainRepairFixRun(
   }
 }
 
-export interface MainRepairRevertDeps {
-  worktreeAdd: AlertFixDispatchDeps["worktreeAdd"];
-  worktreeRemove: AlertFixDispatchDeps["worktreeRemove"];
+const REAL_MAIN_REPAIR_REVERT_DEPS: Pick<AlertFixDispatchDeps, "worktreeAdd" | "worktreeRemove"> & {
   git: (args: string[]) => Promise<string>;
   gh: (args: string[]) => Promise<unknown>;
-}
-
-const REAL_MAIN_REPAIR_REVERT_DEPS: MainRepairRevertDeps = {
+} = {
   worktreeAdd: worktreeAddAsync,
   worktreeRemove,
   git: async (args) => String((await baseReproductionExecFile("git", args, { timeout: 120_000, maxBuffer: 1 << 24 })).stdout),
@@ -51487,7 +51483,7 @@ export async function openMainRepairRevertPr(
   request: MainRepairRevertRequest,
   ledgerPath: string,
   runId: string,
-  deps: MainRepairRevertDeps = REAL_MAIN_REPAIR_REVERT_DEPS,
+  deps: typeof REAL_MAIN_REPAIR_REVERT_DEPS = REAL_MAIN_REPAIR_REVERT_DEPS,
 ): Promise<MainRepairRevertResult> {
   if (request.branch === request.base || !request.branch.startsWith(MAIN_REPAIR_BRANCH_PREFIX)) {
     throw new Error(`refusing a main-repair revert on branch ${request.branch}: it must be a fresh ${MAIN_REPAIR_BRANCH_PREFIX}* branch`);
@@ -51561,7 +51557,7 @@ export function buildMainRepairEffects(
   repoDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   gh: (args: string[]) => Promise<unknown> = ghJsonAsync,
-): MainRepairDeps {
+): NonNullable<MainHealthRungDeps["repair"]> {
   const probe = buildBaseReproductionProbe(config, repoDir, ledgerPath, log);
   return {
     openFixPr: (request) => dispatchMainRepairFixRun(owner, repo, config, request, ledgerPath, runId),

@@ -22,7 +22,7 @@ import {
   MAIN_REPAIR_BRANCH_PREFIX,
   MAIN_REPAIR_FIX_STALL_MIN_MS,
   type MainHealthMergeReader,
-  type MainRepairDeps,
+  type MainHealthRungDeps,
   type MainRepairFixRequest,
   type MainRepairPrState,
   type MainRepairRevertRequest,
@@ -40,7 +40,6 @@ import {
   mainRepairTaskId,
   openMainRepairRevertPr,
   type AlertFixDispatchDeps,
-  type MainRepairRevertDeps,
 } from "../src/run-task.js";
 
 const OWNER = "o";
@@ -77,7 +76,7 @@ interface HarnessOptions {
   history?: boolean;
   fix?: (request: MainRepairFixRequest) => Promise<string | undefined>;
   revert?: (request: MainRepairRevertRequest) => Promise<MainRepairRevertResult>;
-  reproduce?: MainRepairDeps["reproduce"];
+  reproduce?: NonNullable<MainHealthRungDeps["repair"]>["reproduce"];
   firstParents?: string[];
   ledgerPath?: string;
 }
@@ -132,7 +131,7 @@ function harness(options: HarnessOptions = {}): Harness {
   const reverts: MainRepairRevertRequest[] = [];
   const closed: Array<{ url: string; comment: string }> = [];
   const prStates = new Map<string, MainRepairPrState>();
-  const repair: MainRepairDeps = {
+  const repair: NonNullable<MainHealthRungDeps["repair"]> = {
     openFixPr: async (request) => {
       fixes.push(request);
       const url = options.fix ? await options.fix(request) : FIX_PR;
@@ -536,7 +535,7 @@ test("a fix run whose worker opens no PR returns none, and an unreadable diff st
   }
 });
 
-function revertDeps(fail?: "revert" | "diff" | "abort"): MainRepairRevertDeps & { gitCalls: string[][]; ghCalls: string[][]; removed: string[] } {
+function revertDeps(fail?: "revert" | "diff" | "abort"): NonNullable<Parameters<typeof openMainRepairRevertPr>[6]> & { gitCalls: string[][]; ghCalls: string[][]; removed: string[] } {
   const gitCalls: string[][] = [];
   const ghCalls: string[][] = [];
   const removed: string[] = [];
