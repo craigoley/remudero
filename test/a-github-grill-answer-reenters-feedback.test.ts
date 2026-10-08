@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -149,4 +150,44 @@ test("GitHub grill delivery names real queue failures identity collisions and mi
     writeFileSync(join(f.repo, replyRel), bytes);
     assert.equal(answerEscalatedFeedback(f.repo, f.state, f.answer)?.queued, true);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("the real daemon sweep delivers a consumer grill answer from its managed checkout not the core checkout", () => {
+  for (const consumer of [true, false]) {
+  const f = fixture();
+  const core = consumer ? join(f.root, "core") : f.repo;
+  mkdirSync(join(core, "plan"), { recursive: true });
+  writeFileSync(join(core, "plan", "questions.ndjson"), JSON.stringify({ origin: f.answer.origin }) + "\n");
+  const shim = ghShim([{ when: "", stdout: "[]" }]);
+  const body = renderIssueBody({ class: "GRILL", taskId: f.answer.taskId, summary: "route", detail: "scope unchanged",
+    options: [{ label: "site-intake", detail: "route" }], recommendation: "site-intake" });
+  const script = `
+    process.argv = [process.execPath, 'fixture-cli', '--repo-root', ${JSON.stringify(core)}];
+    const { buildSweepHook } = await import(${JSON.stringify(new URL("../src/run-task.ts", import.meta.url).href)});
+    const { repoRoot } = await import(${JSON.stringify(new URL("../src/lib/repo-location.ts", import.meta.url).href)});
+    if (repoRoot !== ${JSON.stringify(core)}) throw new Error('fixture did not isolate the question store');
+    const gateway = { operatorLogins: ['operator'],
+      listOpen: () => [{ number: 42, url: 'fixture', body: ${JSON.stringify(body)} }],
+      listComments: () => [{ id: 123, body: ${JSON.stringify(f.answer.text)}, authorLogin: 'operator', authorType: 'User', authorAssociation: 'MEMBER', createdAt: ${JSON.stringify(f.answer.createdAt)} }],
+      reactPlusOne: () => {} };
+    const logs = [];
+    const hook = buildSweepHook('org', 'consumer', { root: ${JSON.stringify(f.state)}, claudeBin: '/bin/true' },
+      ${JSON.stringify(join(f.state, "ledger.ndjson"))}, 'SCOPE-TEST', { tasks: [], byId: new Map() },
+      (step, extra = {}) => logs.push({ step, ...extra }),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      ${consumer ? JSON.stringify(f.repo) : "undefined"}, undefined, gateway);
+    await hook();
+    console.log(JSON.stringify(logs.filter(row => row.step.startsWith('escalation_answer'))));
+  `;
+  try {
+    const stdout = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+      { cwd: process.cwd(), env: { ...process.env, RMD_GH_COOLDOWN_S: "0", PATH: `${shim.dir}:${process.env.PATH ?? ""}` }, encoding: "utf8", timeout: 30_000 });
+    const rows = JSON.parse(stdout.trim().split("\n").at(-1)!);
+    assert.ok(rows.some((row: { step: string }) => row.step === "escalation_answer.feedback_queued"), stdout);
+    assert.ok(!rows.some((row: { step: string }) => row.step === "escalation_answers.unreadable"), stdout);
+    assert.equal(readQueuedFeedbackRecords(f.state).size, 2);
+    assert.equal(readFileSync(join(f.repo, f.rel), "utf8"), f.original);
+    assert.equal(readFileSync(join(core, "plan", "questions.ndjson"), "utf8"), JSON.stringify({ origin: f.answer.origin }) + "\n");
+  } finally { rmSync(shim.dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+  }
 });

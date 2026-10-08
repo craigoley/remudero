@@ -45485,7 +45485,7 @@ export function buildSweepHook(
     if (escalationAnswerGateway) {
       try {
         const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath }, undefined, answer => {
-          const delivered = answerEscalatedFeedback(repoRoot, config.root, answer);
+          const delivered = answerEscalatedFeedback(targetCheckoutRoot ?? repoRoot, config.root, answer);
           if (delivered?.queued) log("escalation_answer.feedback_queued", { taskId: answer.taskId, origin: answer.origin, feedback_id: delivered.feedbackId });
         });
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
