@@ -104,6 +104,32 @@ export function scopeGuardOutOfScopeFiles(
   );
 }
 
+/** W1-T5118: `"plan"` grades a diff by plan-scope membership, `"files"` by exact declared files. */
+export type FixScopeRegime = "plan" | "files";
+
+/**
+ * W1-T5118: is the PR being repaired a plan-only FILING? Read from the PR's own captured diff,
+ * never from a title, branch name, task type or the task's declared files. Only a NON-EMPTY
+ * baseline whose every path is plan-scoped qualifies; an absent or empty one never invents it.
+ */
+export function isPlanFilingBaseline(baselineDiffFiles?: readonly string[]): boolean {
+  return !!baselineDiffFiles && baselineDiffFiles.length > 0 && baselineDiffFiles.every(isInPlanScope);
+}
+
+/**
+ * W1-T5118: the ONE regime selection the fix prompt and the pre-strike guard both read. A task
+ * whose declared files are all plan-scoped stays `"plan"`. An observed plan-only filing is
+ * `"plan"` too, even when its shard declares future src/test paths, so a repair keeps it a
+ * filing. Everything else keeps the exact declared-file regime.
+ */
+export function fixScopeRegime(
+  declaredFiles: readonly string[] | undefined,
+  baselineDiffFiles?: readonly string[],
+): FixScopeRegime {
+  if (declaredFiles && declaredFiles.length > 0 && declaredFiles.every(isInPlanScope)) return "plan";
+  return isPlanFilingBaseline(baselineDiffFiles) ? "plan" : "files";
+}
+
 /**
  * The scope-regime SELECTION {@link fixRungScopeStandDownReason} needs twice (once for the
  * current diff, once for the baseline it stands down against) and {@link renderFixPrompt}'s
@@ -126,9 +152,10 @@ export function outOfDeclaredScopeFiles(
   files: readonly string[],
   declaredFiles: readonly string[] | undefined,
   registrationChanges: readonly RegistrationChange[] = [],
+  regime: FixScopeRegime = fixScopeRegime(declaredFiles),
 ): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
-  return declaredFiles.every(isInPlanScope)
+  return regime === "plan"
     ? outOfPlanScopeFiles([...files])
     : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
 }
@@ -465,9 +492,12 @@ export function renderFixPrompt(opts: {
   // Empty whenever `baselineDiffFiles` was never captured (fail OPEN, matching that guard's own
   // discipline) or simply carries nothing out of scope; either way the block below renders no
   // INHERITED SCOPE line, matching the clean path's existing shape.
+  // W1-T5118: the SAME `fixScopeRegime` call the pre-strike guard makes, read from the baseline.
+  const scopeRegime = fixScopeRegime(opts.task.files, opts.baselineDiffFiles);
+  const planFiling = scopeRegime === "plan" && !(opts.task.files ?? []).every(isInPlanScope);
   const inheritedOutOfScope =
     opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
-      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
+      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files, [], scopeRegime)
       : [];
   // W1-T2651: the ONE bounded exception to "do not push it" — a path this repo's own generator
   // registry declares (the SAME registry {@link scopeGuardOutOfScopeFiles} now reads, never a
@@ -475,18 +505,27 @@ export function renderFixPrompt(opts: {
   // is graded by plan-scope membership instead ({@link outOfDeclaredScopeFiles}'s own regime
   // selection), which this registry was never wired into, so promising the exception there would
   // contradict the pre-strike gate that actually runs against that PR.
-  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && opts.task.files.every(isInPlanScope);
+  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && scopeRegime === "plan";
   const registryPaths = Object.keys(REGENERABLE_ARTIFACT_GENERATORS).sort();
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
           "",
-          `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
-            `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
-            `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
-            `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
-            `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
-            `adds, so treat "do not push it" as the real rule, not a formality.`,
+          planFiling
+            ? `PLAN FILING SCOPE (W1-T5118): this PR is a plan-only filing — every path it carried before ` +
+              `this round is plan-scoped: ${(opts.baselineDiffFiles ?? []).join(", ")}. Keep it a filing: you ` +
+              `MAY repair that shard or another plan/** path, but do NOT add any path outside plan scope, ` +
+              `including this task's own declared future path(s): ` +
+              `${opts.task.files.filter((f) => !isInPlanScope(f)).join(", ")}. The implement run builds those ` +
+              `after this filing merges; adding them here makes the PR a Standing Rule 15 mixture, and the ` +
+              `next round's fix rung stands down on any non-plan path this rung adds. If the genuine fix ` +
+              `needs one, say so in your REPORT's '## Follow-ups' section instead and leave the branch as-is.`
+            : `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
+              `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
+              `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
+              `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
+              `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
+              `adds, so treat "do not push it" as the real rule, not a formality.`,
           // W1-T2653: named EXPLICITLY per failing check — a fix worker told only "some registry
           // permits some path" (the REGISTRY EXCEPTION line below) still has to trust that the gate
           // it is looking at is one of the ones covered; this line removes that inference by naming

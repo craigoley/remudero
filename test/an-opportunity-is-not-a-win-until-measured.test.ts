@@ -9,11 +9,13 @@ import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { loadProposalRegistry } from "../src/lib/inbox.js";
 import { reconcileCodeqlQualityProposals } from "../src/lib/codeql-quality-intake.js";
 import { reconcileOpportunityOutcomes, productionOpportunityOutcomePorts, type OpportunityOutcomePorts, type OpportunityEvidence, type OpportunitySource } from "../src/lib/opportunity-outcomes.js";
+import * as outcomeModule from "../src/lib/opportunity-outcomes.js";
 import type { RawAlert } from "../src/lib/ops.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
 import type { OpportunityIntakePorts, OpportunityWork } from "../src/lib/opportunity-intake.js";
 import { runGardenerOverseer } from "../src/lib/gardener-overseer.js";
 import { ghStubPath, pathWith } from "./helpers/gh-stub.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const repo = "acme/app";
 const clock = fixedClock(Date.parse("2026-10-04T12:00:00Z"));
@@ -358,4 +360,98 @@ test("the default outcome adapter reads a real checkout and ledger", () => {
     if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("daemon outcome cadence opens its asynchronous production workspace and saves source evidence", async () => {
+  const checkout = gitRepo({ kind: "outcome-async" });
+  checkout.addRemote("origin", `https://github.com/${repo}.git`);
+  const root = checkout.dir, stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(root, "plan", "policy.yaml"), "{}\n");
+  writeFileSync(join(root, "MASTER-PLAN.md"), "");
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ version: 1, proposals: [
+    { id: source.proposalId, summary: JSON.stringify(source.candidate), evidenceAnchors: [] },
+  ] }));
+  const oldPath = process.env.PATH;
+  process.env.PATH = pathWith(ghStubPath("#!/bin/sh\ncase \"$2\" in\n*/pulls\\?*) printf '%s\\n' '[[]]' ;;\n*) exit 1 ;;\nesac\n"));
+  let opened = 0, ticks = 0;
+  const disposed: number[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const garden = { repoRoot: root, stateDir, clock, log: () => {}, openWorkspace: async () => {
+    const id = ++opened;
+    return { root,
+      dispose: async () => { await new Promise<void>((resolve) => setImmediate(resolve)); disposed.push(id); },
+      land: async () => { throw new Error("outcome reconciliation cannot land work"); },
+    };
+  } };
+  const emptyIntake = { repo, clock, standingDebtAnchor: "MASTER-PLAN.md", readWork: () => ({ proposals: [], tasks: [], prs: [], mergedKeys: [], feedback: [] }),
+    readStandingDebt: () => "", readCodeql: () => ({ ok: true, alerts: [] }), readFriction: () => ({ records: [] }),
+    riskJudge: async () => { throw new Error("empty intake cannot call a model"); }, fileCandidate: async () => { throw new Error("empty intake cannot file"); }, stageProposal: () => { throw new Error("empty intake cannot propose"); },
+  } as OpportunityIntakePorts;
+  try {
+    await runDaemon(loadPlanFromYaml("[]", "fixture.yaml"), {
+      refreshMerged: () => () => false, runOne: async () => { throw new Error("no tasks"); }, sleep: async () => {},
+      checkStop: () => ++ticks > 1 ? "done" : undefined,
+      checkIntakeRungs: () => [{ rung: "codeqlQuality", fire: true, reason: "due" }],
+      knowledgeGardener: garden as never, opportunityIntake: emptyIntake,
+      log: (step, extra) => logs.push({ step, extra }),
+    });
+    assert.deepEqual(logs.filter((row) => row.step === "opportunity_outcomes.failed"), []);
+    const saved = JSON.parse(readFileSync(join(stateDir, "opportunity-outcomes.json"), "utf8"));
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].state, "pending");
+    assert.deepEqual(saved[0].sourceIds, source.sourceIds);
+    assert.ok(opened > 0);
+    assert.deepEqual(disposed.sort(), Array.from({ length: opened }, (_, index) => index + 1),
+      "outcome and background knowledge workspaces each have exactly one completed disposal");
+    assert.equal(logs.filter((row) => row.step === "opportunity_outcomes.reconciled").length, 1);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    checkout.cleanup();
+  }
+});
+
+test("asynchronous outcome reconciliation awaits one cleanup on success and read save or evidence failure", async () => {
+  for (const failure of [undefined, "read", "save", "evidence"]) {
+    let disposed = 0;
+    const p = ports();
+    p.dispose = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); disposed++; };
+    if (failure === "read") p.readSources = () => { throw new Error("read unavailable"); };
+    if (failure === "save") p.save = () => { throw new Error("save unavailable"); };
+    if (failure === "evidence") p.readEvidence = () => { throw new Error("evidence unavailable"); };
+    if (failure === "read" || failure === "save") {
+      await assert.rejects(outcomeModule.reconcileOpportunityOutcomesAsync(p), new RegExp(`${failure} unavailable`));
+    } else {
+      const result = await outcomeModule.reconcileOpportunityOutcomesAsync(p);
+      assert.equal(result[0]!.state, failure === "evidence" ? "unavailable" : "measured-helped");
+    }
+    assert.equal(disposed, 1);
+  }
+  const p = ports(); p.dispose = async () => { throw new Error("workspace cleanup unavailable"); };
+  await assert.rejects(outcomeModule.reconcileOpportunityOutcomesAsync(p), /workspace cleanup unavailable/);
+});
+
+test("asynchronous outcome acquisition preserves supplied ports and names a refused checkout", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-outcome-open-"));
+  let disposed = 0, opened = 0;
+  const garden = { stateDir, clock, openWorkspace: async () => { opened++; throw new Error("checkout unavailable"); } } as unknown as GardenerDeps;
+  try {
+    const intake: OpportunityIntakePorts = { repo, clock, standingDebtAnchor: "MASTER-PLAN.md",
+      readWork: () => ({ proposals: [], tasks: [], prs: [], mergedKeys: [], feedback: [] }),
+      readStandingDebt: () => "", readCodeql: () => ({ ok: true, alerts: [] }), readFriction: () => ({ records: [] }),
+      riskJudge: async () => { throw new Error("outcome acquisition cannot call a model"); },
+      fileCandidate: async () => { throw new Error("outcome acquisition cannot file"); },
+      stageProposal: () => { throw new Error("outcome acquisition cannot propose"); },
+      dispose: async () => { await new Promise<void>((resolve) => setImmediate(resolve)); disposed++; },
+    };
+    const supplied = await outcomeModule.openOpportunityOutcomePorts(garden, { intake, readRows: () => [] });
+    assert.deepEqual(await outcomeModule.reconcileOpportunityOutcomesAsync(supplied), []);
+    assert.equal(opened, 0);
+    assert.equal(disposed, 1);
+    await assert.rejects(outcomeModule.openOpportunityOutcomePorts(garden), /checkout unavailable/);
+    assert.equal(opened, 1);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

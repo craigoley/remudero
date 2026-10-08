@@ -12,7 +12,6 @@ import { pathToFileURL } from "node:url";
 import type { Clock } from "../src/lib/clock.js";
 import {
   READ_MODEL_STALL_MS,
-  READ_MODEL_TICK_MS,
   createReadModelTicker,
   createReadModelWorker,
   runReadModelViewWorker,
@@ -63,7 +62,7 @@ function switchOn(stateDir: string, views: string[]): void {
   writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: Object.fromEntries(views.map((v) => [v, "shadow"])) }));
 }
 
-test("while a fake view unit whose cost exceeds soloMs is mid-build, a cheap unit whose source moved is published within one READ_MODEL_TICK_MS tick, and the heavy unit still completes and publishes", async (t) => {
+test("while a fake view unit whose cost exceeds soloMs is mid-build, a cheap unit whose source moved is published before the heavy unit completes", async (t) => {
   let handle: ReturnType<typeof createReadModelWorker> | undefined;
   t.after(() => void handle?.stop());
   const stateDir = scratch(t, "lanes-state");
@@ -97,13 +96,10 @@ export default [
   const heavyStart = Number(lines()[lines().length - 1]!.split(" ")[1]);
   await until(() => (handle!.body("cheap")?.body.data as { value?: string } | undefined)?.value === "v0", "the cheap view's first body");
 
-  const moved = Date.now();
   writeFileSync(source, "v1");
   await until(() => (handle!.body("cheap")?.body.data as { value?: string } | undefined)?.value === "v1", "the cheap view's moved source was published", blockMs * 4);
-  const seen = Date.now();
   const ended = lines().filter((l) => l.startsWith("end")).length;
   assert.equal(ended, 1, "the cheap body was published while the slow unit was still mid-build");
-  assert.ok(seen - moved <= 2 * READ_MODEL_TICK_MS, `the cheap body took ${seen - moved} ms: one tick for the fast lane's next pass, plus the relay`);
 
   await until(() => ((handle!.body("slow")?.body.data as { builtAt?: number } | undefined)?.builtAt ?? 0) > heavyStart, "the heavy unit completed and published", blockMs * 4);
   assert.deepEqual(logs.filter((step) => /views_exited|views_failed|worker_(silent|recycled|exited)/.test(step)), []);
@@ -127,10 +123,11 @@ test("a unit moves lanes when its measured cost crosses soloMs in either directi
   const projector = projectorStates(stateDir, ledgerDir, hand.clock);
   t.after(() => void projector.release());
   let slowMs = 2_000;
+  let cheapSource = "v0";
   const builds: string[] = [];
   const views: ReadModelView[] = [
     { name: "slow", version: 1, materialize: () => (builds.push("slow"), hand.advance(slowMs), [{ key: "", data: { slow: true }, sources: [] }]) },
-    { name: "cheap", version: 1, materialize: () => (builds.push("cheap"), [{ key: "", data: { cheap: true }, sources: [] }]) },
+    { name: "cheap", version: 1, materialize: () => (builds.push("cheap"), [{ key: "", data: { value: cheapSource }, sources: [] }]) },
     { name: "snap", version: 1, snapshotSourced: true, materialize: () => (builds.push("snap"), [{ key: "", data: {}, sources: [] }]) },
   ];
   const lane = (name: "fast" | "heavy") => {
@@ -153,7 +150,10 @@ test("a unit moves lanes when its measured cost crosses soloMs in either directi
 
   builds.length = 0;
   hand.advance(60_000);
+  cheapSource = "v1";
   fast.ticker.tick();
+  const cheapBody = fast.posted.findLast((m): m is Extract<ReadModelWorkerMessage, { type: "body" }> => m.type === "body" && m.entry.view === "cheap");
+  assert.equal((cheapBody?.entry.body.data as { value?: string } | undefined)?.value, "v1", "the fast lane publishes the moved source in its next tick");
   fast.ticker.buildNow("slow");
   assert.ok(!builds.includes("slow"), "the fast lane never builds a unit it handed off, even on a want");
   assert.ok(builds.includes("cheap"));
@@ -257,8 +257,9 @@ setInterval(() => {}, 1000);
   lanes.snapshot({ instance: "core", ok: true, asOf: new Date(T0).toISOString(), bodies: [] });
   lanes.want("task", "W1-T1");
   lanes.accept({ view: "inbox", version: 1, bodies: [] });
-  await until(() => got().includes("fast:bodies"), "every input reached the fast lane");
-  assert.deepEqual(got().filter((l) => /^(fast|heavy):(state|shadow|snapshot|want|bodies)$/.test(l)).sort(), ["fast:bodies", "fast:shadow", "fast:snapshot", "fast:state", "fast:want", "heavy:snapshot", "heavy:state", "heavy:want"]);
+  const expected = ["fast:bodies", "fast:shadow", "fast:snapshot", "fast:state", "fast:want", "heavy:snapshot", "heavy:state", "heavy:want"];
+  await until(() => expected.every((line) => got().includes(line)), "every input reached its lane");
+  assert.deepEqual(got().filter((l) => /^(fast|heavy):(state|shadow|snapshot|want|bodies)$/.test(l)).sort(), expected);
   // The heavy lane's death hands its units back to the fast lane, and again once it is respawned.
   await until(() => logs.some((l) => l.step === "read_model.views_exited" && l.extra.lane === "heavy"), "a heavy lane death is logged by lane");
   await until(() => got().filter((l) => l === "fast:lane:*:false").length >= 2, "the fast lane reclaimed the heavy lane's units at its death and at its respawn");

@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000"
   plan_refs: [W1-T4095]
   files: [src/lib/knowledge-gardener.ts, test/the-knowledge-gardener-never-opens-a-second-pr-for-one-retirement.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30: knowledge-garden passes at 04:12Z (#7976) and 04:28Z (#7977) both retired learning

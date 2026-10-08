@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-07: 'You and the daemon already have all the GitHub access you need'"
   plan_refs: [W1-T6064, W1-T6063, W1-T54]
   files: [src/lib/dep-review.ts, src/run-task.ts, test/the-daemon-syncs-the-node-pin-on-a-dependabot-image-bump.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

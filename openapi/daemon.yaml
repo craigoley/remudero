@@ -6344,6 +6344,117 @@ components:
         pr:
           type: [number, "null"]
 
+    GardenerRuntimeEntry:
+      type: object
+      required: [name, enabled, scope, cadenceMs, phase, observedAt, passId, nextDueAt, queueMs, executionMs, exit, reason, attempts, completions, failures, lastCompletedAt, lastSuccessAt, lastFailureAt]
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        scope:
+          type: string
+          enum: [repository, host, fleet]
+        cadenceMs:
+          type: integer
+          minimum: 1
+        phase:
+          type: string
+          enum: [scheduled, queued, running, completed, failed, cancelled, idle]
+        observedAt:
+          type: string
+          format: date-time
+        passId:
+          type: [string, "null"]
+        nextDueAt:
+          type: [string, "null"]
+          format: date-time
+        queueMs:
+          type: [number, "null"]
+          minimum: 0
+        executionMs:
+          type: [number, "null"]
+          minimum: 0
+        exit:
+          type: [integer, "null"]
+        reason:
+          type: [string, "null"]
+          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, null]
+        attempts:
+          type: integer
+          minimum: 0
+        completions:
+          type: integer
+          minimum: 0
+        failures:
+          type: integer
+          minimum: 0
+
+        lastCompletedAt:
+          type: [string, "null"]
+          format: date-time
+        lastSuccessAt:
+          type: [string, "null"]
+          format: date-time
+        lastFailureAt:
+          type: [string, "null"]
+          format: date-time
+
+    GardenersResult:
+      type: object
+      description: >
+        Bounded registered off-loop gardener receipts. Counters cover this daemon run only.
+        Completed means process exit zero, not a measured improvement. Host/fleet scope is not
+        attributed to a repository. Missing cost or outcome attribution is never zero.
+      required: [version, repository, daemonRunId, codeSha, configuredAt, observedAt, gardens, generatedAt, coverage, counterWindow, outcomeAssessment, spend]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        repository:
+          type: string
+        daemonRunId:
+          type: string
+        codeSha:
+          type: [string, "null"]
+        configuredAt:
+          type: string
+          format: date-time
+        observedAt:
+          type: string
+          format: date-time
+        generatedAt:
+          type: string
+          format: date-time
+        gardens:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/GardenerRuntimeEntry"
+        coverage:
+          type: string
+          enum: [registered-off-loop]
+        counterWindow:
+          type: string
+          enum: [daemon-run]
+        outcomeAssessment:
+          type: string
+          enum: [not_collected]
+        spend:
+          type: "null"
+
+    GardenersUnavailable:
+      type: object
+      required: [error, reason]
+      properties:
+        error:
+          type: string
+          enum: [gardeners_unavailable]
+        reason:
+          type: string
+          enum: [not_collected, unreadable, repository_mismatch, clock_skew]
+
     IncidentsResult:
       type: object
       description: GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first.
@@ -14994,6 +15105,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /v1/gardeners:
+    get:
+      summary: Repository-scoped bounded gardener lifecycle receipts.
+      description: >
+        Reads gardener-runtime.json asynchronously with a 64 KiB bound. The same route under
+        /v1/i/{instance}/gardeners reads that instance's state and verifies repository identity.
+        Missing telemetry is 503 not_collected, never an empty or healthy inventory. No ledger
+        scan, GitHub query, model invocation, or control mutation occurs during this read.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Registered off-loop receipts, source timestamps and explicit attribution gaps.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenersResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Telemetry has not been collected or cannot be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenersUnavailable"
 
   /v1/incidents:
     get:

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item C1b), from a CPU re-profile of warm now@core builds after W1-T6253"
   plan_refs: [W1-T6253, W1-T159, W1-T6267]
   files: [src/lib/glance.ts, test/the-glance-spend-is-summed-once-per-generation-and-window.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

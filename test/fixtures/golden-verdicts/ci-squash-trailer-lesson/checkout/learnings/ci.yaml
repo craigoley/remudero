@@ -1,0 +1,17 @@
+- id: squash-trailer-gate-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts, .github/workflows/ci.yml]
+  fact: >-
+    Before opening a plan-only PR, inspect the commits reachable from its head for
+    `Remudero-Task:` trailers that credit implementation tasks. The squash-trailer-gate refuses
+    when a credited task declares non-plan files, because the PR changes only plan paths. Remove
+    that trailer or include the implementation changes before opening the PR; then rerun the gate
+    after correcting the branch or PR metadata.
+  evidence: >-
+    `scripts/acceptance-author-gate.mjs` applies this refusal only when every changed path is
+    plan-scoped and the trailer-resolved task declares non-plan files. The gate's diagnostic names
+    both remedies. Fourteen repaired pull requests in the window were recorded as
+    ci-learning:5433:squash-trailer-gate.
+  src: "ci-learning:5433:squash-trailer-gate"
+  cited: "2026-10-08"
