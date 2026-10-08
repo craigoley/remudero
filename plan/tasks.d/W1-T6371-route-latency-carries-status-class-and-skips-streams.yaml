@@ -1,0 +1,41 @@
+- id: W1-T6371
+  title: "SERVE'S ROUTE LATENCY HISTOGRAM CARRIES EACH RESPONSE'S STATUS CLASS AND NEVER TIMES THE VIEW EVENT STREAM — the hourly serve.route_reads row keys handler time by route template (18 paths, none with an id) but not by status, so a fast 500 reads as a healthy p50, and /v1/views/events, a stream, is timed at a median 645 s and inflates the views p99"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low  # Rule 19: one concern — the existing route latency histogram's keys and its stream exclusion
+  band_meaning: span
+  origin: "operator session 2026-10-08: serve CPU and memory plan, console latency (backend half; browser experience is a separate console-side item)"
+  plan_refs: []
+  files: [src/lib/route-read-rollup.ts, test/route-latency-carries-status-class-and-skips-streams.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED in the production ledger (read-only), serve.route_reads 2026-10-07 to 10-08: 35 hourly rows, 17 with
+    `latency`; 18 distinct paths, all route templates or fixed API paths, none holding an id or query (#8297's instrument).
+    Per-path hourly p50/p99 exist (nav-badge p50 5 ms, /v1/status p50 70 ms, /v1/views/inbox p99 about 2.1 s).
+    Two gaps:
+    - No status: `wrap` times every finished GET the same way, so an error answered fast lowers the p50 it should flag.
+    - `/v1/views/events` is recorded with a median of 645,392 ms; `wrap` skips only responses whose content-type header
+      starts with text/event-stream at `finish`, so this stream is timed, and `viewLatency` (the "views p99 < 5 ms at
+      serve" target) folds it in.
+    This is backend handler time only. What the operator's browser experiences (network, render) is not measured anywhere
+    and belongs to the console app, separately.
+  design: |
+    (1) The histogram key becomes (route template, status class: 2xx, 304, 4xx, 5xx); the hourly row and the summary keep
+    per-template totals as today and add the per-class split. No URL, query, header, token or body is recorded.
+    (2) A route registered as a stream is never timed, whatever header it sets; `viewLatency` excludes it.
+    (3) The bucket bounds, the hourly cadence and the row's existing fields are unchanged; the row stays bounded by the set
+    of route templates.
+  acceptance:
+    - claim: "a 5xx and a 2xx on one route are counted in separate status classes, a stream route is never timed, and no recorded key holds a path parameter or query"
+      proof: "unit test: test/route-latency-carries-status-class-and-skips-streams.test.ts"
+    - claim: "the rollup keys latency by status class"
+      proof: "grep: statusClass in src/lib/route-read-rollup.ts"
+  falsifier: |
+    Drop the status from the key: the 5xx and 2xx land in one histogram and the test fails. Time the event stream: its
+    hour-long response enters viewLatency and the test fails.
