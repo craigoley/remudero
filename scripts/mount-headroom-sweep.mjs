@@ -226,7 +226,6 @@ export function computeClassSweep(runs) {
     const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
     const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
-    // W1-T6466: unpriced runs are counted, not costed.
     const priced = settled.filter((r) => r.costSource !== "none");
     const unpriced = settled.length - priced.length;
     const costs = priced.map((r) => r.costUsd);
