@@ -8,8 +8,9 @@ import * as feedbackLib from "../src/lib/feedback.js";
 const { feedbackEntryRepoPath } = feedbackLib;
 const answerEscalatedFeedback: typeof feedbackLib.answerEscalatedFeedback = (...args) => feedbackLib.answerEscalatedFeedback(...args);
 import { queuedFeedbackDir, readQueuedFeedbackRecords } from "../src/lib/feedback-landing.js";
-import { readEscalationAnswers, type AcceptedEscalationAnswer, type EscalationAnswerGateway } from "../src/lib/escalation-answers.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers, type AcceptedEscalationAnswer, type EscalationAnswerGateway } from "../src/lib/escalation-answers.js";
 import { renderIssueBody } from "../src/lib/escalate.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "rmd-github-grill-"));
@@ -21,6 +22,26 @@ function fixture() {
   const answer: AcceptedEscalationAnswer = { taskId: `TRIAGE-${id}`, origin: "issue#42:comment:123", text: "site-intake. Keep the companion dependency.", createdAt: "2026-10-07T12:00:00.000Z" };
   return { root, repo, state, id, rel, original, answer };
 }
+
+test("the real GitHub answer gateway preserves native creation times for comments and reactions", async () => {
+  const createdAt = "2026-10-07T12:00:00.000Z";
+  const shim = ghShim([
+    { when: "issues/42/comments", stdout: JSON.stringify([{ id: 123, body: "site-intake", created_at: createdAt }]) },
+    { when: "issues/42/reactions", stdout: JSON.stringify([{ id: 124, content: "+1", created_at: createdAt }]) },
+  ]);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  try {
+    const gateway = ghEscalationAnswerGateway("org", "repo");
+    assert.equal((await gateway.listComments(42))[0].createdAt, createdAt);
+    assert.equal((await gateway.listReactions!(42))[0].createdAt, createdAt);
+    assert.equal(shim.calls().length, 2);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
 
 test("a trusted GitHub grill answer queues both feedback edges once and preserves original scope without dirtying the checkout", () => {
   const f = fixture();

@@ -177,7 +177,7 @@ export function ghEscalationAnswerGateway(
       });
       return rows.map((r) => ({
         id: r.id,
-        createdAt: r.created_at,
+        ...(r.created_at === undefined ? {} : { createdAt: r.created_at }),
         body: r.body ?? "",
         authorLogin: r.user?.login ?? "",
         authorAssociation: r.author_association ?? "NONE",
@@ -193,7 +193,7 @@ export function ghEscalationAnswerGateway(
       });
       return rows.map((r) => ({
         id: r.id,
-        createdAt: r.created_at,
+        ...(r.created_at === undefined ? {} : { createdAt: r.created_at }),
         content: r.content ?? "",
         authorLogin: r.user?.login ?? "",
         authorType: r.user?.type ?? "User",
