@@ -1,0 +1,36 @@
+- id: W1-T6595
+  title: "A GREEN, REVIEWED PLAN PR THE SWEEP HOLDS STILL MERGES — #10141 (a scope amendment) sat ~45 min with checks green and review success while every sweep pass logged automerge.plan_pr_held (mergeable_state unknown/blocked) and its disposition text said 'arming auto-merge'; a local `rmd review 10141` then merged it at once via automerge.clean_status_direct_merge — the sweep's plan-PR path is stricter than the review's, and its reason text misreports what it does"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a green, reviewed plan PR reaches the same merge decision from the sweep as from a local review
+  band_meaning: span
+  origin: "operator session 2026-10-08: PR watch, #10141 held while #10137 waited on it"
+  plan_refs: [W1-T5615, W1-T5748]
+  files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08 (core ledger): #10141 sweep.disposed "awaiting-arm — review success, required checks green —
+    arming auto-merge" from ~17:45Z to 18:26Z, interleaved with automerge.arm_skipped ("a plan PR … is never armed
+    for GitHub auto-merge (W1-T5615) — its checks were not yet green or its mer[geable_state …]") and
+    automerge.plan_pr_held; GitHub REST read auto_merge=false, mergeable=true, mergeable_state=blocked. At ~18:35Z a
+    local `bin/rmd review 10141` merged it immediately (automerge.clean_status_direct_merge, "already green — merged
+    now"). #10137 (W1-T6358) was blocked on it the whole time. READ on origin/main: plan PRs are deliberately
+    never armed (W1-T5615) and are merged directly; W1-T5748 decides behind plan PRs; the sweep's held path and
+    the review's direct-merge path disagree on the same facts.
+  design: |
+    Make the sweep's green+reviewed plan-PR path call the same decision the review path uses
+    (decidePlanPrMergeSafety → clean-status direct merge), so identical facts give identical outcomes; a genuine hold
+    keeps logging plan_pr_held with its reason. Fix the 'mergeable' disposition's reason text so a plan PR reads
+    "merging directly" or "held: <reason>" instead of "arming auto-merge".
+  acceptance:
+    - claim: "a green, reviewed, cleanly mergeable plan PR the sweep previously held is merged directly by the sweep"
+      proof: 'grep: test("W1-T6595: the sweep merges a green reviewed plan PR the review would merge" in test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts'
+  falsifier: |
+    Keep the stricter sweep path: the #10141-shaped fixture (checks green, review success, mergeable true,
+    mergeable_state blocked by being behind) is held instead of merged and the test fails.
