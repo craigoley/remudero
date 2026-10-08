@@ -33,6 +33,14 @@ function host(t: TestContext, instance = "core") {
   put("calls", "");
   writeFileSync(ledger, "fixture\n");
   writeFileSync(join(state, "remudero", "src", "run-task.ts"), "// fixture\n");
+  // The launcher targets Linux and asks GNU stat for %Y. This fixture already replaces
+  // docker/git; provide that Linux observation from real filesystem metadata on every host.
+  // Do not change the production fast-path predicate to accommodate a test machine's stat.
+  executable(join(bin, "stat"), `
+if [ "$1" = -c ] && [ "$2" = %Y ]; then
+  exec ${JSON.stringify(process.execPath)} -e 'console.log(Math.floor(require("node:fs").statSync(process.argv[1]).mtimeMs / 1000))' "$3"
+fi
+exec /usr/bin/stat "$@"`);
   executable(join(bin, "git"), `
 code=""
 if [ "$1" = -C ]; then code="$2"; shift 2; fi
@@ -77,7 +85,12 @@ fi`);
   };
   const installEdgeHeal = () => executable(join(state, "daemon-install", "deploy", "edge-heal.sh"),
     'echo "edge-heal state=$RMD_STATE_DIR" >> "$FIXTURE/calls"; exit "$(cat "$FIXTURE/edge-exit")"');
-  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal };
+  const statMtime = () => {
+    const result = spawnSync(join(bin, "stat"), ["-c", "%Y", ledger], { env, encoding: "utf8" });
+    assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
+    return Number(result.stdout.trim());
+  };
+  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal, statMtime };
 }
 
 function fullTick(calls: string[]) {
@@ -86,6 +99,15 @@ function fullTick(calls: string[]) {
   assert.ok(calls.some((line) => line.startsWith("rmd progress-watchdog ")), calls.join("\n"));
   assert.ok(calls.some((line) => line.startsWith("rmd deploy-run ")), calls.join("\n"));
 }
+
+test("the watchdog fixture observes real changed mtimes through its GNU stat shim", (t) => {
+  const h = host(t);
+  const before = Math.floor(Date.now() / 1000) - 60;
+  utimesSync(h.ledger, before, before);
+  assert.equal(h.statMtime(), before);
+  utimesSync(h.ledger, before + 1, before + 1);
+  assert.equal(h.statMtime(), before + 1);
+});
 
 test("W1-T6361: an unchanged tick skips the checkout walk", (t) => {
   for (const instance of ["core", "console", "site"]) {

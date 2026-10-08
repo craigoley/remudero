@@ -1045,6 +1045,8 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  /** W1-T6358: renews the breaker gate's ledger snapshot; forwarded into tick selection and every lane refill. */
+  beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
    * composition root. Missing/unreadable state returns an empty map and therefore fails open. */
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
@@ -4561,6 +4563,7 @@ export async function runDaemon(
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.());
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.

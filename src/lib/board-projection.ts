@@ -48,6 +48,8 @@ export const BOARD_ORACLE_INTERVAL_MS = 10 * 60_000;
 export const BOARD_DERIVE_DEBOUNCE_MS = 500;
 /** W1-T6014: fact rows one `update` ingests at most. A cold store ingests across calls, each not deriving until the tail. */
 export const BOARD_INGEST_CHUNK_ROWS = 5_000;
+/** PRIMARY CONTROL (W1-T6467): the longest string value a projection's table shares; a longer one stays as parsed. */
+export const BOARD_INTERN_MAX_CHARS = 96;
 /** ...and the ms one `update`'s ingest runs for at most, so a slow disk ends a chunk early. */
 export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
@@ -152,6 +154,26 @@ export interface BoardProjectionOptions {
   ingestChunkRows?: number;
   /** The ms one `update`'s ingest runs for at most; {@link BOARD_INGEST_CHUNK_MS} when omitted. */
   ingestChunkMs?: number;
+  /** False: rows keep their parsed strings (the arm an equality check compares the shared one against). */
+  internStrings?: boolean;
+}
+
+/**
+ * W1-T6467: replaces each TOP-LEVEL primitive string value of a freshly parsed row, at most
+ * {@link BOARD_INTERN_MAX_CHARS} long, with the equal string `table` already holds (the first one seen), so a
+ * projection keeps one copy of each repeated step name, task id or url instead of one per row. A value is only
+ * ever replaced by one equal to it; objects, arrays, numbers, booleans, null and longer strings are left as
+ * parsed, no object is shared, and key order does not change (an existing key is reassigned in place).
+ */
+export function internRowStrings(row: Row, table: Map<string, string>): Row {
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+    if (typeof value !== "string" || value.length > BOARD_INTERN_MAX_CHARS) continue;
+    const held = table.get(value);
+    if (held === undefined) table.set(value, value);
+    else row[key] = held;
+  }
+  return row;
 }
 
 /** `agree`; `transient` (gone on the recheck); `healed`; `escalated` (survived the heal, or recurred within 24 h). */
@@ -188,6 +210,8 @@ export interface BoardProjection {
   creditRead(): { credit: CreditStore; overrides: string };
   /** The fact rows the board derives from, in ledger order. */
   rows(): ReadonlyArray<Row>;
+  /** Distinct string values this projection's own table holds (W1-T6467); 0 before any ingest. */
+  internedStrings(): number;
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
   oracle(): BoardOracleResult;
 }
@@ -218,6 +242,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const githubGeneration = opts.githubGeneration ?? (() => githubGenerationOf(gateway()));
   const chunkRows = opts.ingestChunkRows ?? BOARD_INGEST_CHUNK_ROWS;
   const chunkMs = opts.ingestChunkMs ?? BOARD_INGEST_CHUNK_MS;
+  // W1-T6467: this projection's own table, dropped with it; each views worker isolate builds its own.
+  const strings = opts.internStrings === false ? undefined : new Map<string, string>();
   db.exec(BOARD_PROJECTION_DDL);
   const sql = {
     facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq LIMIT ?"),
@@ -355,7 +381,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const row = JSON.parse(String(r.body)) as Row;
+      const parsed = JSON.parse(String(r.body)) as Row;
+      const row = strings ? internRowStrings(parsed, strings) : parsed;
       let at = rows.length;
       if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
       else while (rowTsMs[at - 1]! > tsMs) at--;
@@ -575,6 +602,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     },
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
+    internedStrings: () => strings?.size ?? 0,
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
       ingest(Number.POSITIVE_INFINITY);

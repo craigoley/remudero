@@ -137,6 +137,15 @@ const CHMOD_REMEDY =
 const DECLARED: readonly Declared[] = [
   {
     kind: "chmod",
+    file: "routing-quarantine-resolution.test.ts",
+    key: "0o644",
+    count: 1,
+    reason:
+      "The daily collector refuses a resolution file unless its stat mode is exactly 0600. " +
+      "This fixture tests that explicit mode policy before reading, so the refusal holds at every uid.",
+  },
+  {
+    kind: "chmod",
     file: "worktree-reap-liveness.test.ts",
     key: "0o000",
     count: 3,
@@ -352,6 +361,17 @@ const DECLARED: readonly Declared[] = [
       "setpriv against a root-chowned path, and skips with a stated reason when setpriv is absent — never vacuous.",
   },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
+  {
+    kind: "platform-tool",
+    file: "the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts",
+    key: "/usr/bin/stat",
+    count: 1,
+    reason:
+      "The Linux launcher requests GNU stat -c %Y, which BSD stat cannot execute. This fixture owns that " +
+      "observation with a Node shim reading real file mtimes, and tests that changing the file changes the " +
+      "reported timestamp. The single system-stat fallback is only for other flags; no watchdog timestamp " +
+      "or healthy verdict is invented, and the production predicate remains unchanged on both platforms.",
+  },
   {
     kind: "platform-tool",
     file: "fleet-heartbeat.test.ts",
