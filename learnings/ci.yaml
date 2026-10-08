@@ -253,11 +253,11 @@
 - id: rule-checks-gate-census-and-plan-scope-refusals
   subsystem: ci
   lifecycle: active
-  files: [src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts]
+  files: [src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, "plan/tasks.d/**"]
   fact: >-
-    When a change touches src/run-task.ts, a src/lib module, a scripts/*.mjs preflight helper, or
-    any plan/ path, run the cheap checks before the first push: `rmd census-membership` (it maps your
-    changed paths to the census suites that walk the whole tree), and `npm run --silent rule15-precheck`
+    When a change touches a listed source or preflight helper, or a plan task shard, run the cheap
+    checks before the first push: `rmd census-membership` (it maps changed paths to the census
+    suites that walk the whole tree), and `npm run --silent rule15-precheck`
     when the diff touches plan/. A census suite refuses a file that references nothing it touches, so
     `git grep` cannot find it. A plan/ shard added beside an implementation is refused by the
     standing rule 15 gate; lift it into a plan-only PR and drop it from this branch.
