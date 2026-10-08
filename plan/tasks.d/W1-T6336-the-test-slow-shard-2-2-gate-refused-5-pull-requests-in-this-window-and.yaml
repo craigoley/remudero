@@ -6,7 +6,9 @@
   verify: human
   risk: low
   priority: 2.5
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T6336 into W1-T6152 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:9872:test-slow-shard (2/2)"
