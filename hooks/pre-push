@@ -193,7 +193,7 @@ fi
 # BEGIN census precheck — counts and the suites admitted after W1-T3225.
 # Three suites (clock-signature, comment-load, fixture-copy) cost a CI round each in one session,
 # because a census names none of a caller's symbols. scripts/census-precheck.mjs imports each one's
-# own counter, reads files and spawns git plus bounded node --test children. A head-failing suite
+# own counter, reads files and spawns git plus bounded TAP suite children. A head-failing suite
 # runs again in a detached merge-base worktree borrowing node_modules (W1-T5663). Only head-red,
 # base-green refuses; an unreadable base is not measured. Counts block only this branch's growth.
 if has census-precheck.mjs; then

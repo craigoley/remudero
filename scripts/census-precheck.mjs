@@ -706,6 +706,7 @@ export const PRECHECK_PARITY = {
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
   // W1-T5693: the whole-tree structural suites join the same evaluateAdmittedCensusSuites, each in its own child.

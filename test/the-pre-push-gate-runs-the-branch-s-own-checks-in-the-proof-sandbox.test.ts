@@ -63,10 +63,12 @@ export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census
   put(join(wt, "protected.txt"), "fixture content\n");
   put(join(wt, "package.json"), JSON.stringify({ type: "module", scripts: { "lint-plan:fast": "node scripts/lint.mjs --base origin/main" } }));
   put(join(wt, "src/lib/policy.ts"), "export const fixture = true;\n");
+  put(join(wt, "census-input.txt"), "healthy");
   put(join(wt, "plan/fixture.yaml"), "fixture: true\n");
   put(join(wt, "test/setup/tmp-hygiene.ts"), "export {};\n");
   put(join(wt, "test/fixture-census.test.ts"), `import { test } from 'node:test'; import assert from 'node:assert/strict';
-test('fixture census', () => assert.equal(${JSON.stringify(failure)}, 'census' === ${JSON.stringify(failure)} ? 'healthy' : ${JSON.stringify(failure)}));\n`);
+import { readFileSync } from 'node:fs';
+test('fixture census', () => assert.equal(readFileSync('census-input.txt', 'utf8'), 'healthy'));\n`);
   put(join(wt, "scripts/generate-capability-snapshot.mjs"), `process.exit(${failure === "capability" ? 1 : 0});\n`);
   put(join(wt, "scripts/lint.mjs"), failure === "lint" || failure === "advisory"
     ? `console.error('✗ fixture\\n    [${failure === "advisory" ? "machine-filing-admission" : "proof-dialect"}] fixture finding'); process.exit(1);\n`
@@ -76,6 +78,7 @@ test('fixture census', () => assert.equal(${JSON.stringify(failure)}, 'census' =
   git("-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD:main");
   git("update-ref", "refs/remotes/origin/main", "HEAD");
   put(join(wt, "src/lib/policy.ts"), "export const fixture = false;\n");
+  if (failure === "census") put(join(wt, "census-input.txt"), "unhealthy");
   put(join(wt, "plan/fixture.yaml"), "fixture: false\n");
   git("add", "-A");
   git("commit", "-q", "-m", "feat: fixture inputs");
@@ -137,6 +140,14 @@ describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandb
         failure === "capability" ? /REFUSED -- capability snapshot is stale/ : /REFUSES it \[proof-dialect\]/);
       assert.throws(() => f.remote.git("rev-parse", "--verify", `refs/heads/${f.branch}`));
       assert.ok(f.runs().length > 0);
+      if (failure === "census") {
+        const censusRuns = f.runs().filter((r) => r.argv.includes("--test"));
+        assert.equal(censusRuns.length, 2, "the head failure is compared with one base run");
+        const roots = censusRuns.map((r) => r.argv[r.argv.indexOf("--chdir") + 1]);
+        assert.equal(roots[0], f.wt);
+        assert.notEqual(roots[1], f.wt, "the base run has its own sandbox root");
+        assert.equal(existsSync(roots[1]), false, "the base worktree is removed after refusal");
+      }
     });
   }
 
