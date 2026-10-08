@@ -1,0 +1,2 @@
+- claim: the ci-shard (1/8) lane receives the conflict-marker lesson through matched learnings
+  proof: "grep: ci-learning:8551:ci-shard (1/8) in learnings/ci.yaml"

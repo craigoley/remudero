@@ -57,6 +57,8 @@ export interface Config {
   accessTeamDomain?: string;
   accessAudience?: string;
   notifyRecipient?: string;
+  /** Human GitHub principals authorized to answer escalations; absent preserves personal-owner behavior. */
+  operatorGithubLogins?: string[];
   overflow?: "none" | "api_key";
   /** the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
    *  before. A PAIR raises it only on a day the subscriptions are tapped out:
@@ -297,6 +299,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("accessTeamDomain", "string", true, undefined, "config.json", "Cloudflare Access team domain.", stringShape),
   configField("accessAudience", "string", true, undefined, "config.json", "Cloudflare Access audience tag.", stringShape),
   configField("notifyRecipient", "string", true, "craigoley@gmail.com", "config.json", "Escalation notification recipient.", stringShape),
+  configField("operatorGithubLogins", "string[]", true, undefined, "config.json", "Human GitHub logins allowed to answer escalations; absent preserves repository-owner behavior.", stringArrayShape),
   configField("overflow", '"none" | "api_key"', true, "none", "config.json", "Metered overflow billing mode.", {
     kind: "enum",
     values: ["none", "api_key"],
