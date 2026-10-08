@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { createCapabilityGrant, InMemoryCapabilityGrantStore, type CapabilityGrant } from "../src/lib/capability-grant.js";
-import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays, type CapabilityInspectionSource } from "../src/lib/capability-inspection.js";
+import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays, loadCapabilityInspectionSource, type CapabilityInspectionSource } from "../src/lib/capability-inspection.js";
 
 test("test/capability-inspection-source.test.ts: unknown input and unavailable sources are distinct from refusal", () => {
   const request = { grantId: "g", target: "t", operation: "read", audience: "a", nonce: "n" };
@@ -45,4 +48,52 @@ test("test/capability-inspection-source.test.ts: unknown input and unavailable s
   assert.deepEqual(compareCapabilityReplays(good, unknown).changes, ["incomparable"]);
   assert.deepEqual(compareCapabilityReplays(good, replayCapabilityDecisions(source, [], now)).changes, ["incomparable"]);
   assert.equal(replayCapabilityDecisions(source, "bad", now).code, "invalid-cases");
+});
+
+test("canonical snapshot rejects malformed rows as unavailable without accepting a valid prefix", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-inspection-rows-"));
+  try {
+    const path = join(dir, "canonical.json");
+    const now = "2026-10-08T00:00:00Z";
+    const input = { grantId: "g", target: "t", operation: "read", audience: "a", nonce: "n" };
+    const grant = createCapabilityGrant({ id: "g", targetIdentity: "t", operations: ["read"], audience: "a",
+      expiresAt: "2030-01-01Z", approval: { approvedBy: "o", approvedAt: "2026-01-01Z" }, revocationLink: "r" });
+    const valid = { grant, revoked: false, useCount: 0, nonces: [] };
+    const write = (rows: unknown[]) => {
+      const content = JSON.stringify({ schema: "capability-inspection-source-v1", grants: rows });
+      writeFileSync(path, content);
+      return content;
+    };
+    write([valid]);
+    assert.equal(inspectCapabilityDecision(loadCapabilityInspectionSource(path), input, now).verdict, "allow");
+    const invalidRows = [
+      null, [], {},
+      { ...valid, grant: null },
+      { ...valid, grant: { ...grant, id: "" } },
+      { ...valid, grant: { ...grant, id: "other", expiresAt: "invalid" } },
+      valid,
+      { ...valid, grant: { ...grant, id: "other" }, revoked: "false" },
+      { ...valid, grant: { ...grant, id: "other" }, useCount: 0.5 },
+      { ...valid, grant: { ...grant, id: "other" }, useCount: -1 },
+      { ...valid, grant: { ...grant, id: "other" }, nonces: [7] },
+      { ...valid, grant: { ...grant, id: "other" }, nonces: Array(1001).fill("n") },
+    ];
+    for (const row of invalidRows) {
+      const content = write([valid, row]);
+      const source = loadCapabilityInspectionSource(path);
+      assert.deepEqual(source, { unavailable: "malformed-source" });
+      const inspected = inspectCapabilityDecision(source, input, now);
+      assert.equal(inspected.verdict, "unavailable");
+      assert.equal(inspected.code, "malformed-source");
+      assert.ok(Object.values(inspected.predicates).every((value) => value === "not-checked"));
+      const replay = replayCapabilityDecisions(source, [input, { ...input, grantId: "absent" }], now);
+      assert.deepEqual(replay.results.map(({ verdict, code }) => ({ verdict, code })), [
+        { verdict: "unavailable", code: "malformed-source" },
+        { verdict: "unavailable", code: "malformed-source" },
+      ]);
+      assert.equal(readFileSync(path, "utf8"), content);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
