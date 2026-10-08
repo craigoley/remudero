@@ -1,6 +1,6 @@
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -11,11 +11,12 @@ import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
+import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
-async function readSource(source, asOf) {
+async function readSource(source, asOf, resolutions) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -25,6 +26,8 @@ async function readSource(source, asOf) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
+  const resolvedRows = new WeakSet();
+  let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
@@ -37,15 +40,18 @@ async function readSource(source, asOf) {
     onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
     onAcceptedRecord: (row, raw) => {
       const timestamp = Date.parse(row.ts);
+      const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
+      if (resolution) resolvedRows.add(row);
       if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
         kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
         timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
+        ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
       });
     },
   })) {
     const time = Date.parse(row.ts);
     if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
-    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
+    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
     // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
@@ -64,7 +70,7 @@ async function readSource(source, asOf) {
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -73,7 +79,8 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso() }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions }) {
+  const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
   const scheduled = Date.parse(`${today}T04:17:00Z`);
@@ -94,13 +101,19 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   }
   const results = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf);
+    const { rows, ...quality } = await readSource(source, asOf, resolutions);
+    const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
+      || quality.futureRows !== quality.routingResolvedFutureRows);
+    const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
+      state: quality.state === "unavailable" ? "unavailable" : trialReasons.length ? "observed-partial" : "observed",
+      reasons: trialReasons, resolvedIrrelevantFutureRows: quality.routingResolvedFutureRows ?? 0 };
     const reports = ROUTING_EXPERIMENTS.map((experiment) => {
       const report = evaluateRoutingExperiment(rows, experiment, today);
       const prior = previous?.sources.find((item) => item.label === source.label)?.reports?.find((item) => item.id === report.id);
       return { ...report, minTasksPerArm: experiment.minTasksPerArm,
-        reviewState: quality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
-        nextAction: quality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
+        sourceQuality: trialSourceQuality,
+        reviewState: trialSourceQuality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
+        nextAction: trialSourceQuality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
         changesSincePriorDay: prior ? { assignments: report.assignments - prior.assignments,
           tasks: report.arms.map((arm) => ({ arm: arm.arm, added: arm.tasks - (prior.arms.find((item) => item.arm === arm.arm)?.tasks ?? 0) })) } : null };
     });
@@ -155,7 +168,8 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values } = parseArgs({ options: { source: { type: "string", multiple: true }, "out-dir": { type: "string" } } });
+  const { values } = parseArgs({ options: { source: { type: "string", multiple: true }, "out-dir": { type: "string" },
+    "quarantine-resolutions": { type: "string" } } });
   const sources = (values.source ?? []).map((value) => {
     const at = value.indexOf("=");
     const label = value.slice(0, at), stateDir = value.slice(at + 1);
@@ -165,6 +179,18 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!values["out-dir"] || !isAbsolute(values["out-dir"]) || sources.length < 1 || sources.length > 3
     || new Set(sources.map((source) => source.label)).size !== sources.length)
     throw new Error("usage: private-routing-daily-review.mjs --source label=/state (1..3 unique) --out-dir /private/output");
-  const result = await dailyRoutingReview({ sources, outDir: values["out-dir"] });
+  const resolutionPath = values["quarantine-resolutions"] ?? join(values["out-dir"], "quarantine-resolutions.json");
+  if (!isAbsolute(resolutionPath)) throw new Error("quarantine resolutions require an absolute private path");
+  let quarantineResolutions;
+  try {
+    const st = lstatSync(resolutionPath);
+    if (!st.isFile() || (st.mode & 0o777) !== 0o600 || st.size > 64 * 1024)
+      throw new Error("quarantine resolutions require a bounded regular private file");
+    quarantineResolutions = JSON.parse(readFileSync(resolutionPath, "utf8"));
+  } catch (error) {
+    if (values["quarantine-resolutions"] || error.code !== "ENOENT") throw error;
+    // An absent optional manifest preserves the original unqualified source warnings.
+  }
+  const result = await dailyRoutingReview({ sources, outDir: values["out-dir"], quarantineResolutions });
   console.log(result.text.trimEnd());
 }
