@@ -94,6 +94,11 @@ export interface ObjectReapDeps {
   hostname?: () => string;
   /** {@link reapGitObjectsAsync} only: the default prune's bound, {@link OBJECT_PRUNE_TIMEOUT_MS} when absent. */
   pruneTimeoutMs?: number;
+  /** Cadence controller adapters share the reaper's clock and composition seam. */
+  random?: () => number;
+  context?: () => MaintenanceContext;
+  survey?: typeof surveyRepositoryMaintenance;
+  run?: typeof runMaintenanceGit;
 }
 
 /** What an awaited prune reports. `timedOutAfterMs` is set iff it was killed at its bound. */
@@ -764,37 +769,30 @@ export async function surveyRepositoryMaintenance(
   return { ...context, readable: true, looseCount: Number(count[1]), looseBytes: Number(size[1]) * 1024, gcLog };
 }
 
-export interface MaintenanceDeps {
-  now?: () => number;
-  random?: () => number;
-  context: () => MaintenanceContext;
-  survey?: typeof surveyRepositoryMaintenance;
-  run?: typeof runMaintenanceGit;
-}
-
 const maintenanceInFlight = new Set<string>();
 
 export async function runRepositoryMaintenance(
   repo: string, statePath: string, policy: MaintenancePolicy,
-  log: (step: string, fields: Record<string, unknown>) => void, deps: MaintenanceDeps,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: Pick<ObjectReapDeps, "clock" | "random" | "survey" | "run"> & Required<Pick<ObjectReapDeps, "context">>,
 ): Promise<void> {
   if (maintenanceInFlight.has(repo)) return;
   maintenanceInFlight.add(repo);
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
   let state: MaintenanceState | undefined;
   let before: MaintenanceSurvey | undefined;
   let after: MaintenanceSurvey | undefined;
   let kind: "incremental" | "gc" | undefined;
-  const started = now();
+  const started = clock.now();
   const emit = (outcome: string, reason: string) => log(`repository_maintenance.${outcome}`, {
-    repo, kind: kind ?? "survey", outcome, reason, duration_ms: Math.max(0, now() - started),
+    repo, kind: kind ?? "survey", outcome, reason, duration_ms: Math.max(0, clock.now() - started),
     loose_before: before?.looseCount, bytes_before: before?.looseBytes,
     loose_after: after?.looseCount, bytes_after: after?.looseBytes,
     gc_log_before: before?.gcLog === undefined ? "unknown" : before.gcLog === null ? "absent" : "present",
     gc_log_after: after?.gcLog === undefined ? "unknown" : after.gcLog === null ? "absent" : "present",
     active_lanes: before?.activeLanes, next_retry: state && Math.max(state.nextEligibleAt, state.nextSurveyAt),
     last_success: state?.lastSuccess, last_failure: state?.lastFailure,
-    retry_pending: state !== undefined && !state.escalated && Math.max(state.nextEligibleAt, state.nextSurveyAt) > now(),
+    retry_pending: state !== undefined && !state.escalated && Math.max(state.nextEligibleAt, state.nextSurveyAt) > clock.now(),
   });
   try {
     state = readMaintenanceState(statePath);
@@ -819,7 +817,7 @@ export async function runRepositoryMaintenance(
     Object.assign(before, deps.context());
     const decision = decideRepositoryMaintenance(before, state, policy, started);
     if (decision.verdict === "deferred" || decision.verdict === "healthy") {
-      state.nextSurveyAt = now() + policy.probeIntervalMs;
+      state.nextSurveyAt = clock.now() + policy.probeIntervalMs;
       state.lastOutcome = "defer";
       state.lastReason = decision.reason;
       saveMaintenanceState(statePath, state);
@@ -830,10 +828,10 @@ export async function runRepositoryMaintenance(
     state.failedGcLog = before.gcLog ?? undefined;
     // Persist an interrupted attempt's failure and retry window BEFORE spawning the child.
     state.failures++;
-    state.lastAttempt = now();
+    state.lastAttempt = clock.now();
     state.lastOutcome = "running";
     const backoff = Math.min(policy.maxBackoffMs, policy.backoffMs * 2 ** Math.min(state.failures - 1, 30));
-    state.nextEligibleAt = now() + policy.timeoutMs +
+    state.nextEligibleAt = clock.now() + policy.timeoutMs +
       Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
     saveMaintenanceState(statePath, state);
     emit("start", decision.reason);
@@ -842,8 +840,8 @@ export async function runRepositoryMaintenance(
     after = await survey(repo, postContext.activeLanes, postContext.disk, Math.min(policy.timeoutMs, 30000));
     const verified = result.ok && completeMaintenanceSurvey(after) && after.gcLog === null;
     if (verified) {
-      state = { ...state, failures: 0, escalated: false, lastOutcome: "complete", lastSuccess: now(),
-        nextEligibleAt: now() + Math.max(86400000, policy.intervalMs), nextSurveyAt: 0, failedGcLog: undefined };
+      state = { ...state, failures: 0, escalated: false, lastOutcome: "complete", lastSuccess: clock.now(),
+        nextEligibleAt: clock.now() + Math.max(86400000, policy.intervalMs), nextSurveyAt: 0, failedGcLog: undefined };
       state.lastReason = "Git maintenance verified";
       saveMaintenanceState(statePath, state);
       emit("complete", state.lastReason);
@@ -852,8 +850,8 @@ export async function runRepositoryMaintenance(
       state.lastReason = !result.ok ? `${result.timedOut ? "timeout: " : ""}${result.error}` :
         !completeMaintenanceSurvey(after) ? `post-survey unreadable: ${after.error ?? "incomplete state"}` :
           "Git failure marker survives";
-      state.lastFailure = now();
-      state.nextEligibleAt = now() +
+      state.lastFailure = clock.now();
+      state.nextEligibleAt = clock.now() +
         Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
       state.escalated = state.failures >= policy.maxFailures;
       saveMaintenanceState(statePath, state);

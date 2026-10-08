@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSyn
 import { join } from "node:path";
 import { test } from "node:test";
 import * as maintenance from "../src/lib/object-reaper.js";
+import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { runDaemon } from "../src/lib/daemon.js";
@@ -56,7 +57,7 @@ test("W1-T3116: maintenance runs the installed git maintenance tasks asynchronou
   let now = 100;
   const rows: string[] = [];
   const run = () => maintenance.runRepositoryMaintenance(store.dir, statePath, policy,
-    (step) => rows.push(step), { now: () => now, context: () => ({ activeLanes: 0, disk: "healthy" }) });
+    (step) => rows.push(step), { clock: clockFromMillisFn(() => now), context: () => ({ activeLanes: 0, disk: "healthy" }) });
   await run();
   assert.ok(rows.includes("repository_maintenance.complete"));
   const state = maintenance.readMaintenanceState(statePath);
@@ -88,7 +89,7 @@ test("W1-T3116: rmd never writes or removes the gc log and success requires the 
   for (const [index, outcome] of outcomes.entries()) {
     const statePath = join(store.dir, `maintenance-${index}.json`);
     await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, () => {}, {
-      now: () => 1e8, random: () => 0, context: () => ({ activeLanes: 0, disk: "healthy" }),
+      clock: fixedClock(1e8), random: () => 0, context: () => ({ activeLanes: 0, disk: "healthy" }),
       survey: async () => survey("failure evidence\n"), run: async () => outcome,
     });
     assert.equal(readFileSync(marker, "utf8"), "failure evidence\n");
@@ -112,7 +113,7 @@ test("W1-T3116: cadence and backoff survive restarts and repeated failure escala
   const rows: string[] = [];
   let attempts = 0;
   const run = () => maintenance.runRepositoryMaintenance(store.dir, statePath, policy,
-    (s) => rows.push(s), { now: () => now, random: () => 0,
+    (s) => rows.push(s), { clock: clockFromMillisFn(() => now), random: () => 0,
       context: () => ({ activeLanes: 0, disk: "healthy" }), survey: async () => survey("failed"),
       run: async () => { attempts++; return { ok: false, timedOut: false, error: "lock held" }; } });
   for (let i = 0; i < 3; i++) {
@@ -131,7 +132,7 @@ test("W1-T3116: cadence and backoff survive restarts and repeated failure escala
   const cappedPath = join(store.dir, "capped.json");
   await maintenance.runRepositoryMaintenance(store.dir, cappedPath,
     { ...policy, maxBackoffMs: policy.backoffMs }, () => {}, {
-      now: () => 100, random: () => 1, context: () => ({ activeLanes: 0, disk: "healthy" }),
+      clock: fixedClock(100), random: () => 1, context: () => ({ activeLanes: 0, disk: "healthy" }),
       survey: async () => survey("failed"), run: async () => ({ ok: false, timedOut: false, error: "lock held" }),
     });
   assert.equal(maintenance.readMaintenanceState(cappedPath).nextEligibleAt, 100 + policy.backoffMs,
@@ -142,21 +143,23 @@ test("W1-T3116: the ledger and status expose object counts, duration, outcome an
   const store = gitRepo({ kind: "maintenance-ledger" });
   const rows: Array<Record<string, unknown>> = [];
   const statePath = join(store.dir, "maintenance.json");
+  let now = 100;
   await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, (_s, f) => rows.push(f), {
-    now: () => 100, context: () => ({ activeLanes: 0, disk: "healthy" }),
-    survey: async () => survey(), run: async () => ({ ok: true, stdout: "" }),
+    clock: clockFromMillisFn(() => now), context: () => ({ activeLanes: 0, disk: "healthy" }),
+    survey: async () => survey(), run: async () => { now = 175; return { ok: true, stdout: "" }; },
   });
   const row = rows.at(-1)!;
   assert.equal(row.loose_before, 6000);
   assert.equal(row.loose_after, 6000);
   assert.equal(row.bytes_before, 12000);
-  assert.equal(row.duration_ms, 0);
+  assert.equal(row.duration_ms, 75);
   assert.equal(row.outcome, "complete");
-  assert.equal(row.next_retry, 86400100);
+  assert.equal(row.last_success, 175);
+  assert.equal(row.next_retry, 86400175);
   const status = await import("../src/lib/status-board.js");
   const projection = status.repositoryMaintenanceStatus([{ step: "repository_maintenance.complete", ...row }]);
   assert.equal(projection[0].outcome, "complete");
-  assert.equal(projection[0].nextRetry, 86400100);
+  assert.equal(projection[0].nextRetry, 86400175);
   assert.equal(projection[0].looseAfter, 6000);
   const board = status.buildStatusBoard(store.dir, join(store.dir, "ledger.ndjson"), {
     repoDir: store.dir, queryService: () => ({ running: false, pid: null }),
@@ -178,7 +181,7 @@ test("unverifiable post-survey and Git's replacement marker each enter durable b
     const statePath = join(store.dir, `post-${index}.json`);
     let probes = 0;
     await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, () => {}, {
-      now: () => 100, context: () => ({ activeLanes: 0, disk: "healthy" }),
+      clock: fixedClock(100), context: () => ({ activeLanes: 0, disk: "healthy" }),
       survey: async () => probes++ === 0 ? survey("previous failure") : after,
       run: async () => ({ ok: true, stdout: "" }),
     });
@@ -228,7 +231,7 @@ test("an unreadable or incomplete survey never spawns a maintenance child", asyn
     { ...survey(), activeLanes: Number.NaN }]) {
     const statePath = join(store.dir, `state-${String(bad.error ?? bad.looseBytes)}-${String(bad.activeLanes)}.json`);
     await maintenance.runRepositoryMaintenance(store.dir, statePath, policy, () => {}, {
-      now: () => 1e8, context: () => ({ activeLanes: bad.activeLanes, disk: "healthy" }),
+      clock: fixedClock(1e8), context: () => ({ activeLanes: bad.activeLanes, disk: "healthy" }),
       survey: async () => bad, run: async () => { assert.fail("incomplete survey authorizes no child"); },
     });
     assert.equal(maintenance.readMaintenanceState(statePath).lastOutcome, "defer");
