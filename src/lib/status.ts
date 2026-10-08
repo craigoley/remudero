@@ -4134,9 +4134,8 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = ghExec(requiredStatusChecksArgs(owner, repo, branch),
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
+    const requiredArgs = requiredStatusChecksArgs(owner, repo, branch);
+    raw = ghExec(requiredArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     // THE FACT THIS TASK EXISTS TO PRESERVE. Classified at the point of failure, because nothing downstream can
     // recover it: an absent binary, an unprivileged token, a network error and a 404 on an unprotected branch
