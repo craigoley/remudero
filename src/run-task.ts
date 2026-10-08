@@ -1261,7 +1261,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { activeWorkerProbes, type ObjectReapDeps, type ObjectReapResult, reapGitObjectsAsync } from "./lib/object-reaper.js";
+import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -35103,6 +35103,42 @@ export const DISK_RECLAIM_DEFAULT_SWEEPS = {
   sweepWorkerHomes: sweepStaleWorkerHomesAsync,
 } as const;
 
+/** One cadence over the canonical and managed object stores; policy is injectable. */
+export async function runRepositoryMaintenanceRung(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  context: MaintenanceContext,
+  policy?: ReturnType<typeof loadDefaultPolicy>["values"]["objectReap"],
+): Promise<void> {
+  const limits = policy ?? loadDefaultPolicy().values.objectReap;
+  const roots = new Set<string>();
+  const reposRoot = join(config.root, "repos");
+  if (existsSync(reposRoot)) {
+    for (const name of readdirSync(reposRoot)) {
+      const repo = join(reposRoot, name);
+      if (existsSync(join(repo, ".git"))) roots.add(repo);
+    }
+  }
+  const daemonRepo = join(config.root, "remudero");
+  if (existsSync(join(daemonRepo, ".git"))) roots.add(daemonRepo);
+  for (const repo of roots) {
+    const state = join(config.root, "state", `repository-maintenance-${createHash("sha256").update(repo).digest("hex").slice(0, 16)}.json`);
+    await runRepositoryMaintenance(repo, state, limits, log, {
+      context: () => {
+        const freeBytes = readDiskFreeBytes(config.root);
+        const inflight = join(config.root, "state", "inflight");
+        const probes = activeWorkerProbes(inflight);
+        const locks = defaultListInflightLocks(inflight);
+        return { ...context,
+          activeLanes: locks.includes("<unreadable>") ? Number.NaN :
+            Math.max(context.activeLanes, activeWorkerCount(), locks.filter((lock) => probes.isInflightLockActive!(lock)).length),
+          disk: freeBytes === undefined ? "unknown" : judgeDiskHeadroom(freeBytes).verdict === "OK" ? "healthy" : "low",
+        };
+      },
+    });
+  }
+}
+
 /**
  * W1-T411 — the disk-reclaim RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
  * `runTaskBody` beside `pruneStaleRuns` and W1-T406's {@link logWorktreeReapBootSurvey}. Three
@@ -35216,107 +35252,8 @@ export async function logDiskReclaimRung(
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
 
-  // W1-T3092 — THE FOURTH SWEEP. Guarded exactly like the three above: a throw here can never
-  // block the dispatch or its siblings. DRY BY DEFAULT behind `objectReap.enabled`, the posture
-  // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
-  // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
-  // outcomes: a survey that reached different probes would describe a decision nobody will make.
-  //
-  // TWO REPOS (operator ruling 2026-10-06): the managed checkout and the daemon's own checkout,
-  // each with its own decision row and refusal streak. The daemon checkout is reaped only where a
-  // git store exists at `<root>/remudero`; a host that keeps it elsewhere has nothing there.
-  let objectsPruned = 0;
-  let objectsWouldPrune = 0;
-  const objectRows: Array<[string, Record<string, unknown>]> = [];
-  try {
-    // W1-T4022: `loadDefaultPolicy()` reads the install's own policy (the seam `runAdhocLaneReapRung`
-    // uses). The prior `loadPolicy(policyPath(config.root))` THREW every tick — the daemon root has no
-    // plan/policy.yaml — and the catch below swallowed it: 0 `objects_declined` rows in four days.
-    let policyBlock: { enabled: boolean };
-    try {
-      policyBlock = deps.objectPolicy?.() ?? loadDefaultPolicy().values.objectReap;
-    } catch (err) {
-      // Logged HERE: an unloadable policy is a different failure than the generic catch below.
-      log("run.disk_reclaim.policy_error", { error: String((err as Error)?.message ?? err) });
-      throw err;
-    }
-    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
-    const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
-    if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
-    const enabled = pin.fire && policyBlock.enabled;
-    const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
-    const daemonCheckout = (deps.objectDaemonCheckoutDir ?? (() => join(config.root, "remudero")))();
-    // Every OTHER git store under `<root>/repos` is a managed repo too: the console and site
-    // daemons run this rung with their own root and clone into `repos/remudero-console` and
-    // `repos/remudero-site`, which a lone `repos/remudero` never reached.
-    const reposRoot = join(config.root, "repos");
-    const otherManaged = (existsSync(reposRoot) ? readdirSync(reposRoot) : [])
-      .filter((name) => name !== "remudero" && existsSync(join(reposRoot, name, ".git")))
-      .sort();
-    const repos = [
-      {
-        repo: "managed",
-        dir: (deps.objectRepoDir ?? (() => join(reposRoot, "remudero")))(),
-        streakPath: (deps.objectStreakPath ?? (() => join(config.root, "state", "object-reap-refusal-streak.json")))(),
-      },
-      ...otherManaged.map((name) => ({
-        repo: `managed:${name}`,
-        dir: join(reposRoot, name),
-        streakPath: join(config.root, "state", `object-reap-refusal-streak-${name}.json`),
-      })),
-      ...(existsSync(join(daemonCheckout, ".git"))
-        ? [{ repo: "daemon-checkout", dir: daemonCheckout, streakPath: join(config.root, "state", "object-reap-refusal-streak-daemon-checkout.json") }]
-        : []),
-    ];
-    for (const { repo, dir, streakPath } of repos) {
-      // AWAITED (2026-10-06): the sync prune held the daemon loop 161 s; this one is bounded and off it.
-      const r = await (deps.reapObjects ?? reapGitObjectsAsync)(dir, inflight, {
-        dryRun: !enabled,
-        // W1-T4022: the REAL `lsof`-backed probe, never the fail-closed `() => 1` object-reaper.ts
-        // falls back to when nothing supplies a counter.
-        ...(deps.objectOpenFileCount ? { openFileCount: deps.objectOpenFileCount } : { openFileCountAsync: defaultOpenFileCountAsync }),
-        streakPath,
-        ownInflightLock: deps.objectOwnInflightLock,
-        ...activeWorkerProbes(inflight),
-      });
-      // An unknown yield adds nothing: the decision row below names it, and a sum cannot.
-      if (r.pruned !== "unknown") objectsPruned += r.pruned;
-      objectsWouldPrune += r.wouldPrune ?? 0;
-      // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
-      // that decides whether arming this rung is worth anything, and it is unreadable unless the
-      // declines are ledgered too, with the CONSECUTIVE REFUSAL streak and when it began (W1-T4022).
-      if (r.refusedBecause !== undefined) {
-        objectRows.push(["run.disk_reclaim.objects_declined", {
-          repo,
-          reason: r.refusedBecause,
-          consecutive_refusals: r.consecutiveRefusals,
-          refusing_since: r.refusingSinceIso,
-          // Named outcomes, never a reading: a handle probe killed at its bound, an unread count.
-          ...(r.handleProbe ? { handle_probe: r.handleProbe } : {}),
-          ...(r.looseBefore === "unknown" ? { loose_before: r.looseBefore } : {}),
-        }]);
-      } else if (r.carriedBy !== undefined) {
-        // WHICH BARRIER CARRIED IT: `quiet` (both held) or `expiry` (the store was busy).
-        objectRows.push(["run.disk_reclaim.objects_decision", {
-          repo,
-          carried_by: r.carriedBy,
-          quiet_shortfall: r.quietShortfall,
-          dry_run: !enabled,
-          loose_before: r.looseBefore,
-          pruned: r.pruned,
-          would_prune: r.wouldPrune,
-          locks_reclaimed: r.locks?.reclaimed,
-          locks_kept: r.locks?.kept,
-          locks_failed: r.locks?.failed,
-          // Armed rows only: a prune killed at its bound is named, never read as a completed one.
-          ...(enabled ? { prune_outcome: r.pruneTimedOutAfterMs !== undefined ? "timed_out" : "completed" } : {}),
-          prune_timed_out_after_ms: r.pruneTimedOutAfterMs,
-        }]);
-      }
-    }
-  } catch {
-    // best-effort — a throw here must never block the dispatch or the other three sweeps
-  }
+  const objectsPruned = 0;
+  const objectsWouldPrune = 0;
 
   if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
     log("run.disk_reclaim", {
@@ -35329,7 +35266,6 @@ export async function logDiskReclaimRung(
       objects_would_prune: objectsWouldPrune,
     });
   }
-  for (const [step, fields] of objectRows) log(step, fields);
 
   return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
@@ -38292,6 +38228,7 @@ export async function daemonCommand(
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
         sweepOrphans,
+        repositoryMaintenance: (context) => runRepositoryMaintenanceRung(config, log, context, policy.values.objectReap),
         // W1-T530: the per-poll half of the feedback-landing sweep — the SAME options daemonBoot's
         // pass runs with, wired here so an entry captured (or a landing attempt that failed)
         // BETWEEN polls is still found within one cycle; awaited off the loop (W1-T5620).

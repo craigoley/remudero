@@ -263,15 +263,9 @@ sync_tree() {
     fi
   fi
 
-  # A stuck repo stays stuck, deliberately: `worktree prune` removes the cause, not an existing
-  # `.git/gc.log`, because this script cannot tell a stale log from one a maintenance run is
-  # still writing. It reports the file and leaves clearing it to an operator.
-  # Why: docs/forensics/entrypoint.md#sync_tree--reporting-a-stuck-gclog-rather-than-clearing-it.
+  # Report only: the daemon cadence owns recovery after useful admission.
   if [ -f "$TREE/.git/gc.log" ]; then
-    log "NOTE: $TREE/.git/gc.log exists — git is declining AUTOMATIC cleanup until it is removed."
-    log "  The stale registrations above are pruned, so the cause is gone, but the log is not"
-    log "  cleared here: it belongs to whatever wrote it. To recover, with no lane running:"
-    log "    rm -f $TREE/.git/gc.log && git -C $TREE gc --prune=now"
+    log "NOTE: $TREE/.git/gc.log exists — autonomous daemon maintenance will retry at a quiet boundary."
   fi
 
   # ── The dirty-tree rule is the deployer's, not a new one ──────────────────────────

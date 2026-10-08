@@ -1,37 +1,12 @@
-/**
- * lib/object-reaper.ts — reclaim UNREACHABLE git objects from a fleet repository.
- *
- * THE GAP: nothing has ever reclaimed a git OBJECT. A grep for gc/prune/repack across src/ returns
- * only `git worktree prune`, which is worktree-ADMIN cleanup. Measurements, and why the second-order
- * effects matter more than the bytes, are in plan/tasks.d/W1-T3090-*.yaml.
- *
- * TWO INDEPENDENT PROTECTIONS, which is the {@link file://./clone-reaper.ts} discipline — that
- * module records that an age test ALONE destroyed two working trees:
- *   (1) QUIET  — no active registered worktree, no inflight lock, no open handle under `.git`.
- *   (2) EXPIRY — {@link OBJECT_PRUNE_EXPIRY} is ALWAYS passed. Even if (1) were wrong, an object a
- *                live worker created inside the window is ineligible.
- *
- * OPERATOR RULING 2026-10-06 ("prune on expiry alone"): the armed reaper refused 58 ticks in a row
- * while two stores held 51,865 and 141,536 loose objects, because a working fleet always has a
- * worktree or an inflight lock. Those two quiet arms NO LONGER REFUSE BY THEMSELVES: the prune runs
- * and its decision row says the EXPIRY barrier carried it ({@link ObjectReapDecision}). The
- * open-handle arm STILL refuses, and an unreadable handle count still reads as held. Expiry is
- * never optional, so (2) is now the protection the clone-reaper discipline asks to be independent:
- * an age test is safe here where it was not there because prune only removes objects NO ref, index
- * or reflog reaches — a whole working tree was never in that set.
- *
- * PRUNE ONLY, NEVER `gc`: gc repacks and can rewrite refs and reflogs, and the finding is about
- * UNREACHABLE objects, which prune alone removes. Never `git worktree prune` either.
- */
-import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+/** Repository maintenance cadence; legacy reaper exports are unreachable from production dispatch. */
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { OpenFileProbe } from "./clone-reaper.js";
 import { type Clock, systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
 
 /** How old an unreachable object must be before it is eligible. The SECOND of the two barriers:
  *  it is what makes a wrong quiet verdict survivable, so it is never omitted and never zero. */
@@ -287,7 +262,7 @@ export const STALE_MAINTENANCE_LOCK_AGE_MS = 60 * 60_000;
 
 /** Leftovers under a repo's git dir whose presence blocks git's own maintenance. A minimal subset
  *  of PR #9555's `GIT_MAINTENANCE_LEFTOVERS` (unmerged when this landed): ref and index locks are
- *  not maintenance and are never touched here. `gc.log` is handled by the reap itself. */
+ *  not maintenance and are never touched here. Git alone owns `gc.log`. */
 export const MAINTENANCE_LEFTOVERS = ["objects/maintenance.lock", "gc.pid", "gc.log.lock"] as const;
 
 /** A git process that may own a maintenance lock. Matched against a whole `ps` args line. */
@@ -465,9 +440,7 @@ export function defaultCountPrunable(repoDir: string, args: readonly string[]): 
 /**
  * Reclaim unreachable objects, or refuse with a named cause.
  *
- * ORDER IS LOAD-BEARING: `.git/gc.log` is removed ONLY on a pass that is about to prune. Removing
- * it on a refused pass would re-arm git's UNSUPERVISED automatic cleanup, which is precisely what
- * the operator's standing rule exists to prevent — the opposite of this function's purpose.
+ * Retained for older direct callers, outside the production dispatch graph. Git alone owns gc.log.
  *
  * THE QUIESCED WINDOW (design (ii), W1-T4022). {@link objectReapDecision} is a single sample at
  * one instant, so it is taken TWICE: once here, once more immediately before the one subprocess
@@ -491,7 +464,7 @@ export function reapGitObjects(
   if (first.refusedBecause !== undefined) return withStreak(deps, true, { pruned: 0, looseBefore, refusedBecause: first.refusedBecause });
 
   // SURVEY: past every refusal above, so the disposition reported is the decision the armed path
-  // would have made. Returns BEFORE gc.log is touched and before anything is spawned or removed.
+  // would have made. Returns before anything is spawned or removed.
   if (deps.dryRun === true) {
     const count = deps.countPrunable ?? defaultCountPrunable;
     return withStreak(deps, false, {
@@ -502,7 +475,7 @@ export function reapGitObjects(
     });
   }
 
-  // THE SECOND END OF THE QUIESCED WINDOW. Checked BEFORE gc.log is touched: a refusal here must
+  // THE SECOND END OF THE QUIESCED WINDOW. A refusal here must
   // leave the auto-gc suppressor exactly where the first refusal above would have left it.
   const second = objectReapDecision(repoDir, inflightDir, deps);
   if (second.refusedBecause !== undefined) {
@@ -530,34 +503,16 @@ function closedWindowReason(refusedBecause: string): string {
   return `quiesced window closed before the prune: ${refusedBecause}`;
 }
 
-/** Reclaim stale maintenance locks, then take off the auto-gc suppressor: only with the prune committed to. */
+/** Retired prune compatibility: preserve Git failure evidence. */
 function commitToPrune(repoDir: string, deps: ObjectReapDeps): StaleLockReclaim {
-  const locks = reclaimStaleMaintenanceLocks(join(repoDir, ".git"), deps);
-  try {
-    rmSync(join(repoDir, ".git", "gc.log"), { force: true });
-  } catch {
-    // best-effort: a gc.log we cannot remove costs a warning, never the prune
-  }
-  return locks;
+  return reclaimStaleMaintenanceLocks(join(repoDir, ".git"), deps);
 }
 
 type BoundedGit = { ok: true; stdout: string } | { ok: false; timedOut: boolean; error: string };
 
 /** One awaited git call, off the event loop: SIGTERM at `timeoutMs`, SIGKILL after the grace. Never rejects. */
 function runGitBounded(repoDir: string, args: readonly string[], timeoutMs: number): Promise<BoundedGit> {
-  return new Promise((resolve) => {
-    let timedOut = false;
-    const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      clearTimeout(timer);
-      if (!err) return resolve({ ok: true, stdout });
-      return resolve({ ok: false, timedOut, error: (stderr || err.message).trim() });
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child);
-    }, timeoutMs);
-  });
+  return runMaintenanceGit(repoDir, args, timeoutMs);
 }
 
 /** {@link defaultListWorktrees}, awaited. Unreadable or timed out fails closed, as the sync read does. */
@@ -612,7 +567,7 @@ function refused(looseBefore: LooseCount, d: ObjectReapDecision, because = d.ref
 
 /**
  * {@link reapGitObjects} OFF THE DAEMON LOOP: the same contract, step for step — floor, decision,
- * survey, second decision, lock reclaim, gc.log, prune — with every git call awaited and bounded.
+ * survey, second decision, lock reclaim, prune — with every git call awaited and bounded.
  * MEASURED 2026-10-06: the sync prune held the daemon loop 161 s (235 s of lag) during one pass.
  * A prune killed at its bound is NOT a success: the result carries `pruneTimedOutAfterMs`.
  */
@@ -652,4 +607,263 @@ export async function reapGitObjectsAsync(
 
 function barrierFields(d: ObjectReapDecision): Pick<ObjectReapResult, "carriedBy" | "quietShortfall"> {
   return { carriedBy: d.carriedBy, ...(d.quietShortfall !== undefined ? { quietShortfall: d.quietShortfall } : {}) };
+}
+
+export interface MaintenancePolicy {
+  intervalMs: number;
+  probeIntervalMs: number;
+  timeoutMs: number;
+  backoffMs: number;
+  maxBackoffMs: number;
+  maxFailures: number;
+  maxActiveLanes: number;
+}
+
+export interface MaintenanceContext {
+  activeLanes: number;
+  disk: "healthy" | "low" | "unknown";
+  queueBusy?: boolean;
+}
+
+export interface MaintenanceSurvey extends MaintenanceContext {
+  readable: boolean;
+  looseCount?: number;
+  looseBytes?: number;
+  gcLog?: string | null;
+  error?: string;
+}
+
+export interface MaintenanceState {
+  nextEligibleAt: number;
+  nextSurveyAt: number;
+  failures: number;
+  escalated: boolean;
+  failedGcLog?: string;
+  lastOutcome?: string;
+  lastSuccess?: number;
+  lastFailure?: number;
+  lastAttempt?: number;
+  lastReason?: string;
+}
+
+export function maintenanceArgs(kind: "incremental" | "gc"): string[] {
+  return ["maintenance", "run", ...(kind === "gc" ? ["--task=gc"] :
+    ["--task=commit-graph", "--task=loose-objects", "--task=incremental-repack"])];
+}
+
+function completeMaintenanceSurvey(survey: MaintenanceSurvey): boolean {
+  return survey.readable && (survey.gcLog === null || typeof survey.gcLog === "string") &&
+    Number.isSafeInteger(survey.looseCount) && Number.isSafeInteger(survey.looseBytes) &&
+    (survey.looseCount ?? -1) >= 0 && (survey.looseBytes ?? -1) >= 0 &&
+    Number.isSafeInteger(survey.activeLanes) && survey.activeLanes >= 0;
+}
+
+export function decideRepositoryMaintenance(
+  survey: MaintenanceSurvey, state: MaintenanceState, policy: MaintenancePolicy, now: number,
+): { verdict: "healthy" | "incremental-due" | "full-gc-due" | "deferred" | "escalate";
+  reason: string; nextEligibleAt: number } {
+  const decision = (verdict: ReturnType<typeof decideRepositoryMaintenance>["verdict"], reason: string) =>
+    ({ verdict, reason, nextEligibleAt: state.nextEligibleAt });
+  if (!completeMaintenanceSurvey(survey)) {
+    return decision("deferred", survey.error ?? "incomplete repository survey");
+  }
+  if (state.escalated) return decision("escalate", "automatic retries exhausted");
+  if (now < state.nextEligibleAt) return decision("healthy", "cadence or failure backoff pending");
+  if (survey.disk !== "healthy") return decision("deferred", `disk verdict ${survey.disk}`);
+  if (survey.gcLog !== null) {
+    if (survey.activeLanes !== 0 || survey.queueBusy) return decision("deferred", "full GC requires quiet admission");
+    return decision("full-gc-due", "persistent Git failure marker");
+  }
+  if (survey.activeLanes > policy.maxActiveLanes) return decision("deferred", "incremental load limit");
+  return decision("incremental-due", "daily incremental maintenance due");
+}
+
+export function readMaintenanceState(path: string): MaintenanceState {
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { nextEligibleAt: 0, nextSurveyAt: 0, failures: 0, escalated: false };
+    }
+    throw new Error(`maintenance state unreadable: ${String(error)}`);
+  }
+  const state = JSON.parse(raw) as MaintenanceState;
+  if (![state.nextEligibleAt, state.nextSurveyAt, state.failures].every((n) => Number.isFinite(n) && n >= 0) ||
+      !Number.isSafeInteger(state.failures) || typeof state.escalated !== "boolean") throw new Error("maintenance state invalid");
+  return state;
+}
+
+function saveMaintenanceState(path: string, state: MaintenanceState): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+export type MaintenanceChild = { ok: true; stdout: string } |
+  { ok: false; timedOut: boolean; error: string };
+
+/** A private process group bounds Git and its descendants; Git owns the database lock. */
+export function runMaintenanceGit(repo: string, args: readonly string[], timeoutMs: number): Promise<MaintenanceChild> {
+  return new Promise((resolve) => {
+    const grouped = process.platform !== "win32";
+    const child = spawn("git", ["-C", repo, ...args], { detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let spawnError: string | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const signal = (kind: NodeJS.Signals): void => {
+      try {
+        if (grouped && child.pid !== undefined) process.kill(-child.pid, kind);
+        else child.kill(kind);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") spawnError = `teardown failed: ${String(error)}`;
+      }
+    };
+    const teardown = () => signal("SIGKILL");
+    process.once("exit", teardown);
+    child.stdout.on("data", (chunk) => { stdout = (stdout + String(chunk)).slice(-64 * 1024 * 1024); });
+    child.stderr.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-65536); });
+    child.on("error", (error) => { spawnError = error.message; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      signal("SIGTERM");
+      killTimer = setTimeout(() => signal("SIGKILL"), 1000);
+    }, timeoutMs);
+    child.on("close", (code) => {
+      process.removeListener("exit", teardown);
+      clearTimeout(timer);
+      if (killTimer) {
+        clearTimeout(killTimer);
+        signal("SIGKILL");
+      }
+      resolve(code === 0 && !timedOut && !spawnError ? { ok: true, stdout } :
+        { ok: false, timedOut, error: spawnError ?? (stderr.trim() || `git exited ${code}`) });
+    });
+  });
+}
+
+export async function surveyRepositoryMaintenance(
+  repo: string, activeLanes: number, disk: MaintenanceContext["disk"], timeoutMs: number,
+): Promise<MaintenanceSurvey> {
+  const context = { activeLanes, disk };
+  const common = await runMaintenanceGit(repo, ["rev-parse", "--git-common-dir"], timeoutMs);
+  const counts = await runMaintenanceGit(repo, ["count-objects", "-v"], timeoutMs);
+  if (!common.ok || !counts.ok) return { ...context, readable: false,
+    error: !common.ok ? common.error : (counts as Extract<MaintenanceChild, { ok: false }>).error };
+  const count = /^count: (\d+)$/m.exec(counts.stdout);
+  const size = /^size: (\d+)$/m.exec(counts.stdout);
+  if (!count || !size) return { ...context, readable: false, error: "incomplete count-objects output" };
+  let gcLog: string | null;
+  try { gcLog = readFileSync(join(resolve(repo, common.stdout.trim()), "gc.log"), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...context, readable: false, error: String(error) };
+    gcLog = null;
+  }
+  return { ...context, readable: true, looseCount: Number(count[1]), looseBytes: Number(size[1]) * 1024, gcLog };
+}
+
+export interface MaintenanceDeps {
+  now?: () => number;
+  random?: () => number;
+  context: () => MaintenanceContext;
+  survey?: typeof surveyRepositoryMaintenance;
+  run?: typeof runMaintenanceGit;
+}
+
+const maintenanceInFlight = new Set<string>();
+
+export async function runRepositoryMaintenance(
+  repo: string, statePath: string, policy: MaintenancePolicy,
+  log: (step: string, fields: Record<string, unknown>) => void, deps: MaintenanceDeps,
+): Promise<void> {
+  if (maintenanceInFlight.has(repo)) return;
+  maintenanceInFlight.add(repo);
+  const now = deps.now ?? Date.now;
+  let state: MaintenanceState | undefined;
+  let before: MaintenanceSurvey | undefined;
+  let after: MaintenanceSurvey | undefined;
+  let kind: "incremental" | "gc" | undefined;
+  const started = now();
+  const emit = (outcome: string, reason: string) => log(`repository_maintenance.${outcome}`, {
+    repo, kind: kind ?? "survey", outcome, reason, duration_ms: Math.max(0, now() - started),
+    loose_before: before?.looseCount, bytes_before: before?.looseBytes,
+    loose_after: after?.looseCount, bytes_after: after?.looseBytes,
+    gc_log_before: before?.gcLog === undefined ? "unknown" : before.gcLog === null ? "absent" : "present",
+    gc_log_after: after?.gcLog === undefined ? "unknown" : after.gcLog === null ? "absent" : "present",
+    active_lanes: before?.activeLanes, next_retry: state && Math.max(state.nextEligibleAt, state.nextSurveyAt),
+    last_success: state?.lastSuccess, last_failure: state?.lastFailure,
+    retry_pending: state !== undefined && !state.escalated && Math.max(state.nextEligibleAt, state.nextSurveyAt) > now(),
+  });
+  try {
+    state = readMaintenanceState(statePath);
+    if (state.escalated || started < Math.max(state.nextEligibleAt, state.nextSurveyAt)) return;
+    if (state.lastOutcome === "running") {
+      state.lastOutcome = "fail";
+      state.lastFailure = state.lastAttempt;
+      state.lastReason = "daemon stopped during maintenance; retry window preserved";
+      state.escalated = state.failures >= policy.maxFailures;
+      saveMaintenanceState(statePath, state);
+      emit("fail", state.lastReason);
+      if (state.escalated) {
+        emit("escalate", "automatic retry limit reached after interrupted attempt");
+        return;
+      }
+    }
+    const context = deps.context();
+    const survey = deps.survey ?? surveyRepositoryMaintenance;
+    before = { ...await survey(repo, context.activeLanes, context.disk, Math.min(policy.timeoutMs, 30000)),
+      queueBusy: context.queueBusy };
+    // Re-read occupancy after asynchronous probes; a newly admitted lane must veto heavy work.
+    Object.assign(before, deps.context());
+    const decision = decideRepositoryMaintenance(before, state, policy, started);
+    if (decision.verdict === "deferred" || decision.verdict === "healthy") {
+      state.nextSurveyAt = now() + policy.probeIntervalMs;
+      state.lastOutcome = "defer";
+      state.lastReason = decision.reason;
+      saveMaintenanceState(statePath, state);
+      emit("defer", decision.reason);
+      return;
+    }
+    kind = decision.verdict === "full-gc-due" ? "gc" : "incremental";
+    state.failedGcLog = before.gcLog ?? undefined;
+    // Persist an interrupted attempt's failure and retry window BEFORE spawning the child.
+    state.failures++;
+    state.lastAttempt = now();
+    state.lastOutcome = "running";
+    const backoff = Math.min(policy.maxBackoffMs, policy.backoffMs * 2 ** Math.min(state.failures - 1, 30));
+    state.nextEligibleAt = now() + policy.timeoutMs +
+      Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
+    saveMaintenanceState(statePath, state);
+    emit("start", decision.reason);
+    const result = await (deps.run ?? runMaintenanceGit)(repo, maintenanceArgs(kind), policy.timeoutMs);
+    const postContext = deps.context();
+    after = await survey(repo, postContext.activeLanes, postContext.disk, Math.min(policy.timeoutMs, 30000));
+    const verified = result.ok && completeMaintenanceSurvey(after) && after.gcLog === null;
+    if (verified) {
+      state = { ...state, failures: 0, escalated: false, lastOutcome: "complete", lastSuccess: now(),
+        nextEligibleAt: now() + Math.max(86400000, policy.intervalMs), nextSurveyAt: 0, failedGcLog: undefined };
+      state.lastReason = "Git maintenance verified";
+      saveMaintenanceState(statePath, state);
+      emit("complete", state.lastReason);
+    } else {
+      state.lastOutcome = "fail";
+      state.lastReason = !result.ok ? `${result.timedOut ? "timeout: " : ""}${result.error}` :
+        !completeMaintenanceSurvey(after) ? `post-survey unreadable: ${after.error ?? "incomplete state"}` :
+          "Git failure marker survives";
+      state.lastFailure = now();
+      state.nextEligibleAt = now() +
+        Math.min(policy.maxBackoffMs, Math.round(backoff * (1 + (deps.random ?? Math.random)() * 0.2)));
+      state.escalated = state.failures >= policy.maxFailures;
+      saveMaintenanceState(statePath, state);
+      emit("fail", state.lastReason);
+      if (state.escalated) emit("escalate", "automatic retry limit reached");
+    }
+  } catch (error) {
+    // State and adapter failures remain visible, with the interrupted attempt's saved retry window.
+    emit("fail", String(error));
+  } finally {
+    maintenanceInFlight.delete(repo);
+  }
 }
