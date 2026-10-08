@@ -5,7 +5,6 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { landFeedback, landFeedbackStatusContent, queueFeedbackRecord, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
-import type { AcceptedEscalationAnswer } from "./escalation-answers.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -729,16 +728,14 @@ export interface CaptureFeedbackOptions {
   submissionKey?: string;
 }
 
-/** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
- * {@link captureFeedback}'s never-clobber guard. `null` when nothing carries this key. A linear
- * scan over {@link listFeedback} and, given `stateRoot`, its landing queue — no second index. */
+/** Find by submission_key (W1-T2302): capture's never-clobber guard scans the repo and landing queue, never a second index. */
 export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot?: string): FeedbackEntry | null {
   const queued = stateRoot === undefined ? [] : ([...readQueuedFeedbackRecords(stateRoot).values()] as unknown as FeedbackEntry[]);
   return [...listFeedback(root), ...queued].find((e) => e.submission_key === key) ?? null;
 }
 
-/** Queue a trusted grill reply and its reverse edge; replay repairs a partial queue without minting another reply. */
-export function answerEscalatedFeedback(repoRoot: string, stateRoot: string, answer: AcceptedEscalationAnswer): { feedbackId?: string; queued: boolean; reason?: string } | undefined {
+/** Queue both grill edges idempotently. The structural argument avoids feedback -> escalation-answers -> worker -> feedback. */
+export function answerEscalatedFeedback(repoRoot: string, stateRoot: string, answer: { taskId: string; origin: string; text: string; createdAt?: string }): { feedbackId?: string; queued: boolean; reason?: string } | undefined {
   const targetId = /^TRIAGE-(fb-[A-Za-z0-9_-]+)$/.exec(answer.taskId)?.[1];
   if (targetId === undefined) return undefined;
   const createdMs = Date.parse(answer.createdAt ?? "");
