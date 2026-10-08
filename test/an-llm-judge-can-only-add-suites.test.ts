@@ -26,8 +26,10 @@ import {
 } from "../src/lib/ci-escalation-judge.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
 import { daemonCommand } from "../src/run-task.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // W1-T4407. A judge beside the deterministic selector may WIDEN what CI runs — add a suite, or escalate
 // to a full run — and can never narrow it. The falsifier: let the judge's list replace the selection,
@@ -258,6 +260,19 @@ test("W1-T4407: the production ports read gh, spawn a tool-less judge and post t
 
   const bad = productionCiJudgePorts({ owner: "o", repo: "r", repoRoot: REPO_ROOT, stateDir: "/nonexistent", log: ledger.log, ghJson: async () => ({ message: "rate limited" }) });
   await assert.rejects(bad.openPrs(), /not an array/);
+});
+
+test("W1-T4407: the production suite list refuses a substituted git pointer", (t) => {
+  const root = tmp(t);
+  const foreign = gitRepo({ kind: "ci-judge-foreign" });
+  t.after(() => foreign.cleanup());
+  mkdirSync(join(foreign.dir, "test"));
+  writeFileSync(join(foreign.dir, "test", "foreign.test.ts"), "export {};\n");
+  foreign.git("add", "test/foreign.test.ts");
+  assert.equal(foreign.git("ls-files", "--", "test"), "test/foreign.test.ts");
+  writeFileSync(join(root, ".git"), `gitdir: ${join(foreign.dir, ".git")}\n`);
+  const ports = productionCiJudgePorts({ owner: "o", repo: "r", repoRoot: root, stateDir: root, log: rows().log });
+  assert.throws(() => ports.suiteIds(), WorktreePointerRefusedError);
 });
 
 test("W1-T4407: the daemon kicks the judge after its sweep and posts a status for the PR head", async () => {

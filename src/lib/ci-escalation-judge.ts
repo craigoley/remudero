@@ -12,7 +12,6 @@
  * that is always `success`: it informs the selection and never gates a merge. Off switch:
  * `state/CI_JUDGE_OFF`.
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -22,6 +21,7 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /** The off switch: while `state/CI_JUDGE_OFF` exists the daemon judges nothing and posts nothing. */
 export const CI_JUDGE_OFF_FILE = "CI_JUDGE_OFF";
@@ -332,12 +332,13 @@ export function productionCiJudgePorts(opts: {
       (await ghText(["pr", "diff", String(pr.number), "--repo", slug, "--name-only"])).split("\n").map((l) => l.trim()).filter(Boolean),
     diff: (pr) => ghText(["pr", "diff", String(pr.number), "--repo", slug]),
     suiteIds: opts.suiteIds ?? (() =>
-      execFileSync("git", ["-C", opts.repoRoot, "ls-files", "--", "test"], { encoding: "utf8", maxBuffer: 1 << 26 })
+      hostWorktreeGit(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 })
         .split("\n").filter((path) => SUITE.test(path))),
     floor: opts.floor ?? ((changed) => affectedSelectionOrFull(changed, () => readAffectedSuitesInput(opts.repoRoot, changed))),
     judge: async (prompt) => {
       const mount = resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
-      const spawn = benchmarkNonDispatchSpawn("ci-judge", opts.spawn ?? spawnWorker);
+      const rawSpawn = opts.spawn ?? spawnWorker;
+      const spawn = benchmarkNonDispatchSpawn("ci-judge", rawSpawn);
       const result = await spawn({
         cwd: opts.repoRoot, permissionMode: "bypassPermissions", settingsFile: join(opts.repoRoot, "settings", "worker.json"),
         prompt, model: mount.model, effort: mount.effort, maxTurns: mount.maxTurns, tools: [],
