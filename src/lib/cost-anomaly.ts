@@ -177,6 +177,8 @@ export interface CostAnomalyFinding {
   sampleSize: number;
   /** W1-T4709: settled runs {@link isNeverWorkedVerdict} kept out of the median; absent when none. */
   excludedCount?: number;
+  /** W1-T6466: settled runs with an unknown price (`costSource: "none"`) kept out of the median; absent when none. */
+  unpriced?: number;
 }
 
 // W1-T4711: the rule lives in a leaf retro.ts can import too; re-exported so callers stay put.
@@ -214,10 +216,16 @@ export function detectCostAnomalies(
   const settled = runs.filter((r) => r.verdict !== "incomplete");
   const byClass = new Map<string, RunSummary[]>();
   const excludedByClass = new Map<string, number>();
+  const unpricedByClass = new Map<string, number>();
   for (const r of settled) {
     const key = r.taskClass ?? "unknown";
     if (neverWorked.has(r.runId)) {
       excludedByClass.set(key, (excludedByClass.get(key) ?? 0) + 1);
+      continue;
+    }
+    // W1-T6466: an unpriced run's `costUsd: 0` is unknown, not free — counted, never a median sample.
+    if (r.costSource === "none") {
+      unpricedByClass.set(key, (unpricedByClass.get(key) ?? 0) + 1);
       continue;
     }
     const arr = byClass.get(key) ?? [];
@@ -230,6 +238,7 @@ export function detectCostAnomalies(
     if (rs.length < policy.minSamples) continue;
     const med = median(rs.map((r) => r.costUsd));
     const excluded = excludedByClass.get(taskClass) ?? 0;
+    const unpriced = unpricedByClass.get(taskClass) ?? 0;
     for (const r of rs) {
       if (r.costUsd > med * policy.multiplier) {
         out.push({
@@ -241,6 +250,7 @@ export function detectCostAnomalies(
           multiplier: policy.multiplier,
           sampleSize: rs.length,
           ...(excluded > 0 ? { excludedCount: excluded } : {}),
+          ...(unpriced > 0 ? { unpriced } : {}),
         });
       }
     }
@@ -288,6 +298,7 @@ export function costAnomalyLine(finding: CostAnomalyFinding): LedgerLine {
     multiplier: finding.multiplier,
     sample_size: finding.sampleSize,
     ...(finding.excludedCount !== undefined ? { excluded_count: finding.excludedCount } : {}),
+    ...(finding.unpriced !== undefined ? { unpriced: finding.unpriced } : {}),
   };
 }
 
