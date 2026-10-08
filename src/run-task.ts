@@ -21,6 +21,7 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
+import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
@@ -17185,10 +17186,12 @@ const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, 
     rmSync(home, { recursive: true, force: true });
   }
 };
-const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+export const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
-    let stdout = "";
-    let stderr = "";
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let retainedBytes = 0;
+    let outputLimitExceeded = false;
     let timedOut = false;
     let spawnError: string | undefined;
     let settled = false;
@@ -17197,7 +17200,11 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ status, output: `${stdout}\n${stderr}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
+      const decode = (chunks: Buffer[]) => {
+        const decoder = new StringDecoder("utf8");
+        return decoder.write(Buffer.concat(chunks)) + (outputLimitExceeded ? "" : decoder.end());
+      };
+      resolve({ status, output: `${decode(stdout)}\n${decode(stderr)}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
     };
     // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
     // the environment synchronously, so clearing it around the call is enough.
@@ -17209,11 +17216,17 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
       }),
     );
     const collect = (chunk: Buffer, into: "out" | "err") => {
-      if (into === "out") stdout += chunk.toString("utf8");
-      else stderr += chunk.toString("utf8");
-      if (stdout.length + stderr.length > maxOutputBytes && spawnError === undefined) {
+      if (settled || timedOut || outputLimitExceeded) return;
+      const remaining = maxOutputBytes - retainedBytes;
+      const kept = Math.min(chunk.byteLength, remaining);
+      if (kept > 0) (into === "out" ? stdout : stderr).push(Buffer.from(chunk.subarray(0, kept)));
+      retainedBytes += kept;
+      if (chunk.byteLength > remaining) {
+        outputLimitExceeded = true;
         spawnError = "maxBuffer exceeded (ENOBUFS)";
+        if (timer) clearTimeout(timer);
         child.kill();
+        killAfterGrace(child);
       }
     };
     child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
@@ -17221,9 +17234,10 @@ const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJ
     timer = setTimeout(() => {
       timedOut = true;
       child.kill();
+      killAfterGrace(child);
     }, timeoutMs);
     child.on("error", (e) => {
-      spawnError = e.message;
+      spawnError ??= e.message;
       finish(null);
     });
     child.on("close", (code) => finish(code));
@@ -36536,9 +36550,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "config": {
       const d = deps("config");
       return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
-        (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
+        (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
-          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          // Leave the build seam absent: production must use the heap-bounded measurement worker.
+          const mountRecommendations = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
           return withDue(async () => {
             try {
               await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });

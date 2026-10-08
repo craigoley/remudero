@@ -199,7 +199,11 @@ test("all async holders emit real ledger rows once per retained count change", a
     assert.equal(row.thread, "main");
     assert.equal(row.instance, "core");
     assert.equal(row.archives, 1);
-    assert.deepEqual(Object.keys(row).sort(), ["actor", "actor_pid", "archives", "failedArchives", "holder", "host", "instance", "rows", "run_id", "step", "task_id", "thread", "tornRows", "ts"].sort());
+    assert.equal(row.digestHits, 0);
+    assert.equal(row.digestMisses, 1);
+    assert.deepEqual(row.digestOutcomes, { pruneAbsent: 1, missing: 1, written: 1 });
+    assert.deepEqual(row.digestErrors, { pruneAbsent: "ENOENT", missing: "ENOENT" });
+    assert.deepEqual(Object.keys(row).sort(), ["actor", "actor_pid", "archives", "digestErrors", "digestHits", "digestMisses", "digestOutcomes", "failedArchives", "holder", "host", "instance", "rows", "run_id", "step", "task_id", "thread", "tornRows", "ts"].sort());
   }
 });
 

@@ -361,10 +361,11 @@ function authorBaseRef(cwd: string): string {
 }
 
 function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): number | null {
-  const runTask = fileURLToPath(new URL("../run-task.ts", import.meta.url));
+  // A consumer checkout has no tsx: use rmd's own launcher, but inspect the consumer's HEAD/base.
+  const rmdBin = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
   const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", runTask, "check-proof", proof, "--base", baseRef],
+    rmdBin,
+    ["check-proof", proof, "--base", baseRef],
     {
       cwd,
       encoding: "utf8",
@@ -381,9 +382,8 @@ function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): nu
  */
 export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   const { intro, criteria, taskId, changedFiles } = opts;
-  // The gate's own base execution decides this. A claim's wording cannot say whether its proof
-  // was already true before the diff. Keep synthetic/non-executable legacy inputs for the other
-  // author gate, but never write a runnable stale or zero-match proof into a new body.
+  // Execute at base rather than guessing from claim wording. Keep synthetic legacy inputs for the
+  // other author gate, but never emit a runnable stale or zero-match proof.
   if (opts.proofCheck || criteria.some((c) => parseWhitelistedProof(c.proof.trim()) !== null)) {
     const proofCwd = opts.proofCwd ?? process.cwd();
     const baseRef = opts.baseRef ?? authorBaseRef(proofCwd);

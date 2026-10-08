@@ -371,6 +371,13 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(dependencyCensus) && changedSrcTypeScript) {
     pathReaders.push(dependencyCensus);
   }
+  // W1-T4994: a coverage shard failed on this suite at 39737b73 and the narrow selector missed it. The suite
+  // drives runSweep and buildSweepEffects, so a change to the sweep, status or run-task seams must select it.
+  const verdictReuse = "test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts";
+  const verdictReuseSeams = ["src/lib/sweep.ts", "src/lib/status.ts", "src/run-task.ts"];
+  if (input.files.has(verdictReuse) && files.some((f) => verdictReuseSeams.includes(f))) {
+    pathReaders.push(verdictReuse);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

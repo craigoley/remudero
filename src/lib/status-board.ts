@@ -1630,17 +1630,18 @@ function deriveRetiredBlockers(plan: Plan | undefined): RetiredBlocker[] {
   return out;
 }
 
-function deriveBlockers(
-  plan: Plan | undefined,
+export interface BlockedPrSections {
+  blockedPrs: BlockedPrBlocker[];
+  blockedPrsUnverifiedReason?: string;
+  mergeHeld: MergeHeldRow[];
+}
+
+/** W1-T6267: derive the sections both boards consume without latches, queue work or process reads. */
+export function deriveBlockedPrSections(
   lines: Array<Record<string, unknown>>,
-  projections: Map<string, StatusProjection> | undefined,
-  github: GitHub | undefined,
-  limit: number,
-  index: LedgerIndex,
-): BlockersSection {
-  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
-  const indeterminate = deriveIndeterminateBlockers(lines, projections);
-  const retired = deriveRetiredBlockers(plan);
+  github?: GitHub,
+  limit = 5,
+): BlockedPrSections {
   let blockedPrs: BlockedPrBlocker[] = [];
   let blockedPrsUnverifiedReason: string | undefined;
   const raw = rawBlockedPrCandidates(lines);
@@ -1657,6 +1658,19 @@ function deriveBlockers(
       blockedPrsUnverifiedReason = `${raw.length} blocked-PR ledger ${raw.length === 1 ? "entry" : "entries"} could not be checked against live GitHub state (${reason}) — withheld rather than replay possibly-stale history as current`;
     }
   }
+  return { blockedPrs, blockedPrsUnverifiedReason, mergeHeld: deriveMergeHeld(lines) };
+}
+
+function deriveBlockers(
+  plan: Plan | undefined,
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  { blockedPrs, blockedPrsUnverifiedReason }: BlockedPrSections,
+  index: LedgerIndex,
+): BlockersSection {
+  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
+  const indeterminate = deriveIndeterminateBlockers(lines, projections);
+  const retired = deriveRetiredBlockers(plan);
   const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired];
   const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
@@ -2020,6 +2034,7 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
 
 function deriveNeedsMe(
   lines: ReadonlyArray<Record<string, unknown>>,
+  mergeHeld: MergeHeldRow[],
   projections: Map<string, StatusProjection> | undefined,
   plan?: Plan,
   operatorReleasedIds: ReadonlySet<string> = new Set(),
@@ -2042,10 +2057,6 @@ function deriveNeedsMe(
           return { count: taskIds.length, taskIds };
         })();
   const { costAnomaly, imageDrift, tokenFallback, uncreditedBuilds } = deriveOperatorItems(lines, projections);
-
-  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
-  // run-task.ts already consult, never a second gateway or ledger pass.
-  const mergeHeld = deriveMergeHeld(lines);
 
   // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
   const heldRoots =
@@ -2316,7 +2327,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit, ledgerIndex);
+  const blockedPrSections = deriveBlockedPrSections(lines, deps.github, queueHeadLimit);
+  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex);
   // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds, read here rather than shared with it —
   // this is its own, unbatched call site. ONE sweep per render, never one per candidate.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
@@ -2347,7 +2359,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const operatorReleases = readOperatorReleasesForBoard(root);
-  const needsMe = deriveNeedsMe(lines, projections, plan, operatorReleases.ids, operatorReleases.reason);
+  const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason);
   needsMe.dispatchClaims = staleDispatchClaimEscalations(
     dispatchClaims.status === "held" ? dispatchClaims.claims : [], nowMs, deps.localHost ?? hostname(),
   );

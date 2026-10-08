@@ -40,7 +40,7 @@ import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
-import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
+import { deriveBlockedPrSections, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
 import { liveRunSpend, subscribeStatusStream } from "./status-stream-publisher.js";
 
 // Keep the live consumer's boundary visible to the ledger render-retention census.
@@ -118,7 +118,7 @@ export interface BoardSnapshot {
   spend: GlanceSpend;
   tasks: BoardRow[];
   /** A PR the sweep reconciler already disposed into a non-progressing class (W1-T1006's sixth
-   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `buildStatusBoard` — see
+   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `deriveBlockedPrSections` — see
    *  {@link deriveBoardStatusSections}. Always an array, never `undefined`. */
   blockedPrs: BlockedPrBlocker[];
   /** The currently-standing operator merge holds (W1-T2719), from status-board.ts's reader. */
@@ -193,37 +193,12 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
   return out;
 }
 
-/** The sixth NEEDS-ME row source (W1-T1006): reuses status-board.ts's `buildStatusBoard`
- *  verbatim for the blocked-PR derivation, never a second derivation over the ledger. `plan` is
- *  deliberately omitted so `buildStatusBoard`'s own QUEUE HEAD/INBOX pass never runs a second,
- *  duplicate batch of `github` calls this board doesn't need. `root`/`repoDir` are a deliberately
- *  bogus sentinel, not `""`, so a test run from a real `state/`/`plan/` tree can't accidentally
- *  pick up files for a section this board discards anyway. */
-// Why: the measured double-`prByRef`-call incident this plan-omission fixes —
-// docs/forensics/board.md#deriveboardstatussections
-const BLOCKED_PR_ROOT_SENTINEL = "/nonexistent-rmd-board-root";
-
+/** W1-T6267: share only the blocked-PR and merge-hold readers with the status board. */
 function deriveBoardStatusSections(
   deps: BoardDeps,
   lines: Array<Record<string, unknown>>,
 ): { blockedPrs: BlockedPrBlocker[]; blockedPrsUnverifiedReason?: string; mergeHeld: MergeHeldRow[] } {
-  const model = buildStatusBoard(BLOCKED_PR_ROOT_SENTINEL, deps.ledgerPath, {
-    queryService: () => ({ running: false, pid: null }),
-    repoDir: BLOCKED_PR_ROOT_SENTINEL,
-    readLedger: () => lines,
-    resolveOriginMainSha: () => undefined,
-    github: deps.github,
-    now: deps.now,
-    grepAnchorTrue: () => false,
-    readProposalRegistry: () => [],
-    readDraftCache: () => ({}),
-  });
-  const blockedPrs = model.blockers.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
-  return {
-    blockedPrs,
-    blockedPrsUnverifiedReason: model.blockers.blockedPrsUnverifiedReason,
-    mergeHeld: model.needsMe.mergeHeld,
-  };
+  return deriveBlockedPrSections(lines, deps.github);
 }
 
 const QUEUE_CLASS_ORDER: Record<PrQueueClass, number> = {
