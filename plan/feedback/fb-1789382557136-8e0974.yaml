@@ -13,10 +13,11 @@ raw: "Root planner incident: rmd plan --mode=create run
   reserved IDs and the operator can retry without duplicate or lost work."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
