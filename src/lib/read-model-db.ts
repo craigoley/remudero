@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+import { threadId } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -29,6 +30,8 @@ export const PROJECTOR_LEASE_NAME = "projector";
 /** SQLite result codes this adapter treats as "the file is not a usable database". */
 const SQLITE_CORRUPT = 11;
 const SQLITE_NOTADB = 26;
+const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
 const INSTANCE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const BASE_DDL = `
@@ -187,25 +190,77 @@ export function readModelDirtyMarkerPath(path: string): string {
 
 /** `marker`: the dirty marker this connection wrote and its close removes; only openReadModel's writer owns one. */
 function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
-  return {
+  // Deferred snapshots and SELECTs use a separate reader; fenced write transactions read their own writes.
+  let reader: DatabaseSync | undefined;
+  const identity = `${process.pid}:${threadId}:${randomUUID()}`;
+  const readConnection = (): DatabaseSync => readOnly || path === ":memory:" ? raw : (reader ??= connect(path, true));
+  const onConnection = <T>(connection: DatabaseSync, fn: () => T): T => {
+    try {
+      return fn();
+    } catch (error) {
+      const code = sqliteErrcode(error);
+      if (code !== undefined && ((code & 255) === SQLITE_BUSY || (code & 255) === SQLITE_LOCKED)) {
+        (error as Error).message += ` [read-model connection=${identity}/${connection === raw && !readOnly ? "writer" : "reader"} path=${path}]`;
+      }
+      throw error;
+    }
+  };
+  const db: ReadModelDb = {
     path,
     schemaVersion,
     readOnly,
     ...(recoveredFrom ? { recoveredFrom } : {}),
     ...(marker?.unclean ? { uncleanShutdown: true } : {}),
-    exec: (sql) => raw.exec(sql),
-    prepare: (sql, opts = {}) => {
-      const statement: StatementSync = raw.prepare(sql);
-      if (opts.bigInts) statement.setReadBigInts(true);
-      return statement as unknown as ReadModelStatement;
+    exec: (sql) => {
+      const connection = /^\s*BEGIN(?:\s+(?:DEFERRED|TRANSACTION))?\s*;?\s*$/i.test(sql) && !raw.isTransaction
+        ? readConnection()
+        : !raw.isTransaction && reader?.isTransaction && !/^\s*BEGIN\s+(?:IMMEDIATE|EXCLUSIVE)\b/i.test(sql) ? reader : raw;
+      onConnection(connection, () => connection.exec(sql));
     },
-    meta: (key) => raw.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
-    inTransaction: () => raw.isTransaction,
+    prepare: (sql, opts = {}) => {
+      const statement: StatementSync = onConnection(raw, () => raw.prepare(sql));
+      if (opts.bigInts) statement.setReadBigInts(true);
+      let readStatement: StatementSync | undefined;
+      const connectionFor = (): DatabaseSync => !raw.isTransaction && (reader?.isTransaction || /^\s*SELECT\b/i.test(sql)) ? readConnection() : raw;
+      const run = <T>(fn: (stmt: StatementSync) => T): T => {
+        const connection = connectionFor();
+        return onConnection(connection, () => {
+          if (connection === raw) return fn(statement);
+          if (!readStatement) {
+            readStatement = connection.prepare(sql);
+            if (opts.bigInts) readStatement.setReadBigInts(true);
+          }
+          return fn(readStatement);
+        });
+      };
+      return {
+        run: (...params) => run((stmt) => stmt.run(...params)) as { changes: number },
+        get: (...params) => run((stmt) => stmt.get(...params)) as SqlRow | undefined,
+        all: (...params) => run((stmt) => stmt.all(...params)) as SqlRow[],
+        iterate: function* (...params) {
+          const connection = connectionFor();
+          const rows = run((stmt) => stmt.iterate(...params));
+          try {
+            for (;;) {
+              const row = onConnection(connection, () => rows.next());
+              if (row.done) return;
+              yield row.value as SqlRow;
+            }
+          } finally {
+            rows.return?.();
+          }
+        },
+      };
+    },
+    meta: (key) => db.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
+    inTransaction: () => raw.isTransaction || (reader?.isTransaction ?? false),
     close: () => {
+      reader?.close();
       raw.close();
       if (marker) rmSync(marker.path, { force: true });
     },
   };
+  return db;
 }
 
 /**
