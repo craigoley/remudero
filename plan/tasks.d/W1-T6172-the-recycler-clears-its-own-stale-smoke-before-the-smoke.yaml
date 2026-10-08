@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-07: console recycle refusals 10-04..10-07 (stale smoke name conflict)"
   plan_refs: [W1-T5706, W1-T5017, W1-T6062]
   files: [deploy/recycle-container.sh, test/the-recycler-clears-its-own-stale-smoke-before-the-smoke.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

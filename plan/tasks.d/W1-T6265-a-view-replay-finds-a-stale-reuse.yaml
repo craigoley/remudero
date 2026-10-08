@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item T1), from the replay that validated PR 9922"
   plan_refs: [W1-T5050, W1-T5885]
   files: [scripts/view-replay.ts, test/a-view-replay-finds-a-stale-reuse.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5740 (#9214) follow-up"
   plan_refs: [W1-T5740, W1-T5284, W1-T5689, W1-T4095]
   files: [src/lib/worker.ts, src/run-task.ts, src/lib/knowledge-gardener.ts, test/a-gardens-async-checkout-lands-and-disposes-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -30,7 +30,7 @@ usage:
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
   rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
   rmd risk-judge-eval [--corpus <dir>]   # Replay risk-judge disposition fixtures offline and report calibration metrics.
-  rmd authority [--json]   # Every external write the fleet may make without the operator, its gate, and its last firing.
+  rmd authority [--json] | rmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>])   # Every external write the fleet may make without the operator, its gate, and its last firing.
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
@@ -284,10 +284,12 @@ W1-T3800: read the privacy-safe disposition corpus, reuse the existing determini
 Every external write the fleet may make without the operator, its gate, and its last firing.
 
 ```
-rmd authority [--json]
+rmd authority [--json] | rmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>])
 ```
 
 W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.
+
+rmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>]) — local read-only inspection at an explicit --at instant. --store must be an operator-trusted canonical export, never a model-supplied grant or request attachment. Snapshot JSON: {schema: 'capability-inspection-source-v1', grants: [{grant: <capability-grant-v1>, revoked: <boolean>, useCount: <nonnegative integer>, nonces: <string[]>}]}. Export acquisition and production persistence remain the host adapter's responsibility; this command reads regular files and persists nothing. --request reads one CapabilityUseRequest; --cases and --compare-cases read arrays of requests, paired by position. Replay cases are independent against the same captured snapshot and comparison only reports changed, unchanged or incomparable verdicts. Output capability-inspection-v1 reports checked predicates; repo and instance remain not-checked. Allow means the verifier would accept at the observation time, never a reusable authorization: live use still verifies current state. Missing, unreadable or malformed stores are unavailable; invalid requests or clocks are unknown. Files are bounded to 1 MiB, grants/cases to 100, operations/redaction fields to 100, nonces per grant to 1000 and strings to 512 characters. Output omits request text, approval prose, secrets and upstream errors. No nonce recording, use consumption, secret resolution, provider execution or policy promotion. Exit 0: all evaluated cases allow (or an empty batch); 1: a canonical refusal; 2: unknown/unavailable input or invalid arguments.
 
 ### `rmd check-proof`
 

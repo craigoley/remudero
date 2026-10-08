@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -111,9 +111,18 @@ test("digest cache failures retain archive results and report unreadable, write 
     const orphan = join(digestDir(fx.dir), "ledger.gone.ndjson.json");
     mkdirSync(orphan);
     writeFileSync(join(orphan, "occupied"), "fixture");
+    // Node refuses unlinking a directory on every host, but the native errno is
+    // EPERM on Darwin and EISDIR on Linux. Pin the real operation, not one OS.
+    let nativeDirectoryUnlinkCode: string | undefined;
+    assert.throws(() => unlinkSync(orphan), (error: NodeJS.ErrnoException) => {
+      assert.match(error.code ?? "", /^(EISDIR|EPERM)$/);
+      nativeDirectoryUnlinkCode = error.code;
+      return true;
+    });
     await memo.load(entries);
     assert.equal(memo.retention().digestOutcomes?.pruneFailed, 1);
-    assert.match(memo.retention().digestErrors?.pruneFailed ?? "", /EISDIR/);
+    assert.equal(memo.retention().digestErrors?.pruneFailed, nativeDirectoryUnlinkCode);
+    assert.equal(readFileSync(join(orphan, "occupied"), "utf8"), "fixture", "a failed prune keeps the directory and its evidence");
     const logged: Record<string, unknown>[] = [];
     memo.reportRetention(fx.dir, "fixture", (_step, row) => logged.push(row));
     assert.equal(logged[0].digestMisses, 2);

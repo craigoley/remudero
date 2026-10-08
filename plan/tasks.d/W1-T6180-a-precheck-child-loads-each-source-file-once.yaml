@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: #9835/#9861 diff-coverage BLOCKED on lines their suites ran (root-caused and merge-side fixed in #9855)"
   plan_refs: [W1-T6138, W1-T6108, W1-T5923]
   files: [scripts/census-precheck.mjs, scripts/coverage-merge-ratchet.mjs, test/a-precheck-child-loads-each-source-file-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 
 /**
  * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1).
@@ -359,6 +361,58 @@ export function changedFilesInDiff(diff: string): string[] {
   for (const m of diff.matchAll(/^--- a\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^rename (?:from|to) (\S+)/gm)) files.add(m[1]);
   return [...files];
+}
+
+/** W1-T6258 — the I/O a node-pin sync needs; the pass decides, the caller reads and pushes. */
+export interface NodePinSyncIo {
+  /** `git show <sha>:<path>` on the PR head, or undefined when the file cannot be read. */
+  readAtHead(headSha: string, path: string): string | undefined;
+  /** Commit `.nvmrc` = `nvmrc` on the PR head ref and push it; returns the pushed sha. */
+  commitAndPush(input: { headRef: string; headSha: string; nvmrc: string; subject: string }): string;
+}
+
+export type NodePinSyncOutcome =
+  | { kind: "skipped" }
+  | { kind: "in-sync"; pinned: string }
+  | { kind: "synced"; from: string; to: string; pushedSha: string }
+  | { kind: "refused"; reason: "major" | "unreadable" | "push-failed"; detail: string };
+
+/**
+ * W1-T6258 — a Dependabot `deploy/Dockerfile` bump edits `FROM` only, so `.nvmrc` drifts and the
+ * exact-pin image tests go red. When the diff touches the Dockerfile, plan the pin on the PR head's
+ * own Dockerfile and `.nvmrc`; a within-major drift is committed once on the head ref. A synced head
+ * plans `in-sync`, so a second pass pushes nothing. A major or unreadable pin is reported, never synced.
+ */
+export function syncNodePinForImageBump(
+  diff: string,
+  head: { sha: string; ref: string | undefined },
+  io: NodePinSyncIo,
+): NodePinSyncOutcome {
+  if (!changedFilesInDiff(diff).includes("deploy/Dockerfile")) return { kind: "skipped" };
+  const dockerfile = io.readAtHead(head.sha, "deploy/Dockerfile");
+  const nvmrc = io.readAtHead(head.sha, ".nvmrc");
+  if (dockerfile === undefined || nvmrc === undefined || head.ref === undefined) {
+    return { kind: "refused", reason: "unreadable", detail: "deploy/Dockerfile, .nvmrc or the head ref could not be read" };
+  }
+  const plan = planNodePin(dockerfile, nvmrc) as { action: string; image?: string; pinned: string };
+  if (plan.action === "in-sync") return { kind: "in-sync", pinned: plan.pinned };
+  if (plan.action === "major") {
+    return { kind: "refused", reason: "major", detail: `the image moves Node ${plan.pinned} -> ${plan.image}, a major` };
+  }
+  if (plan.action !== "rewrite" || plan.image === undefined) {
+    return { kind: "refused", reason: "unreadable", detail: "deploy/Dockerfile must carry exactly one `FROM node:<x.y.z>-` line" };
+  }
+  try {
+    const pushedSha = io.commitAndPush({
+      headRef: head.ref,
+      headSha: head.sha,
+      nvmrc: `${plan.image}\n`,
+      subject: `chore(deps): .nvmrc follows the image's Node ${plan.image}`,
+    });
+    return { kind: "synced", from: plan.pinned, to: plan.image, pushedSha };
+  } catch (error) {
+    return { kind: "refused", reason: "push-failed", detail: String((error as Error)?.message ?? error) };
+  }
 }
 
 export const ACTION_SHA_PIN_CHANGE_RE = /^([+-])\s*uses:\s*([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)@([a-f0-9]{40})\s+#\s*(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\s*$/i;

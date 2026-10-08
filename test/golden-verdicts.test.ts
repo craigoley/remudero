@@ -217,6 +217,12 @@ test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — LINT-PLAN LESSON: the task-authoring lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-lint-plan-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — CODEQL READ-MODEL LESSON: the cited incident executes and the CodeQL guidance arms", () => {
   const { verdict, golden } = judgeCase("ci-codeql-read-model-lesson");
   assert.equal(golden.violation, "none");

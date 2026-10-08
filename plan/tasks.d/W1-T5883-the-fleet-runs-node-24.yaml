@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-05: Node 22 to 24 upgrade (console and site already moved, #1978 and remudero-site #186)"
   plan_refs: [W1-T2770]
   files: [.nvmrc, deploy/Dockerfile, test/the-fleet-runs-node-24.test.ts, package.json, package-lock.json, README.md, docs/adr/0002-node-version-pin.md, docs/deploy-image-forensics.md, scripts/coverage-baseline.json]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

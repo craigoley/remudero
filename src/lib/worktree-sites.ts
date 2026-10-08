@@ -263,6 +263,18 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "question is answered by that fetch, and no dispatched worker ever runs in the tree (W1-T5533).",
     },
   },
+  {
+    file: "src/run-task.ts",
+    site: "defaultNodePinSyncIo",
+    creates: "a throwaway worktree at a Dependabot image-bump PR's own head, removed once the .nvmrc commit is pushed",
+    disposition: {
+      kind: "exempt",
+      because:
+        "origin/main currency is not this site's question: W1-T6258 commits the synced .nvmrc ON TOP OF the bump PR's " +
+        "exact head and pushes that branch, so the tree must be the PR head and no other. `worktreeAdd` cuts a fresh " +
+        "branch off origin/main, which is not the branch being pushed — the same shape as planPrPreflightAtCommit above.",
+    },
+  },
 ];
 
 /** Files under `dir`, recursively, `.ts` only. Read with `readFileSync`, never grepped: two files

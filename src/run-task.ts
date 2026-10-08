@@ -1,13 +1,14 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
+  loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
-// classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
-// src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
-// below have SECOND callers outside doctorCommand and stay imported here too.
+// classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
+// (W1-T2888), importing them from lib/doctor.js; symbols below have other callers and stay imported here.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { loadProposalRecords } from "./lib/plan-proposals.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
@@ -1463,6 +1464,9 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   decideDepReview,
+  isDependabotAuthor,
+  syncNodePinForImageBump,
+  type NodePinSyncIo,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
 } from "./lib/dep-review.js";
@@ -2912,7 +2916,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -3949,7 +3953,7 @@ export function syncPlanFromOrigin(
 ): SyncedPlan {
   let staleDispatch = false;
   try {
-    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+    fetchOriginRetryingRefLock(args => execFileSync("git", ["-C", repoDir, ...args], { stdio: "pipe" }).toString());
   } catch (err) {
     if (!opts.allowStale) {
       throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
@@ -4061,7 +4065,7 @@ export async function syncPlanFromOriginAsync(
   const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
   let staleDispatch = false;
   try {
-    await runGit(["fetch", "--quiet", "origin"]);
+    await fetchOriginRetryingRefLockAsync(args => runGit(args), undefined, 3, PLAN_SYNC_GIT_TIMEOUT_MS);
   } catch (err) {
     if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
     staleDispatch = true;
@@ -21933,6 +21937,45 @@ export interface DepReviewDeps {
     submissionKey: string;
   }) => FeedbackEntry;
   prMutations?: DepReviewPrMutations;
+  nodePin?: NodePinSyncIo;
+}
+
+export function defaultNodePinSyncIo(
+  root: string,
+  options: { git?: (args: string[], cwd: string) => string } = {},
+): NodePinSyncIo {
+  const runGit = options.git ?? ((args: string[], cwd: string): string => hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24 }));
+  const git = (args: string[], cwd = root): string => runGit(args, cwd);
+  return {
+    readAtHead(headSha, path) {
+      try {
+        return git(["show", `${headSha}:${path}`]);
+      } catch (error) {
+        void error; // an unreadable file is reported by the caller as `unreadable`, with nothing more to carry
+        return undefined;
+      }
+    },
+    commitAndPush({ headRef, headSha, nvmrc, subject }) {
+      const scratch = mkdtempSync(join(tmpdir(), "rmd-node-pin-"));
+      const tree = join(scratch, "wt");
+      try {
+        git(["worktree", "add", "--quiet", "-B", headRef, tree, headSha]);
+        writeFileSync(join(tree, ".nvmrc"), nvmrc);
+        git(["add", ".nvmrc"], tree);
+        git(["-c", "user.name=remudero", "-c", "user.email=remudero@users.noreply.github.com", "commit", "--quiet", "-m", subject], tree);
+        const pushedSha = git(["rev-parse", "HEAD"], tree).trim();
+        gitPushRunBranch(tree, { expectedHeadSha: pushedSha });
+        return pushedSha;
+      } finally {
+        try {
+          git(["worktree", "remove", "--force", tree]);
+        } catch (error) {
+          void error; // scratch removal below makes the failed worktree cleanup unreachable.
+        }
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  };
 }
 
 export interface DepReviewPrMutations {
@@ -21972,13 +22015,14 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,author,statusCheckRollup",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup",
   ]) as {
     number: number;
     url: string;
     title: string;
     body: string;
     headRefOid: string;
+    headRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
@@ -21992,6 +22036,22 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
+
+  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+    const sync = syncNodePinForImageBump(
+      diff,
+      { sha: view.headRefOid, ref: view.headRefName },
+      deps.nodePin ?? defaultNodePinSyncIo(config.root),
+    );
+    if (sync.kind === "synced") {
+      log("dep-review.node_pin_synced", { pr_url: view.url, from: sync.from, to: sync.to, head_sha: view.headRefOid, pushed_sha: sync.pushedSha });
+      console.log(`### rmd dep-review PR #${view.number} — .nvmrc ${sync.from} -> ${sync.to} pushed; CI re-runs on the new head`);
+      return 1;
+    }
+    if (sync.kind === "refused") {
+      log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+  }
 
   const result = decideDepReview({
     author: { login: view.author?.login ?? "" },
@@ -23395,6 +23455,7 @@ export function authorityCommand(rest: string[], deps: AuthorityCommandDeps = {}
   const badArg = unknownArgError("authority", rest, [], ["--json"]);
   const out = deps.out ?? console.log;
   const err = deps.err ?? console.error;
+  if (rest[0] === "inspect") return capabilityInspectCommand(rest.slice(1), deps);
   if (badArg) {
     err(`${badArg}\n${USAGE}`);
     return 2;
@@ -52670,6 +52731,53 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   return 0;
 }
 
+export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCommandDeps, "out" | "err"> = {}): number {
+  const out = deps.out ?? console.log;
+  const err = deps.err ?? console.error;
+  if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+    out(commandHelp(commandSpec("authority")));
+    return 0;
+  }
+  const flags = new Map<string, string>();
+  const permitted = new Set(["--store", "--request", "--cases", "--compare-cases", "--at"]);
+  for (let i = 0; i < rest.length; i += 2) {
+    const flag = rest[i];
+    const value = rest[i + 1];
+    if (!permitted.has(flag) || flags.has(flag) || !value || value.startsWith("--")) {
+      err("rmd authority inspect: invalid arguments; see --help");
+      return 2;
+    }
+    flags.set(flag, value);
+  }
+  const storePath = flags.get("--store");
+  const at = flags.get("--at");
+  const requestPath = flags.get("--request");
+  const casesPath = flags.get("--cases");
+  const comparePath = flags.get("--compare-cases");
+  if (!storePath || !at || Boolean(requestPath) === Boolean(casesPath) || (comparePath && !casesPath)) {
+    err("rmd authority inspect: require --store, --at and either --request or --cases; see --help");
+    return 2;
+  }
+  const source = loadCapabilityInspectionSource(storePath);
+  const read = readInspectionJson((requestPath ?? casesPath)!);
+  if (requestPath) {
+    const decision = inspectCapabilityDecision(source, read.ok ? read.value : null, at);
+    out(JSON.stringify(decision));
+    return decision.verdict === "allow" ? 0 : decision.verdict === "refuse" ? 1 : 2;
+  }
+  const baseline = replayCapabilityDecisions(source, read.ok ? read.value : null, at);
+  const batches = [baseline];
+  if (comparePath) {
+    const comparisonRead = readInspectionJson(comparePath);
+    const candidate = replayCapabilityDecisions(source, comparisonRead.ok ? comparisonRead.value : null, at);
+    batches.push(candidate);
+    out(JSON.stringify({ baseline, candidate, comparison: compareCapabilityReplays(baseline, candidate) }));
+  } else out(JSON.stringify(baseline));
+  if (batches.some((batch) => batch.code !== "evaluated"
+    || batch.results.some((r) => r.verdict === "unknown" || r.verdict === "unavailable"))) return 2;
+  return batches.some((batch) => batch.results.some((r) => r.verdict === "refuse")) ? 1 : 0;
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -52766,9 +52874,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "authority",
-    syntax: "rmd authority [--json]",
+    syntax: "rmd authority [--json] | rmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>])",
     summary: "Every external write the fleet may make without the operator, its gate, and its last firing.",
-    detail: "W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.",
+    detail: "W1-T2695: derives one table from plan/policy.yaml's schema and the GitHub/git write surface (lib/authority.ts's AUTHORITY_TABLE) — for each external write: the module+symbol that performs it, its gate kind (policy row / ledger verdict / operator verb / always), the plan/policy.yaml value that governs it (when any), the plan/ratifications.yaml pin (when W1-T2694's file carries one), and the last time it fired in the ledger union. Joins the ledger archive+live union (lib/ledger-grep.ts's resolveLedgerUnion), never the live ledger.ndjson alone, and REFUSES the whole report — never blanking each row's last-fired column — when that union could not be read. --json prints the same rows as JSON instead of the formatted table. test/authority-ratchet.test.ts enumerates every tracked src file with a detectable external write (an assertLiveWriteAllowed call, a gh REST write-verb argv, a gh pr/issue create-merge-comment-close argv, or a raw git push argv) and fails naming any file missing from AUTHORITY_TABLE. READ-ONLY: no network call, no gh/git spawn, writes nothing.\n\nrmd authority inspect --store <snapshot.json> --at <instant> (--request <request.json> | --cases <cases.json> [--compare-cases <candidate.json>]) — local read-only inspection at an explicit --at instant. --store must be an operator-trusted canonical export, never a model-supplied grant or request attachment. Snapshot JSON: {schema: 'capability-inspection-source-v1', grants: [{grant: <capability-grant-v1>, revoked: <boolean>, useCount: <nonnegative integer>, nonces: <string[]>}]}. Export acquisition and production persistence remain the host adapter's responsibility; this command reads regular files and persists nothing. --request reads one CapabilityUseRequest; --cases and --compare-cases read arrays of requests, paired by position. Replay cases are independent against the same captured snapshot and comparison only reports changed, unchanged or incomparable verdicts. Output capability-inspection-v1 reports checked predicates; repo and instance remain not-checked. Allow means the verifier would accept at the observation time, never a reusable authorization: live use still verifies current state. Missing, unreadable or malformed stores are unavailable; invalid requests or clocks are unknown. Files are bounded to 1 MiB, grants/cases to 100, operations/redaction fields to 100, nonces per grant to 1000 and strings to 512 characters. Output omits request text, approval prose, secrets and upstream errors. No nonce recording, use consumption, secret resolution, provider execution or policy promotion. Exit 0: all evaluated cases allow (or an empty batch); 1: a canonical refusal; 2: unknown/unavailable input or invalid arguments.",
   },
   {
     name: "check-proof",
@@ -54031,6 +54139,12 @@ export async function main(
     dispatch?: typeof dispatchCommand;
   } = {},
 ): Promise<void> {
+  const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  // Local inspection bypasses invocation logging, housekeeping, credentials and self-sync.
+  if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
+    await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
+    return;
+  }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
   // See {@link installUnhandledRejectionGuard} — it is idempotent, so the in-process `main()`
