@@ -39,3 +39,11 @@
   falsifier: |
     A process class missing from the list, or a recommendation applied to configuration in this task, fails human
     verification.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The declared scope is a recon report and plan record, explicitly without enforcement changes.; on the change's description/files alone, no diff was read — The supplied text asserts separate stamp windows but supplies no resolved paths or supporting observations; its acceptance proof checks only for “stamp path,” which cannot verify the claimed process census or sharing relationships.; on the change's description/files alone, no diff was read — The gates explicitly require HIGH when the finding cannot be verified from what is shown; that condition applies to the supplied evidence."
+    judged_at: "2026-10-08T14:11:31.657Z"
+    pin: "a1fdb142d10da56fb76c17e7d4f241c00ccb66822456f077a323753e34b25449"
