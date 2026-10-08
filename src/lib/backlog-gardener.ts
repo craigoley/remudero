@@ -50,6 +50,8 @@ export interface BacklogSources {
 }
 
 const MARKER = /^ {2}# backlog gardener: band=(2|3|4) evidence=([a-f0-9]{16})$/m;
+const DECLARED_PRIORITY = /^ {2}priority: (-?\d+(?:\.\d+)?)[ \t]*$/m;
+const DECLARED_PRIORITY_LINE = /^ {2}priority: -?\d+(?:\.\d+)?[ \t]*\n/m;
 const STEP = /\b[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+\b/g;
 const physicalFiles = (task: Task): string[] => (task.files ?? []).filter((p) => !/[?*\[\]{}]/.test(p));
 const filingNumber = (id: string): number => Number(/-T(\d+)/.exec(id)?.[1] ?? Number.MAX_SAFE_INTEGER);
@@ -141,6 +143,9 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
   for (const task of [...plan.open].sort((a, b) => filingNumber(a.id) - filingNumber(b.id) || a.id.localeCompare(b.id))) {
     const rel = plan.shards.get(task.id);
     if (!rel) continue;
+    // W1-T6307: the machine-filing judge prices an unjudged machine task when it rules; banding it
+    // first races that write, and update-branch merges both lines into one shard (#9979).
+    if (task.author_class === "machine" && task.risk_ruling === undefined) continue;
     const text = readFileSync(join(sources.repoRoot, rel), "utf8");
     const marker = MARKER.exec(text);
     // A marked priority is ours only while it still equals the band in our marker. Any other
@@ -184,16 +189,17 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     const text = readFileSync(path, "utf8");
     const old = MARKER.exec(text);
     const oldBand = old ? Number(old[1]) : undefined;
-    const declared = /^ {2}priority: (\d+)[ \t]*$/m.exec(text);
+    // W1-T6307: any numeric value is a declared priority — the machine-filing judge writes `2.5`.
+    const declared = DECLARED_PRIORITY.exec(text);
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand)) continue;
     let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
     if (action.disposition.kind === "band") {
       const band = action.disposition.band;
-      next = declared ? next.replace(/^ {2}priority: \d+[ \t]*$/m, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
+      next = declared ? next.replace(DECLARED_PRIORITY, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: queued\n  # backlog gardener: band=${band} evidence=${action.evidence.signature}`);
     } else {
-      next = next.replace(/^ {2}priority: \d+[ \t]*\n/m, "");
+      next = next.replace(DECLARED_PRIORITY_LINE, "");
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: blocked\n  retirement: ${action.disposition.retirement}\n  # backlog gardener: retirement evidence=${action.evidence.signature}`);
     }
     if (next === text) continue;

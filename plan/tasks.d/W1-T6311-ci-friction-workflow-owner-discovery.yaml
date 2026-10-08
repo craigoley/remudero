@@ -1,0 +1,76 @@
+- id: W1-T6311
+  title: "THE CI-FRICTION GARDENER CANNOT FIND ITS OWN MATRIX JOB AND HOLDS THE CAUSE FOREVER — resolve declared workflow ownership before calling a measured cause ownerless, and reconsider only a no-owner hold with new ownership evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator approval 2026-10-07: engineering follow-up to canonical CI-friction issue #9018"
+  plan_refs: [W1-T4435, W1-T5380]
+  files: [src/lib/ci-friction-gardener.ts, src/lib/ci-friction-remedy.ts, test/a-ci-friction-workflow-owner-is-discovered.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Reserved with the shipped rmd next-task-id from the writable operator checkout:
+    refs/rmd-id/W1-T6311, e39e1c2d9bf3c846b2db18d13dcddeda590c1b2c,
+    branch codex/file-ci-owner-oct8-1791425520000. Filing only, not task credit.
+    Subject sweep read 114 fetched origin heads; 16 main shards name the existing gardener,
+    and no head added a new shard on that owner surface. W1-T5380's generic-term boundary
+    remains required. Do not duplicate duration balancing or coverage-compaction owners.
+  rationale: |
+    OBSERVED at 8bba0979563618823ed5fd580bc7e374de7ab413, 2026-10-08: #9018 names
+    check:coverage-shard (1/8) and says no code names it. gitCiFrictionOwnerSearch searches
+    only src/ and scripts/. The workflow actually declares the coverage-shard job in
+    .github/workflows/ci.yml and expands its name with matrix.shard. ciCheckFamily already
+    normalizes matrix families; adding another loose string heuristic is not the missing edge.
+    ciFrictionLadder skips every previously escalated origin before discovering ownership,
+    so correcting the search alone would leave the existing incident permanently held.
+    GitHub's workflow syntax defines jobs.<job_id>.name and matrix expansion as the source
+    of displayed job identity. Evidence: issue #9018 and its October 7 consolidation comment;
+    https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax.
+    This is an ownership/reachability repair, not proof that coverage costs have fallen.
+  design: |
+    Resolve the observed check/job identity to a declared workflow job at one pinned fetched
+    main revision. Reuse ciCheckFamily, the already available check/round details and the
+    existing git reader; do not add GitHub reads, evaluate arbitrary workflow expressions,
+    or match a generic word such as ci, Test, or coverage to an unrelated product module.
+    A distinctive failing-test/refusal owner continues to outrank the broad matrix family.
+    Name ambiguous or unsupported workflow identities rather than selecting by hit count.
+    An unreadable git/blob/workflow input must remain distinct from a readable no-owner
+    result, retain its source reason, and preserve the previous scorecard and held state.
+
+    Persist a bounded, deterministic ownership-evidence fingerprint and the hold's reason.
+    Reconsider only a hold caused by missing ownership, once when its relevant ownership
+    evidence changes and a specific owner is now readable. Unrelated main churn must not
+    reopen it each tick. Preserve exhausted ladders, retirement, active remedy tasks,
+    operator holds and non-ownership escalations; never clear all escalated origins.
+    Existing no-owner legacy receipts may migrate once only on a positive, specific owner
+    witness; an unknown legacy reason must stay held. Record the old refusal, new witness,
+    pinned source and actual next decision in the ledger, not a generic success label.
+
+    A workflow-only remedy remains a separate instrument-surface build: do not mix a
+    .github/workflows edit with src product changes in this implementation. Neither owner
+    discovery nor a filed remedy retires an incident or certifies a pull request. Keep all
+    semantic judges, required tests and coverage gates unchanged. Validate with native git
+    fixtures exercising default reads and genuine failure arms, not only injected searches.
+  acceptance:
+    - claim: "the declared matrix job is a discoverable workflow owner without generic-term attribution"
+      proof: "unit test: CI friction resolves a declared matrix job without assigning a generic term to product code"
+    - claim: "a specific refusal owner outranks the workflow family and unreadable input is not absence"
+      proof: "unit test: CI friction preserves distinctive ownership and distinguishes unreadable discovery from no owner"
+    - claim: "new specific ownership evidence releases a no-owner hold once without clearing other holds"
+      proof: "unit test: CI friction reconsiders only a no-owner hold once per changed ownership witness"
+    - claim: "the default owner reader and its failure paths execute against native git fixtures"
+      proof: "unit test: CI friction workflow ownership uses real pinned git reads and reports native read failures"
+  falsifier: |
+    Remove workflow discovery: the real matrix-job fixture becomes ownerless. Rank by a
+    generic family term: the generic-term case names unrelated product code. Collapse a
+    failed blob read to []: the unreadable case reports absence. Skip every escalated origin:
+    the existing no-owner fixture remains held; clear every origin instead: exhausted and
+    operator-held controls reopen. Replay the same witness or unrelated main changes and
+    require zero second revalidation. Delete each fix and record nonzero failures before
+    restoring it and obtaining a complete zero-failure test summary.

@@ -431,12 +431,25 @@ refresh_deploy_code() {
   deploy_code_idle "$container" && deploy_code_clean
 }
 
+# W1-T6282 -- THE CODE THAT DECIDES AND PERFORMS A DEPLOY: deploy/, the rmd entrypoint, and
+# src/lib/deployer.ts with every local module it imports (test/a-busy-primary-reaches-its-image-
+# recycle.test.ts walks that import graph and fails when a module is missing here).
+DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliation.ts
+  src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
+  src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
+  src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
+  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
 # now hands a busy recycle to recycle-container.sh's own pause-and-drain. Only workers or locks
-# qualify -- an unreadable probe, a dirty tree, or a daemon tree older than the install head defers.
+# qualify -- an unreadable probe, a dirty tree, or a daemon tree older than the install head's
+# DEPLOY LOGIC defers. W1-T6282: whole-HEAD ancestry was a moving target on a busy repo (the
+# install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
+# deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
 deploy_code_busy_handoff() {
-  local code="$STATE_DIR/remudero" install_head daemon_head
+  local code="$STATE_DIR/remudero" install_head daemon_head rc=0
   [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
   deploy_code_clean || return 1
   if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
@@ -444,11 +457,22 @@ deploy_code_busy_handoff() {
     echo "rmd-relaunch: deploy code -- busy, and a head is unreadable; deferring." >&2
     return 1
   fi
-  if ! GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
-    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} does not contain install head ${install_head}; deferring." >&2
+  if GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
+    return 0
+  fi
+  # Objects only: the busy tree's HEAD and files are untouched, exactly like the daemon's own fetch.
+  GIT_OPTIONAL_LOCKS=0 git -C "$code" fetch --quiet origin main 2>/dev/null || true
+  GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --quiet "$daemon_head" "$install_head" -- "${DEPLOY_LOGIC_PATHS[@]}" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic (${DEPLOY_LOGIC_PATHS[*]}); deferring." >&2
     return 1
   fi
-  echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
+  if [ "$rc" -ne 0 ]; then
+    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} vs install head ${install_head}: deploy logic unreadable (git diff exit ${rc}); deferring." >&2
+    return 1
+  fi
+  echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} carries install head ${install_head}'s deploy logic, asking deploy-run anyway."
 }
 DEPLOY_CODE_REFRESH
 }
