@@ -38273,7 +38273,7 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo),
+          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
           gitCredentialSocket?.socketPath,
           onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
