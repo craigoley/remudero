@@ -223,6 +223,12 @@ test("GOLDEN — LINT-PLAN LESSON: the task-authoring lane's cited incident exec
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — CLAIMS LESSON: the matched lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-claims-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — CI SHARD CONFLICT LESSON: the staged-marker remedy executes and arms", () => {
   const { verdict, golden } = judgeCase("ci-shard-conflict-lesson");
   assert.equal(golden.violation, "none");
