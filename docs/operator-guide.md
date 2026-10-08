@@ -1241,6 +1241,79 @@ container lifecycle was exercised by running it — proof 3 is a separate, delib
 operator-timed action, because taking an unscheduled reboot of a live fleet host is exactly the
 kind of decision this script does not make on its own.
 
+### Container runtimes on the scratch NVMe (RMD_RUNTIME_ON_SCRATCH, opt-in)
+
+Approved 2026-10-08. Docker's data-root moves from `/mnt/rmd/docker` to `/mnt/scratch/docker`, and
+containerd's root (`/var/lib/containerd`) becomes a bind from `/mnt/scratch/containerd`, so image
+pulls and layer I/O leave the IOPS-capped data disk. Nothing changes until the operator runs the
+installer with `RMD_RUNTIME_ON_SCRATCH=1`. Design and evidence:
+docs/forensics/install-container-runtime-mount-order.md.
+
+**The trap.** Do NOT express the new bind as an fstab line. fstab mounts run during local-fs,
+BEFORE `rmd-scratch.service` mounts the NVMe, so the bind would capture an empty directory on the
+29 GB OS disk, and containerd would pull every image onto `/`. The installer instead renders
+`var-lib-containerd.mount`, which runs after `rmd-scratch.service` and fails (Assert, not Condition)
+unless `/mnt/scratch` is mounted. It refuses to install while fstab still mounts
+`/var/lib/containerd`. A `15-remudero-scratch-runtime.conf` guard in both `docker.service.d` and
+`containerd.service.d` makes each service exit before starting on an unmounted scratch.
+
+**The window** (root on the host; drain first):
+
+```sh
+# 1. Warm copy while everything runs
+sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/containerd/ /mnt/scratch/containerd/
+sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/docker/ /mnt/scratch/docker/
+# 2. rmd pause in core, console and site; wait for no in-flight run. Stop the three watchdog timers.
+sudo systemctl stop docker.socket docker.service containerd.service
+# 3. Final delta, then unmount the OLD bind (an already-mounted /var/lib/containerd would satisfy
+#    the new unit and containerd would keep running from /mnt/rmd)
+sudo rsync -aHAX --numeric-ids --delete /mnt/rmd/containerd/ /mnt/scratch/containerd/
+sudo rsync -aHAX --numeric-ids --delete /mnt/rmd/docker/ /mnt/scratch/docker/
+sudo systemctl stop var-lib-containerd.mount && ! mountpoint -q /var/lib/containerd
+# 4. fstab: comment out exactly this line (the installer prints it if it is still active)
+#      /mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0
+sudo cp -p /etc/fstab /etc/fstab.bak-2026-10-08 && sudoedit /etc/fstab
+# 5. daemon.json: it holds only data-root today; keep the backup for the rollback
+sudo cp -p /etc/docker/daemon.json /etc/docker/daemon.json.bak-2026-10-08
+echo '{ "data-root": "/mnt/scratch/docker" }' | sudo tee /etc/docker/daemon.json
+# 6. Install (renders the unit, both guards, the rmd-scratch dirs drop-in; one daemon-reload)
+sudo RMD_RUNTIME_ON_SCRATCH=1 RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  RMD_SCRATCH_STATE_DIRS="/mnt/rmd/remudero-console-state /home/craigoleyagent/rmd-site-state" \
+  ./deploy/install-container-runtime-mount-order.sh --install
+# 7. Bring them up in order, then restart the timers and rmd resume each daemon
+sudo systemctl start var-lib-containerd.mount containerd.service docker.service
+```
+
+**Verify** (ground truth first, then the script's own check):
+
+```sh
+findmnt /var/lib/containerd             # SOURCE is the NVMe device with [/containerd]
+docker info --format '{{.DockerRootDir}}'   # /mnt/scratch/docker
+df -h / /mnt/scratch                    # / does not grow while images pull
+sudo RMD_RUNTIME_ON_SCRATCH=1 RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  ./deploy/install-container-runtime-mount-order.sh   # exit 0 and "containerd and docker run from /mnt/scratch"
+```
+
+**Roll back** (`/mnt/rmd/docker` and `/mnt/rmd/containerd` stay untouched for at least a week):
+
+```sh
+sudo systemctl stop docker.socket docker.service containerd.service var-lib-containerd.mount
+sudo ./deploy/install-container-runtime-mount-order.sh --uninstall-scratch-runtime   # refuses while the mount is active
+sudo cp -p /etc/fstab.bak-2026-10-08 /etc/fstab
+sudo cp -p /etc/docker/daemon.json.bak-2026-10-08 /etc/docker/daemon.json
+sudo systemctl daemon-reload && sudo mount /var/lib/containerd
+sudo systemctl start containerd.service docker.service
+sudo RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  RMD_SCRATCH_STATE_DIRS="/mnt/rmd/remudero-console-state /home/craigoleyagent/rmd-site-state" \
+  ./deploy/install-container-runtime-mount-order.sh --install   # re-renders 20- with /mnt/rmd/docker
+```
+
+**After a deallocate** the NVMe comes back empty. `rmd-scratch.service` formats and mounts it, its
+`ExecStartPost` drop-in re-creates `/mnt/scratch/containerd`, and both services start on empty
+stores. The watchdog re-pulls and recreates the daemons; serve and cloudflared rely on their own
+self-heal. If the NVMe fails to mount, both services stay down and say why in the journal, rather
+than filling `/`.
+
 ### Host units: the launcher, boot unit, watchdog and reaper (W1-T2877)
 
 `deploy/install-host-units.sh` provisions everything that makes a VM a **fleet host**, as opposed to
@@ -1367,6 +1440,42 @@ there mean a daemon crash-looping under a watchdog that keeps papering over it.
 
 This installer does **not** start or stop the daemon. Bring it up with `~/rmd-relaunch.sh`, or let
 `rmd-fleet.service` do it at boot.
+
+#### Serve and cloudflared self-heal (`deploy/edge-heal.sh`)
+
+The **core** launcher (no `--instance`, or `--instance core`) runs `deploy/edge-heal.sh` from
+`<state>/daemon-install` on every tick that exits 0. That covers boot, a healthy daemon, a revived
+daemon and `state/STOP`; a refused tick (for example an unmounted `/mnt/rmd`) skips it. It recreates
+`remudero-serve` and `cloudflared` only when they are **absent**. That is what a Docker data root on
+wiped scratch looks like after an Azure deallocate. A stopped container stays with its
+`unless-stopped` policy. When both containers exist, the step costs one `docker container inspect`
+each.
+
+- **Serve absent:** it runs `deploy/serve-container.sh` in create mode, with the tick's state root.
+  Because the step runs after the daemon is revived, the script can read the GitHub App env from it.
+- **cloudflared absent:** it runs `cloudflare/cloudflared:latest` on `rmd-net` with
+  `--restart=unless-stopped`. The token file is mounted read-only and passed as
+  `tunnel --no-autoupdate run --token-file /etc/cloudflared/token` (cloudflared 2025.4.0 or later),
+  so the token never appears in argv, env or `docker inspect`. If the token file is missing or
+  empty, it logs one `REFUSING` line and creates nothing.
+- **`rmd-net` absent:** it creates the network only when no `cloudflared` exists. A new network next
+  to a live tunnel would leave the tunnel on the old network.
+
+The token file defaults to `/etc/remudero/cloudflared-token` (override:
+`RMD_CLOUDFLARED_TOKEN_FILE`). The heal only stats the file. cloudflared reads it inside the
+container as uid 65532 (the image's nonroot user), so a `root:root 0600` file would be unreadable
+there. Create it owned by that uid, readable by nobody else on the host:
+
+```
+sudo install -d -m 0755 /etc/remudero
+sudo install -m 0400 -o 65532 -g 65532 /dev/stdin /etc/remudero/cloudflared-token   # paste the token, then ^D
+```
+
+**One-off migration off the inline token.** The live `cloudflared` was created by hand with
+`--token <TOKEN>` on its command line, which `docker inspect` shows. Rotate the token in Cloudflare,
+write the new one to the file, then run `deploy/edge-heal.sh --migrate-cloudflared` as the service
+user. It refuses without the file, pulls the image, removes the old container and recreates it in
+the token-file shape. The tunnel is down for a few seconds.
 
 
 ### Rotating the service tokens
