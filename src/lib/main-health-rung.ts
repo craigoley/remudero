@@ -726,6 +726,7 @@ function buildRepairLane(deps: RepairLaneDeps) {
 
   const startRevert = (ctx: RedContext, episode: MainRepairEpisode, why: string): void => {
     const offendingSha = episode.offendingSha!;
+    const startedIn = generation;
     const branch = `${MAIN_REPAIR_BRANCH_PREFIX}revert-${offendingSha.slice(0, 12)}-${deps.now()}`;
     const request: MainRepairRevertRequest = {
       headSha: ctx.headSha,
@@ -752,6 +753,10 @@ function buildRepairLane(deps: RepairLaneDeps) {
           ...(episode.fixPrUrl ? { fix_pr_url: episode.fixPrUrl } : {}),
           reason: why,
         });
+        if (generation !== startedIn) {
+          await repair.closePr(result.prUrl, `Main went green while this revert was being opened; closing it as redundant (W1-T6403).`);
+          record("main.repair.redundant_closed", { offending_sha: offendingSha, pr_url: result.prUrl });
+        }
         return;
       }
       record("main.repair.revert_refused", {
@@ -768,7 +773,7 @@ function buildRepairLane(deps: RepairLaneDeps) {
     async onRed(ctx: RedContext): Promise<boolean> {
       if (job) return true;
       let episode = mainRepairEpisodeFromLedger(readLedgerLines(deps.ledgerPath));
-      if (!episode?.offendingSha) {
+      if (episode === undefined || episode.offendingSha === undefined) {
         const located = await locate(ctx);
         if (located === "pending") return true;
         if (!located) return false;

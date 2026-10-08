@@ -51426,7 +51426,9 @@ export async function dispatchMainRepairFixRun(
     try {
       diffStat = await (deps.diffStat ?? mainRepairDiffStat)(worktreePath, request.offendingSha);
     } catch (error) {
-      diffStat = `(diff stat unavailable: ${String((error as Error)?.message ?? error).slice(0, 300)})`;
+      const reason = String((error as Error)?.message ?? error).slice(0, 300);
+      log("main-repair.diff_stat_unreadable", { offending_sha: request.offendingSha, error: reason });
+      diffStat = `(diff stat unavailable: ${reason})`;
     }
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),

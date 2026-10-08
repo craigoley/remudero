@@ -644,3 +644,34 @@ test("the daemon's repair effects read a PR's state and close a redundant one wi
     w.cleanup();
   }
 });
+
+test("a repair PR that reports back after main went green is closed as redundant", async () => {
+  for (const tier of ["fix", "revert"] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const h = harness(
+      tier === "fix"
+        ? { fix: async () => (await gate, FIX_PR) }
+        : { revert: async () => (await gate, { prUrl: REVERT_PR }) },
+    );
+    try {
+      if (tier === "revert") {
+        await tick(h);
+        h.prStates.set(FIX_PR, { state: "closed" });
+      }
+      h.advance(60_000);
+      await h.rung(); // starts the gated repair job and returns without waiting on it
+      h.setHead(GREEN_HEAD);
+      h.advance(60_000);
+      await h.rung(); // main reads green while that job is still held
+      assert.equal(h.rows("main.repair.resolved").length, 1, `${tier}: the episode resolved first`);
+      release();
+      await h.rung.repairIdle();
+      const url = tier === "fix" ? FIX_PR : REVERT_PR;
+      assert.deepEqual(h.closed.map((c) => c.url), [url], `${tier}: the late PR is closed`);
+      assert.equal(h.rows("main.repair.redundant_closed")[0]?.pr_url, url, tier);
+    } finally {
+      h.cleanup();
+    }
+  }
+});
