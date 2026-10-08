@@ -5,11 +5,14 @@
  * and every restart killed it. These drive `runDaemon` with a fake spawner over a real state file.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { FIXTURE_CONFIG_PATH_SEGMENTS } from "../src/lib/config.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
@@ -250,4 +253,42 @@ test("W1-T5723: the child entry does nothing when imported without its flag", as
   const before = process.exitCode;
   await import("../src/measurement-cadence-child.js");
   assert.equal(process.exitCode, before);
+});
+
+test("W1-T5723: a runner whose start throws is ledgered as a failed child run and the boot carries on", { timeout: 5_000 }, async () => {
+  assert.equal(detachedActionInFlight("measurement-cadence"), false, "precondition: no cadence leaked in");
+  let inProcess = 0;
+  const rows: Row[] = [];
+  await boot(rows, {
+    checkMeasurementCadence: () => ({ fire: true, reason: "due" }),
+    runMeasurementCadence: async () => { inProcess += 1; return cadenceResult(); },
+    measurementCadenceChild: { pending: () => false, start: () => { throw new Error("EAGAIN: spawn refused"); } },
+  });
+  const failed = rows.find((r) => r.step === "measurement_cadence.run_failed");
+  assert.deepEqual(failed?.extra, { error: "EAGAIN: spawn refused", flow: "child" });
+  assert.equal(childRows(rows).length, 0, "no child outcome is claimed for a start that threw");
+  assert.equal(inProcess, 0, "a refused child never falls back to running the cadence in-process");
+  assert.equal(detachedActionInFlight("measurement-cadence"), false, "nothing was detached");
+});
+
+test("W1-T5723: the real child entry runs the real cadence and records its failure in the state file", { timeout: 120_000 }, () => {
+  // A temp HOME whose config is malformed: the real cadence's first act, `loadConfig()`, throws before it
+  // records a fire or reads any repository, so the child exits fast and touches nothing outside this HOME.
+  const home = scratch();
+  const configFile = join(home, ...FIXTURE_CONFIG_PATH_SEGMENTS);
+  mkdirSync(dirname(configFile), { recursive: true });
+  writeFileSync(configFile, "{not json");
+  const statePath = join(scratch(), "state.json");
+  const entry = fileURLToPath(new URL("../src/measurement-cadence-child.ts", import.meta.url));
+  const child = spawnSync(process.execPath, ["--import", "tsx", entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, "RUN-REAL"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+    encoding: "utf8",
+    timeout: 110_000,
+  });
+  assert.equal(child.status, 1, `the child exits 1 on a failed cadence (stderr: ${child.stderr})`);
+  const state = readState(statePath);
+  assert.equal(state.runId, "RUN-REAL");
+  assert.equal(state.status, "failed");
+  assert.match(String(state.error), /JSON/, "the recorded error is the config parse failure");
 });
