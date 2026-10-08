@@ -43502,27 +43502,48 @@ export function commitWorkerEdits(
   };
 }
 
-/** Inspect declarations rather than comments or string examples; never execute worker content. */
-function declaresProofTitle(content: string, titles: readonly string[]): boolean {
+/** Inspect declarations rather than comments or string examples; never execute worker content.
+ *  Template expressions are re-scanned as template text after their closing brace (as
+ *  scripts/census-precheck.mjs does); a scanner that stops advancing ends the scan as "not found". On
+ *  2026-10-08 `${prefix}\n## Acceptance` scanned `##` as a zero-length PrivateIdentifier forever,
+ *  pinning the daemon's event loop at 95% CPU for over an hour inside a fix round's commit. */
+export function declaresProofTitle(content: string, titles: readonly string[]): boolean {
   const scanner = createScanner(true, undefined, content);
-  let token = scanner.scan();
+  const braceDepths: number[] = [];
+  let lastEnd = -1;
+  const scanNext = (): SyntaxKind => {
+    let next = scanner.scan();
+    if (next === SyntaxKind.TemplateHead) braceDepths.push(0);
+    else if (next === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
+    else if (next === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        next = scanner.reScanTemplateToken(false);
+        if (next === SyntaxKind.TemplateTail) braceDepths.pop();
+      } else braceDepths[braceDepths.length - 1]--;
+    }
+    return next;
+  };
+  let token = scanNext();
   while (token !== SyntaxKind.EndOfFile) {
+    const end = scanner.getTokenEnd();
+    if (end <= lastEnd) return false;
+    lastEnd = end;
     if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
     if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
-      token = scanner.scan();
+      token = scanNext();
       while (token === SyntaxKind.DotToken) {
-        scanner.scan();
+        scanNext();
         if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
-        token = scanner.scan();
+        token = scanNext();
       }
       if (token === SyntaxKind.OpenParenToken) {
-        token = scanner.scan();
+        token = scanNext();
         if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
             !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
-            scanner.scan() === SyntaxKind.CommaToken) return true;
+            scanNext() === SyntaxKind.CommaToken) return true;
       }
     }
-    token = scanner.scan();
+    token = scanNext();
   }
   return false;
 }
