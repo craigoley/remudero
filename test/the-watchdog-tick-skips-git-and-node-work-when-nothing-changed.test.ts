@@ -33,6 +33,14 @@ function host(t: TestContext, instance = "core") {
   put("calls", "");
   writeFileSync(ledger, "fixture\n");
   writeFileSync(join(state, "remudero", "src", "run-task.ts"), "// fixture\n");
+  // The launcher targets Linux and asks GNU stat for %Y. This fixture already replaces
+  // docker/git; provide that Linux observation from real filesystem metadata on every host.
+  // Do not change the production fast-path predicate to accommodate a test machine's stat.
+  executable(join(bin, "stat"), `
+if [ "$1" = -c ] && [ "$2" = %Y ]; then
+  exec ${JSON.stringify(process.execPath)} -e 'console.log(Math.floor(require("node:fs").statSync(process.argv[1]).mtimeMs / 1000))' "$3"
+fi
+exec /usr/bin/stat "$@"`);
   executable(join(bin, "git"), `
 code=""
 if [ "$1" = -C ]; then code="$2"; shift 2; fi
