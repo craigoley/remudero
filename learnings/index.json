@@ -91,7 +91,8 @@
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
         "skipped-check-deadlock",
-        "strikes-exhausted-counts-rows"
+        "strikes-exhausted-counts-rows",
+        "test-slow-suite-serialization"
       ],
       "globs": [
         ".github/**",
@@ -107,6 +108,7 @@
         "scripts/lib/inherited-violation.mjs",
         "scripts/source-size-baseline.json",
         "scripts/source-size-ratchet.mjs",
+        "scripts/test-tier-manifest.mjs",
         "src/lib/board-projection.ts",
         "src/lib/git-push.ts",
         "src/lib/ledger-projector.ts",

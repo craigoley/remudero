@@ -253,6 +253,12 @@ test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-pus
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — TEST-SLOW LESSON: the cited incident executes and the slow-tier guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-test-slow-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");

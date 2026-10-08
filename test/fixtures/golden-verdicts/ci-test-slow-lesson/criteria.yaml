@@ -1,0 +1,2 @@
+- claim: the test-slow lesson reaches the test and CI lane through an active learning
+  proof: "grep: ci-learning:9362:test-slow in learnings/ci.yaml"
