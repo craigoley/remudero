@@ -235,6 +235,32 @@ export function withGhKillEscalation<T extends { stdout: string; stderr: string 
  */
 const asyncReadInFlight = new Map<string, Promise<unknown>>();
 
+function ghArgsAreCoalescibleRead(args: readonly string[]): boolean {
+  if (args[0] === "pr") return ["view", "list", "checks"].includes(args[1] ?? "");
+  if (args[0] !== "api") return false;
+  let explicitGet = false;
+  let hasPayload = false;
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "-X" || arg === "--method" || arg.startsWith("-X") || arg.startsWith("--method=")) {
+      const method = arg === "-X" || arg === "--method" ? args[++i]
+        : arg.startsWith("-X") ? arg.slice(2).replace(/^=/, "") : arg.slice("--method=".length);
+      if (method !== "GET") return false;
+      explicitGet = true;
+    } else if (/^(?:-[fF]|--(?:raw-field|field|input))$/.test(arg)) {
+      hasPayload = true;
+      i += 1;
+    } else if (/^(?:-[fF].|--(?:raw-field|field|input)=)/.test(arg)) {
+      hasPayload = true;
+    } else if (/^(?:-[Hqpt]|--(?:header|jq|preview|template|hostname|cache))$/.test(arg)) {
+      i += 1;
+    } else if (arg.startsWith("-") && !/^(?:-i|--(?:include|paginate|slurp|silent|verbose|allow-escape-sequences)|--(?:header|jq|preview|template|hostname|cache)=.*|-[Hqpt].+)$/.test(arg)) {
+      return false;
+    }
+  }
+  return explicitGet || !hasPayload;
+}
+
 /** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
  * worker/parser failure. The operation is deliberately reduced to the command family so an error
  * can be logged without carrying request arguments, headers, tokens, or response contents. */
@@ -287,8 +313,8 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
   if (execAsync !== execFileAsync) return run();
-  const key = JSON.stringify(execArgs);
-  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? JSON.stringify(execArgs) : undefined;
+  const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
@@ -298,6 +324,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await applyGhReadCadenceAsync(args);
     return run();
   })();
+  if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
     return await request;
@@ -324,14 +351,15 @@ export async function ghTextAsync(
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
   if (execAsync !== execFileAsync) return read();
-  const key = `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}`;
-  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     refuseSentinelGhToken("gh", args, undefined);
     await applyGhReadCadenceAsync(args);
     return read();
   })();
+  if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
     return await request;
