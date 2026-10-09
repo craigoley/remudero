@@ -16539,7 +16539,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   lightPassReadyRefreshInFlight = true;
   try {
     const appendLine = deps.appendLine ?? appendLedger;
-    const now = deps.now ? deps.now() : Date.now();
+    const now = clockFromMillisFn(deps.now).now();
     const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
