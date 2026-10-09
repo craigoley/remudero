@@ -16,7 +16,7 @@
  * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
  * Node builtins only, so `scripts/check.mjs` loads this directly under Node's type stripping.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** The buildinfo's file name inside a checkout's git directory. */
@@ -31,16 +31,18 @@ export function typecheckArgs(buildInfo: string | undefined): string[] {
 /** `root`'s git directory: `.git` itself, or the target of a linked worktree's `gitdir:` file. */
 export function gitDirOf(root: string): string | undefined {
   const dotGit = join(root, ".git");
+  let text: string;
   try {
-    if (statSync(dotGit).isDirectory()) return dotGit;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
-    if (m === null) return undefined;
-    const dir = resolve(root, m[1]!);
-    return existsSync(dir) ? dir : undefined;
-  } catch {
+    text = readFileSync(dotGit, "utf8"); // one read, no stat-then-read race: a directory answers EISDIR
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EISDIR") return dotGit;
     // No readable `.git`: this tree has no git directory to keep a buildinfo in, so it runs the plain check.
     return undefined;
   }
+  const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
+  if (m === null) return undefined;
+  const dir = resolve(root, m[1]!);
+  return existsSync(dir) ? dir : undefined;
 }
 
 /** Where `root`'s own buildinfo lives, or undefined when `root` has no git directory. */

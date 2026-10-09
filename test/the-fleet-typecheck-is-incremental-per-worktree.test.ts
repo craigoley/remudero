@@ -17,6 +17,7 @@ import { mergedHeadTypechecks, mergedTypecheckArgv, type TypecheckSpawn } from "
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   canonicalBuildInfo,
+  gitDirOf,
   prepareWorktreeTypecheck,
   rebaseBuildInfo,
   seedBuildInfo,
@@ -147,6 +148,11 @@ test("a tree with no git directory runs the plain, non-incremental check", () =>
   const dir = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}incr-nogit-`)));
   assert.deepEqual(prepareWorktreeTypecheck(dir), { args: typecheckArgs(undefined), seed: "no-seed" });
   assert.deepEqual(typecheckArgs(undefined), ["-p", "tsconfig.json", "--noEmit"]);
+  writeFileSync(join(dir, ".git"), "not a gitdir line\n");
+  assert.equal(gitDirOf(dir), undefined, "a .git file naming no gitdir");
+  writeFileSync(join(dir, ".git"), "gitdir: ./gone\n");
+  assert.equal(gitDirOf(dir), undefined, "a gitdir that no longer exists");
+  assert.equal(canonicalBuildInfo(dir), undefined);
 });
 
 test("the open-weight typecheck keeps its buildinfo in the worker's home, never the worktree", () => {
