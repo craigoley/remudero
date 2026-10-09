@@ -845,6 +845,7 @@ import {
   writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftSelectionContext,
   type DraftRungOutcome,
   type EvidenceAnchor,
   type BatchApproveResult,
@@ -45746,7 +45747,7 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
@@ -48641,24 +48642,23 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-  github?: GitHub,
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  legacyGrepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
   // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
   // that injects only the sync seam warms through that same seam, so its answers are unchanged.
   const grepAnchorSync = grepAnchor ?? ((ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, ref, anchor));
   const grepAnchorWarm =
+    legacyGrepAnchorAsync ??
     grepAnchorAsync ??
     (grepAnchor
       ? async (ref: string, anchor: EvidenceAnchor) => grepAnchor(ref, anchor)
       : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
-  let lazyGithub: GitHub | undefined;
-  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
-  return async (tickRead) => {
+  return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -48711,21 +48711,13 @@ export function buildInboxDraftHook(
         }
       }
 
-      let draftReadiness: ReadinessContext | undefined;
+      let draftSelection: DraftSelectionContext | undefined;
       try {
-        const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
-        const { isMerged, depsUnobservable } = tickRead
-          ? projectionReadinessAccessors(new Map(tickRead.projection))
-          : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
-        draftReadiness = {
-          plan,
-          isMerged,
-          depsUnobservable,
+        draftSelection = {
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -48736,7 +48728,7 @@ export function buildInboxDraftHook(
       }
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -48746,7 +48738,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
