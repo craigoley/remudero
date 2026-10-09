@@ -1,6 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
+import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -73,7 +74,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
-import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import {
@@ -4174,7 +4175,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let shardRelPath: string | undefined;
       try {
         shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
-          .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
           .map((f) => join("plan", "tasks.d", f))[0];
       } catch {
         /* the shard directory is unreadable — fall through to the monolith below */
@@ -12878,6 +12879,10 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
   });
 }
 
+export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
+  return orderPendingReviews(prs.map((pr, index) => ({ pr, index }))).map((job) => job.index);
+}
+
 function effectiveReviewWidth(
   deps: SweepDeps,
   policy: SweepPolicy,
@@ -14070,6 +14075,10 @@ export async function runSweep(
         blockerReadFailure = { reason: String(error) };
       }
     }
+    // A green, reviewed PR under an operator merge hold is waiting on a person: name the hold, never "arming".
+    const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
+    const shownReason = mergeHold === undefined ? reason
+      : `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`;
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
@@ -14081,6 +14090,7 @@ export async function runSweep(
         (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
       ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+      operatorHold: mergeHold !== undefined,
     });
     const planRepairCapable =
       (metadataWait && typeof deps.repairMetadata === "function") ||
@@ -14108,7 +14118,7 @@ export async function runSweep(
       prUrl: pr.prUrl,
       taskId: pr.taskId,
       disposition,
-      reason,
+      reason: shownReason,
       acted,
       question,
       ...(actionError ? { actionError } : {}),
@@ -14122,7 +14132,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         deduped,
         ...(actionError ? { action_error: actionError } : {}),
         dry_run: true,
@@ -14151,7 +14161,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         head_sha: pr.headSha,
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
@@ -14211,7 +14221,7 @@ export async function runSweep(
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
-  for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
+  for (const prIndex of sweepWalkOrder(openPrs)) {
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
@@ -17352,10 +17362,7 @@ export function deriveQueueGovernorTrailingFlow(
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
     if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
-    // Most merges are ledgered only as a sweep `pr.terminal` row, never as `verdict.merged`.
-    const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
-      || (line.step === "pr.terminal" && line.state === "merged");
-    if (!merged) continue;
+    if (!isMergedLedgerRow(line)) continue;
     const key = typeof line.pr_number === "number" ? `#${line.pr_number}` : typeof line.pr_url === "string" ? line.pr_url : undefined;
     if (key === undefined) unkeyedMerges++;
     else mergedPrs.add(key);
@@ -17438,6 +17445,7 @@ export function windowCostRows(
 export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 let sweepEffectsWiringObserver: ((judge: "production" | "former_bound_stand_in") => void) | undefined;
 /** W1-T7096: lets a test see which progress judge each real sweep-effects construction wired, without a log row. */
@@ -18704,9 +18712,6 @@ export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
  *  PRs prints a different one and therefore matched nothing at all. */
 const DIFF_COVERAGE_BLOCK_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
 
-/** `  - src/lib/foo.ts:123` — one uncovered line as the gate lists them. */
-const UNCOVERED_LINE_RE = /^\s*-\s+(\S+:\d+)\s*$/;
-
 /** What {@link diffCoverageReport} found: the check that blocked and the lines it named. */
 export interface DiffCoverageReport {
   check: string;
@@ -18720,10 +18725,13 @@ export interface DiffCoverageReport {
 export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverageReport | undefined {
   for (const f of failures) {
     if (!DIFF_COVERAGE_BLOCK_RE.test(f.logTail)) continue;
-    const uncovered: string[] = [];
-    for (const line of f.logTail.split("\n")) {
-      const m = line.match(UNCOVERED_LINE_RE);
-      if (m?.[1]) uncovered.push(m[1]);
+    const parsed = diffCoverageTargets([f.logTail]);
+    const uncovered = (parsed?.targets ?? []).flatMap((t) => t.lines.map((line) => `${t.file}:${line}`));
+    // The fix prompt uses repository-relative targets. CI can also print an absolute checkout
+    // path; retain it here so the red-base refresh can compare its complete source suffix.
+    for (const raw of f.logTail.split("\n")) {
+      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)(?:[^\s:]+[\\/])*[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
+      if (absolute) uncovered.push(`${absolute[1]}:${absolute[2]}`);
     }
     return { check: f.name, uncovered };
   }

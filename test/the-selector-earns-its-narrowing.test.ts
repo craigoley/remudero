@@ -137,6 +137,11 @@ test("selector-shadow reads all eight coverage job logs instead of a partial run
 
 test("W1-T4439: a missed failure files a task naming the missing edge", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", "test/the-affected-suite-selector-runs-in-shadow.test.ts"]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "test", "a.test.ts"), "");
@@ -597,6 +602,11 @@ test("a retry-recovered file is ledgered once as flake evidence for the test gar
 
 test("a later miss of the same suite is ledgered as evidence for its task and never filed again", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-dedupe-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", "test/the-affected-suite-selector-runs-in-shadow.test.ts"]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });

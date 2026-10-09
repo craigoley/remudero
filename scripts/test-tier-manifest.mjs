@@ -453,6 +453,81 @@ export function writeManifest(path, manifest) {
   writeFileSync(path, `${JSON.stringify({ thresholdMs: manifest.thresholdMs, files: sortedFiles }, null, 2)}\n`);
 }
 
+function gitLines(spawn, cwd, args) {
+  const res = spawn("git", args, { cwd, encoding: "utf8", maxBuffer: 1 << 26 });
+  if (res.error || res.status !== 0) return undefined;
+  return String(res.stdout).split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+/** W1-T5940: what a merge_group run tests. The queue chains one squash commit per member onto the
+ *  group base, so `HEAD^1...HEAD` sees only the LAST member. The selection is the union of
+ *  `select` over the combined diff and over each member commit's own diff; anything unreadable,
+ *  any full-run verdict, or an empty union is a full run. `select` returns an AffectedSelection. */
+export function mergeGroupSelection({ base, head = "HEAD", select, spawn = spawnSync, cwd = process.cwd() }) {
+  const full = (reason) => ({ mode: "full", suites: [], members: 0, reason });
+  if (!base || !head) return full("no merge group base");
+  const combined = gitLines(spawn, cwd, ["diff", "--name-only", `${base}...${head}`]);
+  const members = gitLines(spawn, cwd, ["rev-list", "--first-parent", "--reverse", `${base}..${head}`]);
+  if (!combined || !members || combined.length === 0 || members.length === 0) {
+    return full("the group's combined diff or member commits could not be read");
+  }
+  const diffs = [combined];
+  for (const sha of members) {
+    const own = gitLines(spawn, cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", `${sha}^1`, sha]);
+    if (!own) return full(`member ${sha.slice(0, 12)}'s own diff could not be read`);
+    if (own.length > 0) diffs.push(own);
+  }
+  const suites = new Set();
+  for (const changed of diffs) {
+    let sel;
+    try {
+      sel = select(changed);
+    } catch (err) {
+      return full(`the selector failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!sel || sel.fullRun) return full(sel?.reasons?.[0] ?? "the selector asked for a full run");
+    for (const suite of sel.narrow ?? sel.suites ?? []) suites.add(suite);
+  }
+  if (suites.size === 0) return full("the selection is empty");
+  return { mode: "affected", suites: [...suites].sort(), members: members.length, reason: `${suites.size} suite(s) over ${members.length} member(s)` };
+}
+
+/** W1-T5940: ci.yml's merge_group entry point (needs tsx). Selects with W1-T5705's narrow lane —
+ *  symbols from the group's combined diff — and writes the suites, or `full`, to `outPath`.
+ *  `load` imports a repo-relative module for us: a dynamic import in this file makes tsx attach a
+ *  source map to it, and a coverage run that loads it from a since-deleted fixture checkout then
+ *  cannot write its lcov (ERR_SOURCE_MAP_MISSING_SOURCE). */
+export async function writeMergeGroupSelection(base, outPath, { load, root = process.cwd() } = {}) {
+  if (typeof load !== "function") throw new Error("writeMergeGroupSelection needs a `load` module importer");
+  const mod = await load("src/lib/affected-suites.ts");
+  const { callerReachableSuites } = await load("src/lib/ci-parity.ts");
+  const { defaultPreflightSpawn } = await load("src/lib/commit-message.ts");
+  const diff = spawnSync("git", ["diff", "-U0", `${base}...HEAD`], { cwd: root, encoding: "utf8", maxBuffer: 1 << 28 });
+  let symbolSuites;
+  const select = (changed) => mod.affectedSelectionOrFull(changed, () => {
+    symbolSuites ??= callerReachableSuites(
+      mod.changedSymbols(diff.status === 0 ? diff.stdout : "", (p) => readFileSync(join(root, p), "utf8")), root, defaultPreflightSpawn,
+    ).suites;
+    return mod.readAffectedSuitesInput(root, changed, { symbolSuites });
+  });
+  const sel = mergeGroupSelection({ base, select, cwd: root });
+  if (sel.mode === "affected") {
+    // The candidate lane refuses unknown files and fewer candidates than shards; pad with the
+    // fastest recorded suites rather than fall back to a full run.
+    const known = listTestFiles(root);
+    const manifest = loadManifest(join(root, DEFAULT_MANIFEST_RELATIVE_PATH));
+    const picked = new Set(sel.suites.filter((s) => known.includes(s)));
+    const median = medianMeasuredDurationMs(manifest);
+    const spare = known.filter((f) => !picked.has(f)).sort((a, b) => weightedDurationMs(a, manifest, median) - weightedDurationMs(b, manifest, median));
+    while (picked.size < DEFAULT_CI_SHARD_COUNT && spare.length > 0) picked.add(spare.shift());
+    sel.suites = [...picked].sort();
+    if (sel.suites.length < DEFAULT_CI_SHARD_COUNT) Object.assign(sel, { mode: "full", suites: [], reason: "too few suites to shard" });
+  }
+  writeFileSync(outPath, sel.mode === "full" ? "full\n" : `${sel.suites.join("\n")}\n`);
+  console.log(`W1-T5940: merge group selection -> ${sel.mode === "full" ? `FULL: ${sel.reason}` : sel.reason}`);
+  return sel;
+}
+
 function getFlagValue(argv, flag) {
   const idx = argv.indexOf(flag);
   return idx === -1 ? undefined : argv[idx + 1];

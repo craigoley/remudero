@@ -1121,6 +1121,9 @@ export interface DaemonDeps {
    *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
    *  Optional — omitted, this tick performs no artifact sweep. */
   sweepReclaimableArtifacts?: () => void;
+  /** W1-T7093: update this instance's shared host-memory reservation tree on every heartbeat.
+   *  Bookkeeping only; a failure is logged and never delays or gates work. */
+  sweepHostMemoryReservations?: () => void;
   /** Called on an idle tick whose census names at least one recoverable-class blocker — see
    *  {@link StarvationCensus}. Fires at most once per episode, and dispatch is already idle by then, so
    *  the hook is a pure notification. The real command wires an escalation with its own cross-boot
@@ -2013,6 +2016,16 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
+          // not merely by worker start/release calls. Best-effort, after the liveness row so a
+          // slow or failed ledger walk cannot erase this tick's heartbeat.
+          if (deps.sweepHostMemoryReservations) {
+            try {
+              deps.sweepHostMemoryReservations();
+            } catch (e) {
+              log("daemon.host_memory_reservation_sweep.error", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           // W1-T3378: a `review-PR*` worktree a SIGKILL stranded is never revisited by anything
           // in-process (materializeReviewWorktree/withMaterializedWorktree's teardown are both
           // `finally`-only), so this out-of-process sweep is what actually reclaims it. Best-

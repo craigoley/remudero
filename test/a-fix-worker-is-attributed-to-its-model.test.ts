@@ -271,3 +271,35 @@ test("W1-T4613: the sweep's receipt wrapper stands aside, so a fix worker is rec
   assert.equal(after.filter((l) => l.step === "worker.assignment").length, 1);
   assert.equal(after.filter((l) => l.step === "worker.attempt").length, 1);
 });
+
+test("a fix round keeps its worker's own output as a bounded retained tail named on fix.done", async () => {
+  // #10339 (2026-10-09): two diff-coverage rounds committed nothing and no transcript of either
+  // survived, so nobody could replay what they read. A build already keeps state/runs/<id>.tail.
+  const rung = fixRung({
+    raw: async (args) => {
+      args.onSelectionAssignment?.(assignment("asg-tail"));
+      args.streamObserver?.({ kind: "working", tsMs: 1, text: "reading the diff-coverage targets" });
+      args.streamObserver?.({ kind: "tool-executing", tsMs: 2, text: "[tool_use: Edit]", toolName: "Edit" });
+      return worker({ selectionAssignmentId: "asg-tail" });
+    },
+  });
+  await runFixRung(rung.run);
+  const done = rung.lines.find((line) => line.step === "fix.done")!;
+  assert.equal(done.worker_tail, join("state", "runs", `${String(done.worker_run_id)}.tail`));
+  const tailFile = join(rung.config.root, String(done.worker_tail));
+  assert.ok(existsSync(tailFile), "the round's tail is retained where `rmd peek` and the W1-T942 retention already look");
+  assert.match(readFileSync(tailFile, "utf8"), /reading the diff-coverage targets\n\[tool_use: Edit\]/);
+  assert.equal(rung.lines.filter((line) => line.step === "worker.activity").length, 0, "tail only: no per-event ledger rows");
+});
+
+test("a fix receipt without a configured root still dispatches and records its worker", async () => {
+  const rung = fixRung({ raw: routedWorker("asg-no-root") });
+  rung.run.config = {} as Config;
+
+  await runFixRung(rung.run);
+
+  assert.equal(rung.spawns.length, 1);
+  const done = rung.lines.find((line) => line.step === "fix.done");
+  assert.equal(done?.selection_assignment_id, "asg-no-root");
+  assert.equal(done?.worker_tail, undefined, "a tail is only advertised when it has a valid root");
+});

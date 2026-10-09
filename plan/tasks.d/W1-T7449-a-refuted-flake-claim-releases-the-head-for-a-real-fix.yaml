@@ -1,0 +1,68 @@
+- id: W1-T7449
+  title: "A REFUTED FLAKE CLAIM RELEASES THE HEAD FOR A REAL FIX — a fix round claims FLAKE, its one rerun fails again and fix.done records flake_claim refuted, yet fixRungStalledWithoutNewHead does not read that as stalled, so every later pass holds the PR under 'fix already dispatched for this head' until an operator hand-fixes it; the refutation ends the rung, the next round must be a real fix, and the W1-T7096 progress judge, not a strike count, guards the loop"
+  repo: remudero
+  depends_on: [W1-T7096]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the sweep and the fix rung do after a FLAKE claim's rerun reproduces the red
+  band_meaning: span
+  origin: "operator session 2026-10-09: #10400 (W1-T5940) needed a hand fix after the fix lane's FLAKE claim was refuted; ruling 2026-10-09 'an llm judge should determine if more fix attempts should be made or if we're in an endless loop that needs escalated. I hate hard ceilings'"
+  plan_refs: [W1-T5920, W1-T6353, W1-T7096, W1-T7243, W1-T1110, W1-T1210, W1-T100]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts, test/a-job-requeue-refused-while-its-run-is-running-is-retried-not-dropped.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-09, PR #10400 (W1-T5940), head a5975e7. coverage-shard (7/8) passed all 3836 tests, but node's
+    coverage reporter died with ERR_SOURCE_MAP_MISSING_SOURCE and no lcov was written. The red was deterministic.
+    Core ledger: at 18:48:35Z fix.dispatch (ci-log, strike 1/2) ran a worker that returned fix_outcome FLAKE, and
+    the rung's rerun-once arm wrote sweep.check_requeued for job 113953533475. The rerun failed again at 19:02Z,
+    and at 19:13:44Z fix.done recorded flake_claim refuted with no pushed head. From 19:21Z every sweep pass
+    disposed the PR blocked-fixable acted:false with "fix already dispatched for this head (a5975e7) — awaiting its
+    outcome before spending another strike". repeat_streak climbed from 3 to 5 and strike 2 was never spent. The
+    head moved only when the operator's session hand-fixed it. #10460 since gives the worker node's coverage error,
+    which removes this incident's trigger, but the hold below is independent of the cause.
+
+    WHY IT HOLDS. fixRungStalledWithoutNewHead (src/lib/sweep.ts) reads a fix.done as stalled for
+    flake_claim "requeue_deferred" (W1-T5920) and for a no-commit ci-log success with flake_claim undefined
+    (W1-T6353). A "refuted" claim matches neither, so the dispatch dedup in runSweep's blocked-fixable arm treats
+    the rung as still in flight. The hold is deliberate: W1-T5920's test "a FLAKE outcome whose requeue never
+    landed does not hold the head under fix already dispatched" in
+    test/a-job-requeue-refused-while-its-run-is-running-is-retried-not-dropped.test.ts asserts "Accepted requeues
+    keep the dedup: confirmed or refuted, the head stays held". W1-T5920's own incident (#9396/#9382/#9415,
+    2026-10-05) ended the same way: the PRs were held until an operator merged main by hand.
+
+    WHY A ONE-LINE RELEASE IS NOT ENOUGH. fixRoundTally does not count a flake round as a strike or a no-commit
+    round. The head's one requeue per check is already spent (requeuedCheckKeysFromLedger), so a second FLAKE
+    claim cannot rerun anything and is refuted at once. Releasing the hold alone would loop FLAKE → refuted →
+    released with nothing to stop it. The operator ruled out a fixed strike count as that stop.
+    W1-T100 shaped the fix evidence (review vs ci-log) in the same two files. This task leaves that shape alone and
+    changes only the dedup after a refuted FLAKE claim and what the next round may claim.
+  design: |
+    1. fixRungStalledWithoutNewHead reads a fix.done with flake_claim "refuted" as stalled, as it does for
+       "requeue_deferred". "confirmed" keeps its current meaning: the rerun went green, so the PR is no longer red
+       on that check. Update W1-T5920's held-on-purpose assertion: "refuted" now releases the head, and
+       "confirmed" still holds.
+    2. The next round on that head is a real fix attempt. runFixRung reads the head's refuted flake history from
+       the ledger. (a) The dispatched worker evidence names it: "this red reproduced on a rerun at <head>; it is
+       not a flake". (b) A FLAKE outcome from that round is not rerun. It is recorded on fix.done as
+       flake_claim "repeated" and treated as a no-op round (counted in fixRoundTally's noCommitRounds), never as a
+       requeue.
+    3. Loop protection is the W1-T7096 progress judge, not a new constant. The refuted claim and any repeated
+       FLAKE round are pre-signals in its FixProgressInput (beside no-op round and same red set). judgeFixProgress
+       decides continue, change-approach or escalate, and an escalation names the loop ("flake claimed and refuted
+       on an unchanged red"). If the judge has no verdict, the head holds and the judge is asked again next pass,
+       as in W1-T7096.
+    4. Ledger: keep the existing rows. The sweep.disposed row that releases the hold names the refuted claim
+       ("flake claim refuted at <head> — dispatching a real fix round"), so the release is visible.
+  acceptance:
+    - claim: "a refuted FLAKE claim no longer holds the head: the next sweep pass dispatches a real fix round, a repeated FLAKE outcome on that head is not rerun, and the progress judge, not a strike count, decides whether the loop continues"
+      proof: 'unit test: test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts'
+    - claim: "fixRungStalledWithoutNewHead reads a refuted flake claim as stalled"
+      proof: 'grep: flake_claim === "refuted" in src/lib/sweep.ts'
+  falsifier: |
+    Restore the hold (drop the "refuted" arm in fixRungStalledWithoutNewHead). The #10400-shaped history (FLAKE
+    claim, refuted rerun, unchanged head) stands down under "fix already dispatched for this head", and the test
+    asserting a fix dispatch on the next pass fails.

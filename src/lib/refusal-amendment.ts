@@ -34,6 +34,7 @@ import {
 import type { Task } from "./plan.js";
 import type { PlanPrPreflightCheck, PlanPrPreflightFinding } from "./plan-pr-emitter.js";
 import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** The ledger step {@link runSweep}'s call site writes once per handled refusal, and the ONLY thing
  *  {@link noPrVerdictRowsFromLedger} reads back to dedupe — one constant so writer and fold agree. */
@@ -419,7 +420,7 @@ export function readTaskShard(repoDir: string, taskId: string): { relPath: strin
   let shardRel: string | undefined;
   try {
     shardRel = readdirSync(shardDir)
-      .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+      .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
       .map((f) => relative(repoDir, join(shardDir, f)).split(sep).join("/"))[0];
   } catch {
     /* the shard directory is unreadable — fall through to the monolith */

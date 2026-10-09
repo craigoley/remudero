@@ -15,6 +15,13 @@ import { gitRepo } from "./helpers/git-repo.js";
 const execAsync = promisify(execFile);
 
 function fixture(root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-loop-`))) {
+  // The filing checkout is its own tree and holds the files a narrow edge declares, as main does:
+  // lint-plan's admission reads them there, while the daemon's tree keeps only the suites it walks.
+  const checkout = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-loop-checkout-`));
+  for (const owner of ["src/lib/affected-suites.ts", shadow.SELECTOR_SHADOW_MISS_TEST_PATH]) {
+    fs.mkdirSync(join(checkout, owner, ".."), { recursive: true });
+    fs.writeFileSync(join(checkout, owner), "// fixture\n");
+  }
   for (const path of ["test/nested", "plan/tasks.d", "state"]) fs.mkdirSync(join(root, path), { recursive: true });
   fs.writeFileSync(join(root, "test/nested/example.test.ts"), "");
   fs.writeFileSync(join(root, "plan/tasks.yaml"), "[]\n");
@@ -25,7 +32,7 @@ function fixture(root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector
     repoRoot: root, stateDir: join(root, "state"),
     log: (step: string, fields?: Record<string, unknown>) => { events.push({ step, fields }); },
     openWorkspace: async () => ({
-      root, branch: "selector-shadow-garden-test",
+      root: checkout, branch: "selector-shadow-garden-test",
       land: async (input: { paths: string[]; title: string; body: string }) => {
         await execAsync(process.execPath, ["-e", "setTimeout(() => {}, 30)"]);
         landed.push(input);
@@ -34,7 +41,7 @@ function fixture(root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector
       dispose: async () => { disposed++; },
     }),
   };
-  return { root, deps, landed, events, disposed: () => disposed };
+  return { root, checkout, deps, landed, events, disposed: () => disposed };
 }
 
 function miss(): shadow.SelectorShadowRun {
@@ -71,7 +78,7 @@ test("W1-T5003: a timer keeps firing while a selector-shadow pass files a miss",
     assert.equal(h.landed.length, 1);
     assert.equal(h.disposed(), 1);
     assert.equal(h.events.find((e) => e.step === "selector-shadow.miss_filed")?.fields?.task_id, "W1-T9001");
-    const task = fs.readFileSync(join(h.root, h.landed[0]!.paths[0]!), "utf8");
+    const task = fs.readFileSync(join(h.checkout, h.landed[0]!.paths[0]!), "utf8");
     assert.match(task, /id: W1-T9001/);
     assert.match(task, /src\/example.ts/);
     await shadow.runSelectorShadowGardener(h.deps, () => [miss()], async () => [], mint);

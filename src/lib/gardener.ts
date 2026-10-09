@@ -297,6 +297,9 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   /** What a pending PR waits on, read from local files with no GitHub call ({@link gardenPendingSignal});
    *  absent or undefined, a pending PR is paced on the clock alone. */
   pendingSignal?: (prUrl: string) => string | undefined;
+  /** Stands in for a shard filer's landing guard (machine-filing.ts's `machineShardLandingGuard`): a
+   *  fixture sets it to land a shape lint-plan refuses, to test what follows a landing. Production never does. */
+  landingRefusal?: (root: string, paths: readonly string[]) => string | undefined;
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -321,6 +324,10 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
   /** Make the plan's changes in the workspace; return what to land, or undefined if nothing changed. */
   apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>) => { paths: string[]; title: string; body: string } | undefined;
+  /** A garden that files plan shards names lint-plan's verdict on its landing here, normally
+   *  machine-filing.ts's `machineShardLandingRefusal`. A refusal is a recorded filing failure, so a
+   *  draft lint-plan would refuse never opens as a red PR (#10446, #10457). */
+  landingRefusal?: (root: string, paths: readonly string[]) => string | undefined;
 }
 
 /** A new class starts optimistic (Beta(3, 1)): it acts most passes until its outcomes say otherwise. */
@@ -890,6 +897,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
         const landing = spec.apply(ws as unknown as W, plan, scorecard);
+        const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
+        if (refused) throw new Error(`${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
           const why = spec.review?.[acting];
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));

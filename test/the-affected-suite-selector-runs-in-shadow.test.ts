@@ -94,6 +94,19 @@ test("the claims-check suite is selected for each recorded plan-validation edge"
   }
 });
 
+test("the run-task git-leaf suite is selected for each recorded edge", () => {
+  const suite = "test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts";
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of [
+    "src/run-task.ts",
+    "test/check-proof-grep-cause.test.ts",
+    "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite}`);
+  }
+});
+
 test("W1-T6924: the now-view rederivation suite is selected for each recorded miss edge", () => {
   const suite = "test/now-view-rederives-only-dirtied-tasks.test.ts";
   const edges = [

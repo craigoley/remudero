@@ -8,7 +8,7 @@ import { slug } from "./feedback-docket.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -298,6 +298,7 @@ export function scoutGardenSpec(
   };
   return {
     name: "scout",
+    landingRefusal: machineShardLandingGuard(deps),
     classes: SCOUT_CLASSES,
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(clock)}`,
     inventory: () => scoutInventory(full),
