@@ -1,3 +1,4 @@
+import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -9751,6 +9752,23 @@ export function selectUpdateBranchTarget(
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
   ready?: ReadyRefreshFacts,
 ): ArmedStalledPr | undefined {
+  return selectUpdateBranchDecision(prs, now, inFlightTaskIds, staleGateWorkflowsByPr, updatedForWorkflow,
+    behindMainByPr, policy, queuedPrNumbers, baseChangedFilesByPr, ready).target;
+}
+
+export function selectUpdateBranchDecision(
+  prs: readonly OpenPrView[],
+  now: number,
+  inFlightTaskIds: ReadonlySet<string> = new Set(),
+  staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
+  updatedForWorkflow: ReadonlySet<string> = new Set(),
+  behindMainByPr: ReadonlyMap<number, number> = new Map(),
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> &
+    Partial<Pick<SweepPolicy, "reviewWaitingBranchRefreshCeiling">> = DEFAULT_SWEEP_POLICY,
+  queuedPrNumbers: ReadonlySet<number> = new Set(),
+  baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
+  ready?: ReadyRefreshFacts,
+): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr } {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
@@ -9763,23 +9781,26 @@ export function selectUpdateBranchTarget(
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
   const candidates = [...combined.values()];
-  if (candidates.length === 0) return undefined;
+  if (candidates.length === 0) return { target: undefined };
   const byNumber = new Map<number, OpenPrView>(prs.map((pr) => [pr.prNumber, pr]));
-  const eligible = candidates.filter((s) => {
+  const commonEligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
-    // Let current-head checks finish before an ordinary refresh replaces that head. Red stale-gate
-    // recovery remains eligible; the bounded CI-timeout recovery has its own decision and effect.
-    if (view.checksState === "pending") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
     return true;
   });
-  if (eligible.length === 0) return undefined;
-  const eligibleViews = eligible.map((s) => byNumber.get(s.prNumber)!);
-  const winnerView = oldestActivityFirst(eligibleViews, now);
-  return eligible.find((s) => s.prNumber === winnerView?.prNumber);
+  // Hold only positively pending input snapshots; all other eligibility guards remain in force.
+  const eligible = commonEligible.filter((s) => byNumber.get(s.prNumber)!.checksState !== "pending");
+  const winnerView = oldestActivityFirst(eligible.map((s) => byNumber.get(s.prNumber)!), now);
+  const target = eligible.find((s) => s.prNumber === winnerView?.prNumber);
+  const hadPending = commonEligible.some((s) => byNumber.get(s.prNumber)!.checksState === "pending");
+  const withoutPendingGuard = hadPending
+    ? oldestActivityFirst(commonEligible.map((s) => byNumber.get(s.prNumber)!), now) : undefined;
+  const pendingGuard = withoutPendingGuard?.checksState === "pending"
+    ? commonEligible.find((s) => s.prNumber === withoutPendingGuard.prNumber) : undefined;
+  return { target, ...(pendingGuard ? { pendingGuard } : {}) };
 }
 
 /** One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the
@@ -16240,12 +16261,19 @@ export async function runSweep(
       return behindBy > 0 && behindBy <= policy.reviewWaitingBranchRefreshThreshold && pr.isDraft !== true &&
         checksGreenReviewSuccess(pr);
     });
+    const spentRefreshHeads = new Set<string>(), recordedPendingGuards = new Set<string>();
+    // Reuse the existing history traversal; observation adds no ledger read or GitHub request.
+    for (const line of ledgerLines) {
+      const key = `${String(line.pr_number)}@${String(line.head_sha)}`;
+      if (line.step === "sweep.update_branch.attempted" || line.step === "sweep.ci_timeout_refresh.attempted") spentRefreshHeads.add(key);
+      if (line.step === "sweep.update_branch.pending_guard" && line.guard_version === CI_REFRESH_GUARD_VERSION
+        && line.outcome === "guarded" && line.counterfactual_selected_without_pending_guard === true)
+        recordedPendingGuards.add(JSON.stringify([line.pr_url, line.pr_number, line.head_sha]));
+    }
     const readyFacts: ReadyRefreshFacts = {
       incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&
         actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold",
-      spentHeads: new Set(ledgerLines
-        .filter((l) => l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted")
-        .map((l) => `${String(l.pr_number)}@${String(l.head_sha)}`)),
+      spentHeads: spentRefreshHeads,
       readSource: deps.readPrFileSource,
     };
     // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
@@ -16278,7 +16306,7 @@ export async function runSweep(
         });
       }
     }
-    const target = selectUpdateBranchTarget(
+    const decision = selectUpdateBranchDecision(
       refreshPrs,
       now,
       deps.inFlightTaskIds ?? new Set(),
@@ -16290,6 +16318,19 @@ export async function runSweep(
       deps.baseChangedFilesByPr,
       readyFacts,
     );
+    const { target, pendingGuard } = decision;
+    if (pendingGuard && !recordedPendingGuards.has(JSON.stringify([pendingGuard.prUrl, pendingGuard.prNumber, pendingGuard.headSha]))) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: pendingGuard.taskId ?? "SWEEP",
+        step: "sweep.update_branch.pending_guard", outcome: "guarded",
+        guard_version: CI_REFRESH_GUARD_VERSION, evidence: "sweep-input-snapshot",
+        sweep_input_as_of: clockFromMillisFn(() => now).iso(),
+        pr_number: pendingGuard.prNumber, pr_url: pendingGuard.prUrl, head_sha: pendingGuard.headSha,
+        update_reason: pendingGuard.updateReason,
+        counterfactual_selected_without_pending_guard: true,
+        selected_refresh_head: target?.headSha ?? null,
+      });
+    }
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
       // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.

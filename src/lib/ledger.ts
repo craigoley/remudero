@@ -829,6 +829,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // attempted/conflict/error/head-moved/up-to-date siblings (W1-T5949) are kept so rotation cannot
   // erase evidence that an update ran but minted no new head; only `.updated` suppresses an orphan.
   "sweep.update_branch.attempted",
+  "sweep.update_branch.pending_guard",
   "sweep.update_branch.conflict",
   "sweep.update_branch.error",
   "sweep.update_branch.head-moved",
