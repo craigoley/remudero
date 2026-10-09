@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, sweepWalkOrder, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "../src/lib/sweep.js";
+import type { OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+
+// A namespace read, so the file still loads at a base without sweepWalkOrder and the proof misses there.
+const { DEFAULT_SWEEP_POLICY, runSweep } = sweep;
 
 const HEAD = "a".repeat(40);
 const PATH = "plan/tasks.d/W1-T5543-fixture.yaml";
@@ -45,7 +49,7 @@ test("a scarce repair slot goes to the oldest waiting PR, not the newest listed"
 });
 
 test("the sweep walk visits oldest-first and keeps a total order", () => {
-  assert.deepEqual(sweepWalkOrder([newer, older]), [1, 0]);
+  assert.deepEqual(sweep.sweepWalkOrder([newer, older]), [1, 0]);
   const noDate = { prNumber: 1, createdAt: undefined };
-  assert.deepEqual(sweepWalkOrder([{ prNumber: 3 }, noDate, { prNumber: 2 }]), [1, 2, 0], "prNumber breaks ties");
+  assert.deepEqual(sweep.sweepWalkOrder([{ prNumber: 3 }, noDate, { prNumber: 2 }]), [1, 2, 0], "prNumber breaks ties");
 });
