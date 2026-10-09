@@ -11,10 +11,27 @@ raw: "Observed on 2026-09-20: console task UI-T36 produced two open
   review; do not choose by timestamp alone."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10366
+summary:
+  headline: Prevent duplicate merges when the same task has two open PRs
+  what_happened: "After a freshness handoff, task UI-T36 produced two open PRs:
+    #1484 included an older head and an out-of-scope CSS file, while #1491
+    matched the current plan and declared files. Choosing by timestamp alone
+    could close the wrong PR or allow both to merge."
+  decision: Require proof of newer branch ancestry and declared-file ownership
+    before keeping the newer canonical build; close or disarm only the proven
+    superseded PR with a traceable receipt, and send ambiguous pairs for human
+    review.
+  options:
+    - label: Proven supersession
+      consequence: "Keep #1491, close or disarm #1484 with an attributable receipt,
+        and prevent both from merging."
+    - label: Ambiguous evidence
+      consequence: Leave both PRs for human review; do not choose by timestamp or
+        merge either as a pair.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
