@@ -75,22 +75,26 @@ export const PLAN_ONLY_REVIEW_MARKER_STEP = "review.plan_only_reviewed";
 /** Rows the next live file need not carry: merged PRs' sweep and review rows, and superseded latest-only rows. */
 export function pruneCarriedRows<T extends CarriedRow>(rows: readonly T[]): T[] {
   const merged = new Set<string>();
+  // W1-T5759: a CLOSED terminal row covers only the PR's rows that precede it in file order, because a closed
+  // PR can be reopened and the rows the sweep writes while it is open again are live. A merge cannot be undone.
+  const closedAt = new Map<string, number>();
   const latestByKey = new Map<string, T>();
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     if (!row.json) continue;
     const mergeKey = recordedMergeKey(row.json, row.step);
-    if (mergeKey) merged.add(mergeKey);
+    if (mergeKey && row.step === PR_TERMINAL_STEP && row.json.state !== "merged") closedAt.set(mergeKey, index);
+    else if (mergeKey) merged.add(mergeKey);
     const keyOf = row.step === undefined ? undefined : LATEST_ROW_LEDGER_STEPS.get(row.step);
     // File order, not ts order: the readers take the LAST row in the file.
     if (keyOf) latestByKey.set(`${row.step}\u0000${keyOf(row.json)}`, row);
   }
-  return rows.filter((row) => {
+  return rows.filter((row, index) => {
     if (!row.json || row.step === undefined) return true;
     const keyOf = LATEST_ROW_LEDGER_STEPS.get(row.step);
     if (keyOf) return latestByKey.get(`${row.step}\u0000${keyOf(row.json)}`) === row;
     if (row.step !== "sweep.disposed" && row.step !== "review.posted") return true;
     const key = sweepPrKey(row.json);
-    if (key === undefined || !merged.has(key)) return true;
+    if (key === undefined || !(merged.has(key) || index < (closedAt.get(key) ?? -1))) return true;
     return row.step === "sweep.disposed" && keptAfterMerge(row.json);
   });
 }
