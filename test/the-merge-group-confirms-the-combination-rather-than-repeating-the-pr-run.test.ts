@@ -115,3 +115,38 @@ test("W1-T5940: ci.yml wires the merge group's selection into ci-shard and test-
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(readFileSync(join(dir, "out.txt"), "utf8"), /^class=NO_SRC$/m, "a merge group must take coverage-ratchet's existing skip class");
 });
+
+/** Runs a selection step's body with a stub `node` that writes one suite to the file it is handed. */
+function runSelectStep(job: string, event: string) {
+  const step = jobs[job]!.steps.find((s) => s.name?.startsWith("Select the merge group's suites (W1-T5940"))!;
+  const dir = gitRepo({ kind: "merge-group-select" }).dir;
+  mkdirSync(join(dir, "bin"));
+  writeFileSync(join(dir, "bin", "node"), '#!/bin/sh\nfor a in "$@"; do last="$a"; done\necho test/picked.test.ts > "$last"\n', { mode: 0o755 });
+  writeFileSync(join(dir, "select.sh"), step.run!.replaceAll("${{ steps.admission.outputs.setup }}", "true"));
+  const r = spawnSync("bash", ["-eo", "pipefail", "select.sh"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, GITHUB_EVENT_NAME: event, GROUP_BASE: "a".repeat(40), GITHUB_STEP_SUMMARY: join(dir, "summary.md") },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  try { return readFileSync(join(dir, "merge-group-suites.txt"), "utf8"); } catch { return undefined; }
+}
+
+test("W1-T5940: each merge group selection step writes the group's suites on merge_group and nothing on a pull_request", () => {
+  for (const job of ["ci", "test-slow-shard"]) {
+    assert.equal(runSelectStep(job, "merge_group"), "test/picked.test.ts\n", `${job}'s selection step must run on a merge group`);
+    assert.equal(runSelectStep(job, "pull_request"), undefined, `${job}'s selection step must stay inert on a pull_request`);
+  }
+});
+
+test("W1-T5940: coverage-ratchet's merge group skip never fires on a pull_request", () => {
+  const classify = jobs["coverage-ratchet"]!.steps.find((s) => s.id === "classify")!.run!;
+  const dir = gitRepo({ kind: "merge-group-classify-pr" }).dir;
+  writeFileSync(join(dir, "classify.sh"), classify);
+  const r = spawnSync("bash", ["-o", "pipefail", "classify.sh"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: join(dir, "out.txt") },
+  });
+  assert.doesNotMatch(r.stdout, /W1-T5940: merge group — coverage-ratchet skips/, "a pull_request must not take the merge group skip");
+});
