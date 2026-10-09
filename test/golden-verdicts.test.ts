@@ -319,6 +319,36 @@ test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task auth
   assert.ok(selected.some((entry) => entry.id === "prompt-surface-gate-learning-path-evidence"));
 });
 
+test("GOLDEN — UNWIRED-GATE LESSON: the cited proof executes and the gate lanes receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-unwired-gate-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of [
+    ".github/workflows/unwired-gate.yml",
+    "scripts/unwired-gate-check.mjs",
+    "src/lib/ci-parity.ts",
+  ]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "unwired-gate-repair-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-shard-seven-eight-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6919.yaml", "plan/feedback/example.yaml", "deploy/example.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "ci-shard-seven-eight-refusals-reach-task-authoring-lane"), taskFile);
+  }
+});
+
 test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {
   const { verdict, golden } = judgeCase("ci-remudero-review-lesson");
   assert.equal(golden.violation, "none");
