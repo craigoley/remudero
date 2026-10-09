@@ -1,0 +1,45 @@
+- id: W1-T7393
+  title: "AN INCONCLUSIVE GARDENER METRIC RELEASES ON ITS CLOCK — the 24 h pending release fires only when the metric gained NO trial since the merge, so a metric that moved a little and then froze (export gardener, #10045) holds the gardener's lane forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-10-09: export gardener's pending metric still reads waiting 36 h after #10045 merged"
+  plan_refs: [W1-T4117, W1-T5114]
+  files: [src/lib/gardener.ts, test/an-inconclusive-gardener-metric-releases-on-its-clock.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 ~19:00Z on the fleet host (core state, read-only): state/export-gardener.json still holds
+    `pending` for #10045 (merged 2026-10-08T06:59:48Z) with atMerge {trials 68248, successes 156} and
+    mergeSeenAt 2026-10-08T07:00:01Z, so its 24 h release came due 2026-10-09T07:00Z. The garden runs about once a
+    minute (garden.pass name=export, exit 0, ~3 s each), yet the ledger (10-07..10-09 archives plus the live file)
+    holds no export.pending_released, export.gardener_judged or export.gardener_failed row; the last export.scorecard
+    is 2026-10-08T12:27Z with awaiting=#10045.
+    MECHANISM (src/lib/gardener.ts:420-444, `judgeGardenPending`): the release branch sits inside
+    `if (trials <= 0)` (:432), "a merge whose metric gains no trial". The export metric DID gain trials: the scan at
+    2026-10-08T12:22Z was folded after the merge, and state/export-gardener-record.json now holds trials 72109,
+    successes 166, i.e. 3,861 trials and 10 successes since the merge. after = 0.00259 against before = 0.00229, a
+    difference of 0.0003 inside one standard error (~0.00077), so the verdict is "waiting". No adoption scan has
+    landed since (state/adoption-latest.json generatedAt 2026-10-08T12:22:31Z), so the metric is frozen and every
+    pass re-reads the inventory (releaseDue is true), returns "waiting", and exits on the unchanged fingerprint
+    without a row. Nothing bounds a waiting verdict with trials > 0.
+    The export metric also dilutes by construction: foldScan adds one trial per still-dead export per scan (~3,800)
+    and one success per landed deletion, so a single deletion can rarely clear one standard error.
+    The gate gardener holds #10281 (merged 2026-10-09T07:19Z) the same way and is exposed from 2026-10-10T07:20Z.
+  design: |
+    In judgeGardenPending, once mergeSeenAt + GARDEN_PENDING_RELEASE_MS has passed and the difference is still
+    within one standard error, return "released" whatever the trial count (neither credit nor debit), and ledger
+    `<name>.pending_released` with the trials and the difference seen, so it is visible why it released. A clear
+    credit or debit before the bound is unchanged.
+  acceptance:
+    - claim: "a merged metric that gained trials but stays within one standard error is released after the 24 h bound"
+      proof: 'grep: test("W1-T7393: an inconclusive metric with trials since the merge is released after the bound" in test/an-inconclusive-gardener-metric-releases-on-its-clock.test.ts'
+  falsifier: |
+    Keep the release inside `trials <= 0`: the fixture with 3,861 trials since the merge and a sub-SE difference
+    stays "waiting" past 24 h, and the test fails.
