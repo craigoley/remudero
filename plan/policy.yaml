@@ -869,6 +869,67 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
+  # W1-T7094 — the REPORT-ONLY host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is
+  # a PROPOSAL to calibrate from `memory_budget.shadow` rows, not a ruling. `mode` accepts only off
+  # or shadow: no enforce mode exists, a later task must add one with operator approval, and nothing
+  # switches it on a timer. Read by host-memory-shadow.ts itself, never by validatePolicy.
+  hostMemoryBudget:
+    mode:
+      value: "shadow"
+      origin: "proposal"
+    # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
+    hostReserveMib:
+      value: 2048
+      origin: "proposal"
+      min: 0
+      max: 16384
+    containerReserveMib:
+      value: 1024
+      origin: "proposal"
+      min: 0
+      max: 16384
+    # Pages per second (pswpin delta); 256 pages is 1 MiB/s at 4 KiB pages.
+    swapInPagesPerSecMax:
+      value: 256
+      origin: "proposal"
+      min: 0
+      max: 1000000
+    psiSomeAvg10Max:
+      value: 10
+      origin: "proposal"
+      min: 0
+      max: 100
+    psiFullAvg10Max:
+      value: 2
+      origin: "proposal"
+      min: 0
+      max: 100
+    # OBSERVED 2026-10-09: serve's cold start peaks at 7.5 GB; a cold start begins from nothing resident.
+    serveColdStartReserveMib:
+      value: 7680
+      origin: "proposal"
+      min: 0
+      max: 16384
+    uncertaintyMarginMib:
+      value: 256
+      origin: "proposal"
+      min: 0
+      max: 8192
+    daemonGrowthUnmeasuredMib:
+      value: 1024
+      origin: "proposal"
+      min: 0
+      max: 8192
+    daemonGrowthMinSamples:
+      value: 6
+      origin: "proposal"
+      min: 1
+      max: 3600
+    staleReadingMs:
+      value: 600000
+      origin: "proposal"
+      min: 1000
+      max: 86400000
 
 drain:
   max:
