@@ -1,6 +1,6 @@
 {
   "_comment": "W1-T5702: selector graph reach ceilings measured on 5e11392f4bf69b63aeff80d21fe7a50e4c1cb3f8 plus this task; all three metrics may only shrink. Importer paths identify additions. Tightening passes and prints the new measurement.",
-  "importerCount": 931,
+  "importerCount": 933,
   "largestScc": 250,
   "medianReachPercent": 81.47138964577657,
   "importers": [
@@ -103,6 +103,8 @@
     "test/a-growing-task-cannot-record-its-own-ceiling.test.ts",
     "test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts",
     "test/a-hand-build-worktree-is-one-command.test.ts",
+    "test/a-hand-worktree-defaults-to-the-scratch-disk.test.ts",
+    "test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts",
     "test/a-harness-commit-keeps-an-already-staged-test-deletion.test.ts",
     "test/a-held-review-names-the-claim-it-stood-down-for.test.ts",
     "test/a-host-git-call-into-a-worker-worktree-runs-no-worker-code.test.ts",
