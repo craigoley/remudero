@@ -11,7 +11,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -127,12 +128,28 @@ function installHook(dir: string): void {
   for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
-  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs"]) {
+  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
 }
+
+test("census precheck: the copied hook fixture loads its counters without git on PATH", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-census-hook-load-"));
+  installHook(dir);
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { evaluateCensusPrecheck } from "./scripts/census-precheck.mjs";
+    console.log(JSON.stringify(evaluateCensusPrecheck({ changed: [],
+      readHead: () => null, readBase: () => null, measuredFiles: [], testFiles: [] })));
+  `], {
+    cwd: dir, encoding: "utf8",
+    env: { ...process.env, PATH: dir, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), []);
+});
 
 let counter = 0;
 
