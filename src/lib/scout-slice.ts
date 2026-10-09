@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
+import { clockFromMillisFn } from "./clock.js";
 import { EXPORT_GARDEN_WINDOW_DAYS } from "./export-gardener.js";
 import { slug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -166,7 +167,7 @@ export function gitSliceSources(repoRoot: string): SliceSources {
       const tracked = git(["ls-files", "--", ...SCOUT_SLICE_ROOTS]).split("\n").filter((p) => p !== "");
       const changedAt = new Map<string, number>();
       if (sinceMs !== undefined) {
-        const log = git(["log", `--since=${new Date(sinceMs).toISOString()}`, "--format=%x01%ct", "--name-only", "--", ...SCOUT_SLICE_ROOTS]);
+        const log = git(["log", `--since=${clockFromMillisFn(() => sinceMs).iso()}`, "--format=%x01%ct", "--name-only", "--", ...SCOUT_SLICE_ROOTS]);
         for (const chunk of log.split("\u0001")) {
           const [stamp, ...names] = chunk.split("\n");
           const at = Number(stamp) * 1000;
