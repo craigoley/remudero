@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
   plan_refs: [W1-T7093, W1-T6782, W1-T5347, W1-T2853, W1-T3209]
-  files: [src/lib/host-memory-shadow.ts, src/lib/worker.ts, src/run-task.ts, plan/policy.yaml, test/a-shadow-memory-verdict-never-delays-a-start.test.ts]
+  files: [src/lib/host-memory-shadow.ts, src/lib/worker.ts, src/run-task.ts, plan/policy.yaml, test/a-shadow-memory-verdict-never-delays-a-start.test.ts, test/a-shadow-verdict-never-waits-on-its-ledger.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -47,6 +47,10 @@
         failure logs memory_budget.shadow_error (deduplicated per reason per hour) and the start is unaffected. There is
         no enforce, block or defer code path, and the mode key in plan/policy.yaml accepts only "off" or "shadow". A later
         enforcement task must add its own mode with operator approval. Nothing switches modes on a timer or after a window.
+    (3a) UNAVAILABLE STORAGE OR LOCK: the evaluator never waits on a lock. Any lock is try-once and non-blocking, and file
+        reads are bounded. A held lock, EACCES, ENOENT, ENOSPC, EIO, or a ledger state of missing, unreadable or reset
+        (W1-T7093) yields a verdict carrying that state as an uncertainty reason. The reason widens the margin and is never
+        read as zero reservations. The start proceeds unchanged and at once in every case.
     (4) THRESHOLDS (host reserve, swap-in and PSI cut-offs, cold-start reserve, default estimates) live in plan/policy.yaml
         under sweep.hostMemoryBudget with origin "proposal". Each is a proposal to be calibrated from shadow rows, not a
         ruling.
@@ -58,6 +62,8 @@
   acceptance:
     - claim: "every real worker start yields one memory_budget.shadow row and starts identically whether the verdict is admit, defer or error; a scenario with no samples is reported unvalidated and serve-stopped rows are never pooled with serve-running ones; resident tree memory is not subtracted twice; an unmeasured estimate, uncertain entry or missing growth history widens the margin and is named; swap-in and PSI each produce their own reason; serve-stopped, serve-steady, serve-cold-start and unknown are distinguished; and the policy mode accepts only off or shadow"
       proof: "unit test: test/a-shadow-memory-verdict-never-delays-a-start.test.ts"
+    - claim: "with the ledger lock held by another process, or the store missing, unreadable, reset, unwritable or full, the shadow verdict returns at once with that state named as an uncertainty reason, never as zero reservations, and the real start proceeds unchanged"
+      proof: "unit test: test/a-shadow-verdict-never-waits-on-its-ledger.test.ts"
     - claim: "the worker start calls the shadow evaluator"
       proof: "grep: recordShadowMemoryVerdict( in src/lib/worker.ts"
   falsifier: |
