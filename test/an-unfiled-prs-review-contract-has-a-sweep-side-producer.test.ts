@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hydrateReviewReuseFacts, ownDiffDigestFromCompareFiles } from "../src/lib/open-prs-rest.js";
+import { DEFAULT_RISK } from "../src/lib/plan.js";
+import { bodyReviewContractDigest, parseAcceptanceBlock, reviewContractDigest } from "../src/lib/review.js";
 
 // The sweep integration proofs live in a-run-unfiled-prs-review-verdict-is-its-own.test.ts.
 const FILES = [{ filename: "src/example.ts", status: "modified", sha: "blob1" }];
@@ -41,4 +43,20 @@ test("unreviewed PRs cost no hydration reads or failure callbacks", () => {
     () => assert.fail("no orphaned review means no compare"), undefined,
     () => assert.fail("an unattempted read is not a failure"));
   assert.deepEqual([...facts], []);
+});
+
+test("an unfiled PR's body acceptance yields the contract digest its review recorded, in either review mode", () => {
+  const body = "## Acceptance\n- the change works | grep: example in src/example.ts\n";
+  const acceptance = parseAcceptanceBlock(body);
+  const deterministic = reviewContractDigest({ taskId: "PR-5718", acceptance });
+  const semantic = reviewContractDigest({ taskId: "PR-5718", acceptance, risk: DEFAULT_RISK, budgetUsd: 15 });
+  const digest = (recordedDigest: string | undefined, unfiled = true, text = body) => bodyReviewContractDigest({
+    reviewLedgerKey: "PR-5718", body: text, unfiled, recordedDigest, semanticRisk: DEFAULT_RISK, semanticBudgetUsd: 15,
+  });
+  assert.equal(digest(deterministic), deterministic);
+  assert.equal(digest(semantic), semantic);
+  assert.equal(digest(undefined), deterministic, "no recorded review keeps the deterministic contract");
+  assert.equal(digest(semantic, false), deterministic, "a filed id never takes the untasked semantic defaults");
+  assert.equal(digest(semantic, true, body.replace("change works", "change differs")) === semantic, false);
+  assert.equal(digest(semantic, true, "## Summary\nno acceptance"), undefined);
 });

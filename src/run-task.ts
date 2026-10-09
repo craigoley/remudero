@@ -1428,6 +1428,7 @@ import {
   claimReviewDecision,
   reviewDecisionDigest,
   reviewTaskIdEvidenceAsync,
+  bodyReviewContractDigest,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -41787,8 +41788,7 @@ function* openPrViewSteps(
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
     const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
-    const bodyAcceptance = taskRecord ? [] : parseAcceptanceBlock(pr.body ?? "");
-    let currentContractDigest = taskRecord?.acceptance?.length
+    const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
           acceptance: taskRecord.acceptance,
@@ -41796,18 +41796,14 @@ function* openPrViewSteps(
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
         })
-      : bodyAcceptance.length
-        ? reviewContractDigest({ taskId: reviewLedgerKey, acceptance: bodyAcceptance })
-        : undefined;
-    // Unfiled semantic reviews include these defaults; deterministic reviews omit them.
-    // Recompute both known contracts from the current body, retaining the recorded mode only on equality.
-    if (bodyAcceptance.length && (taskId === undefined || taskId === UNFILED_RUN_SENTINEL)) {
-      const semanticContractDigest = reviewContractDigest({
-        taskId: reviewLedgerKey, acceptance: bodyAcceptance,
-        risk: DEFAULT_RISK, budgetUsd: UNTASKED_REVIEW_BUDGET_USD,
-      });
-      if (semanticContractDigest === priorReviewForReuse?.reviewContractDigest) currentContractDigest = semanticContractDigest;
-    }
+      : taskRecord
+        ? undefined
+        : bodyReviewContractDigest({
+            reviewLedgerKey, body: pr.body ?? "",
+            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            recordedDigest: priorReviewForReuse?.reviewContractDigest,
+            semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
+          });
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
