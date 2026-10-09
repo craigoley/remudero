@@ -1,22 +1,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { COMMANDS } from "../src/run-task.js";
 
 // @source-text-subject: the watchdog descriptions are the subject of this wording regression.
 const parity = readFileSync(new URL("../scripts/console-parity-ratchet.mjs", import.meta.url), "utf8");
 const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 
 test("test/the-progress-watchdog-says-it-writes-a-diagnostics-bundle.test.ts: registry detail", () => {
-  const command = COMMANDS.find(({ name }) => name === "progress-watchdog");
+  const registry = source.match(/const COMMANDS: readonly CommandSpec\[\] = \[([\s\S]*?)\n\] as const/);
+  assert.ok(registry, "the COMMANDS registry exists");
+  const command = registry[1].match(/^  \{\n    name: "progress-watchdog",\n[\s\S]*?^  \},/m);
   assert.ok(command, "the progress-watchdog command is registered");
-  assert.doesNotMatch(command.detail, /read[- ]only/i);
-  assert.match(command.detail, /capture-diagnostics it writes one bundle/);
-  assert.match(command.detail, /<state>\/diagnostics\/progress-<ts>\//);
-  assert.match(command.detail, /at most one per 15 min/);
-  assert.match(command.detail, /docker ps/);
-  assert.match(command.detail, /docker logs --tail/);
-  assert.match(command.detail, /it recycles nothing/i);
+  const literal = command[0].match(/^    detail: ("(?:\\.|[^"\\])*"),$/m);
+  assert.ok(literal, "the progress-watchdog registry detail is a string literal");
+  const detail: string = JSON.parse(literal[1]);
+  assert.doesNotMatch(detail, /read[- ]only/i);
+  assert.match(detail, /capture-diagnostics it writes one bundle/);
+  assert.match(detail, /<state>\/diagnostics\/progress-<ts>\//);
+  assert.match(detail, /at most one per 15 min/);
+  assert.match(detail, /docker ps/);
+  assert.match(detail, /docker logs --tail/);
+  assert.match(detail, /it recycles nothing/i);
 });
 
 test("test/the-progress-watchdog-says-it-writes-a-diagnostics-bundle.test.ts: CLI_ONLY note", () => {
