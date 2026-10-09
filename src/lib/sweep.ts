@@ -4,7 +4,7 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
@@ -17589,13 +17589,110 @@ export interface PrTerminalReconcileSummary {
   unionRead: boolean;
 }
 
+interface PrTerminalLiveCursor {
+  identity: string;
+  offset: number;
+  pending: Buffer;
+  named: Map<string, string>;
+  /** W1-T5759: file-order ordinals, so a terminal fact is compared by position with the rows around it. */
+  seq: number;
+  namedSeq: Map<string, number>;
+  namedTs: Map<string, string>;
+  terminalSeq: Map<string, number>;
+  terminalState: Map<string, string>;
+}
+
+const terminalLiveCursors = new Map<string, PrTerminalLiveCursor>();
+
+function newPrTerminalLiveCursor(identity = ""): PrTerminalLiveCursor {
+  return { identity, offset: 0, pending: Buffer.alloc(0), named: new Map(), seq: 0, namedSeq: new Map(), namedTs: new Map(), terminalSeq: new Map(), terminalState: new Map() };
+}
+
+function collectPrTerminalKeys(cursor: PrTerminalLiveCursor, rows: Iterable<Record<string, unknown>>): void {
+  for (const row of rows) {
+    const key = prUrlKey(row.pr_url);
+    if (key === undefined) continue;
+    const seq = cursor.seq++;
+    if (row.step === PR_TERMINAL_STEP) {
+      cursor.terminalSeq.set(key, seq);
+      cursor.terminalState.set(key, String(row.state));
+      continue;
+    }
+    if (!cursor.named.has(key)) cursor.named.set(key, row.pr_url as string);
+    cursor.namedSeq.set(key, seq);
+    if (typeof row.ts === "string" && row.ts > (cursor.namedTs.get(key) ?? "")) cursor.namedTs.set(key, row.ts);
+  }
+}
+
+/** A key's live terminal row settles it unless it is a CLOSED fact and a named row came after it (a reopen). */
+function liveTerminalCovers(cursor: PrTerminalLiveCursor, key: string): boolean | undefined {
+  const terminalSeq = cursor.terminalSeq.get(key);
+  if (terminalSeq === undefined) return undefined;
+  return cursor.terminalState.get(key) === "merged" || (cursor.namedSeq.get(key) ?? -1) < terminalSeq;
+}
+
+function readPrTerminalLiveCursor(ledgerPath: string): PrTerminalLiveCursor {
+  let fd: number;
+  try {
+    fd = fs.openSync(ledgerPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    terminalLiveCursors.delete(ledgerPath);
+    return newPrTerminalLiveCursor();
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const identity = `${stat.dev}:${stat.ino}`;
+    let cursor = terminalLiveCursors.get(ledgerPath);
+    if (!cursor || cursor.identity !== identity || stat.size < cursor.offset) {
+      cursor = newPrTerminalLiveCursor(identity);
+      terminalLiveCursors.set(ledgerPath, cursor);
+    }
+    if (stat.size === cursor.offset) return cursor;
+    const bytes = Buffer.alloc(stat.size - cursor.offset);
+    let read = 0;
+    while (read < bytes.length) {
+      const count = fs.readSync(fd, bytes, read, bytes.length - read, cursor.offset + read);
+      if (count === 0) break;
+      read += count;
+    }
+    const text = Buffer.concat([cursor.pending, bytes.subarray(0, read)]);
+    let start = 0;
+    let end: number;
+    while ((end = text.indexOf(0x0a, start)) !== -1) {
+      const line = text.toString("utf8", start, end).trim();
+      start = end + 1;
+      if (!line) continue;
+      let row: Record<string, unknown>;
+      try {
+        row = JSON.parse(line) as Record<string, unknown>;
+      } catch (error) {
+        console.error(`ledger: dropping unparseable line in ${ledgerPath}: ${line} (${String(error)})`);
+        continue;
+      }
+      collectPrTerminalKeys(cursor, [row]);
+    }
+    cursor.pending = Buffer.from(text.subarray(start));
+    cursor.offset += read;
+    return cursor;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
  *  written once, so each is read once per process; only an archive that failed to open is re-read. */
-const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Set<string> }>();
+const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Map<string, ArchivedTerminal> }>();
 
-function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlySet<string>; unread: number } {
+/** The newest archived terminal row of a PR: its ts and state (a merged fact is final and wins). */
+interface ArchivedTerminal {
+  ts: string;
+  state: string;
+}
+
+function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
   const dir = dirname(ledgerPath);
-  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Set<string>() };
+  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Map<string, ArchivedTerminal>() };
   terminalUnionScans.set(dir, memo);
   const read = readLedgerUnionRecordsSync(dir, {
     pattern: /"step":"pr\.terminal"/,
@@ -17609,7 +17706,10 @@ function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlySet<string>
     },
     onRecord: (row) => {
       const key = row.step === PR_TERMINAL_STEP ? prUrlKey(row.pr_url) : undefined;
-      if (key) memo.keys.add(key);
+      if (!key) return;
+      const next = { ts: typeof row.ts === "string" ? row.ts : "", state: String(row.state) };
+      const had = memo.keys.get(key);
+      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) memo.keys.set(key, next);
     },
   });
   return { keys: memo.keys, unread: read.unread.length };
@@ -17618,7 +17718,9 @@ function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlySet<string>
 /**
  * THE TERMINAL-ROW RUNG. For each PR the live file names (any row carrying its `pr_url`) that `lookup`
  * reports closed and that has no `pr.terminal` row yet, append exactly one. Dedup reads the live file, then
- * the archives, so a rotation that moved the row out of the live file cannot cause a second one. A fact
+ * the archives, so a rotation that moved the row out of the live file cannot cause a second one. It compares
+ * POSITIONS, not presence (W1-T5759): a CLOSED terminal row is superseded by a named row written after it
+ * (live: later in the file; archived: a later `ts`), so a reopened PR that closes again gets one new row. A fact
  * naming another PR than the one asked about is ignored. An archive the dedup could not open is counted on
  * the row as `union_unread`, so a duplicate it allowed is attributable.
  */
@@ -17626,25 +17728,32 @@ export function runPrTerminalReconcile(
   lookup: (prUrl: string) => ClosedPrFact | undefined,
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "dryRun">,
 ): PrTerminalReconcileSummary {
-  // ledger-read-intent: live — the archive half is terminalKeysInArchives, read only for unresolved PRs.
-  const live = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
-  const named = new Map<string, string>();
-  const terminal = new Set<string>();
-  for (const row of live) {
-    const key = prUrlKey(row.pr_url);
-    if (key === undefined) continue;
-    if (row.step === PR_TERMINAL_STEP) terminal.add(key);
-    else if (!named.has(key)) named.set(key, row.pr_url as string);
+  const cursor = deps.readLedger ? newPrTerminalLiveCursor() : readPrTerminalLiveCursor(deps.ledgerPath);
+  if (deps.readLedger) {
+    collectPrTerminalKeys(cursor, deps.readLedger(deps.ledgerPath));
   }
+  const { named } = cursor;
   const pending: ClosedPrFact[] = [];
+  let needsArchives = false;
   for (const [key, prUrl] of named) {
-    const fact = terminal.has(key) ? undefined : lookup(prUrl);
-    if (fact && prUrlKey(fact.prUrl) === key) pending.push(fact);
+    const covered = liveTerminalCovers(cursor, key);
+    const fact = covered === true ? undefined : lookup(prUrl);
+    if (fact && prUrlKey(fact.prUrl) === key) {
+      pending.push(fact);
+      if (covered === undefined) needsArchives = true;
+    }
   }
-  const archived = pending.length > 0 ? terminalKeysInArchives(deps.ledgerPath) : undefined;
+  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath) : undefined;
   let appended = 0;
   for (const fact of pending) {
-    if (archived?.keys.has(prUrlKey(fact.prUrl)!) || deps.dryRun) continue;
+    const key = prUrlKey(fact.prUrl)!;
+    if (deps.dryRun) continue;
+    if (cursor.terminalSeq.has(key)) {
+      // a live closed fact with a named row after it: the PR was reopened and closed again
+    } else {
+      const archivedFact = archived?.keys.get(key);
+      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) continue;
+    }
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: "SWEEP",
@@ -17656,6 +17765,8 @@ export function runPrTerminalReconcile(
       source: "sweep.pr_terminal",
       ...(archived?.unread ? { union_unread: archived.unread } : {}),
     });
+    cursor.terminalSeq.set(key, cursor.seq++);
+    cursor.terminalState.set(key, fact.state);
     appended++;
   }
   return { named: named.size, appended, unionRead: archived !== undefined };

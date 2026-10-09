@@ -4,7 +4,8 @@
  * W1-T5348's ~290 s `planPrPreflight` could not run on `POST /v1/feedback/decision`'s request path, so #8891
  * skipped it there and console-originated landings shipped unchecked. The route now QUEUES the decision's
  * bytes under the state root (the ci-learning shape) and returns at once; `sweepFeedbackLanding` lands the
- * queue in the same tree and the same preflight as its disk scan, and drops a record once origin/main has it.
+ * queue in the same tree and the same preflight as its disk scan, and drops a record once the checkout
+ * holds the bytes fetched from origin/main.
  *
  * Every git fixture comes from test/helpers/git-repo.ts; GitHub is a fake `gh`, never the network.
  */
@@ -165,15 +166,32 @@ test("a console feedback decision is queued by the route and landed by the daemo
   assert.equal(fx.preflight.counter.runs, 1, "an unchanged landing never re-runs the preflight");
   assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [fx.relPath], "pending until origin/main carries it");
 
-  // Once the landing PR merges, the next pass acknowledges the queued record and lands nothing.
+  // A merge updates origin/main; the queue serves the decision until the checkout refreshes.
   fx.f.mergeLanding();
+  const held = sweep();
+  assert.equal(held.landed, false, JSON.stringify(held));
+  assert.equal(held.keptForCheckout, 1);
+  assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [fx.relPath]);
+  assert.equal(feedback.listFeedback(fx.f.clone.dir)[0]?.status, "proposed");
+  const listed = landing.overlayQueuedFeedbackEntries(feedback.listFeedback(fx.f.clone.dir), fx.stateRoot);
+  assert.equal(listed[0]?.status, "accepted");
+  assert.ok("landing" in listed[0]);
+  assert.equal(listed[0].landing, "queued");
+  assert.equal(fx.preflight.counter.runs, 1);
+
+  fx.f.clone.git("merge", "--ff-only", "origin/main");
+  assert.equal(readFileSync(join(fx.f.clone.dir, fx.relPath), "utf8"), readFileSync(join(fx.stateRoot, QUEUE_DIR, fx.relPath), "utf8"));
   const settled = sweep();
   assert.equal(settled.landed, false, JSON.stringify(settled));
+  assert.equal(settled.keptForCheckout, 0);
   assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [], "a landed decision leaves the queue");
+  const refreshed = landing.overlayQueuedFeedbackEntries(feedback.listFeedback(fx.f.clone.dir), fx.stateRoot);
+  assert.equal(refreshed[0]?.status, "accepted");
+  assert.equal("landing" in refreshed[0], false);
   assert.equal(fx.preflight.counter.runs, 1);
 });
 
-test("a queued record origin/main has never seen lands as a new file and leaves the queue once merged", () => {
+test("a queued record origin/main has never seen lands as a new file and leaves the queue after checkout refresh", () => {
   const f = originWith({ "README.md": "seed\n" }, "w5460-new-record");
   const stateRoot = tmpDir("new-record-state");
   const rel = "plan/feedback/fb-queued.yaml";
@@ -190,8 +208,28 @@ test("a queued record origin/main has never seen lands as a new file and leaves 
   assert.match(f.show(LANDING_BRANCH, rel), /^status: grilling$/m);
 
   f.mergeLanding();
-  withLiveWritesAllowed(() => landing.sweepFeedbackLanding(f.clone.dir, { gh, planPrPreflight, stateRoot }));
+  const held = withLiveWritesAllowed(() => landing.sweepFeedbackLanding(f.clone.dir, { gh, planPrPreflight, stateRoot }));
+  assert.equal(held.landed, false, JSON.stringify(held));
+  assert.equal(held.keptForCheckout, 1);
+  assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), [rel]);
+  assert.equal(existsSync(join(f.clone.dir, rel)), false);
+  const listed = landing.overlayQueuedFeedbackEntries(feedback.listFeedback(f.clone.dir), stateRoot);
+  assert.equal(listed[0]?.id, "fb-queued");
+  assert.equal(listed[0]?.status, "grilling");
+  assert.ok("landing" in listed[0]);
+  assert.equal(listed[0].landing, "queued");
+
+  f.clone.git("merge", "--ff-only", "origin/main");
+  assert.equal(readFileSync(join(f.clone.dir, rel), "utf8"), readFileSync(join(stateRoot, QUEUE_DIR, rel), "utf8"));
+  const settled = withLiveWritesAllowed(() => landing.sweepFeedbackLanding(f.clone.dir, { gh, planPrPreflight, stateRoot }));
+  assert.equal(settled.landed, false, JSON.stringify(settled));
+  assert.equal(settled.keptForCheckout, 0);
   assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), []);
+  const refreshed = landing.overlayQueuedFeedbackEntries(feedback.listFeedback(f.clone.dir), stateRoot);
+  assert.equal(refreshed[0]?.id, "fb-queued");
+  assert.equal(refreshed[0]?.status, "grilling");
+  assert.equal("landing" in refreshed[0], false);
+  assert.equal(counter.runs, 1, "checkout acknowledgement never re-runs the preflight");
 });
 
 test("a queued decision wins over a dirty disk copy of the same record, in one tree and one preflight", () => {
