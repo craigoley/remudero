@@ -1912,6 +1912,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
+  const effectsProgressJudge = productionFixProgressJudge({ cwd: repoRoot,
+    settingsFile: join(repoRoot, "settings", "worker.json"), spawn: spawnImpl });
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
@@ -2180,8 +2183,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
-    fixProgressJudge: productionFixProgressJudge({ cwd: repoRoot,
-      settingsFile: join(repoRoot, "settings", "worker.json"), spawn: spawnImpl }),
+    fixProgressJudge: effectsProgressJudge,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -3603,6 +3605,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
           deps: {
+            fixProgressJudge: effectsProgressJudge,
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
             // W1-T3718: the repair ladder's fleet state follows THIS spawn — a capacity refusal
@@ -17220,7 +17223,7 @@ export function productionFixProgressJudge(opts: {
   cwd: string; settingsFile: string; mount?: Mount;
   spawn?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
 }): FixProgressJudge {
-  return async input => {
+  const judge: FixProgressJudge = async input => {
     const mount = opts.mount ?? resolveRiskJudgeMount(loadMounts(mountsPath(opts.cwd)));
     const args = buildRiskJudgeSpawnArgs({ input: {
       change: { description: "fix progress" }, gatesState: {}, planContext: { taskId: input.taskId },
@@ -17240,6 +17243,14 @@ export function productionFixProgressJudge(opts: {
     if (result.subtype !== undefined && result.subtype !== "success") return undefined;
     return parseFixProgressVerdict(result.text);
   };
+  PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
+  return judge;
+}
+
+const PRODUCTION_FIX_PROGRESS_JUDGES = new WeakSet<FixProgressJudge>();
+/** True for a judge built by {@link productionFixProgressJudge} — lets a fixture tell a chosen judge from a default one. */
+export function isProductionFixProgressJudge(judge: FixProgressJudge | undefined): boolean {
+  return judge !== undefined && PRODUCTION_FIX_PROGRESS_JUDGES.has(judge);
 }
 
 /** The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).

@@ -1,4 +1,4 @@
-import { runSweep as runSweepProduction } from "../../src/lib/sweep.js";
+import { isProductionFixProgressJudge, runSweep as runSweepProduction } from "../../src/lib/sweep.js";
 import type { FixProgressJudge } from "../../src/lib/fix-progress-judge.js";
 
 export * from "../../src/lib/sweep.js";
@@ -20,6 +20,8 @@ export async function runSweep(...args: Parameters<typeof runSweepProduction>) {
   };
   return runSweepProduction(openPrs, {
     ...deps,
-    fixProgressJudge: deps.fixProgressJudge ?? fixtureProgressJudge,
+    // buildSweepEffects wires the production LLM judge; a fixture that did not CHOOSE a judge keeps the former bound.
+    fixProgressJudge: deps.fixProgressJudge && !isProductionFixProgressJudge(deps.fixProgressJudge)
+      ? deps.fixProgressJudge : fixtureProgressJudge,
   }, policy);
 }

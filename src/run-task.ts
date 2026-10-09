@@ -10685,6 +10685,8 @@ export async function runFixRung(opts: {
   strikeCap: number;
   progressDecision?: FixProgressVerdict;
   progressApproach?: string;
+  /** W1-T7096: ask the production LLM progress judge when `deps.fixProgressJudge` is unwired. */
+  useProductionProgressJudge?: boolean;
   /**
    * W1-T2403: the per-head bound on retrigger-shaped rounds (see {@link isRetriggerShapedCommit})
    * this invocation spends before it stops retriggering and escalates naming the check(s) that
@@ -11045,8 +11047,13 @@ export async function runFixRung(opts: {
     roundRows.push({ ...extra, task_id: opts.taskId, step });
     opts.deps.log(step, extra);
   } };
-  const progressJudge = deps.fixProgressJudge ?? productionFixProgressJudge({ cwd: opts.worktreePath,
-    settingsFile: opts.settingsFile });
+  // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
+  // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
+  const progressJudge: FixProgressJudge = deps.fixProgressJudge ?? (opts.useProductionProgressJudge
+    ? productionFixProgressJudge({ cwd: opts.worktreePath, settingsFile: opts.settingsFile })
+    : async () => strikes >= opts.strikeCap || retriggers >= (opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP) || consecutiveMergeRefusalReasons.length >= 2
+      ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
+      : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" });
   let progressApproach = opts.progressApproach;
   let progressRoundReason: string | undefined;
   const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`].filter(Boolean).join("\n\n") || undefined;
@@ -11465,8 +11472,11 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
-      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      // W1-T7096: the judge decides the NEXT round; with no round recorded yet the first one runs unjudged.
+      const decision: Awaited<ReturnType<typeof judgeFixProgress>> = input.rounds.length === 0
+        ? { verdict: "continue", reason: "no fix round has run yet; the judge decides from the first round on" }
+        : await judgeFixProgress(input, progressJudge);
+      if (input.rounds.length > 0) deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -19458,6 +19468,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (review.state !== "success") {
       const rung = await runFixRung({
         guardRoundHead: true,
+        useProductionProgressJudge: true,
         taskId,
         runId,
         task,
