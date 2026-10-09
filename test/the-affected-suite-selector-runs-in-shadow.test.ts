@@ -19,10 +19,12 @@ import {
   affectedSelectionOrFull,
   changedSymbols,
   fullRunTrigger,
+  READ_MAP_FORMAT,
   readAffectedSuitesInput,
   selectAffectedSuites,
   shadowRecord,
   type AffectedSuitesInput,
+  type ReadMapInput,
 } from "../src/lib/affected-suites.js";
 import { affectedSuitesStep } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -90,6 +92,31 @@ test("the claims-check suite is selected for each recorded plan-validation edge"
     assert.ok(selection.suites.includes(claimsCheck), `${changed} must select ${claimsCheck}`);
     assert.ok(selection.reasons.includes(`${claimsCheck}: reads a changed file by path`), changed);
   }
+});
+
+test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {
+  const census = "test/every-ci-census-is-asked-before-the-push.test.ts";
+  const edges = [
+    "scripts/affected-reach-baseline.json",
+    "src/lib/affected-suites.ts",
+    "test/the-affected-suite-reach-ratchet.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [census, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(census), `${changed} must select ${census} in the floor`);
+    assert.ok(selection.narrow?.includes(census), `${changed} must select ${census} in the narrow candidate`);
+  }
+  const absent = selectAffectedSuites([edges[1]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
+  });
+  assert.ok(!absent.suites.includes(census), "a suite absent from the tree cannot be selected");
+  assert.ok(!absent.narrow?.includes(census), "the narrow candidate also excludes an absent suite");
 });
 
 test("W1-T4404: a config or lockfile change selects the full suite", () => {

@@ -136,6 +136,23 @@
   src: "ci-learning:8551:ci-shard (1/8)"
   cited: "2026-10-08"
 
+- id: ci-shard-seven-eight-refusals-reach-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/feedback/**", "deploy/**"]
+  fact: >-
+    When ci-shard (7/8) refuses a pull request, inspect that shard's failure before repairing; the
+    repair window included selector-plan updates, deployment tests, feedback proposals, and plan
+    guidance, so the PR list alone does not establish a shared cause. Route the verified failure and
+    its narrow repair into the task-authoring lane, then rerun the affected proof before resubmitting.
+  evidence: >-
+    The window recorded as ci-learning:9979:ci-shard (7/8) includes PRs #9979, #10001, #10135,
+    #10140, #10186, and #10255, each followed by a repair. Their recorded diffs span plan task
+    shards, a CI learning, deployment code/tests, feedback records, and master-plan guidance; the
+    available commit evidence does not establish one common shard failure cause.
+  src: "ci-learning:9979:ci-shard (7/8)"
+  cited: "2026-10-09"
+
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active
@@ -237,6 +254,23 @@
     ci-learning:5433:squash-trailer-gate.
   src: "ci-learning:5433:squash-trailer-gate"
   cited: "2026-10-08"
+
+- id: acceptance-author-gate-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts, ".github/workflows/ci.yml"]
+  fact: >-
+    Before opening a PR from the task-authoring lane, ensure its acceptance block has the required
+    header and at least one executable proof using a supported dialect (`unit test:` or `grep:`),
+    and that each proof matches evidence in the proposed tree. The acceptance-author-gate refuses
+    bodies it cannot judge; repair the block and open a new head so CI evaluates the corrected body.
+  evidence: >-
+    The acceptance-author-gate runs the shared acceptance-author-time predicate on pull request
+    bodies. Pull requests #10003 and #10010 were refused by that gate and repaired; their filing
+    records identify this task-authoring lane and the acceptance-block gate as the recurring
+    refusal surface.
+  src: "ci-learning:10003:acceptance-author-gate"
+  cited: "2026-10-09"
 
 - id: comment-load-ratchet-lane
   subsystem: ci

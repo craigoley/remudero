@@ -1,0 +1,2 @@
+- claim: the lane that trips the acceptance-author-gate receives a matched learning
+  proof: "grep: ci-learning:10003:acceptance-author-gate in learnings/ci.yaml"

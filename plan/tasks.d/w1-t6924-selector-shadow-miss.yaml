@@ -1,0 +1,16 @@
+- id: W1-T6924
+  title: "REPAIR THE SELECTOR EDGE INTO test/now-view-rederives-only-dirtied-tasks.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/now-view-rederives-only-dirtied-tasks.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37893350498 for PR #10267 at f1bd67844723e737a9e6260c69ae387de76d5fb8: src/lib/read-model-db.ts, test/read-model-readers-never-contend-with-the-writer.test.ts -> test/now-view-rederives-only-dirtied-tasks.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/now-view-rederives-only-dirtied-tasks.test.ts when this edge is exercised"
+      proof: "grep: test/now-view-rederives-only-dirtied-tasks\\.test\\.ts in src/lib/affected-suites.ts"
