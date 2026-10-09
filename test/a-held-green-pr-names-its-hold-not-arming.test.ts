@@ -38,6 +38,11 @@ test("operator-hold is a blocker class owned by the operator that never climbs t
   const list: readonly string[] = blockers.PR_BLOCKERS;
   assert.ok(list.includes("operator-hold"));
   assert.equal((blockers.PR_BLOCKER_OWNERS as Record<string, string>)["operator-hold"], "operator");
+  const dayOld = blockers.decideSloRung({
+    blocker: "operator-hold" as blockers.PrBlocker, owner: "operator", reasonClass: "other",
+    blockerAgeMs: 24 * 60 * 60_000, rungHistory: [], nowMs: NOW,
+  });
+  assert.equal(dayOld.rung, "none", "a hold waits on a person; no refresh, rebuild or digest may act on it");
 });
 
 test("a released hold goes back to arming", async () => {
