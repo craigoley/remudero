@@ -168,7 +168,7 @@ const TEST_HOME_PREFIX = "rmd-test-home-";
 // and its exit would then delete the HOME the parent still reads.
 if (isMainThread) {
   reapDeadOwnerDirs(TEST_HOME_PREFIX);
-  const testHome = fs.mkdtempSync(join(tmpdir(), `${TEST_HOME_PREFIX}${setupDirOwnerTag()}`));
+  const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${setupDirOwnerTag()}`));
   process.env.HOME = testHome;
   const testConfigDir = join(testHome, ".config", "remudero");
   fs.mkdirSync(testConfigDir, { recursive: true });
