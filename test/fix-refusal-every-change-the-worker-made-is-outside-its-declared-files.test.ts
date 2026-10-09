@@ -133,7 +133,7 @@ test("W1-T5801: fix_refusal:every-change-the-worker-made-is-outside-its-declared
 
 // #10369: a fix round patched main's own typecheck break in an undeclared file the CI log named,
 // then sat conflicting with main's real fix. A log-named path main moved since the merge base is main's red.
-function mainMovedRepo() {
+function branchBehindMain() {
   const repo = gitRepo({ kind: "main-owned-remedy" });
   repo.git("config", "user.name", "fixture");
   repo.git("config", "user.email", "fixture@example.invalid");
@@ -162,15 +162,16 @@ test("a path main changed since the merge base and this branch did not is main's
   const mainOwnedPaths = (runTask as Record<string, unknown>).mainOwnedPaths as
     ((dir: string, paths: string[]) => { outcome: string; owned: string[] }) | undefined;
   assert.equal(typeof mainOwnedPaths, "function");
-  const repo = mainMovedRepo();
+  const repo = branchBehindMain();
   assert.deepEqual(mainOwnedPaths!(repo.dir, ["src/shared.ts", "src/both.ts", "src/declared.ts"]),
     { outcome: "compared", owned: ["src/shared.ts"] });
   repo.git("update-ref", "-d", "refs/remotes/origin/main");
-  assert.deepEqual(mainOwnedPaths!(repo.dir, ["src/shared.ts"]), { outcome: "no-base", owned: [] });
+  const noBase = mainOwnedPaths!(repo.dir, ["src/shared.ts"]);
+  assert.deepEqual([noBase.outcome, noBase.owned], ["no-base", []]);
 });
 
 async function mainOwnedRound(report: string) {
-  const repo = mainMovedRepo();
+  const repo = branchBehindMain();
   const before = repo.git("rev-parse", "HEAD");
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   let pushes = 0;

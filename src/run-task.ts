@@ -11791,7 +11791,7 @@ export async function runFixRung(opts: {
     const logNamedMain = mainOwnedPaths(opts.worktreePath, logNamedPaths.map((file) => file.path));
     if (logNamedMain.owned.length > 0 || logNamedMain.outcome === "unreadable") {
       deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
-        ...(logNamedMain.detail === undefined ? {} : { detail: logNamedMain.detail }) });
+        ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
     }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
@@ -43625,12 +43625,12 @@ export function mainOwnedPaths(
   repoDir: string,
   paths: readonly string[],
   runGit: GitRunner = (args) => hostWorktreeGit(repoDir, args),
-): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; detail?: string } {
+): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; reason?: string } {
   if (paths.length === 0) return { outcome: "compared", owned: [] };
   try {
     runGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]);
-  } catch {
-    return { outcome: "no-base", owned: [] };
+  } catch (error) {
+    return { outcome: "no-base", owned: [], reason: String(error) };
   }
   try {
     const base = runGit(["merge-base", "HEAD", "refs/remotes/origin/main"]).trim();
@@ -43638,7 +43638,7 @@ export function mainOwnedPaths(
     const ours = changed("HEAD");
     return { outcome: "compared", owned: [...changed("refs/remotes/origin/main")].filter((path) => !ours.has(path)) };
   } catch (error) {
-    return { outcome: "unreadable", owned: [...paths], detail: String(error) };
+    return { outcome: "unreadable", owned: [...paths], reason: String(error) };
   }
 }
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
