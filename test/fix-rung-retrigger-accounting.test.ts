@@ -310,11 +310,47 @@ test("W1-T2403: a real defect (never retrigger-shaped) still spends real strikes
   assert.ok(!lines.some((l) => l.step === "fix.retrigger"), "no fix.retrigger line exists — nothing was misclassified");
 });
 
-test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", () => {
+test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", async () => {
   assert.ok(DEFAULT_FIX_RETRIGGER_CAP >= 1 && DEFAULT_FIX_RETRIGGER_CAP <= 5, "small, per W1-T2345's own 'bound the repetition' shape");
-  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  assert.doesNotMatch(source, /retriggers\s*>=\s*(?:opts\.)?retriggerCap/, "the former bound must not choose whether another round runs");
-  assert.doesNotMatch(source, /retrigger_cap_exhausted/, "the progress judge owns the next-round decision");
+  const { lines, log } = captureLog();
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  let workers = 0;
+  let judgments = 0;
+  const rung = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    retriggerCap: 1,
+    progressDecision: { verdict: "continue", reason: "first round already admitted" },
+    initialReview: fakeReview("failure", [criterion({ claim: "criterion A", met: false })], "sha-0"),
+    deps: {
+      fixProgressJudge: async input => {
+        judgments++;
+        assert.equal(workers, 1, "the first retrigger has reached its former ceiling");
+        assert.equal(input.rounds.length, 1, "the judge sees the completed round");
+        return { verdict: "continue", reason: "a second retrigger can clear the transient red" };
+      },
+      spawn: async () => { workers++; return result({ sessionId: `fix-session-${workers}` }); },
+      readRoundCommits: async () => [RETRIGGER_COMMIT],
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY,
+      runReview: async () => fakeReview(workers === 2 ? "success" : "failure",
+        [criterion({ claim: "criterion A", met: workers === 2 })], `sha-${workers}`),
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log,
+      say: () => {},
+      account: r => r,
+    },
+  });
+  assert.equal(workers, 2, "the judge admits another worker past retriggerCap=1");
+  assert.equal(judgments, 1);
+  assert.equal(rung.outcome, "fixed");
+  assert.equal(rung.retriggers, 2);
+  assert.equal(rung.strikes, 0);
+  assert.equal(lines.filter(line => line.step === "fix.retrigger").length, 2);
+  assert.equal(lines.filter(line => line.step === "fix.progress_judged").length, 1);
+  assert.deepEqual(issueCalls, []);
 });
 
 test("W1-T2403: fixStrikeCap's own default is unchanged by this task, in either direction", () => {
