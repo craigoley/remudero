@@ -47,6 +47,8 @@ export interface GardenState<C extends string> {
   /** The one class whose PR is awaiting its outcome. While it waits, no new PR is opened.
    *  `mergeSeenAt` is when a pass first saw the merge, so a frozen metric is released ({@link GARDEN_PENDING_RELEASE_MS}). */
   pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome; mergeSeenAt?: string };
+  /** The decision pending's recording time; legacy records start when next observed open. */
+  pendingRecordedAt?: string;
   /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
   filingFailures?: { count: number; lastAt: string; reason: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
@@ -364,6 +366,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
     if (!isOutcome(pending.baseline) || (pending.atMerge !== undefined && !isOutcome(pending.atMerge))) return "`pending` has a malformed baseline";
     if (pending.mergeSeenAt !== undefined && typeof pending.mergeSeenAt !== "string") return "`pending.mergeSeenAt` is not a timestamp";
   }
+  if (parsed.pendingRecordedAt !== undefined && (typeof parsed.pendingRecordedAt !== "string" || !Number.isFinite(Date.parse(parsed.pendingRecordedAt)))) return "`pendingRecordedAt` is not a timestamp";
   if (lastPass !== undefined && (!isRecord(lastPass) || typeof lastPass.fingerprint !== "string" || (lastPass.landed !== undefined && typeof lastPass.landed !== "string"))) return "`lastPass` is not a fingerprint";
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
@@ -401,6 +404,9 @@ export function readGardenState<C extends string>(path: string, classes: readonl
  *  `partial` ones while every other class, defuse included, sat idle (W1-T5825). */
 export const GARDEN_PENDING_RELEASE_MS = 24 * 3_600_000;
 
+/** BACKSTOP: an open decision PR releases its lane unjudged after a day from recording (W1-T5842). */
+export const GARDEN_DECISION_PENDING_RELEASE_MS = 24 * 3_600_000;
+
 /**
  * Judge the pending class, if any, on its own metric `now`. A closed (unmerged) PR is a debit. After
  * the merge, the success rate SINCE the merge is compared with the rate before the pass; the class is
@@ -435,15 +441,18 @@ export function judgeGardenPending<C extends string>(state: GardenState<C>, now:
   return { state, verdict: "waiting" };
 }
 
-/** A terminal PR verdict: reviewed merges earn credit; closing any pending PR earns a debit. */
-export function judgeGardenDecision<C extends string>(state: GardenState<C>, prState: PrState): { state: GardenState<C>; verdict: PendingVerdict } {
+/** Merges credit and closes debit; with a clock, an overdue open decision PR releases unjudged. */
+export function judgeGardenDecision<C extends string>(state: GardenState<C>, prState: PrState, clock?: Clock): { state: GardenState<C>; verdict: PendingVerdict } {
   const pending = state.pending;
   if (!pending) return { state, verdict: "none" };
+  if (prState === "open" && clock && state.pendingRecordedAt && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS) {
+    return { state: { ...state, pending: undefined, pendingRecordedAt: undefined }, verdict: "released" };
+  }
   if (prState !== "merged" && prState !== "closed") return { state, verdict: "waiting" };
   const c = state.classes[pending.actionClass];
   const credit = prState === "merged";
   const classes = { ...state.classes, [pending.actionClass]: credit ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 } };
-  return { state: { ...state, classes, pending: undefined }, verdict: credit ? "credit" : "debit" };
+  return { state: { ...state, classes, pending: undefined, pendingRecordedAt: undefined }, verdict: credit ? "credit" : "debit" };
 }
 
 /** Whether `c` is judged by its PR's decision (merged credits, closed debits) rather than a metric. */
@@ -581,7 +590,9 @@ export function gardenNeedsInventory<C extends string>(
   const terminalMetric = metricPending !== undefined && !metricPending.atMerge;
   const releaseDue = metricPending?.atMerge !== undefined &&
     (!metricPending.mergeSeenAt || clock.now() - Date.parse(metricPending.mergeSeenAt) >= GARDEN_PENDING_RELEASE_MS);
-  return state.lastCheap !== spec.cheapFingerprint() || terminalMetric || releaseDue;
+  const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
+    state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
+  return state.lastCheap !== spec.cheapFingerprint() || terminalMetric || releaseDue || Boolean(decisionReleaseDue);
 }
 
 /** What one pass did. */
@@ -634,8 +645,13 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   }
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
+  const clock = deps.clock ?? systemClock;
   const pendingBefore = state.pending;
   const prState = pendingBefore ? (yield* step(() => deps.prState?.(pendingBefore.prUrl) ?? "unknown")) : undefined;
+  if (pendingBefore && judgedByDecision(spec, pendingBefore.actionClass) && prState === "open" && state.pendingRecordedAt === undefined) {
+    state = { ...state, pendingRecordedAt: clock.iso() };
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+  }
   // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
@@ -648,25 +664,33 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   }
   // A metric class needs one inventory at merge to pin its baseline. Later observations follow
   // the cheap input cadence even when the action fingerprint stays the same. An open or unreadable
-  // PR need not force an expensive read.
-  const clock = deps.clock ?? systemClock;
+  // PR within its backstop need not force an expensive read.
   const metricPending = state.pending && !judgedByDecision(spec, state.pending.actionClass) && prState === "merged" ? state.pending : undefined;
   const terminalMetric = metricPending !== undefined && !metricPending.atMerge;
   // A frozen metric's release (or its first stamp) is due on the clock, not on a changed input.
   const releaseDue = metricPending?.atMerge !== undefined &&
     (!metricPending.mergeSeenAt || clock.now() - Date.parse(metricPending.mergeSeenAt) >= GARDEN_PENDING_RELEASE_MS);
-  if (state.lastCheap === cheap && !terminalMetric && !releaseDue) return { ran: false };
+  const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
+    state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
+  if (state.lastCheap === cheap && !terminalMetric && !releaseDue && !decisionReleaseDue) return { ran: false };
   const inventory = spec.inventory();
   const fingerprint = spec.fingerprint(inventory);
   if (state.pending) {
     const held = state.pending;
+    const recordedAt = state.pendingRecordedAt;
     const judged = judgedByDecision(spec, held.actionClass)
-      ? judgeGardenDecision(state, prState ?? "unknown")
+      ? judgeGardenDecision(state, prState ?? "unknown", clock)
       : judgeGardenPending(state, metricOf(spec, inventory, held.actionClass), prState ?? "unknown", clock);
     state = judged.state.pending ? judged.state : heldPassForgotten(judged.state);
     if (judged.verdict === "credit" || judged.verdict === "debit") deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (judged.verdict === "released") {
-      deps.log(`${spec.name}.pending_released`, { pr_url: held.prUrl, action_class: held.actionClass, waited_ms: clock.now() - Date.parse(held.mergeSeenAt!), bound_ms: GARDEN_PENDING_RELEASE_MS });
+      const decision = judgedByDecision(spec, held.actionClass);
+      deps.log(`${spec.name}.pending_released`, {
+        pr_url: held.prUrl, action_class: held.actionClass,
+        waited_ms: clock.now() - Date.parse((decision ? recordedAt : held.mergeSeenAt)!),
+        bound_ms: decision ? GARDEN_DECISION_PENDING_RELEASE_MS : GARDEN_PENDING_RELEASE_MS,
+        ...(decision ? { reason: `open PR ${held.prUrl} exceeded the decision backstop` } : {}),
+      });
     }
   }
   const trusted = state.pending !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);
@@ -720,8 +744,9 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (judgedByDecision(spec, c) ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting) } : state.pending;
+  const pendingRecordedAt = prUrl && acting !== undefined ? (judgedByDecision(spec, acting) ? clock.iso() : undefined) : state.pendingRecordedAt;
   const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
-  writeAtomic(statePath, JSON.stringify({ ...state, pending, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
+  writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
 }
 
