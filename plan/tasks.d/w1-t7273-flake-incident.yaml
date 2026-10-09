@@ -1,0 +1,34 @@
+- id: W1-T7273
+  title: "FLAKE INCIDENT — test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts"
+  files:
+    - test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts
+  acceptance:
+    - claim: "the cause of test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts's intermittent failure is fixed in test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7273 pins the cause of the intermittent failure"
+    - claim: "the incident test file declares the new W1-T7273 order-forcing regression"
+      proof: "grep: W1-T7273 pins the cause of the intermittent failure in test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — released for automatic verification by the pinned low/proceed risk ruling below. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10203, #10310, #10377.
+    CI runs: 37865724208, 37919851949, 37946372738.
+    Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.98
+    reasons:
+      - "FIX-worker risk review: the declared work is limited to repairing one test file and adding an order-forcing regression test; the changes are reversible and require no privileged or irreversible action."
+    judged_at: "2026-10-09T17:58:10.000Z"
+    pin: "7031cb6d9baedf91940fc05b50e0bb18ecd3ff891678ed01663746d9758413db"
