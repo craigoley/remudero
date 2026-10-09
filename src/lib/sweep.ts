@@ -10216,7 +10216,7 @@ export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): bool
   return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
 }
 
-/** W1-T6434 — the diff excerpt a next fix round is shown from a preserved patch, in characters. */
+/** W1-T6434 — PRIMARY CONTROL on the diff excerpt a next fix round is shown from a preserved patch, in characters. */
 export const PRIOR_PARTIAL_WORK_EXCERPT_CAP = 4000;
 const PRESERVED_PATCH_REF_PREFIX = "refs/rmd-recovery/fix-dirty/";
 /** Paths whose bytes never reach a prompt, whatever they hold. */

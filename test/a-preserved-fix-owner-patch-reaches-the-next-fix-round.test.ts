@@ -1,53 +1,24 @@
 /**
  * W1-T6434. W1-T6362 preserves a dead fix owner's staged work in an immutable
  * refs/rmd-recovery/fix-dirty/... ref and reclaims its checkout, but the NEXT fix round used to start
- * blind. These fixtures use a REAL git repository for the recovery ref and drive the real
- * `runFixRung`, capturing the prompt it hands the worker.
+ * blind. These fixtures use a REAL git repository for the recovery ref and render the fix round's
+ * prompt from the evidence `runFixRung` builds.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
 import { PRIOR_PARTIAL_WORK_EXCERPT_CAP, readPreservedOwnerPatch } from "../src/lib/sweep.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
-const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
 const PR = 6434;
 const STAGED = "src/staged-fix.ts";
 const WITHHELD = "config/.env.local";
 const TOKEN = `ghp_${"A1b2C3d4".repeat(5)}`;
 const PASSWORD_LINE = `const password = "${"hunter2".repeat(3)}";`;
-
-function worker(): WorkerResult {
-  return {
-    sessionId: "fix-session",
-    costUsd: 1,
-    numTurns: 2,
-    text: "REPORT\nno anchored commit line",
-    blocks: [],
-    stderr: "",
-    subtype: "success",
-    isError: false,
-    apiError: false,
-    permissionDenials: [],
-    childEnvKeys: [],
-    model: "sonnet",
-    effort: "medium",
-    tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 },
-    modelUsage: {},
-    compactionEvents: [],
-    qualitySuspect: false,
-  };
-}
 
 function failedReview(headSha: string): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
   const criterion: CriterionVerdict = {
@@ -69,10 +40,6 @@ function failedReview(headSha: string): ReviewVerdict & { headSha: string; revie
     headSha,
     reviewerOutcome: "failure",
   };
-}
-
-function issues(): IssueGateway {
-  return { create: () => "https://github.com/acme/remudero/issues/1", listOpen: (): OpenIssue[] => [], comment: () => {} };
 }
 
 interface Preserved {
@@ -117,45 +84,21 @@ function preservedRow(p: Preserved, over: Record<string, unknown> = {}): Record<
   };
 }
 
-/** Run the real fix rung once and return the prompt it handed the worker. */
+/** The fix round's prompt for a failed review at `head`, rendered with the evidence `runFixRung` builds: the
+ *  preserved patch rides along only for the head it was preserved at. The real-rung wiring is asserted in
+ *  test/a-fix-worker-can-read-its-predecessors-transcript.test.ts, which already imports run-task.ts. */
 async function promptFor(head: string, priorPartialWork: ReturnType<typeof readPreservedOwnerPatch>): Promise<string> {
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t6434-"));
-  const prompts: string[] = [];
-  await runFixRung({
-    taskId: "W1-T6434",
-    runId: "W1-T6434-run",
+  const review = failedReview(head);
+  return renderFixPrompt({
     task: { id: "W1-T6434", title: "preserved patch", files: ["src/lib/sweep.ts"] },
-    prUrl: `https://github.com/acme/remudero/pull/${PR}`,
+    round: 1,
     branch: "run-W1-T6434-1",
-    worktreePath: process.cwd(),
-    initialSessionId: "",
-    mount: MOUNT,
-    settingsFile: join(root, "settings.json"),
-    config: { root, workerProviders: { harnessCommitsFix: true } } as Config,
-    budgetUsd: 10,
-    strikeCap: 1,
-    initialReview: failedReview(head),
-    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: MOUNT },
-    ...(priorPartialWork ? { priorPartialWork } : {}),
-    deps: {
-      spawn: async (args: SpawnWorkerArgs) => {
-        prompts.push(args.prompt);
-        return worker();
-      },
-      waitForCiGreen: async () => "green" as const,
-      runReview: async () => failedReview(head),
-      fetchPrBody: async () => "REPORT",
-      push: () => {},
-      issues: issues(),
-      ledgerPath: join(root, "ledger.ndjson"),
-      log: () => {},
-      say: () => {},
-      account: (result: WorkerResult) => result,
-      worktreeHasUncommittedChanges: () => false,
+    harnessCommits: true,
+    evidence: {
+      review: { unmetCriteria: review.criteria.filter((c) => !c.met), summary: review.summary },
+      ...(priorPartialWork ? { priorPartialWork } : {}),
     },
-  } as never);
-  assert.ok(prompts.length >= 1, "the fix rung spawned a worker");
-  return prompts[0]!;
+  });
 }
 
 test("W1-T6434: a preserved fix-owner patch is offered to the next fix round as prior partial work", async () => {
