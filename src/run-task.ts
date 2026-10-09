@@ -26,6 +26,7 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
+import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
@@ -34294,21 +34295,41 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * for why drainage of already-open PRs must never be gated by WIP.
  */
 function queueGovernorGateFor(
-  openPrOwnership: () => { owned: number; foreign: number },
+  openPrOwnership: () => { owned: number; foreign: number; ownedPrNumbers?: readonly number[] },
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
 ): () => QueueGovernorResult | undefined {
   return () => {
-    const { owned, foreign } = openPrOwnership();
-    const flow = deriveQueueGovernorTrailingFlow(readLedgerLines(ledgerPath), now(), policy);
+    const { owned, foreign, ownedPrNumbers } = openPrOwnership();
+    const lines = readLedgerLines(ledgerPath);
+    const nowMs = now();
+    const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
+    const adaptive = assembleAdaptiveQueueFlow({
+      lines, ownedPrNumbers, nowMs, baseLimit: policy.wipLimit,
+      trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
+    });
     const result = checkQueueGovernor(owned, policy, {
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
+      stuckOwnedCount: adaptive.stuckOwnedCount,
+      adaptiveBound: adaptive.adaptiveBound,
+      headroomFraction: adaptive.headroomFraction,
     });
-    if (!result.deferred) return undefined;
+    if (!result.deferred) {
+      if (owned >= policy.wipLimit) {
+        appendLedger(ledgerPath, {
+          run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
+          observed_open_count: owned, base_wip_limit: policy.wipLimit, wip_limit: result.wipLimit,
+          stuck_owned_count: result.stuckOwnedCount ?? 0, headroom_fraction: result.headroomFraction ?? null,
+          headroom_unread: adaptive.headroomUnread, trailing_merged_count: flow.trailingMergedCount,
+          trailing_opened_count: flow.trailingOpenedCount, tier: result.tier,
+        });
+      }
+      return undefined;
+    }
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
@@ -34329,7 +34350,7 @@ export function createOpenPrCountObservation(): {
   observe: (openPrs: readonly PrRef[] | undefined) => void;
   read: (projectionCount: () => number) => number;
   readConfirmed: () => number | undefined;
-  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number };
+  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number; ownedPrNumbers?: number[] };
 } {
   let observed = false;
   let openPrs: readonly PrRef[] | undefined;
@@ -34356,9 +34377,8 @@ export function createOpenPrCountObservation(): {
     readOwnership: (projectionCount) => {
       if (!observed) return { owned: projectionCount(), foreign: 0 };
       if (openPrs === undefined) throw new Error("open PR board count is unreadable");
-      let owned = 0;
-      for (const pr of openPrs) if (isFleetOwnedRunBranch(pr.headRefName)) owned++;
-      return { owned, foreign: openPrs.length - owned };
+      const ownedPrNumbers = openPrs.filter((pr) => isFleetOwnedRunBranch(pr.headRefName)).map((pr) => pr.number);
+      return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
     },
   };
 }
