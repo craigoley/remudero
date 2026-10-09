@@ -41682,7 +41682,7 @@ function* openPrViewSteps(
     (prNumber, reason) => {
       const pr = raw.find((candidate) => candidate.number === prNumber)!;
       appendLedger(ledgerPath, {
-        run_id: `sweep-review-reuse-${Date.now()}`, task_id: "SWEEP", lane: "sweep",
+        run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
         step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
         head_sha: pr.headRefOid, reason,
       });
