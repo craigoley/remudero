@@ -13,6 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/flow-review-failed-n-unmet-criterion.test.ts
+    - "src/lib/read-model-worker.ts"
   acceptance:
     - claim: "review-failed:<n> unmet criterion is cleared by its owner without manual intervention"
       proof: "grep: test(\"W1-T7091: flow-review-failed-n-unmet-criterion clears without a person\" in test/flow-review-failed-n-unmet-criterion.test.ts"
