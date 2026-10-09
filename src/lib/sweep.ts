@@ -71,7 +71,7 @@ import {
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
-import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import {
@@ -17135,10 +17135,7 @@ export function deriveQueueGovernorTrailingFlow(
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
     if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
-    // Most merges are ledgered only as a sweep `pr.terminal` row, never as `verdict.merged`.
-    const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
-      || (line.step === "pr.terminal" && line.state === "merged");
-    if (!merged) continue;
+    if (!isMergedLedgerRow(line)) continue;
     const key = typeof line.pr_number === "number" ? `#${line.pr_number}` : typeof line.pr_url === "string" ? line.pr_url : undefined;
     if (key === undefined) unkeyedMerges++;
     else mergedPrs.add(key);
