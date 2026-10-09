@@ -117,3 +117,22 @@ test("W1-T5693: the structural suites expose executable scripts and have left th
     assert.ok(!ciOnly.includes(testFile), `${testFile} is run, so it is not CI-only`);
   }
 });
+
+test("W1-T5702: a test that gains a src/run-task.ts import, or the reach ratchet's own files, start the reach ratchet alone", () => {
+  const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
+  // Built from parts so this suite's own text never reads as a run-task importer to that ratchet.
+  const runTask = ["..", "src", ["run", "task.js"].join("-")].join("/");
+  assert.deepEqual(evaluate(["test/new.test.ts"], { "test/new.test.ts": `import { x } from "${runTask}";` }).runs, [[REACH]]);
+  assert.deepEqual(
+    evaluate(["test/old.test.ts"], { "test/old.test.ts": `import "${runTask}";\nconst y = 1;` }, { "test/old.test.ts": `import "${runTask}";` }).runs,
+    [],
+  );
+  assert.deepEqual(evaluate(["test/new.test.ts"], { "test/new.test.ts": 'import { a } from "../src/lib/a.js";' }).runs, []);
+  for (const path of ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"]) {
+    assert.deepEqual(evaluate([path], { [path]: "" }, { [path]: "" }).runs, [[REACH]], path);
+  }
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
+  assert.deepEqual(precheck.PRECHECK_PARITY[REACH], { run: "census:affected-reach" });
+  assert.ok(scripts["census:affected-reach"].endsWith(REACH));
+});

@@ -108,6 +108,7 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     "test/cycle-ratchet.test.ts",
     "test/source-size-baseline-is-enforced.test.ts",
     "test/citation-anchor-census.test.ts",
+    "test/the-affected-suite-reach-ratchet.test.ts",
     "test/node-24-runtime-compatibility.test.ts",
     "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",
     "test/host-capability-fixtures.test.ts",

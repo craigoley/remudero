@@ -625,6 +625,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
+  // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
+  { testFile: "test/the-affected-suite-reach-ratchet.test.ts", script: "census:affected-reach", structural: true,
+    trigger: (input) =>
+      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
+      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
+    remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
   { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", script: "census:every-priced-ledger-step",
