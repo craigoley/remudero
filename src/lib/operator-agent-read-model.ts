@@ -143,7 +143,7 @@ export function createOperatorAgentRowsSource(
           : `the read model has not applied this process's operator-agent write at ${wrote} yet`;
         return { reason, sources };
       }
-      const sources = readModel.judge(entry.body.sources, clock.now());
+      const sources = readModel.judge(entry.body.sources, clock.now(), entry);
       return { rows: (entry.body.data as OperatorAgentRowsData).rows, stale: sources.filter((source) => source.state !== "fresh").map((source) => source.name) };
     },
   };

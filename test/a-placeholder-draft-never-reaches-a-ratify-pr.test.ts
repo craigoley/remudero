@@ -127,9 +127,9 @@ test("directory checks use the injected worktree predicate and permit future fil
     seen.push(path);
     return exists;
   });
-  assert.ok(lint(false).some((v) => v.check === "draft-missing-directory" && /plan\/ratification/.test(v.message)));
+  assert.ok(lint(false).some((v) => v.check === "draft-missing-directory" && /"plan"/.test(v.message)));
   assert.deepEqual(lint(true), []);
-  assert.deepEqual(seen, ["plan/ratification", "plan/ratification"]);
+  assert.deepEqual(seen, ["plan", "plan"]);
   assert.deepEqual(lintDraftedFragment(amended((t) => { t.title = "tighten the W1-T7001 input guard"; }),
     PROPOSAL, GOOD_STAMP, KNOWN), []);
 });

@@ -987,6 +987,12 @@ function isMalformedDialectProof(proof: string): boolean {
   return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource);
 }
 
+/** The executable proof a claim-less `unit test:`/`grep:` bullet already is (code span unwrapped), or `""`. */
+function bareDialectProof(item: string): string {
+  const dialectSource = matchesDialectPrefix(item) ? item : stripCodeSpan(item);
+  return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource) ? dialectSource : "";
+}
+
 /** Sentence-level punctuation a bare test-name title would not carry: comma, colon, semicolon, parenthetical aside,
  * em/en dash, ellipsis. Any one marks a body as PROSE, not a plain title. */
 const PROSE_PUNCTUATION_RE = /[,;:()]|--|—|–|\.\.\./;
@@ -6460,10 +6466,13 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const item = bullet[1].trim();
       const sep = acceptanceSeparator(item);
       let claim = (sep ? item.slice(0, sep.index) : item).trim();
-      const proof = sep ? item.slice(sep.index + sep.width).trim() : "";
+      let proof = sep ? item.slice(sep.index + sep.width).trim() : "";
       // "- claim: <text>" form: strip the label and any surrounding quotes.
       const claimLabel = claim.match(/^claim\s*:\s*(.*)$/i);
       if (claimLabel) claim = stripQuotes(claimLabel[1].trim());
+      // A bare `- unit test: <title>` / `- grep: <p> in <f>` bullet names its proof and omits only the claim, so it is
+      // its own claim. Read as an empty proof it was "repaired" with a base-passing grep (#10404, #10413).
+      else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
