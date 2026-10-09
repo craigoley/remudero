@@ -1,0 +1,32 @@
+- id: W1-T7447
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:coverage-shard (7/8) cost 3069.8 PR minute(s) across 28 round(s) on 242 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.02
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:coverage-shard (7/8)"
+  files:
+    - .github/workflows/ci.yml
+    - test/check-coverage-shard-7-8.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:coverage-shard (7/8)"
+      proof: "grep: test(\"W1-T7447: check:coverage-shard (7/8) is prevented, not retried\" in test/check-coverage-shard-7-8.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-shard (7/8)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:coverage-shard (7/8) cost 3069.8 PR minute(s) (seven-day half-life) across 28 fix round(s) on 242 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard (7/8)
+
+    RECENT ROUNDS (newest first):
+    - (none recorded)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

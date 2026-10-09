@@ -14,7 +14,9 @@
  * field order of its own to keep; the others render {@link machineShardHeaderLines} in place.
  * feedback-landing.ts never imports this module: task-linter's import chain reaches it.
  */
-import { loadPlanFromYaml, type TaskRisk } from "./plan.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, type TaskRisk } from "./plan.js";
 import { lintTask } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
@@ -122,6 +124,79 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
   } catch (e) {
     return { text, refused: `unparseable: ${(e as Error).message}` };
   }
+}
+
+/** lint-plan's machine-filing admission (plan.ts), as a filer is handed it. */
+export type MachineFilingAdmission = typeof machineFilingAdmissionViolations;
+
+/** Where a drafted shard's declared paths can be found: the filing checkout, and optionally the base tree. */
+export interface MachineShardPaths {
+  pathExists: (path: string) => boolean;
+  pathExistsAtBase?: (path: string) => boolean;
+  /** Defaults to plan.ts's own; a fixture may stand in for it, never production. */
+  admissionViolations?: MachineFilingAdmission;
+}
+
+/**
+ * lint-plan's changed-task verdict on a drafted machine shard: the task lint plus the machine-filing
+ * admission lint-plan --base runs on every filing PR (W1-T3843). A filer's own `lintTask(task)` skips
+ * admission, so it passed while checking nothing: #10446 (a workflow owner) and #10457 (a two-file
+ * selector edge) each filed shards that went red on lint-plan. Undefined when lint-plan would admit
+ * every machine-authored record in the text; otherwise every blocking reason, by task.
+ */
+export function machineShardFilingRefusal(text: string, source: string, paths: MachineShardPaths): string | undefined {
+  // An unparseable draft throws: every landing path records a throw as its filing failure.
+  const plan = loadPlanFromYaml(text, source);
+  const admission = paths.admissionViolations ?? machineFilingAdmissionViolations;
+  const reasons: string[] = [];
+  for (const task of plan.tasks) {
+    if (task.author_class !== "machine") continue;
+    for (const v of lintTask(task).violations) if (v.severity === "block") reasons.push(`${task.id}: ${v.check}: ${v.message}`);
+    const refused = admission(task, { plan, releasedIds: new Set(), pathExists: paths.pathExists, pathExistsAtBase: paths.pathExistsAtBase });
+    if (refused.length > 0) reasons.push(`${task.id}: machine-filing-admission: ${refused.join("; ")}`);
+  }
+  return reasons.length > 0 ? reasons.join("; ") : undefined;
+}
+
+/** {@link machineShardLandingRefusal} bound to the tree a filer reads its findings from (its
+ *  `deps.repoRoot`) as the base, in the shape a gardener spec's `landingRefusal` takes. `alsoAtBase`
+ *  adds a filer's own base read. */
+export function machineShardLandingGuard(
+  filer: { repoRoot: string; admissionViolations?: MachineFilingAdmission; landingRefusal?: (root: string, paths: readonly string[]) => string | undefined },
+  alsoAtBase?: (path: string) => boolean,
+): (root: string, paths: readonly string[]) => string | undefined {
+  if (filer.landingRefusal) return filer.landingRefusal;
+  return (root, paths) =>
+    machineShardLandingRefusal(root, paths, (p) => existsSync(join(filer.repoRoot, p)) || alsoAtBase?.(p) === true, filer.admissionViolations);
+}
+
+/** A plan shard path, as a landing names it. */
+const SHARD_PATH = /(^|\/)tasks\.d\/[^/]+\.ya?ml$/;
+
+/**
+ * The landing-path check every shard-filing gardener runs before it opens a PR: each plan shard among
+ * `paths`, read from the filing checkout at `root`, must pass {@link machineShardFilingRefusal}. A
+ * refused draft is a recorded filing failure, never a red PR.
+ */
+export function machineShardLandingRefusal(
+  root: string,
+  paths: readonly string[],
+  pathExistsAtBase?: (path: string) => boolean,
+  admissionViolations?: MachineFilingAdmission,
+): string | undefined {
+  const reasons: string[] = [];
+  for (const path of paths) {
+    if (!SHARD_PATH.test(path.replaceAll("\\", "/"))) continue;
+    const abs = join(root, path);
+    if (!existsSync(abs)) continue;
+    const refused = machineShardFilingRefusal(readFileSync(abs, "utf8"), path, {
+      pathExists: (p) => existsSync(join(root, p)),
+      pathExistsAtBase,
+      admissionViolations,
+    });
+    if (refused !== undefined) reasons.push(`${path}: ${refused}`);
+  }
+  return reasons.length > 0 ? reasons.join("; ") : undefined;
 }
 
 // ── The deterministic backstop (operator ruling 2026-09-29, DECISIONS.md) ─────────────────────
