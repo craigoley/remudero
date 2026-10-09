@@ -63,7 +63,7 @@ import {
 } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { createLedgerRotationMemo, ledgerRotationDigests, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import {
   capDecisions,
   escalationClasses,
@@ -950,23 +950,30 @@ export function createNowView(opts: NowViewOptions): {
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
-  /** The pin/reviewer gates' steps and the operator items' steps (W1-T5374), read in ONE union pass: each read
-   *  parsed every rotation (30 days of them) on a generation's first build, twice over, while core's first
-   *  `decisions` stage per generation took 11 s p50 against 2.6 s after (2026-10-06, 56 generations). */
+  /** Bump this version whenever the pin/reviewer or operator step set changes. */
+  const gateReducerVersion = "1";
   const isPinReviewerRow = (row: Record<string, unknown>): boolean => row.step === "rung.unratified" || row.step === "daemon.boot" ||
     row.step === "daemon.freshness_not_stale" || row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_");
   const operatorSteps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
   const isOperatorRow = (row: Record<string, unknown>): boolean => typeof row.step === "string" && operatorSteps.test(row.step);
   const gateLinePattern = /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_|cost\.anomaly|daemon\.image_drift|github_app\.token_refresh/;
+  const reduceGateRows = (rows: Array<Record<string, unknown>>) => rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row));
   const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
   const gateRows = new Map<string, Array<Record<string, unknown>>>();
   /** The gate rows of one decisions build: complete, or the last complete read's rows with `complete: false`. */
   const gateLedger = (instance: NowInstance): { complete: boolean; rows: Array<Record<string, unknown>> } => {
-    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row)));
+    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo(reduceGateRows, { holder: "now.gate" });
     gateMemos.set(instance.name, memo);
     const pass = memo.pass({ parseMissing: true });
-    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords, pattern: gateLinePattern });
+    const digests = ledgerRotationDigests(instance.ledgerDir, reduceGateRows, { holder: "now.gate", reducerVersion: gateReducerVersion });
+    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, pattern: gateLinePattern,
+      rotationRecords: (entry, parse) => pass.rotationRecords(entry, () => {
+        const archived = digests.rotationRecords(entry, parse);
+        const tornLines = archived.tornLines.filter((line) => gateLinePattern.test(line));
+        return { ...archived, torn: tornLines.length, tornLines };
+      }) });
     pass.complete();
+    if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
     if (complete) gateRows.set(instance.name, read.rows);
     return { complete, rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows };
