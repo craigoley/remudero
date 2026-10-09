@@ -54,8 +54,8 @@ interface CallerRecord {
 const RECORDS: readonly CallerRecord[] = [
   {
     file: "src/lib/affected-suites.ts", helper: "readAffectedSuitesInput", via: ["readAffectedSuitesInput"],
-    callers: ["scripts/preflight-author.mjs", "scripts/select-affected-suites.mjs", "src/lib/ci-escalation-judge.ts", "src/lib/ci-parity.ts", "src/lib/selector-shadow-gardener.ts", "src/run-task.ts"],
-    tree: "WORKTREE: run-task.ts coveragePrecheck passes the worker worktree; ci-escalation-judge.ts passes the daemon checkout; the rest pass a repo root", decision: "leaf",
+    callers: ["scripts/preflight-author.mjs", "scripts/select-affected-suites.mjs", "scripts/test-tier-manifest.mjs", "src/lib/ci-escalation-judge.ts", "src/lib/ci-parity.ts", "src/lib/selector-shadow-gardener.ts", "src/run-task.ts"],
+    tree: "WORKTREE: run-task.ts coveragePrecheck passes the worker worktree; ci-escalation-judge.ts passes the daemon checkout; the rest (test-tier-manifest.mjs's merge_group selection included) pass a repo root", decision: "leaf",
   },
   {
     file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/run-task.ts"],
