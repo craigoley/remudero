@@ -1085,7 +1085,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     try {
       idle = listDirtyRelFiles(root, kind.ownedDir, git).length === 0 && queuedFeedbackSources(queueRoot).length === 0;
     } catch {
-      idle = false;
+      idle = false; // deliberate: an unreadable scan is not "idle", so the full path below reports it
     }
     if (idle) return withAcknowledgement({ landed: false, files: [] });
 
@@ -1843,6 +1843,7 @@ function* findPendingLandingPrSteps(net: LandingNet, identity: LandingIdentity):
   try {
     return pendingLandingPrOf(yield* net.gh(pendingLandingPrArgs(identity.prHead, landingRepoArgs(identity))));
   } catch {
+    // Deliberate, as in findPendingLandingPr: an unreadable listing reads as "no PR yet", and the caller opens one.
     return undefined;
   }
 }
