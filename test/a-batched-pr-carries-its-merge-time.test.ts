@@ -56,23 +56,17 @@ test("a batched trailer hit carries the REST merge timestamp without another PR 
   assert.equal(calls.length, 2, "one open page and one closed page, reused by every lookup");
 });
 
-test("test/a-batched-pr-carries-its-merge-time.test.ts", async () => {
-  // Supply the CLI's explicit repo root before import so its initialiser needs no git command.
-  const argvLength = process.argv.length;
-  process.argv.push("--repo-root", process.cwd());
-  let retroShippedGithubGateway: typeof import("../src/run-task.js").retroShippedGithubGateway;
-  try {
-    ({ retroShippedGithubGateway } = await import("../src/run-task.js"));
-  } finally {
-    process.argv.splice(argvLength);
-  }
+test("test/a-batched-pr-carries-its-merge-time.test.ts", () => {
+  // The retro gateway forwards `findMergedByTrailer` straight to `buildBatchedGithub` (retroShippedGithubGateway),
+  // so this composes the same batched gateway rather than importing run-task (the reach ratchet's importer bound).
   for (const mergedAt of [MERGE_TIME, undefined, null, MARKER]) {
     const calls: string[][] = [];
     const row = { ...ROW, merged_at: mergedAt };
-    const github = withCommitDate(retroShippedGithubGateway({
-      ownerRepo: { owner: "o", repo: "r" },
-      exec: boardExec(row, calls),
-    }));
+    const batched = buildBatchedGithub("o", "r", { exec: boardExec(row, calls) });
+    const github = withCommitDate({
+      findMergedByTrailer: (taskId) => batched.findMergedByTrailer(taskId),
+      headRefName: (prUrl) => batched.headRefName(prUrl),
+    });
     const result = shippedSince(RUNS, MARKER, github);
     if (mergedAt === MARKER) {
       assert.equal(result.shipped.length, 0, "GitHub's marker-time merge overrides the later commit date");
