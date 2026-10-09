@@ -12848,8 +12848,6 @@ export function emptyDiffReviewFailure(pr: OpenPrView): boolean {
   return !isBlockedCi(pr) && pr.changedFiles?.length === 0;
 }
 
-/** Any held disposition with an observed, empty diff against main; `undefined` changed files is unobserved, never empty.
- *  A proof-discrimination red keeps W1-T4957's own routes (a stack-parent close, or the ci-log round beside another red). */
 export function emptyDiffSupersedes(pr: OpenPrView, disposition: Disposition): boolean {
   return pr.changedFiles?.length === 0 && disposition !== "mergeable" && disposition !== "stale" &&
     !(pr.ciFailures ?? []).some((failure) => failure.name === "proof-discrimination");
@@ -14147,7 +14145,6 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
-    // #10265: an observed empty diff against main outranks every blocker; the plan-scoped round below never reached #10356's close.
     const emptyDiffSupersession = emptyDiffSupersedes(pr, disposition) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
     if (emptyDiffSupersession) {
       staleProofCloses += 1;

@@ -2,6 +2,8 @@
 // plan-proof-unrunnable — a plan filing red on a required check — and the plan-scoped round ran first,
 // so the close never fired and the PR sat open. An observed empty diff against main is checked before
 // any blocker routing: nothing is left to merge, whatever blocked it.
+// A proof-discrimination red keeps W1-T4957's own routes (the stack-parent close, or the ci-log round beside
+// another red); the close shares the per-pass supersession-close budget.
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
