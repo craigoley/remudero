@@ -12047,9 +12047,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
 /** W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
  *  NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears only
  *  on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and every
- *  later pass stands down FOREVER. `fix.resolved` is never counted as stalled. TASK-ID KEYED, safe
- *  because every caller guards on the PR's CURRENT head. W1-T1210 — A TASKID WITH NO `fix.dispatch`
- *  ROW IS THE SAME SHAPE ONE STEP EARLIER, and the ABSENCE of the row is the falsifier. */
+ *  later pass stands down FOREVER; a `fix.stood_down` is such an end. `fix.resolved` is never stalled.
+ *  TASK-ID KEYED (callers guard on the CURRENT head). W1-T1210: no `fix.dispatch` row ⇒ stalled. */
 export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
@@ -12077,6 +12076,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
+    } else if (line.step === "fix.stood_down") {
+      stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
