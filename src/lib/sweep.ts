@@ -18488,6 +18488,12 @@ export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverage
     if (!DIFF_COVERAGE_BLOCK_RE.test(f.logTail)) continue;
     const parsed = diffCoverageTargets([f.logTail]);
     const uncovered = (parsed?.targets ?? []).flatMap((t) => t.lines.map((line) => `${t.file}:${line}`));
+    // The fix prompt uses repository-relative targets. CI can also print an absolute checkout
+    // path; retain it here so the red-base refresh can compare its complete source suffix.
+    for (const raw of f.logTail.split("\n")) {
+      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)(?:[^\s:]+[\\/])*[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
+      if (absolute) uncovered.push(`${absolute[1]}:${absolute[2]}`);
+    }
     return { check: f.name, uncovered };
   }
   return undefined;

@@ -1,7 +1,5 @@
-// The sweep's diff-coverage reporter feeds the red-base refresh decision. It kept its own parser that
-// only recognised a bare `  - path:line`, so a line the gate glosses with ` -- <remedy>` vanished —
-// and with it the source path the refresh decision compares against main. It now reads the gate's
-// list through the one parser the fix prompt already uses (diffCoverageTargets, #10463).
+// The sweep's diff-coverage reporter feeds the red-base refresh decision. It reads repository paths
+// through the fix prompt's parser and retains absolute checkout paths when CI prints those instead.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -21,4 +19,25 @@ test("a glossed-only diff-coverage red still names its source file to the red-ba
   assert.deepEqual(sweep.failingSourceFilesFromCiFailures([{ name: "coverage-ratchet", logTail }]), [
     "src/lib/daemon-memory-telemetry.ts",
   ]);
+});
+
+test("an absolute diff-coverage path retains its checkout prefix and gloss", () => {
+  const logTail = [HEADER, "  - C:\\workspace\\remudero\\src\\lib\\model-health.ts:47 -- cover the failure arm"].join("\n");
+  const failures = [{ name: "coverage-ratchet", logTail }];
+  assert.deepEqual(sweep.diffCoverageReport(failures)?.uncovered, [
+    "C:\\workspace\\remudero\\src\\lib\\model-health.ts:47",
+  ]);
+  assert.deepEqual(sweep.failingSourceFilesFromCiFailures(failures), [
+    "C:/workspace/remudero/src/lib/model-health.ts",
+  ]);
+});
+
+test("an absolute path from another checkout does not match a source basename", () => {
+  const logTail = [HEADER, "  - /workspace/other/foo.ts:12"].join("\n");
+  const failures = [{ name: "coverage-ratchet", logTail }];
+  assert.deepEqual(sweep.failingSourceFilesFromCiFailures(failures), ["/workspace/other/foo.ts"]);
+  assert.deepEqual(
+    sweep.decideRedBaseRefresh(failures, { behindBy: 3, baseChangedFiles: ["src/lib/foo.ts"] }).matchingBaseFiles,
+    [],
+  );
 });
