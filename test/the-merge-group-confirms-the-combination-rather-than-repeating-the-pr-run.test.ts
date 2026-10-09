@@ -8,7 +8,8 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { parse as parseYaml } from "yaml";
 // @ts-expect-error — plain .mjs, no declaration file. A namespace import, so a tree without the
 // export fails inside each test rather than at module load.
 import * as tierManifest from "../scripts/test-tier-manifest.mjs";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,7 +99,7 @@ test("W1-T5940: ci.yml wires the merge group's selection into ci-shard and test-
     const select = jobs[job]!.steps.find((s) => s.name?.startsWith("Select the merge group's suites (W1-T5940"));
     assert.ok(select?.run, `${job} must select the merge group's suites`);
     assert.equal(select!.env?.GROUP_BASE, "${{ github.event.merge_group.base_sha }}", `${job} must read the group base from a step env`);
-    assert.match(select!.run!, /writeMergeGroupSelection\(process\.argv\[1\], process\.argv\[2\]\)/);
+    assert.match(select!.run!, /writeMergeGroupSelection\(process\.argv\[1\], process\.argv\[2\], \{ load: \(p\) => import\(r \+ p\) \}\)/);
   }
   const ciTest = jobs.ci!.steps.find((s) => s.name === "Test")!.run!;
   assert.match(ciTest, /"\$\{GITHUB_EVENT_NAME\}" = "merge_group" \] && .*\n\s+cp merge-group-suites\.txt affected-suites-selected\.txt\n\s+CLASS="AFFECTED"/);
@@ -149,4 +151,26 @@ test("W1-T5940: coverage-ratchet's merge group skip never fires on a pull_reques
     env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: join(dir, "out.txt") },
   });
   assert.doesNotMatch(r.stdout, /W1-T5940: merge group — coverage-ratchet skips/, "a pull_request must not take the merge group skip");
+});
+
+test("W1-T5940: tsx loads test-tier-manifest.mjs untransformed, so a deleted fixture copy cannot break the coverage report", () => {
+  // A dynamic import makes tsx attach a source map; a-gate-run-leaves-the-tracked-tree-clean then
+  // loads the script from a checkout it deletes, and the lcov writer dies (ERR_SOURCE_MAP_MISSING_SOURCE).
+  const covDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5940-v8cov-`));
+  try {
+    const r = spawnSync(process.execPath, ["--enable-source-maps", "--import", "tsx", "-e", "await import(process.argv[1])", join(REPO_ROOT, "scripts/test-tier-manifest.mjs")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: { ...process.env, NODE_V8_COVERAGE: covDir },
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    type V8Report = { result: Array<{ url: string }>; "source-map-cache"?: Record<string, unknown> };
+    const reports = readdirSync(covDir).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(covDir, f), "utf8")) as V8Report);
+    const isScript = (url: string) => url.endsWith("/scripts/test-tier-manifest.mjs");
+    assert.ok(reports.some((rep) => rep.result.some((s) => isScript(s.url))), "the child never loaded scripts/test-tier-manifest.mjs");
+    const mapped = reports.flatMap((rep) => Object.keys(rep["source-map-cache"] ?? {}).filter(isScript));
+    assert.deepEqual(mapped, [], "tsx attached a source map to scripts/test-tier-manifest.mjs");
+  } finally {
+    rmSync(covDir, { recursive: true, force: true });
+  }
 });

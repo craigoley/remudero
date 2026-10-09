@@ -275,7 +275,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" != "merge_group" ] || [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
             exit 0
           fi
-          node --import tsx -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2]);' \
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
           if [ "$(head -n 1 merge-group-suites.txt)" = "full" ]; then
             echo "- W1-T5940: merge group selection: **full run** (the selection was unusable)." >> "$GITHUB_STEP_SUMMARY"
@@ -840,7 +840,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" != "merge_group" ]; then
             exit 0
           fi
-          node --import tsx -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2]);' \
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |

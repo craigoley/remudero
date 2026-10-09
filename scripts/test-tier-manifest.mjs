@@ -498,11 +498,15 @@ export function mergeGroupSelection({ base, head = "HEAD", select, spawn = spawn
 }
 
 /** W1-T5940: ci.yml's merge_group entry point (needs tsx). Selects with W1-T5705's narrow lane —
- *  symbols from the group's combined diff — and writes the suites, or `full`, to `outPath`. */
-export async function writeMergeGroupSelection(base, outPath, root = process.cwd()) {
-  const mod = await import(`${root}/src/lib/affected-suites.ts`);
-  const { callerReachableSuites } = await import(`${root}/src/lib/ci-parity.ts`);
-  const { defaultPreflightSpawn } = await import(`${root}/src/lib/commit-message.ts`);
+ *  symbols from the group's combined diff — and writes the suites, or `full`, to `outPath`.
+ *  `load` imports a repo-relative module for us: a dynamic import in this file makes tsx attach a
+ *  source map to it, and a coverage run that loads it from a since-deleted fixture checkout then
+ *  cannot write its lcov (ERR_SOURCE_MAP_MISSING_SOURCE). */
+export async function writeMergeGroupSelection(base, outPath, { load, root = process.cwd() } = {}) {
+  if (typeof load !== "function") throw new Error("writeMergeGroupSelection needs a `load` module importer");
+  const mod = await load("src/lib/affected-suites.ts");
+  const { callerReachableSuites } = await load("src/lib/ci-parity.ts");
+  const { defaultPreflightSpawn } = await load("src/lib/commit-message.ts");
   const diff = spawnSync("git", ["diff", "-U0", `${base}...HEAD`], { cwd: root, encoding: "utf8", maxBuffer: 1 << 28 });
   let symbolSuites;
   const select = (changed) => mod.affectedSelectionOrFull(changed, () => {
