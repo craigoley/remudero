@@ -2817,6 +2817,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -11789,10 +11790,16 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
+    const logNamedPaths = ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath);
+    const logNamedMain = mainOwnedPaths(opts.worktreePath, logNamedPaths.map((file) => file.path));
+    if (logNamedMain.owned.length > 0 || logNamedMain.outcome === "unreadable") {
+      deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
+        ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
+    }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
-      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
+      ...logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path)),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -12913,7 +12920,12 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
-      try {
+      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
+      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else try {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
@@ -38318,6 +38330,22 @@ export async function daemonCommand(
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
+        // W1-T7093: maintain the worker-tree ledger on the same recurring heartbeat the reader
+        // consumes. This is report-only bookkeeping; a failure never alters dispatch or workers.
+        sweepHostMemoryReservations: () => {
+          const swept = sweepMemoryReservations({ root: config.root, log: (event) => log(String(event.event ?? "host_memory_ledger.diagnostic"), event) });
+          if (swept) {
+            log("daemon.host_memory_reservations.swept", {
+              state: swept.reading.state,
+              scope: swept.reading.scope,
+              live: swept.reading.entries.length,
+              released: swept.released.length,
+              uncertain: swept.reading.counts.uncertain,
+              incomplete_walk: swept.reading.counts.incompleteWalk,
+              reserved_mib: swept.reading.reservedMib,
+            });
+          }
+        },
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
@@ -43627,6 +43655,28 @@ export function ciLogNamedSourcePaths(
     }
   }
   return [...found].map(([path, job]) => ({ path, job }));
+}
+
+/** Paths main changed since the merge base and this branch did not: a red there is main's, so refresh, never patch (#10369). */
+export function mainOwnedPaths(
+  repoDir: string,
+  paths: readonly string[],
+  runGit: GitRunner = (args) => hostWorktreeGit(repoDir, args),
+): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; reason?: string } {
+  if (paths.length === 0) return { outcome: "compared", owned: [] };
+  try {
+    runGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]);
+  } catch (error) {
+    return { outcome: "no-base", owned: [], reason: String(error) };
+  }
+  try {
+    const base = runGit(["merge-base", "HEAD", "refs/remotes/origin/main"]).trim();
+    const changed = (to: string) => new Set(runGit(["diff", "--name-only", "-z", base, to, "--", ...paths]).split("\0").filter(Boolean));
+    const ours = changed("HEAD");
+    return { outcome: "compared", owned: [...changed("refs/remotes/origin/main")].filter((path) => !ours.has(path)) };
+  } catch (error) {
+    return { outcome: "unreadable", owned: [...paths], reason: String(error) };
+  }
 }
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
@@ -50037,7 +50087,7 @@ export function shardEvidence(task: Task): string | undefined {
  *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
 function shardAgeDays(taskId: string, root: string, nowMs: number): number {
   try {
-    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
+    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
     if (!out) return 0;
     return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
   } catch {
@@ -53314,7 +53364,7 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   const git = (args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   git(["fetch", "--quiet", "origin", "main"]);
   const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
-  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
+  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => isTaskShardName(n, taskId))) return true;
   const mono = git(["show", "origin/main:plan/tasks.yaml"]);
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
@@ -54093,6 +54143,7 @@ function commandSyntax(name: string): string {
 import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
+import { isTaskShardName } from "./lib/task-shard-name.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
