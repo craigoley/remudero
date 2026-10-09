@@ -39,6 +39,28 @@ test(proof, () => {
   }
 });
 
+test(`${proof}: unusable read maps keep contract readers and report the map problem`, () => {
+  const map: NonNullable<ReadMapInput["map"]> = { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} };
+  const cases: Array<{ readMap?: ReadMapInput; problem?: string }> = [
+    {},
+    { readMap: { mapProblem: "file not found", drift: { changedSinceMap: [] } }, problem: "no read map (file not found)" },
+    { readMap: { mapProblem: "malformed", drift: { changedSinceMap: [] } }, problem: "no read map (malformed)" },
+    { readMap: { map, drift: { distance: 900, changedSinceMap: [] } }, problem: "read map main is stale: 900 commits behind the base, past its bound of 150" },
+    { readMap: { map, drift: { problem: "no ancestry", changedSinceMap: [] } }, problem: "read map main is not an ancestor of the base (no ancestry)" },
+  ];
+  for (const path of contracts) {
+    for (const { readMap, problem } of cases) {
+      const selection = selectAffectedSuites([path], {
+        files: tree(path), pathReaders: [], symbolSuites: [], readMap,
+      });
+      assert.equal(selection.fullRun, false, `${path}: ${problem}`);
+      assert.deepEqual(selection.suites, ["test/direct.test.ts", "test/indirect.test.ts"]);
+      assert.deepEqual(selection.narrow, selection.suites);
+      assert.equal(selection.readMapFallback, problem);
+    }
+  }
+});
+
 test(`${proof}: other contract-tree paths still force a full run and name the path`, () => {
   const readMaps: Array<ReadMapInput | undefined> = [undefined, {
     map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
