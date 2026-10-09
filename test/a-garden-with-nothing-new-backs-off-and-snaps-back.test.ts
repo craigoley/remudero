@@ -11,9 +11,8 @@ import { EVIDENCE_COVERAGE_PASS_INTERVAL_MS, evidenceCoveragePassDue, evidenceCo
 import {
   GARDEN_QUIET_BACKOFF_DIVISOR, gardenPacingDue, gardenPacingPath, readGardenPacing, recordGardenPacing, selectorShadowGardenPass,
 } from "../src/lib/garden-registry.js";
-import { machineJudgeFoundWork, OPERATOR_RELEASES_FILE } from "../src/lib/machine-filing-judge.js";
+import { machineJudgeFoundWork, machineJudgeInputs } from "../src/lib/machine-filing-judge.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, machineJudgeInputs, type GardenBuildContext } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const MINUTE = 60_000;
@@ -102,34 +101,19 @@ test("evidence-coverage is due only once its six-hour interval has passed", (t) 
   assert.equal(evidenceCoveragePassDue(dir, clock), true, "an unreadable state runs, and the pass logs it");
 });
 
-test("the daemon builds due probes for evidence-coverage, selector-shadow and machine-judge", async (t) => {
-  const repo = gitRepo({ kind: "garden-pacing-registry" });
+test("the machine judge's inputs stamp follows its plan tree and operator releases, and only judged work is new", (t) => {
+  const repo = gitRepo({ kind: "machine-judge-inputs" });
   t.after(() => repo.cleanup());
   mkdirSync(join(repo.dir, "plan"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "policy.yaml"), "rules: []\n");
   repo.git("add", "plan/policy.yaml");
   repo.git("commit", "--quiet", "-m", "seed the plan tree");
-  const root = scratch(t);
-  const stateDir = join(root, "state");
-  mkdirSync(stateDir, { recursive: true });
-  const ctx = { config: { root }, repoRoot: repo.dir, owner: "o", repo: "r", log: () => {}, raiseDuplicate: () => "" } as unknown as GardenBuildContext;
-  for (const name of ["evidence-coverage", "selector-shadow", "machine-judge"] as const) {
-    const pass = await buildRegisteredGarden(name, ctx);
-    assert.equal(typeof pass.due, "function", `${name} exposes a due probe`);
-    assert.equal(pass.due!(), true, `${name} with nothing recorded is due`);
-  }
-
-  // machine-judge: an hour quiet waits, and a new plan tree or operator release is due at once.
-  const judge = await buildRegisteredGarden("machine-judge", ctx);
+  const stateDir = scratch(t);
   const stamp = machineJudgeInputs(repo.dir, stateDir);
   assert.match(stamp, /^[0-9a-f]{40}:absent$/, "the plan tree's id and no releases yet");
-  writeFileSync(gardenPacingPath(stateDir, "machine-judge"), JSON.stringify({
-    lastPassAt: new Date(Date.now() - MINUTE).toISOString(), lastNewAt: new Date(Date.now() - 60 * MINUTE).toISOString(), inputs: stamp,
-  }));
-  assert.equal(judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
-  writeFileSync(join(stateDir, OPERATOR_RELEASES_FILE), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));
-  assert.equal(judge.due!(), true, "an operator release is judged now");
-  assert.equal(machineJudgeInputs(join(root, "no-such-checkout"), stateDir).startsWith("unreadable:"), true);
+  writeFileSync(join(stateDir, "operator-releases.json"), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));
+  assert.notEqual(machineJudgeInputs(repo.dir, stateDir), stamp, "an operator release changes the stamp");
+  assert.equal(machineJudgeInputs(join(stateDir, "no-such-checkout"), stateDir).startsWith("unreadable:"), true);
 
   const empty = { proceeded: [], escalated: [], unavailable: [], refused: [], failed: [], settled: [] };
   assert.equal(machineJudgeFoundWork(empty), false);

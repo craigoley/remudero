@@ -198,7 +198,7 @@ import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, OPERATOR_RELEASES_FILE, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -36855,21 +36855,6 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
-}
-
-/** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
- *  lives in it) and the operator's releases. A plan that cannot be resolved stamps as unreadable, so it
- *  differs from any recorded tree and the pass runs and reports the failure. */
-export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
-  let plan: string;
-  try {
-    plan = execFileSync("git", ["-C", repoRoot, "rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
-    plan = "unreadable";
-  }
-  const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });
-  return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
 }
 
 /** The daemon's garden pass spawn (W1-T5475): a child pass logs through the daemon's ledger `log`, not stderr. */
