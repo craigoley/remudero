@@ -268,9 +268,14 @@ async function readThreadHeap({ kind, thread }: TrackedWorker, timeoutMs: number
     timer.unref?.();
   });
   const read = (async (): Promise<ThreadRead> => {
-    const heap = await thread.getHeapStatistics();
-    return { site: kind, threadId, total: heap.total_heap_size, used: heap.used_heap_size };
-  })().catch((e: unknown) => unsized(String((e as Error)?.message ?? e)));
+    try {
+      const heap = await thread.getHeapStatistics();
+      return { site: kind, threadId, total: heap.total_heap_size, used: heap.used_heap_size };
+    } catch (e) {
+      // Reason: a thread that exited or refused the read is named unsized, never read as 0 bytes.
+      return unsized(String((e as Error)?.message ?? e));
+    }
+  })();
   try {
     return await Promise.race([read, late]);
   } finally {
