@@ -16,7 +16,7 @@ import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { createSlotPreparer, prepareSlotDeps, runCommand, type RunCommand } from "./serve-slots.js";
-import { createServeSupervisor, handoffSwitch, type ServeSupervisor, type ServeSupervisorOptions } from "./serve-supervisor.js";
+import { createServeSupervisor, handoffSwitch, SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "./serve-supervisor.js";
 
 export const SERVE_GENS_DIR_ENV = "RMD_SERVE_GENS_DIR";
 
@@ -53,6 +53,7 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
     prepare: createSlotPreparer({ repoDir, gensDir, run, log }),
     serveArgs: serveArgsOf(argv),
     handoffEnabled: handoffSwitch(env, gensDir),
+    spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
     log,
   });
   const onSignal = opts.onSignal ?? ((signal, handler) => void process.once(signal, handler));

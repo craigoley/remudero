@@ -20,7 +20,7 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
+  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
@@ -7638,6 +7638,7 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 }
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
+export const BASE_REPRODUCTION_CONTRADICTED_STEP = "sweep.base_reproduction.contradicted";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
@@ -9063,7 +9064,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // weakens no floor, grants no override. `blocked-ambiguous` dedups per `pr@sha`, so a new head
     // re-earns its question and an override stops this row matching — `mergeable` then arms it.
     disposition: "blocked-ambiguous",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    when: (pr) => isCappedArmEscalation(pr),
     blocker: "plan-proof-unrunnable",
     reason: () =>
       "every required check is green and remudero-review reports success, but the verdict ledgered " +
@@ -10416,6 +10417,17 @@ export interface CappedRoutingDiagnosis {
   detail: string;
 }
 
+export function isCappedArmEscalation(pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">): boolean {
+  return pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true;
+}
+
+export function cappedRouteReadsDisposition(
+  pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">,
+  disposition: Disposition,
+): boolean {
+  return disposition === "mergeable" || (disposition === "blocked-ambiguous" && isCappedArmEscalation(pr));
+}
+
 /**
  * W1-T3669 — LEGIBILITY FOR A ROUTE THAT SHIPPED SILENT. `runSweep`'s capped-routing block (W1-T3306)
  * has four preconditions and, until this task, standing down on any of them looked identical to
@@ -10431,7 +10443,7 @@ export function diagnoseCappedRoutingBlock(
   disposition: Disposition,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): CappedRoutingDiagnosis {
-  if (disposition !== "mergeable") {
+  if (!cappedRouteReadsDisposition(pr, disposition)) {
     return {
       blocked: true,
       precondition: "not-mergeable",
@@ -12081,12 +12093,20 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   let stalled = false;
   let dispatched = false;
   let ciHead: unknown;
+  let amendmentNumber: number | undefined;
+  let awaitingAmendment: number | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
+      awaitingAmendment = undefined;
       ciHead = line.mode === "ci-log" ? line.head_sha : undefined;
+    } else if (line.step === "fix.scope_amendment") {
+      const n = Number(line.amendmentNumber ?? line.amendment_number);
+      if (Number.isSafeInteger(n) && n > 0) amendmentNumber = n;
+    } else if (line.step === "fix.done" && line.subtype === "scope_amendment_pending") {
+      awaitingAmendment = amendmentNumber;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
@@ -12103,6 +12123,10 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
     }
+  }
+  if (awaitingAmendment !== undefined && lines.some((line) =>
+    line.step === PR_TERMINAL_STEP && line.state === "merged" && Number(line.pr_number) === awaitingAmendment)) {
+    return true;
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
@@ -12437,6 +12461,7 @@ export function fixRoundTally(
     if (round.refusal || round.done?.subtype === "commit_refused") {
       const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
       tally.refusals.push({ reason, round_id: round.id });
+      if (round.dispatch.mode === "ci-log" && reason === "the worker changed nothing") tally.noCommitRounds.push(round.id);
       const count = (reasons.get(reason) ?? 0) + 1;
       reasons.set(reason, count);
       if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
@@ -12818,6 +12843,10 @@ export function readyDraftPullRequest(
 
 /** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
 export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
+
+export function emptyDiffReviewFailure(pr: OpenPrView): boolean {
+  return !isBlockedCi(pr) && pr.changedFiles?.length === 0;
+}
 
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
 const armsInFlight = new Set<string>();
@@ -14203,12 +14232,12 @@ export async function runSweep(
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
     }
-    // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
-    // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
-    // its claim re-read and shared strike cap remain the sole spending boundary. An operator
-    // override keeps `arm` true and therefore retains the ordinary mergeable arm route.
+    // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
+    // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,
+    // which claims every capped head first; that escalation now stands only with nothing to repair.
+    // An operator override keeps `arm` true and therefore retains the ordinary mergeable arm route.
     const proofDiscrimination =
-      disposition === "mergeable" && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
+      cappedRouteReadsDisposition(pr, disposition) && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
@@ -14461,7 +14490,7 @@ export async function runSweep(
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
         const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
           !metadataRedRuledOut(ledgerLines, pr);
-        alreadyDone = metadataRed
+        alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
@@ -15289,7 +15318,10 @@ export async function runSweep(
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
                 const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
                 const { verdict } = row;
-                if (verdict === "reproduced") {
+                const contradicted = verdict !== "clear" && reproductionFiles.every((file) => ciContradictedProbeFiles([...reproductionHistory, { ...row, step: "sweep.base_reproduction" }]).has(file));
+                if (contradicted) {
+                  appendLine(deps.ledgerPath, { ...row, step: BASE_REPRODUCTION_CONTRADICTED_STEP });
+                } else if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
                     const refund = { run_id: deps.runId, task_id: pr.taskId!, step: "fix.strike_refunded", pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -15305,7 +15337,7 @@ export async function runSweep(
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
                 // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
-                const mainFailing = verdict === "clear" ? undefined : mainFailingTestFiles(reproductionHistory);
+                const mainFailing = verdict === "clear" || contradicted ? undefined : mainFailingTestFiles(reproductionHistory);
                 if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
                   acted = false;
                   const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
@@ -15401,6 +15433,13 @@ export async function runSweep(
                 }
                 reason = `superseded — the stale-proof red leaves nothing in this PR's diff against main (${carried})`;
                 extraDisposedFields = { ...extraDisposedFields, stale_proof_superseded: true };
+                await deps.close(pr, reason);
+                break;
+              }
+              if (emptyDiffReviewFailure(pr) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                staleProofCloses += 1;
+                reason = `superseded — this PR's diff against main is empty, so nothing is left to merge; its failed review cannot be repaired in it (#10265)`;
+                extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
                 await deps.close(pr, reason);
                 break;
               }

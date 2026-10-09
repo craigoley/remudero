@@ -11,7 +11,7 @@ import { gardenLedgerBucket } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
@@ -139,7 +139,50 @@ export const CI_FRICTION_LEDGER_STEPS: readonly string[] = [
   "fix.base_refreshed", "ci-friction.remedy_escalated", "ci-friction.scorecard",
 ];
 
-export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): LedgerRecord[] {
+/** Bump whenever {@link CI_FRICTION_LEDGER_STEPS} or {@link ciFrictionHeadWitnesses} changes: each keys a durable
+ *  per-rotation digest ({@link ledgerRotationDigests}), and a stale one must not answer for the new reduction. */
+export const CI_FRICTION_DIGEST_VERSION = "1";
+
+/** One rotation's head-to-PR witnesses, reduced the way the association recovery below reads them: the first
+ *  row per head sha that names a pull request, as `{ step, head_sha, pr_number }`. */
+export function ciFrictionHeadWitnesses(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const witnesses: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (typeof row.head_sha !== "string" || seen.has(row.head_sha)) continue;
+    const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
+    if (pr === undefined) continue;
+    seen.add(row.head_sha);
+    witnesses.push({ step: row.step, head_sha: row.head_sha, pr_number: pr });
+  }
+  return witnesses;
+}
+
+/** The durable rotation digests the ci-friction history read answers its archives from. */
+export interface CiFrictionRotationDigests {
+  steps: LedgerRotationHook;
+  witnesses: LedgerRotationHook;
+}
+
+export function ciFrictionRotationDigests(stateDir: string, fsDeps?: LedgerGrepFsDeps): CiFrictionRotationDigests {
+  const wanted = new Set(CI_FRICTION_LEDGER_STEPS);
+  return {
+    steps: ledgerRotationDigests(stateDir, (rows) => rows.filter((row) => wanted.has(row.step as string)),
+      { holder: "ci-friction-steps", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+    witnesses: ledgerRotationDigests(stateDir, ciFrictionHeadWitnesses,
+      { holder: "ci-friction-head-witnesses", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+  };
+}
+
+/**
+ * The gardener's whole ledger history. Archived rotations are answered from durable digests, so a pass after
+ * the first decompresses only rotations cut since the last one; the rows are the full union's, unchanged.
+ */
+export function readCiFrictionLedgerRecords(
+  stateDir: string,
+  reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  digests: CiFrictionRotationDigests = ciFrictionRotationDigests(stateDir),
+): LedgerRecord[] {
   const checked = (options: Parameters<typeof readLedgerUnionRecordsSync>[1]): LedgerRecord[] => {
     const read = reader(stateDir, options);
     if (!read.ok) {
@@ -152,7 +195,7 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
     }
     return read.rows as LedgerRecord[];
   };
-  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true });
+  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.steps });
   const byRun = runPrIndex(rows);
   const byHead = headPrIndex(rows);
   const missing = new Set<string>();
@@ -164,7 +207,8 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
   // the retained dispatches need, preserving that attribution without keeping every unrelated row.
   const pattern = new RegExp([...missing].map(head => JSON.stringify(head).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
   const recovered = new Set<string>();
-  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true })) {
+  // The pattern narrows the live file; each archive answers with its witnesses, which the head check below narrows.
+  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.witnesses })) {
     if (typeof row.head_sha !== "string" || !missing.has(row.head_sha) || recovered.has(row.head_sha)) continue;
     const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
     if (pr === undefined) continue;
