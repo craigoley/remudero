@@ -53,6 +53,7 @@ function controlledThread(threadId: number) {
     thread: thread as unknown as WorkerThread,
     get asked(): number { return requests.length; },
     answer(h: HeapStatistics, index = 0): void { requests[index].resolve(h); },
+    fail(message: string, index = 0): void { requests[index].reject(new Error(message)); },
     exit(code: number): void { for (const listener of exitListeners.splice(0)) listener(code); },
   };
 }
@@ -212,6 +213,61 @@ test("a thread list or heap read that throws is named, and leaves no request out
   assert.equal(row?.outstanding_ms, undefined, "a request that never started is not outstanding");
 });
 
+test("an exited Worker's -1 thread id is skipped, and a thread with no exit event is marked exited once the registry drops it", () => {
+  const gone = { threadId: -1, once: () => undefined, getHeapStatistics: () => { throw new Error("never asked"); } } as unknown as WorkerThread;
+  const deaf = controlledThread(81);
+  const noExitEvent = { ...deaf.thread, once: () => { throw new Error("no exit event"); } } as unknown as WorkerThread;
+  let live: TrackedWorker[] = [{ kind: "status:prewarm", thread: gone }, { kind: "status:prewarm", thread: noExitEvent }];
+  const readings = book(() => live);
+  readings.refresh();
+  const first = readings.fields(MAIN);
+  assert.deepEqual(threadsOf(first).map((t) => t.thread_id), [81], "a thread reading -1 has already exited and is not booked");
+  live = [];
+  readings.refresh();
+  const second = entry(readings.fields(MAIN), 81);
+  assert.equal(second?.state, "exited", "a thread the registry stopped listing is exited even without an exit event");
+  assert.equal(second?.exit_code, undefined, "no exit code is invented");
+});
+
+test("a failed main-heap read omits main and the residual with its reason, and a missing input is named", async () => {
+  const t = controlledThread(91);
+  const failing = workerHeapReadings({ live: () => [{ kind: "read-plane:startReadPlane", thread: t.thread }], mainHeap: () => { throw new Error("v8 unavailable"); }, timeoutMs: 15 });
+  failing.refresh();
+  t.answer(heap(10));
+  await settle(5);
+  const noMain = failing.fields(MAIN);
+  assert.equal(noMain.worker_heaps?.main, undefined, "an unread main isolate is absent, never zero");
+  assert.equal(noMain.unattributed_omitted, "main-heap-unread:v8 unavailable");
+  const u = controlledThread(92);
+  const partial = book(() => [{ kind: "read-plane:startReadPlane", thread: u.thread }]);
+  partial.refresh();
+  u.answer(heap(10));
+  await settle(5);
+  const missing = partial.fields({ rss_bytes: MAIN.rss_bytes });
+  assert.equal(missing.unattributed_bytes_approx, undefined);
+  assert.equal(missing.unattributed_omitted, "needs:rss_bytes,external_bytes");
+});
+
+test("a heap request that rejects is named on the thread, releases it for the next round, and is ignored once the thread exited", async () => {
+  const flaky = controlledThread(101);
+  const leaving = controlledThread(102);
+  let live: TrackedWorker[] = [{ kind: "read-plane:startReadPlane", thread: flaky.thread }, { kind: "status:prewarm", thread: leaving.thread }];
+  const readings = book(() => live);
+  readings.refresh();
+  flaky.fail("worker is terminating");
+  leaving.exit(0);
+  leaving.fail("terminated");
+  await settle(5);
+  const fields = readings.fields(MAIN);
+  const failed = entry(fields, 101);
+  assert.deepEqual({ state: failed?.state, error: failed?.error, outstanding: failed?.outstanding_ms }, { state: "unanswered", error: "worker is terminating", outstanding: undefined },
+    "a rejected request is named, never zero, and leaves nothing outstanding");
+  assert.equal(entry(fields, 102)?.error, undefined, "a rejection after the thread exited is not attributed to it");
+  live = [{ kind: "read-plane:startReadPlane", thread: flaky.thread }];
+  readings.refresh();
+  assert.equal(flaky.asked, 2, "the settled rejection lets the next round ask again");
+});
+
 function fixturePlan(): Plan {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-thread-heaps-`));
   const f = join(dir, "tasks.yaml");
@@ -233,7 +289,10 @@ async function heartbeat(extra: Partial<DaemonDeps>, ticks: number, settleMs: nu
       runOne: async (id) => { await gate; merged.add(id); return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" }; },
       sweepLight: async () => {},
       sleep: async () => { sleeps++; await settle(settleMs); if (sleeps >= ticks) release?.(); },
-      log: (step, e = {}) => { if (step === "daemon.alive") { rows.push(e); events.push("row"); } },
+      log: (step, e = {}) => {
+        if (step === "daemon.alive") { rows.push(e); events.push("row"); }
+        if (step === "daemon.memory_read_failed") events.push(`failed:${String(e.error)}`);
+      },
       ...extra,
     },
     { max: 1 },
@@ -264,6 +323,14 @@ test("serve's own worker-heap reading keeps its shape: the daemon book changes n
     name: "worker-heap:read-model-worker:spawnReadModel", kind: "worker-heap", entries: 1,
     bytes: h.total_heap_size + h.external_memory, parts: { "thread-71": { entries: 1, bytes: h.total_heap_size + h.external_memory } },
   }], "serve.memory's worker-heap line is still committed heap plus external, one part per thread");
+});
+
+test("a request round that throws is logged, and every heartbeat is still written", { timeout: 20_000 }, async () => {
+  const events: string[] = [];
+  const readMemoryTelemetry = Object.assign(() => ({ ...MAIN }), { afterRow: () => { throw new Error("round refused"); } });
+  const rows = await heartbeat({ readMemoryTelemetry }, 4, 5, events);
+  assert.ok(rows.length >= 3, `the heartbeat survived every failed round (got ${rows.length})`);
+  assert.equal(events.filter((e) => e === "failed:round refused").length, rows.length, "each failed round is logged once, after its row");
 });
 
 test("the sampler module references no heap snapshot, inspector or gc entry point", () => {
