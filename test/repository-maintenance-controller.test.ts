@@ -193,7 +193,9 @@ test("unverifiable post-survey and Git's replacement marker each enter durable b
 });
 
 test("Git's database lock refuses a contender and preserves failure evidence", async () => {
-  const store = gitRepo({ kind: "maintenance-contender" });
+  // No seed commit: newer Git can detach automatic maintenance after a commit,
+  // and that fixture's lock release can race this deliberately held database lock.
+  const store = gitRepo({ kind: "maintenance-contender", seedCommit: false });
   const marker = join(store.dir, ".git", "gc.log");
   writeFileSync(marker, "original failure\n");
   const lock = join(store.dir, ".git", "objects", "maintenance.lock");
@@ -210,7 +212,7 @@ test("Git's database lock refuses a contender and preserves failure evidence", a
 });
 
 test("a zero-exit maintenance lock skip is never a completed child", async () => {
-  const store = gitRepo({ kind: "maintenance-zero-skip" });
+  const store = gitRepo({ kind: "maintenance-zero-skip", seedCommit: false });
   const lock = join(store.dir, ".git", "objects", "maintenance.lock");
   const marker = join(store.dir, ".git", "gc.log");
   writeFileSync(lock, "another maintenance owner\n");
