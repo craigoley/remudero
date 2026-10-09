@@ -12,7 +12,7 @@
   plan_refs: [W1-T6362, W1-T5974, W1-T5918]
   files: [src/lib/prompt-render.ts, src/lib/sweep.ts, test/a-preserved-fix-owner-patch-reaches-the-next-fix-round.test.ts]
   status: queued
-  priority: 3
+  priority: 1  # operator 2026-10-09: unbuilt since 10-08; W1-T6362 merged
   attempts: 0
   rationale: |
     READ 2026-10-08: #10111 (W1-T6362) writes a dead owner's staged residue at the PR's current head to an immutable
