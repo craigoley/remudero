@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the unwired-gate gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:10137:unwired-gate in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:10137:unwired-gate. The unwired-gate gate went red on #10137 and was repaired; the repair touched test/a-coverage-shard-that-cannot-report-names-the-truncated-raw-file.test.ts, test/setup/tmp-hygiene.ts, test/the-drain-reads-the-ledger-once-per-pass.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed plan scopes the remedy to a matched learnings entry in learnings/ci.yaml, consistent with the sole declared file and acceptance criterion."
+      - "The supplied scope describes worker guidance for an existing gate, with no stated change to merge, deploy, infrastructure, review policy, credentials, permissions, or destructive actions."
+      - "The supplied family record shows 12 merged tasks and 1 declined; filing-time gates state identifies no concerning failure."
+    judged_at: "2026-10-09T07:00:08.353Z"
+    pin: "2f414b9a116956f178714e88c9a49e31a32f6be60e6669feb041b71941dcd3b9"

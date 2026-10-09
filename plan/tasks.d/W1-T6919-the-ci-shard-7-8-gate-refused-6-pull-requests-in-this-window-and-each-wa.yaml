@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the ci-shard (7/8) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:9979:ci-shard (7/8) in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:9979:ci-shard (7/8). The ci-shard (7/8) gate went red on #9979 and was repaired; the repair touched learnings/ci.yaml, learnings/index.json, plan/feedback/fb-1789382557136-8e0974.yaml, plan/feedback/fb-1789845689573-0abbac.yaml, plan/feedback/fb-1789927308301-29a363.yaml, plan/tasks.d/w1-t6287-selector-shadow-miss.yaml, test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts, test/recycle-container.test.ts, test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan proposes a matched CI learning entry and declares only learnings/ci.yaml, consistent with its stated remedy."
+      - "The supplied scope names no sensitive access, deletion, irreversible action, policy change, or operator-only decision."
+      - "The family track record reports 12 merged tasks and 1 declined; filing-time gates state supplies no failed gate. Implementation and proof execution remain unverified because no diff exists yet."
+    judged_at: "2026-10-09T06:59:50.536Z"
+    pin: "8f90ac3ae400b25f00824d0ebd7a739836ec2a8d998764827d89b2d3f63b80a5"
