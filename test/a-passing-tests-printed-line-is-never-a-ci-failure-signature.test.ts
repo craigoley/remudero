@@ -32,6 +32,17 @@ test("a runner's not ok names the failing test file even when noise precedes it"
   assert.equal(gardener.ciFailureSignature(tail), "test/the-sweep-walks-oldest-first.test.ts");
 });
 
+test("a failing test named only by its title is signed by the file its stack frame names", () => {
+  const tail = [
+    `${job}${at(1)}ok 1 - test/a-worktree-is-materialized.test.ts`,
+    `${job}${at(2)}not ok 7 - buildSweepHook builds once`,
+    `${job}${at(3)}    at TestContext.<anonymous> (file:///workspace/remudero/test/sweep-gateway-warm.test.ts:88:3)`,
+  ].join("\n");
+  assert.equal(gardener.ciFailureSignature(tail), "test/sweep-gateway-warm.test.ts");
+  // No frame names a file: the title stays the signature, and a passing file is never borrowed.
+  assert.equal(gardener.ciFailureSignature(tail.split("\n").slice(0, 2).join("\n")), "buildSweepHook builds once");
+});
+
 test("a truncated coverage report is the shard's signature, not an unnamed flake", () => {
   const tail = [
     `${job}${at(1)}ok 1 - test/a.test.ts`,

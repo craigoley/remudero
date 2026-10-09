@@ -367,15 +367,29 @@ export function testRunnerFailureSignature(lines: readonly string[]): string | u
   const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
   if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
   const named: string[] = [];
-  for (const b of bodies) {
+  let firstNamedAt = -1;
+  for (const [i, b] of bodies.entries()) {
     const name = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]
       ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(b)?.[1]
       ?? /^FLAKE-RETRY: .* — (?!\(no test name)(.+)$/.exec(b)?.[1]
       ?? /COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
-    if (name !== undefined && !/^failing tests:?$/.test(name.trim())) named.push(name.trim());
+    if (name !== undefined && !/^failing tests:?$/.test(name.trim())) {
+      if (firstNamedAt < 0) firstNamedAt = i;
+      named.push(name.trim());
+    }
   }
-  const file = named.map((n) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(n)?.[1]).find((f) => f !== undefined);
+  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
+  const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
   if (file !== undefined) return file;
+  // A failing test named only by its title: the stack frame under the failure names its file. Only
+  // lines FROM the first failure on are read, and never a passing `ok`/`# Subtest` line.
+  if (firstNamedAt >= 0) {
+    for (const b of bodies.slice(firstNamedAt)) {
+      if (/^\s*(?:ok \d+ - |# Subtest: )/.test(b)) continue;
+      const frameFile = testFileRe.exec(b)?.[1];
+      if (frameFile !== undefined) return frameFile;
+    }
+  }
   const first = named[0]?.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
   return first ? first.slice(0, 120) : RED_WITH_NO_FAILING_TEST;
 }
