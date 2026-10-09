@@ -70,31 +70,39 @@ export function liveRunSpend(
   lines: Array<Record<string, unknown>>,
   taskId: string,
 ): { spendUsd: number; turns: number; hasData: boolean } | undefined {
-  let inFlight = false;
-  let spendUsd = 0;
-  let turns = 0;
-  // Distinguishes "no data yet" from a real zero (fb-1784902052582-c124f9).
-  let hasData = false;
+  return liveRunSpendByTask(lines, [taskId]).get(taskId);
+}
+
+/** {@link liveRunSpend} for several tasks in ONE pass over `lines`: the board asked once per running task, a
+ *  whole-ledger scan each, which on core's fact store was most of the `now` view's snapshot stage. Only in-flight
+ *  tasks have an entry. */
+export function liveRunSpendByTask(
+  lines: Array<Record<string, unknown>>,
+  taskIds: Iterable<string>,
+): Map<string, { spendUsd: number; turns: number; hasData: boolean }> {
+  const runs = new Map<string, { inFlight: boolean; spendUsd: number; turns: number; hasData: boolean }>();
+  for (const id of taskIds) runs.set(id, { inFlight: false, spendUsd: 0, turns: 0, hasData: false });
   for (const line of lines) {
-    if (line.task_id !== taskId) continue;
+    const run = typeof line.task_id === "string" ? runs.get(line.task_id) : undefined;
+    if (!run) continue;
     if (line.step === "run.start") {
-      inFlight = true;
-      spendUsd = 0;
-      turns = 0;
-      hasData = false;
+      // Distinguishes "no data yet" from a real zero (fb-1784902052582-c124f9).
+      Object.assign(run, { inFlight: true, spendUsd: 0, turns: 0, hasData: false });
       continue;
     }
     if (line.step === "verdict") {
-      inFlight = false;
+      run.inFlight = false;
       continue;
     }
-    if (!inFlight) continue;
+    if (!run.inFlight) continue;
     if (line.step !== "implement.done" && line.step !== "fix.done") continue;
-    if (typeof line.cost_usd === "number") spendUsd += line.cost_usd;
-    if (typeof line.num_turns === "number") turns += line.num_turns;
-    hasData = true;
+    if (typeof line.cost_usd === "number") run.spendUsd += line.cost_usd;
+    if (typeof line.num_turns === "number") run.turns += line.num_turns;
+    run.hasData = true;
   }
-  return inFlight ? { spendUsd, turns, hasData } : undefined;
+  const out = new Map<string, { spendUsd: number; turns: number; hasData: boolean }>();
+  for (const [id, { inFlight, spendUsd, turns, hasData }] of runs) if (inFlight) out.set(id, { spendUsd, turns, hasData });
+  return out;
 }
 
 /** Every distinct `task_id` named on a ledger line, in first-seen order. */
