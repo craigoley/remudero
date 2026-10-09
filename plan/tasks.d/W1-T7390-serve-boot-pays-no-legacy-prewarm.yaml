@@ -1,0 +1,46 @@
+- id: W1-T7390
+  title: "SERVE BOOT PAYS NO LEGACY PREWARM — every serve generation spends ~48 s running the raw /v1/operator-activity (~30 s) and /v1/action-results (~18 s) handlers to fill in-process memos, although the read-model `workstreams` and `actions` views already build the same bodies off-thread"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-09: Azure-host performance follow-up to #10348 (serve handoff spacing)"
+  plan_refs: [W1-T5050, W1-T5052, W1-T4454]
+  files: [src/run-task.ts, src/lib/serve.ts, src/lib/console-snapshot-cache.ts, test/serve-boot-pays-no-legacy-prewarm.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-09 at origin/main 500b53676: src/run-task.ts:40013 wires
+    `consoleSnapshots.prewarmPaths: ["/v1/operator-activity", "/v1/action-results"]`; src/lib/serve.ts:982 starts
+    `prewarmReadRoutes` on every boundConsoleReadRoutes, and src/lib/console-snapshot-cache.ts:411-429 runs each raw
+    GET handler once on serve's own process (ledgering serve.boot_prewarm {path, ms}). #10348's 46.2 h window
+    (2026-10-06 20:25Z to 10-08 18:38Z) measured 141 serve generations, each paying a 48 s boot prewarm
+    (operator-activity 30 s plus action-results 18 s; 6,740 s in total). #10348 halves handoffs but each remaining
+    generation still pays the full 48 s.
+    The same bodies already exist off-thread: src/lib/workstreams-view.ts (W1-T5050) answers the operator-activity
+    body per instance with buildOperatorActivityProjection, "the very function the route answers with", and
+    src/lib/actions-view.ts (W1-T5052) answers the action-results body with buildActionResultsProjection over the
+    same window. Both are served as /v1/views/<name> (src/lib/views.ts:274).
+    The console (craigoley/remudero-console) still reads the legacy paths: app/workstreams/page.tsx:36,47 reads
+    /v1/operator-activity and app/actions/page.tsx:12,32 reads /v1/action-results.
+  design: |
+    Make the two legacy GETs answer from the materialized view bodies, then delete the prewarm.
+    1. GET /v1/operator-activity and GET /v1/action-results answer the instance's entry of the `workstreams` /
+       `actions` view body when that body is built and fresh, with the same JSON shape and the view's staleness;
+       any query the view entry cannot answer (a filter the body does not hold, an unbuilt or unavailable entry)
+       falls through to the raw handler exactly as today.
+    2. Remove `prewarmPaths` from src/run-task.ts:40013 and the prewarmReadRoutes call in serve.ts; delete
+       prewarmReadRoutes if nothing else calls it.
+    This keeps the console contract unchanged. Once the console reads /v1/views/workstreams and /v1/views/actions
+    directly (a remudero-console task), the legacy-path fallback can go too; that is out of this task's files.
+  acceptance:
+    - claim: "a serve boot runs no raw operator-activity or action-results handler, and both legacy GETs answer from the view body"
+      proof: 'grep: test("W1-T7390: serve boot pays no legacy prewarm and the legacy reads answer from the views" in test/serve-boot-pays-no-legacy-prewarm.test.ts'
+  falsifier: |
+    Leave prewarmPaths wired: the test observes the raw operator-activity handler run at boot and fails. Leave the
+    route on the raw handler: the test's spy sees the ledger fold on a request whose view body is built, and fails.

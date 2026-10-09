@@ -1,0 +1,40 @@
+- id: W1-T7391
+  title: "THE NOW VIEW'S DECISIONS LEDGER READ STARTS WARM — `decisions.ledger` takes 1.5-14.6 s on the first build after a restart, when its in-memory rotation memo is empty, against 22-57 ms in steady state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-10-09: Azure-host performance work (read-model worker slow_view rows)"
+  plan_refs: [W1-T5374]
+  files: [src/lib/now-view.ts, test/now-decisions-ledger-starts-warm.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-09 at origin/main 500b53676: the `decisions.ledger` lap (src/lib/now-view.ts:1107) is
+    `gateLedger` (src/lib/now-view.ts:964-973). It reads the whole ledger union through
+    `createLedgerRotationMemo(...)` with NO holder, so the memo lives only in the worker's memory, and
+    `memo.pass({ parseMissing: true })` gunzips and parses every archived rotation (30 days of them) on the first
+    build of each process. OBSERVED 2026-10-09 on the fleet host: the lap took 1.5-14.6 s on the first build after a
+    restart and 22-57 ms in steady state. Serve restarts about every 20-40 min under merging (#10348), so the cold
+    cost recurs all day.
+    #10358 added a durable per-rotation digest store for exactly this shape: `ledgerRotationDigests`
+    (src/lib/ledger-union.ts:1534) keeps each rotation's reduced rows on disk under
+    cache/rotation-digests/<holder>/, keyed by name, size and mtime, so a fresh process decompresses only a rotation
+    it has not seen.
+  design: |
+    Seed the gate rows' rotation memo from durable digests: give gateLedger's read a holder (e.g. "now.gate") and a
+    reducer version, and read archived rotations through `ledgerRotationDigests` (or the async memo's durable
+    digest mode, if that is the closer fit) with the same reducer (isPinReviewerRow || isOperatorRow). The live file
+    is still read every build, and the completeness rules (refuseIncomplete, torn, unclassified) are unchanged.
+    Bump the reducer version whenever the gate step set changes.
+  acceptance:
+    - claim: "a fresh now view's first decisions build parses no rotation another process already digested"
+      proof: 'grep: test("W1-T7391: a fresh now view reads the gate rows from durable rotation digests" in test/now-decisions-ledger-starts-warm.test.ts'
+  falsifier: |
+    Keep the holderless in-memory memo: a second view instance over the same state dir parses every rotation again,
+    the test's digest counts show parsed > 0, and it fails.

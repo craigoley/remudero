@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high
+  band_meaning: span
   priority: 1.35
   status: queued
   attempts: 0
@@ -13,10 +14,11 @@
   files:
     - src/lib/sweep.ts
     - test/flow-review-failed-n-unmet-criterion.test.ts
+    - "src/lib/read-model-worker.ts"
   acceptance:
     - claim: "review-failed:<n> unmet criterion is cleared by its owner without manual intervention"
       proof: "grep: test(\"W1-T7091: flow-review-failed-n-unmet-criterion clears without a person\" in test/flow-review-failed-n-unmet-criterion.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges. Scope now spans sweep and read-model-worker; the earlier ruling covered sweep and its test only. Parked unjudged until the machine-filing judge assesses the amended record."
   rationale: |
     review-failed:<n> unmet criterion cost 2.70 PR-hours; owner fix-lane
     Owner fix-lane failed to clear eligible episodes.
@@ -24,12 +26,10 @@
     - PR #10265: 2.72 PR-hours — 1 unmet criterion — strike 1/2
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "low"
-    action: proceed
-    confidence: 0.78
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
     reasons:
-      - "The plan targets owner-driven remediation of an unmet review criterion and declares only src/lib/sweep.ts and a dedicated test file; it does not request changing review policy or bypassing the criterion."
-      - "The supplied scope names no credential access, destructive action, infrastructure change, or operator-only decision; the family reports 3 merged tasks and 0 declined."
-      - "This is a filing-time assessment with verify: auto and a named acceptance proof; no implementation or passing test results are supplied."
-    judged_at: "2026-10-09T11:59:01.685Z"
-    pin: "9ea2c4d0ec054a88bafea8371a2a4b14e616b30b63ac4a8fb6c380612ddececa"
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearance of a review-failed unmet criterion but does not identify the criterion or the owner's corrective action, leaving review-policy implications unverifiable from the supplied record.; on the change's description/files alone, no diff was read — The supplied grep proof checks for a test declaration; it does not establish that clearance requires satisfying the unmet criterion. The escalation rule explicitly classifies unverifiable findings as HIGH."
+    judged_at: "2026-10-09T19:14:23.957Z"
+    pin: "1194c00a2ad0099cdcf1f0fa812940368c7e73646f2c638205717bf2b255a8e7"
