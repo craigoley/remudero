@@ -16307,7 +16307,7 @@ export async function runSweep(
         run_id: deps.runId, task_id: pendingGuard.taskId ?? "SWEEP",
         step: "sweep.update_branch.pending_guard", outcome: "guarded",
         guard_version: CI_REFRESH_GUARD_VERSION, evidence: "sweep-input-snapshot",
-        sweep_input_as_of: new Date(now).toISOString(),
+        sweep_input_as_of: clockFromMillisFn(() => now).iso(),
         pr_number: pendingGuard.prNumber, pr_url: pendingGuard.prUrl, head_sha: pendingGuard.headSha,
         update_reason: pendingGuard.updateReason,
         counterfactual_selected_without_pending_guard: true,

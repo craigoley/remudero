@@ -66,6 +66,7 @@ test("the shipped sweep writes one actual pending guard counterfactual and keeps
   const guarded = rows.filter(r => r.step === "sweep.update_branch.pending_guard");
   assert.equal(guarded.length, 1);
   assert.equal(guarded[0].head_sha, A);
+  assert.equal(guarded[0].sweep_input_as_of, ASOF);
   assert.equal(guarded[0].selected_refresh_head, B);
   assert.equal(guarded[0].counterfactual_selected_without_pending_guard, true);
   assert.deepEqual(updates, [B]);

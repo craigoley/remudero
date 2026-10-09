@@ -80,6 +80,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.stale_red_redrive.local_route": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.released": A_LANE_RUN_ID,
   "sweep.update_branch.attempted": A_LANE_RUN_ID,
+  "sweep.update_branch.pending_guard": A_LANE_RUN_ID,
   "sweep.update_branch.error": A_LANE_RUN_ID,
   "automerge.hold_withdrawal": A_LANE_RUN_ID,
   "automerge.shadow_refused": A_LANE_RUN_ID,
@@ -252,12 +253,13 @@ test("sweep review telemetry does not change the config gardener's gathered runs
   ];
   const telemetry: LedgerRecord[] = [
     "sweep.review_eligible", "sweep.review_admitted", "sweep.post_review.attempt",
+    "sweep.update_branch.pending_guard",
   ].map(step => ({
     run_id: "SWEEP-1", task_id: "T-1", step, pr_url: "https://github.com/fixture/repo/pull/2",
   }));
   const rows = [...worker, ...telemetry];
   const filtered = rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)));
-  assert.equal(filtered.length, worker.length, "all three sweep receipts are outside the filtered read");
+  assert.equal(filtered.length, worker.length, "sweep receipts stay outside the worker pricing read");
   const unfilteredRuns = gatherRuns(rows);
   assert.equal(unfilteredRuns.length, 1, "positive control: the worker run is still gathered");
   assert.equal(unfilteredRuns[0]!.prUrl, worker[2]!.pr_url);
