@@ -100,13 +100,47 @@ function withScratchCopy(root, suites, fn, parent = tmpdir()) {
 }
 /** Excluded from the corpus - see {@link ciReadingSuites}. */
 export const OWN_SUITE = "test/a-ci-skip-guard-can-fire-unconditionally.test.ts";
+const LINKED_GUARD_SUITE = "test/a-skip-guard-reached-through-a-class-variable-is-enumerated.test.ts";
 
-// A guard is skip-shaped when its block reaches `exit 0` - that is what makes an always-true
-// condition a SILENT PASS rather than a visible failure. The window is deliberately small: a
-// distant `exit 0` belongs to some later branch, not to this guard.
+// Keep the direct-exit window; W1-T5829 also follows assignments to later skip readers in a step.
 const EXIT_LOOKAHEAD_LINES = 8;
 const IF_FORM = /^(\s*)if (.+); then\s*$/;
 const OR_FORM = /^(\s*)(\[ .+ \]) \|\| (\{.*)$/;
+const CASE_FORM = /^(\s*)case (.+) in\s*$/;
+
+function blockEnd(lines, start, limit, closing) {
+  let depth = 1;
+  const closer = new RegExp(`^\\s*${closing}\\b`);
+  for (let i = start + 1; i < limit; i += 1) {
+    const opens = closing === "fi" ? IF_FORM.test(lines[i]) || /^\s*if .*\\\s*$/.test(lines[i]) : CASE_FORM.test(lines[i]);
+    if (opens) depth += 1;
+    if (closer.test(lines[i])) depth -= 1;
+    if (depth === 0) return i;
+  }
+  return limit;
+}
+
+function skipCasePattern(lines, start, end) {
+  let armIndent;
+  let pattern;
+  for (let i = start + 1; i < end; i += 1) {
+    const arm = /^(\s*)\(?([^()]+)\)\s*(.*)$/.exec(lines[i]);
+    if (arm && (armIndent === undefined || arm[1] === armIndent)) {
+      armIndent = arm[1];
+      pattern = arm[2].trim().split("|")[0];
+      if (/\bexit 0\b/.test(arm[3])) return pattern;
+      if (arm[3].includes(";;")) pattern = undefined;
+    } else if (pattern !== undefined) {
+      if (/\bexit 0\b/.test(lines[i])) return pattern;
+      if (lines[i].includes(";;")) pattern = undefined;
+    }
+  }
+  return undefined;
+}
+
+function variableReads(line) {
+  return [...line.matchAll(/\$(?:\{([A-Za-z_]\w*)(?:[^}]*)\}|([A-Za-z_]\w*))/g)].map((match) => match[1] ?? match[2]);
+}
 
 /**
  * ENUMERATED FROM THE TREE, NEVER FROM A LIST - the constraint W1-T2680 and W1-T2521 already
@@ -115,24 +149,48 @@ const OR_FORM = /^(\s*)(\[ .+ \]) \|\| (\{.*)$/;
  */
 export function enumerateSkipGuards(text) {
   const lines = text.split("\n");
-  const guards = [];
+  const candidates = [];
   const seenPerJob = new Map();
   let job = "(top level)";
+  let step = 0;
+  let stepEnd = lines.length;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const jobHeader = /^ {2}([A-Za-z][\w-]*):\s*$/.exec(line);
     if (jobHeader) job = jobHeader[1];
-    const form = IF_FORM.test(line) ? "if" : OR_FORM.test(line) ? "or" : undefined;
+    const run = /^(\s*)(?:-\s+)?run:\s*[|>]/.exec(line);
+    if (run) {
+      step = i + 1;
+      stepEnd = lines.findIndex((next, index) => index > i && next.trim() && /^\s*/.exec(next)[0].length <= run[1].length);
+      if (stepEnd === -1) stepEnd = lines.length;
+    }
+    const form = IF_FORM.test(line) ? "if" : OR_FORM.test(line) ? "or" : CASE_FORM.test(line) ? "case" : undefined;
     if (form === undefined) continue;
-    const block = lines.slice(i, i + EXIT_LOOKAHEAD_LINES).join("\n");
-    if (!/\bexit 0\b/.test(block)) continue;
-    const trimmed = line.trim();
+    const end = form === "or" ? i + 1 : blockEnd(lines, i, stepEnd, form === "case" ? "esac" : "fi");
+    const skipPattern = form === "case" ? skipCasePattern(lines, i, end) : undefined;
+    const direct = form === "case" ? skipPattern !== undefined : /\bexit 0\b/.test(lines.slice(i,
+      Math.min(i + EXIT_LOOKAHEAD_LINES, form === "if" ? end + 1 : stepEnd, stepEnd)).join("\n"));
+    const assignments = form === "if"
+      ? lines.slice(i + 1, end).flatMap((bodyLine) => /^\s*(?:export\s+)?([A-Za-z_]\w*)=/.exec(bodyLine)?.[1] ?? [])
+      : [];
+    candidates.push({ job, step, line: i + 1, text: line, form, skipPattern, assignments, reads: variableReads(line), skip: direct });
+  }
+  for (const candidate of [...candidates].reverse()) {
+    if (candidate.form === "if" && !candidate.skip) {
+      candidate.skip = candidates.some((reader) => reader.skip && reader.job === candidate.job && reader.step === candidate.step &&
+        reader.line > candidate.line && candidate.assignments.some((variable) => reader.reads.includes(variable)));
+    }
+  }
+  const guards = [];
+  for (const candidate of candidates.filter((guard) => guard.skip)) {
+    const { job, line, text, form, skipPattern } = candidate;
+    const trimmed = text.trim();
     const nth = (seenPerJob.get(`${job} ${trimmed}`) ?? 0) + 1;
     seenPerJob.set(`${job} ${trimmed}`, nth);
     // The key is job + text + occurrence, never the line number: a guard added above this one
     // shifts every index below it, and a baseline keyed on indexes would silently re-point at a
     // different guard rather than failing.
-    guards.push({ key: `${job}#${nth}: ${trimmed}`, job, line: i + 1, text: line, form });
+    guards.push({ key: `${job}#${nth}: ${trimmed}`, job, line, text, form, ...(form === "case" ? { skipPattern } : {}) });
   }
   return guards;
 }
@@ -144,8 +202,7 @@ export function enumerateSkipGuards(text) {
  * fast-lane case, and left the guard under test untouched - so a new test appeared to survive a
  * falsifier it had never been given. Same shape as this repo's whole-file lcov-edit trap.
  *
- * The two forms invert: an `if` guard skips when its condition is TRUE, an `[ .. ] || { .. }`
- * guard skips when its test is FALSE. "Always skip" therefore means different constants.
+ * Force an `if` condition true, an `[ .. ] || { .. }` test false, or a case's exit-zero arm.
  */
 export function mutateGuardLine(text, guard) {
   const before = text.split("\n");
@@ -156,9 +213,16 @@ export function mutateGuardLine(text, guard) {
   }
   const ifMatch = IF_FORM.exec(original);
   const orMatch = OR_FORM.exec(original);
+  const caseMatch = CASE_FORM.exec(original);
+  const quotedPattern = caseMatch && /^(['"])(.*)\1$/.exec(guard.skipPattern);
+  const caseValue = caseMatch && (quotedPattern ? quotedPattern[2] : guard.skipPattern
+    .replace(/\[([!^]?)([^\]]+)\]/g, (_match, negated, chars) => negated
+      ? [..."abcdefghijklmnopqrstuvwxyz0123456789"].find((char) => !new RegExp(`^[${chars}]$`).test(char))
+      : chars[0]));
   lines[guard.line - 1] = ifMatch
     ? `${ifMatch[1]}if [ "1" = "1" ]; then`
-    : `${orMatch[1]}[ "1" = "0" ] || ${orMatch[3]}`;
+    : caseMatch ? `${caseMatch[1]}case '${caseValue.replace(/'/g, "'\\''")}' in`
+      : `${orMatch[1]}[ "1" = "0" ] || ${orMatch[3]}`;
   const changed = lines.flatMap((l, i) => (l === before[i] ? [] : [i + 1]));
   if (changed.length !== 1 || changed[0] !== guard.line) {
     throw new Error(`refusing a mutant that touched line(s) ${changed.join(", ")} rather than only ${guard.line}`);
@@ -175,7 +239,7 @@ export function mutateGuardLine(text, guard) {
  * one behaviour: MEASURED, a re-seed with it in the corpus read 14 covered / 2 uncovered where the
  * honest figure was 5 / 11. That is the general hazard - a purely STRUCTURAL suite over ci.yml's
  * text reacts to the edit, not to what the guard does - and it is stated here rather than
- * detected, because only this one suite is guaranteed to have the property.
+ * detected, because both inventory suites have this property.
  *
  * `--untracked` IS LOAD-BEARING, not tidiness. `git grep` reads the index, so a suite added in the
  * very commit that adds a guard is INVISIBLE to it until staged - and this check's whole job is to
@@ -191,7 +255,7 @@ export function ciReadingSuites(root = REPO_ROOT) {
   return out
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE);
+    .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE && l !== LINKED_GUARD_SUITE);
 }
 
 /**
