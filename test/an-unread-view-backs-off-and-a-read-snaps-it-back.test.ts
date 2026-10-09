@@ -78,7 +78,8 @@ function projectorStates(stateDir: string, ledgerDir: string, clock: Clock): { s
   return { states: last?.type === "state" ? last.instances : [], release: () => ticker.release() };
 }
 
-test("a read-paced view nobody reads is rebuilt at most once per stretched interval, and the next read rebuilds it on the next tick", (t) => {
+for (const factory of [false, true]) {
+test(`a read-paced ${factory ? "factory" : "direct"} view nobody reads is rebuilt at most once per stretched interval, and the next read rebuilds it on the next tick`, (t) => {
   const stateDir = scratch(t, "paced-state");
   const ledgerDir = scratch(t, "paced-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(T0));
@@ -98,7 +99,7 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
     { name: "now", version: 1, readPaced: true, materialize: built("now") },
     { name: "steady", version: 1, materialize: built("steady") },
   ];
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views, viewsOnly: true, oracle: "off", post: () => {} });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views: factory ? views.map((view) => ({ name: view.name, create: () => view })) : views, viewsOnly: true, oracle: "off", post: () => {} });
   t.after(() => void ticker.release());
   ticker.observe(projector.states);
   const tickMs = 250;
@@ -150,6 +151,7 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
   const reading = count("now", readingFrom);
   assert.ok(Math.abs(reading - count("steady", readingFrom)) <= 2, `read every minute, it keeps the unpaced cadence: ${reading} vs ${count("steady", readingFrom)}`);
 });
+}
 
 test("a read reaches the views it reads directly or through a view built from them", () => {
   const names = ["now", "nav-badge", "repositories", "read-model"];
