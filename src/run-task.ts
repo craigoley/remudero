@@ -478,6 +478,7 @@ import {
   validateDeployStateRoot,
 } from "./lib/install-root.js";
 import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
+import { readCoverageNightlySummary } from "./lib/coverage-nightly-intake.js";
 import {
   buildDigest,
   buildMarkerAwareDigest,
@@ -30787,6 +30788,15 @@ export function buildSuccessorAlertHandler(opts: {
   };
 }
 
+export function buildCoverageNightlyDaemonHook(opts: Parameters<typeof readCoverageNightlySummary>[0] & {
+  next(): GithubPostureFinding[] | Promise<GithubPostureFinding[]>;
+}): () => Promise<GithubPostureFinding[]> {
+  return async () => {
+    await readCoverageNightlySummary(opts);
+    return opts.next();
+  };
+}
+
 export function buildMeasurementCadenceDaemonHooks(deps: {
   check?: () => MeasurementCadenceDecision;
   run?: () => Promise<MeasurementCadenceRunResult>;
@@ -38431,7 +38441,9 @@ export async function daemonCommand(
         // against the recorded state/github-posture.json baseline, and returns only what
         // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
         // finding and never gates dispatch on it (see that call site's own comment).
-        checkGithubPosture: githubPostureHooks?.checkGithubPosture,
+        checkGithubPosture: githubPostureHooks ? buildCoverageNightlyDaemonHook({
+          ledgerPath, ...self, next: githubPostureHooks.checkGithubPosture,
+        }) : undefined,
         // MEASUREMENT CADENCE RUNG (W1-T1259's design, wired here). Same shape as the auto-triage/
         // github-posture hooks above and gated the same way — SAFE ON in policy data (see
         // plan/policy.yaml's `measurementCadence` row for why this rung, unlike auto-triage,
