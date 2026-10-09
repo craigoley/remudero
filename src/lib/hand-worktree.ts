@@ -14,9 +14,17 @@
  * When no donor qualifies, the next step is REPORTED with the free space, never run here.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync, statfsSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statfsSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+
+export function defaultHandWorktreeParent(
+  repoDir: string,
+  { scratchRoot = "/mnt/scratch", exists = (path: string) => existsSync(path) && statSync(path).isDirectory() }:
+    { scratchRoot?: string; exists?: (path: string) => boolean } = {},
+): string {
+  return exists(scratchRoot) ? join(scratchRoot, "hand") : dirname(resolve(repoDir));
+}
 
 /** A filed task id (`W1-T<n>`, or a consumer prefix's `<P>-T<n>`); `unfiled` is accepted beside it. */
 export const HAND_WORKTREE_TASK_ID_RE = /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/;
@@ -35,6 +43,7 @@ export interface HandWorktreeRequest {
   taskId: string;
   /** ABSOLUTE directory the worktree is created in; a relative one is refused. */
   parent: string;
+  createParent?: boolean;
   clock?: Clock;
   minFreeBytes?: number;
   /** The npm binary the donor's `npm ls` runs through. */
@@ -132,6 +141,13 @@ export function createHandWorktree(req: HandWorktreeRequest): HandWorktreeResult
   const filed = taskId !== "unfiled";
   if (filed && !HAND_WORKTREE_TASK_ID_RE.test(taskId)) return { status: "refused", reason: `'${taskId}' is not a task id (W1-T<n>) or 'unfiled'` };
   if (!isAbsolute(parent)) return { status: "refused", reason: `--parent '${parent}' is relative — give an absolute directory` };
+  if (req.createParent) {
+    try {
+      mkdirSync(parent, { recursive: true });
+    } catch (error) {
+      return { status: "refused", reason: `cannot create scratch parent ${parent}: ${(error as Error).message}` };
+    }
+  }
   if (!existsSync(parent) || !statSync(parent).isDirectory()) return { status: "refused", reason: `--parent '${parent}' is not a directory` };
   const freeBytes = freeBytesAt(parent);
   const floor = req.minFreeBytes ?? HAND_WORKTREE_MIN_FREE_BYTES;

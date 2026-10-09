@@ -1608,6 +1608,7 @@ import {
   operatorVerdictEvidence,
   renderClarificationQuestion,
   renderSweepSummary,
+  type SweepSummary,
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   runCreditBackfill,
@@ -1704,6 +1705,9 @@ import {
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
   riskJudgeHandedOffHead,
+  handedOffHeadJudgmentPool,
+  type HandedOffHeadJudgmentPool,
+  awaitHandedOffHeadJudgments,
   riskJudgeCodeScanning,
   codeScanningHeadSettled,
   reviewInputLoopFacts,
@@ -2954,7 +2958,7 @@ function realDeps(): ComposedRealGraph {
 // reason (see lib/cli-args.ts's own header) — src/lib/report-commands.ts's moved report verbs
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
-import { createHandWorktree, renderHandWorktree } from "./lib/hand-worktree.js";
+import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 export { unknownArgError };
 
 // ── W1-T2888: the read-and-print report verbs, moved to src/lib/report-commands.ts ────────────
@@ -24285,9 +24289,9 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
 /**
  * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
  * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
- * parent defaults to the directory holding this checkout, so the worktree lands beside it.
+ * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
  */
-export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number } = {}): number {
+export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number; scratchRoot?: string; exists?: (path: string) => boolean } = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
     : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
@@ -24296,8 +24300,14 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
     return 2;
   }
   const repoDir = opts.repoDir ?? repoRoot;
-  const parent = flagValue(rest, "--parent") ?? dirname(resolve(repoDir));
-  const result = createHandWorktree({ repoDir, taskId, parent, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  const explicitParent = flagValue(rest, "--parent");
+  const scratchRoot = opts.scratchRoot ?? "/mnt/scratch";
+  const parent = explicitParent ?? defaultHandWorktreeParent(repoDir, { scratchRoot, exists: opts.exists });
+  const scratchDefault = explicitParent === undefined && parent === join(scratchRoot, "hand");
+  const reason = explicitParent !== undefined ? "explicit --parent" : scratchDefault
+    ? `scratch root ${scratchRoot} is a directory` : `scratch root ${scratchRoot} is not a directory; using checkout parent`;
+  console.log(`parent: ${parent} (${reason})`);
+  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
   if (result.status === "refused") {
     console.error(`rmd hand-worktree: refused — ${result.reason}`);
     return 1;
@@ -44440,6 +44450,18 @@ export function captureRepairFeedbackWithPriorVerdict(
   captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
 }
 
+/** The one-shot boundary owns and drains its judgment pool before returning a summary. */
+export async function runOneShotSweep(
+  run: (pool: HandedOffHeadJudgmentPool) => Promise<SweepSummary>,
+  pool = handedOffHeadJudgmentPool(),
+): Promise<SweepSummary> {
+  try {
+    return await run(pool);
+  } finally {
+    await awaitHandedOffHeadJudgments(pool);
+  }
+}
+
 /**
  * `rmd sweep [--repo <name>] [--dry-run]` — run ONE level-triggered reconciliation
  * pass over every open PR (W1-T77, ratifies P22 core). FAIL LOUD on junk args
@@ -44524,7 +44546,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
   // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
-  const summary = await runSweep(
+  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweep(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     withFullSweepRepairAdmission({
       ...effects,
@@ -44538,10 +44560,11 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
     DEFAULT_SWEEP_POLICY,
-  );
+  ));
 
   // W1-T150 — the credit-backfill rung (ratifies P30): level-triggered, like
   // the open-PR reconciliation above, but over every task's OWNED merge state
@@ -53252,7 +53275,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "hand-worktree",
     syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
     summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before writing anything when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent defaults to the directory holding this checkout) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
   },
   {
     name: "next-task-id",

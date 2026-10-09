@@ -363,6 +363,8 @@ function growingHost(dir: string): void {
       tsMs,
       values: { root_free_kb: 400 * GB + (143 - i) * GB },
       consumers: { worktrees: 10 * GB + i * 0.8 * GB, state: 3 * GB },
+      devices: { root: "/dev/sda1" },
+      consumerDevices: { worktrees: "/dev/sda1", state: "/dev/sda1" },
       janitorTs: new Date(Math.floor(tsMs / (6 * 3_600_000)) * 6 * 3_600_000).toISOString(),
       janitorFreedKb: 4 * 1024,
     };

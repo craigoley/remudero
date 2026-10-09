@@ -1,21 +1,8 @@
 /**
- * lib/staged-install.ts — W1-T4933: reinstall a MANAGED checkout's node_modules when its lockfile hash
- * moved, STAGED and SWAPPED, never in place.
- *
- * MEASURED 2026-09-30: `repos/remudero-console` sat at origin/main with a 2026-09-24 install after a
- * 2026-09-27 lockfile change added `@vercel/functions`; every test importing the module that needs it
- * failed to load, and the reviewer failed six proofs. W1-T4356 reinstalled only on its fast-forward arm,
- * through `ensureInstallFresh`'s in-place `npm ci` whose clear phase empties the tree other workers and
- * the reviewer are linked to.
- *
- * THE SEQUENCE (each step leaves the live tree serving):
- *   1. compare {@link hashInstallInputs} with the marker inside the live node_modules — equal is a no-op;
- *   2. copy the lockfile, package.json (and each workspace's package.json) into a SIBLING staging dir
- *      and `npm ci` THERE;
- *   3. verify the staged tree resolves every direct dependency;
- *   4. rename live → staging-root/previous, then staged → live (one rename each, same filesystem);
- *   5. write the marker AFTER the swap, then remove the previous tree.
- * A failure anywhere before step 4 leaves the old tree untouched; a failed second rename puts it back.
+ * Refresh a managed install in a sibling staging directory, then swap it into place.
+ * A verified donor with matching install inputs on the same device lends hard links;
+ * otherwise npm builds the staged tree. The live tree serves until verification completes.
+ * A failed second rename restores the previous tree. Install markers stay private.
  */
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -28,9 +15,11 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
@@ -57,6 +46,9 @@ export interface StagedInstallOptions {
   /** Called at most once per lockfile hash, on a failed install. Its own failure never masks the install error. */
   escalate?: (failure: StagedInstallFailure) => void;
   clock?: Clock;
+  donorDirs?: readonly string[];
+  device?: (path: string) => number;
+  linkInstall?: (donorDir: string, stagingDir: string) => void;
 }
 
 export type StagedInstallOutcome = "noop" | "refreshed" | "skipped_symlink";
@@ -159,6 +151,61 @@ function defaultRunInstall(stagingDir: string): void {
   execFileSync("npm", ["ci"], { cwd: stagingDir, stdio: "pipe", timeout: STAGED_NPM_CI_TIMEOUT_MS });
 }
 
+function defaultDonorDirs(repoDir: string, reasons: string[]): string[] {
+  const parent = dirname(resolve(repoDir));
+  const root = basename(parent) === "repos" ? dirname(parent) : parent;
+  const candidates = [dirname(dirname(dirname(fileURLToPath(import.meta.url)))), join(root, "daemon-install")];
+  for (const dir of new Set([parent, join(root, "repos"), join(root, "worktrees")])) {
+    if (!existsSync(dir)) continue;
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) candidates.push(join(dir, entry.name));
+      }
+    } catch (error) {
+      const reason = `${dir}: ${errorText(error)}`;
+      reasons.push(reason);
+    }
+  }
+  return [...new Set(candidates)].filter((dir) => resolve(dir) !== resolve(repoDir));
+}
+
+function reuseDonor(
+  repoDir: string, stagingDir: string, wanted: string, names: string[],
+  deps: StagedInstallOptions, hash: (dir: string) => string, reasons: string[],
+): string | undefined {
+  const verify = deps.verify ?? defaultVerify;
+  const device = deps.device ?? ((path: string) => statSync(path).dev);
+  const targetDevice = device(stagingDir);
+  for (const donor of deps.donorDirs ?? defaultDonorDirs(repoDir, reasons)) {
+    if (resolve(donor) === resolve(repoDir)) continue;
+    const modules = join(donor, "node_modules");
+    if (readTrimmed(installHashMarkerPath(donor)) !== wanted) continue;
+    try {
+      if (!lstatSync(modules).isDirectory() || device(modules) !== targetDevice || hash(donor) !== wanted) continue;
+      const missing = verify(donor, names);
+      if (missing.length > 0) {
+        reasons.push(`${donor}: donor does not resolve ${missing.join(", ")}`);
+        continue;
+      }
+      (deps.linkInstall ?? ((from: string, stage: string) => {
+        execFileSync("cp", ["-al", join(from, "node_modules"), join(stage, "node_modules")], { stdio: "pipe", timeout: STAGED_NPM_CI_TIMEOUT_MS });
+      }))(donor, stagingDir);
+      const stagedMissing = verify(stagingDir, names);
+      if (stagedMissing.length > 0) throw new Error(`linked tree does not resolve ${stagedMissing.join(", ")}`);
+      if (readTrimmed(installHashMarkerPath(stagingDir)) !== wanted || hash(donor) !== wanted) {
+        throw new Error("donor inputs or marker changed while linking");
+      }
+      rmSync(installEscalatedMarkerPath(stagingDir), { force: true });
+      return donor;
+    } catch (error) {
+      const reason = `${donor}: ${errorText(error)}`;
+      reasons.push(reason);
+      rmSync(join(stagingDir, "node_modules"), { recursive: true, force: true });
+    }
+  }
+  return undefined;
+}
+
 /**
  * Bring `repoDir/node_modules` in line with its lockfile without ever emptying the live tree.
  * Returns `"noop"` on a matching hash. THROWS {@link StagedInstallFailedError} after ledgering
@@ -192,12 +239,16 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
   const stagingDir = join(stagingRoot, "stage");
   const previousTree = join(stagingRoot, "previous");
   let swapped = false;
+  let donor: string | undefined;
+  const donorRejections: string[] = [];
   try {
     rmSync(stagingRoot, { recursive: true, force: true }); // a crashed earlier attempt's leftovers
     mkdirSync(stagingDir, { recursive: true });
     copyInstallInputs(repoDir, stagingDir);
-    (deps.runInstall ?? defaultRunInstall)(stagingDir);
-    const missing = (deps.verify ?? defaultVerify)(stagingDir, directDependencyNames(repoDir));
+    const names = directDependencyNames(repoDir);
+    donor = reuseDonor(repoDir, stagingDir, wanted, names, deps, hash, donorRejections);
+    if (!donor) (deps.runInstall ?? defaultRunInstall)(stagingDir);
+    const missing = donor ? [] : (deps.verify ?? defaultVerify)(stagingDir, names);
     if (missing.length > 0) throw new Error(`staged tree does not resolve ${missing.join(", ")}`);
 
     // The swap: two renames on one filesystem. The second failing puts the old tree straight back.
@@ -209,6 +260,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
       throw error;
     }
     swapped = true;
+    if (donor) rmSync(markerPath, { force: true });
     writeFileSync(markerPath, wanted);
   } catch (error) {
     const failure: StagedInstallFailure = { repoDir, hash: wanted, error: errorText(error) };
@@ -217,6 +269,9 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
       repo: basename(repoDir),
       hash: wanted,
       swapped,
+      method: donor ? "hard-linked" : "npm-ci",
+      donor: donor ?? null,
+      donor_rejections: donorRejections,
       error: failure.error,
       escalated: !escalated,
       elapsed_ms: clock.now() - startedAt,
@@ -243,6 +298,9 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
     repo: basename(repoDir),
     before_hash: before ?? null,
     after_hash: wanted,
+    method: donor ? "hard-linked" : "npm-ci",
+    donor: donor ?? null,
+    donor_rejections: donorRejections,
     elapsed_ms: clock.now() - startedAt,
   });
   return "refreshed";

@@ -77,6 +77,9 @@ export interface HostSample {
   values: Record<string, number>;
   /** Consumer name → kb, only on the beats that measured them. */
   consumers: Record<string, number>;
+  /** Published filesystem identities; absent in samples from older heartbeats. */
+  devices?: Partial<Record<"root" | "state", string>>;
+  consumerDevices?: Record<string, string>;
   janitorTs?: string;
   janitorFreedKb?: number;
 }
@@ -119,10 +122,13 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   put("swap_total_kb", digits(payload["swap_total_kb"]));
   put("inodes_free", digits(payload["root_fs_inodes_free"]));
   const consumers: Record<string, number> = {};
+  const consumerDevices: Record<string, string> = {};
   for (const [key, raw] of Object.entries(payload)) {
     const m = /^consumer_(.+)_kb$/.exec(key);
     const kb = digits(raw);
     if (m && kb !== undefined) consumers[m[1]!] = kb;
+    const deviceMatch = /^consumer_(.+)_device$/.exec(key);
+    if (deviceMatch) consumerDevices[deviceMatch[1]!] = raw;
   }
   const janitorTs = payload["janitor_last_ts"];
   const freed = parseSizeKb(payload["janitor_last_freed"]);
@@ -132,6 +138,8 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
     tsMs,
     values,
     consumers,
+    devices: { root: payload["root_fs_device"], state: stateDevice },
+    consumerDevices,
     ...(janitorTs && Number.isFinite(Date.parse(janitorTs)) ? { janitorTs } : {}),
     ...(freed !== undefined ? { janitorFreedKb: freed } : {}),
   };
@@ -315,8 +323,8 @@ export interface Attribution {
   janitorPasses: number;
 }
 
-/** The consumer whose growth explains the most of a falling kb-device, or undefined. */
-export function attributeGrowth(samples: readonly HostSample[], projection: Projection): Attribution | undefined {
+/** The consumer on this disk whose measured growth explains the most of its fall, or undefined. */
+export function attributeGrowth(samples: readonly HostSample[], projection: Projection, device: "root" | "state"): Attribution | undefined {
   if (projection.slopePerHour >= 0 || !samples.length) return undefined;
   const latest = Math.max(...samples.map((s) => s.tsMs));
   const windowHours = Math.max(projection.windowHours, ATTRIBUTION_MIN_WINDOW_H);
@@ -324,7 +332,11 @@ export function attributeGrowth(samples: readonly HostSample[], projection: Proj
   const names = [...new Set(inWindow.flatMap((s) => Object.keys(s.consumers)))].sort();
   let best: Attribution | undefined;
   for (const consumer of names) {
-    const pts = inWindow.filter((s) => s.consumers[consumer] !== undefined).map((s) => ({ x: s.tsMs / HOUR_MS, y: s.consumers[consumer]! }));
+    const pts = inWindow.filter((s) => {
+      const disk = s.devices?.[device];
+      return disk !== undefined && disk !== "unknown" && disk !== "" &&
+        s.consumerDevices?.[consumer] === disk && s.consumers[consumer] !== undefined;
+    }).map((s) => ({ x: s.tsMs / HOUR_MS, y: s.consumers[consumer]! }));
     if (pts.length < 3) continue;
     const fit = theilSen(thin(pts, MAX_POINTS));
     if (!fit || fit.slope <= 0) continue;
@@ -378,7 +390,7 @@ export function evaluateHost(host: string, allSamples: readonly HostSample[], no
     const projection = projectSeries(points);
     if (!projection || projection.slopePerHour >= 0) continue;
     const base = tierFor(projection.hoursToFull, cadenceHours)!;
-    const attribution = device === "root" || device === "state" ? attributeGrowth(samples, projection) : undefined;
+    const attribution = device === "root" || device === "state" ? attributeGrowth(samples, projection, device) : undefined;
     out.push({
       host,
       device,
@@ -498,7 +510,7 @@ function evidenceText(f: Finding): string {
     `Host ${f.host}, device ${f.device}: ${free} free, falling ${rate} (Theil-Sen over ${p.points} samples across ${fmtHours(p.spanHours)}); projected full in ${p.hoursToFull === undefined ? "never" : fmtHours(p.hoursToFull)}.`,
     `That host's janitor runs about every ${fmtHours(f.cadenceHours)}; the latest pass reclaimed ${f.janitorFreedKb === undefined ? "an unknown amount" : fmtKb(f.janitorFreedKb)}${f.janitorIneffective ? " — effectively nothing while the series kept falling" : ""}.`,
     ...(f.stale ? ["The host's heartbeat has gone silent while its samples were falling."] : []),
-    ...(f.attribution ? [`Growth is attributed to ${f.attribution.consumer}: +${fmtKb(f.attribution.growthKbPerHour)}/h, ${(f.attribution.share * 100).toFixed(0)}% of the fall.`] : []),
+    ...(f.attribution ? [`Growth is attributed to ${f.attribution.consumer}: +${fmtKb(f.attribution.growthKbPerHour)}/h, ${(f.attribution.share * 100).toFixed(0)}% of the fall.`] : f.device === "root" || f.device === "state" ? [`unattributed: no measured consumer on ${f.device}`] : []),
   ].join("\n");
 }
 
@@ -668,7 +680,7 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
     const episode = (state.episodes[key] ??= { tier: f.tier });
     episode.tier = f.tier;
     const p = f.projection;
-    const row = { host: f.host, device: f.device, tier: f.tier, hours_to_full: p.hoursToFull === undefined ? null : Math.round(p.hoursToFull * 10) / 10, slope_per_hour: Math.round(p.slopePerHour), unit: unitOf(f.device), cadence_hours: Math.round(f.cadenceHours * 10) / 10, stale: f.stale, attributed: f.attribution?.consumer ?? null };
+    const row = { host: f.host, device: f.device, tier: f.tier, hours_to_full: p.hoursToFull === undefined ? null : Math.round(p.hoursToFull * 10) / 10, slope_per_hour: Math.round(p.slopePerHour), unit: unitOf(f.device), cadence_hours: Math.round(f.cadenceHours * 10) / 10, stale: f.stale, attributed: f.attribution?.consumer ?? (f.device === "root" || f.device === "state" ? `unattributed: no measured consumer on ${f.device}` : null) };
     if (f.tier !== "record" && !episode.handedOff && ports.handoff) {
       const origin = incidentOrigin(f.host, f.device);
       if (!(ports.openIncidentOrigins?.() ?? new Set<string>()).has(origin)) {
