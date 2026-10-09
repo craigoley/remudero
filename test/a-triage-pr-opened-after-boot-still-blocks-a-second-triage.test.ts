@@ -26,6 +26,7 @@ async function drive(ledgerLines: string[], liveState: string) {
   try {
     let fires = 0;
     let checks = 0;
+    const liveReads: number[] = [];
     const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
     await runDaemon(loadPlan(plan(dir)), {
       refreshMerged: () => () => false,
@@ -36,11 +37,14 @@ async function drive(ledgerLines: string[], liveState: string) {
       runAutoTriage: async () => { fires++; },
       // The boot snapshot was taken before the first triage opened its PR.
       isFeedbackOpenPr: () => undefined,
-      readFeedbackLiveState: (_id: string, pr: number) => (pr === 10255 ? liveState : undefined),
+      readFeedbackLiveState: (_id: string, pr: number) => {
+        liveReads.push(pr);
+        return pr === 10255 ? liveState : undefined;
+      },
       readLedgerLines: () => ledgerLines,
       log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
     }, { laneCount: 2 });
-    return { fires, lines };
+    return { fires, lines, liveReads };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -60,7 +64,8 @@ test("a triage PR opened after boot blocks a second triage of the same feedback"
 });
 
 test("a triage PR opened after boot and since closed lets the feedback be triaged again", async () => {
-  const { fires } = await drive([OPENED], "CLOSED");
+  const { fires, liveReads } = await drive([OPENED], "CLOSED");
+  assert.ok(liveReads.includes(10255), "the ledger's candidate must reach the live-state read");
   assert.ok(fires >= 1, "a closed, unmerged triage leaves the feedback untriaged");
 });
 
