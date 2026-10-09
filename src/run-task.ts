@@ -230,6 +230,7 @@ import {
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
   type FixReviewFinding,
+  type PriorPartialWork,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -10792,6 +10793,9 @@ export async function runFixRung(opts: {
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
   proofDiscrimination?: ProofDiscriminationEvidence;
+  /** W1-T6434: a dead fix owner's preserved patch at the dispatched head (see PriorPartialWork). Offered to
+   *  every strike that still targets that head; once a push moves the head it is no longer shown. */
+  priorPartialWork?: PriorPartialWork;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
@@ -12304,7 +12308,7 @@ export async function runFixRung(opts: {
     // construction, never a special case. Read again after the push below (`currentCiFailures`,
     // refreshed by `deps.fetchCiFailures`) to see whether the strike that just ran moved anything.
     const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
-    const evidence: FixEvidence =
+    const evidenceBase: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
         : noReviewYet
@@ -12333,6 +12337,11 @@ export async function runFixRung(opts: {
             proofDiscrimination: proofDiscriminationNow,
             constraint: opts.constraint,
           };
+    // W1-T6434: only while this strike still targets the head the patch was preserved at.
+    const evidence: FixEvidence =
+      opts.priorPartialWork && priorHeadSha === opts.initialReview.headSha
+        ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
+        : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.

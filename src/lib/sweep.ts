@@ -69,7 +69,8 @@ import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
-import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
+import { runRiskJudge, scrubRiskJudgeText, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
+import type { PriorPartialWork } from "./prompt-render.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
@@ -3604,8 +3605,26 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const budgetUsd = task.budget_usd ?? defaultBudgetUsd;
 
         const fixWorktree = worktreePath;
+        // W1-T6434: a dead owner's staged work preserved at THIS head (W1-T6362) is offered to the round
+        // as prior partial work. Best-effort: a ledger or ref that cannot be read leaves the prompt as before.
+        let priorPartialWork: PriorPartialWork | undefined;
+        try {
+          priorPartialWork = readPreservedOwnerPatch({
+            repoDir,
+            prNumber: pr.prNumber,
+            headSha: pr.headSha,
+            ledgerLines: readLedgerLines(ledgerPath), // ledger-read-intent: live
+            onUnreadable: (reason) => log("sweep.fix.prior_partial_work_unreadable", { pr_number: pr.prNumber, task_id: task.id, head_sha: pr.headSha, reason }),
+          });
+        } catch (e) {
+          log("sweep.fix.prior_partial_work_unreadable", {
+            pr_number: pr.prNumber, task_id: task.id, head_sha: pr.headSha,
+            reason: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
+          });
+        }
         const rung = await runFixRung({
           guardRoundHead: true,
+          ...(priorPartialWork ? { priorPartialWork } : {}),
           ...buildFixRungDispatchArgs({
             task,
             runId,
@@ -10185,6 +10204,61 @@ export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number):
  *  a thrown round needs no row, its `finally` releases the claim. */
 export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
   return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+}
+
+/** W1-T6434 — the diff excerpt a next fix round is shown from a preserved patch, in characters. */
+export const PRIOR_PARTIAL_WORK_EXCERPT_CAP = 4000;
+const PRESERVED_PATCH_REF_PREFIX = "refs/rmd-recovery/fix-dirty/";
+/** Paths whose bytes never reach a prompt, whatever they hold. */
+const PRESERVED_PATCH_WITHHELD_PATHSPECS = [
+  "**/.env*", ".env*", "**/*.pem", "**/*.key", "**/*.p12", "**/*secret*", "**/*credential*", "**/id_rsa*", "**/*token*",
+].map((glob) => `:(exclude,glob)${glob}`);
+
+/**
+ * W1-T6434 — the preserved fix-owner patch for THIS PR at THIS head, as bounded prompt evidence.
+ * Reads the newest `sweep.fix.owner_residue_preserved` row (W1-T6362) whose `pr_number` and
+ * `head_sha` both match, then the recovery ref's own diff against its parent (the owner's HEAD). The
+ * excerpt is scrubbed BEFORE it is capped, so a credential cut at the boundary cannot survive as a
+ * fragment. No matching row, a ref outside the recovery namespace, or an unreadable ref returns
+ * `undefined` (the last reported through `onUnreadable`): the prompt then renders as it always did.
+ */
+export function readPreservedOwnerPatch(args: {
+  repoDir: string;
+  prNumber: number;
+  headSha: string;
+  ledgerLines: ReadonlyArray<Record<string, unknown>>;
+  git?: (repoDir: string, argv: string[]) => string;
+  onUnreadable?: (reason: string) => void;
+}): PriorPartialWork | undefined {
+  const row = args.ledgerLines.findLast(
+    (line) => line.step === "sweep.fix.owner_residue_preserved" && line.pr_number === args.prNumber && line.head_sha === args.headSha,
+  );
+  if (!row) return undefined;
+  const recoveryRef = typeof row.recovery_ref === "string" ? row.recovery_ref : "";
+  if (!recoveryRef.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(recoveryRef)) {
+    args.onUnreadable?.("recovery_ref is outside the recovery namespace");
+    return undefined;
+  }
+  const git = args.git ?? ((dir: string, argv: string[]) => hostWorktreeGit(dir, argv, { maxBuffer: 1 << 24 }));
+  let diff: string;
+  try {
+    git(args.repoDir, ["rev-parse", "--verify", "--quiet", `${recoveryRef}^{commit}`]);
+    diff = git(args.repoDir, [
+      "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${recoveryRef}^`, recoveryRef, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
+    ]);
+  } catch (e) {
+    args.onUnreadable?.(capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP));
+    return undefined;
+  }
+  const scrubbed = scrubRiskJudgeText(diff).text;
+  const stagedPaths = Array.isArray(row.staged_paths) ? row.staged_paths.filter((p): p is string => typeof p === "string") : [];
+  return {
+    recoveryRef,
+    stagedPaths,
+    ...(typeof row.staged_more === "number" && row.staged_more > 0 ? { stagedMore: row.staged_more } : {}),
+    excerpt: scrubbed.slice(0, PRIOR_PARTIAL_WORK_EXCERPT_CAP),
+    excerptTruncated: scrubbed.length > PRIOR_PARTIAL_WORK_EXCERPT_CAP,
+  };
 }
 
 /** W1-T5955 — take a branch claim, first clearing one whose round already ended. */
