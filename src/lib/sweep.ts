@@ -14224,9 +14224,9 @@ export async function runSweep(
               const ports = deps.headRehome;
               if (!ports) throw new Error("head re-home effects not wired");
               const observed = await ports.observe(pr);
-              const preliminary = headRehomePlan(pr, { conformingHead: false, observation: observed, nowMs: now });
+              const preliminary = headRehomePlan(pr, observed, now);
               const quiet = preliminary.action !== "rehome" && preliminary.needsQuietJudgment ? await ports.judgeQuiet(observed) : undefined;
-              const plan = headRehomePlan(pr, { conformingHead: false, observation: observed, quiet, nowMs: now });
+              const plan = headRehomePlan(pr, observed, now, quiet);
               if (plan.action !== "rehome") {
                 rehomeReason = plan.reason;
                 appendLine(deps.ledgerPath, { ...row, step: "pr.rehome.refused", reason: plan.reason });

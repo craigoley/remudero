@@ -85,8 +85,8 @@ test("planner derives one task from earlier trailers or commit subjects and keep
     [["fix(flow): build W1-T42 and W1-T43", "fix(flow): repair"], "unfiled"],
     [["fix(flow): build\n\nRemudero-Task: W1-T42", "fix(flow): build\n\nRemudero-Task: W1-T43", "fix(flow): repair"], "unfiled"],
   ] as const) {
-    assert.deepEqual(headRehomePlan(pr(), { conformingHead: false, observation: { ...live, commitMessages: messages },
-      quiet: { quiet: true, reason: "handed off" }, nowMs: NOW }),
+    assert.deepEqual(headRehomePlan(pr(), { ...live, commitMessages: messages }, NOW,
+      { quiet: true, reason: "handed off" }),
     { action: "rehome", headName: `run-${expected}-${NOW}`, headSha: SHA, reason: "head-identity-only red; handed off" });
   }
 });
@@ -107,16 +107,16 @@ test("planner names each unsafe observation and never emits a branch action", as
     [{ commitMessages: ["fix(flow): repair\n\nRemudero-Task: bad/id", "fix(flow): repair"] }, /cannot form a branch/],
   ];
   for (const [patch, reason] of cases) {
-    const result = headRehomePlan(pr(), { conformingHead: false, observation: { ...live, ...patch },
-      quiet: { quiet: true, reason: "handed off" }, nowMs: NOW });
+    const result = headRehomePlan(pr(), { ...live, ...patch }, NOW,
+      { quiet: true, reason: "handed off" });
     assert.equal(result.action, "refused");
     assert.match(result.reason, reason);
   }
-  assert.equal(headRehomePlan(pr(), { conformingHead: true, observation: live, nowMs: NOW }).action, "none");
-  assert.equal(headRehomePlan(pr({ ciFailures: [] }), { conformingHead: false, observation: live, nowMs: NOW }).action, "none");
-  assert.equal(headRehomePlan(pr(), { conformingHead: false, observation: { ...live,
-    commitMessages: ["fix(flow): repair\n\nRemudero-Task: PR-50"] }, nowMs: NOW }).action, "none");
-  assert.match(headRehomePlan(pr(), { conformingHead: false, observation: live, nowMs: NOW }).reason, /no judgment/);
+  assert.equal(headRehomePlan(pr(), live, NOW, undefined, true).action, "none");
+  assert.equal(headRehomePlan(pr({ ciFailures: [] }), live, NOW).action, "none");
+  assert.equal(headRehomePlan(pr(), { ...live,
+    commitMessages: ["fix(flow): repair\n\nRemudero-Task: PR-50"] }, NOW).action, "none");
+  assert.match(headRehomePlan(pr(), live, NOW).reason, /no judgment/);
 });
 
 test("the quietness judgment can re-home a just-pushed head and hold an old active session", async () => {

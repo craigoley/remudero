@@ -37,14 +37,14 @@ export function headIdentityRed(pr: HeadRehomePr): boolean {
   return [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)].includes("head-identity-gate");
 }
 
-export function headRehomePlan(pr: HeadRehomePr, deps: {
-  conformingHead: boolean;
-  observation: HeadRehomeObservation;
-  quiet?: QuietHeadDecision;
-  nowMs: number;
-}): HeadRehomePlan {
-  const live = deps.observation;
-  if (deps.conformingHead || !headIdentityRed(pr)) return { action: "none", reason: "head needs no branch repair" };
+export function headRehomePlan(
+  pr: HeadRehomePr,
+  live: HeadRehomeObservation,
+  nowMs: number,
+  quiet?: QuietHeadDecision,
+  conformingHead = false,
+): HeadRehomePlan {
+  if (conformingHead || !headIdentityRed(pr)) return { action: "none", reason: "head needs no branch repair" };
   if (live.headSha !== pr.headSha || live.headRefName !== pr.headRefName) return { action: "refused", reason: "head moved" };
   if (live.state !== "open" || live.isDraft || live.mergeState === "dirty" || live.sameRepository === false) {
     return { action: "refused", reason: "PR is closed, draft, conflicted or from a fork" };
@@ -58,8 +58,8 @@ export function headRehomePlan(pr: HeadRehomePr, deps: {
   if (!live.changedFiles?.length) return { action: "refused", reason: "diff unreadable or empty" };
   if (!live.commitMessages.length) return { action: "refused", reason: "head commits unreadable" };
   if (extractTaskTrailerId(live.commitMessages.at(-1)!) !== undefined) return { action: "none", reason: "head commit already has a task trailer" };
-  if (!deps.quiet?.quiet) return { action: "refused", reason: `quietness not established: ${deps.quiet?.reason ?? "no judgment"}`,
-    needsQuietJudgment: deps.quiet === undefined };
+  if (!quiet?.quiet) return { action: "refused", reason: `quietness not established: ${quiet?.reason ?? "no judgment"}`,
+    needsQuietJudgment: quiet === undefined };
   const trailered = new Set(live.commitMessages.map(extractTaskTrailerId).filter((id): id is string => id !== undefined));
   const mentioned = new Set(live.commitMessages.flatMap(message => message.match(/\bW\d+-T\d+\b/g) ?? []));
   const ids = trailered.size ? trailered : mentioned;
@@ -67,8 +67,8 @@ export function headRehomePlan(pr: HeadRehomePr, deps: {
   if (taskId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(taskId) || taskIdFromRunBranch(`run-${taskId}-1`) !== taskId)) {
     return { action: "refused", reason: "task identity cannot form a branch" };
   }
-  return { action: "rehome", headName: `run-${taskId ?? "unfiled"}-${deps.nowMs}`, headSha: pr.headSha,
-    reason: `head-identity-only red; ${deps.quiet.reason}` };
+  return { action: "rehome", headName: `run-${taskId ?? "unfiled"}-${nowMs}`, headSha: pr.headSha,
+    reason: `head-identity-only red; ${quiet.reason}` };
 }
 
 export interface HeadRehomePorts {
