@@ -43,7 +43,8 @@ export function coverageNightlyGithubReader(
       const payload = await (deps.ghJsonAsync ?? ghJsonAsync)([
         "api", `repos/${owner}/${repo}/actions/workflows/coverage-nightly.yml/runs?branch=main&status=completed&per_page=1`,
       ]) as { workflow_runs?: unknown[] } | null;
-      if (!Array.isArray(payload?.workflow_runs)) throw new Error("coverage-nightly workflow run list is unreadable");
+      if (payload === null) throw new Error("coverage-nightly workflow run response is null");
+      if (!Array.isArray(payload.workflow_runs)) throw new Error("coverage-nightly workflow run list is unreadable");
       return payload.workflow_runs.length === 0 ? undefined : completedMainRun(payload.workflow_runs[0]);
     },
     async summaryForRun(owner, repo, run) {

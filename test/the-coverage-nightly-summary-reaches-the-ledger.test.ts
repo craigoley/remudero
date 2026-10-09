@@ -233,6 +233,21 @@ test("an unreadable archive refuses deduplication and logs its reason", async ()
   });
 });
 
+test("a null workflow response fails with its own reason, logs once and appends no measurement", async () => {
+  await withTempDir("nightly-intake-test", async (stateDir) => {
+    const ledgerPath = join(stateDir, LEDGER_FILENAME);
+    const logs: string[] = [];
+    const github = coverageNightlyGithubReader({ ghJsonAsync: async () => null });
+    const result = await readCoverageNightlySummary({
+      ledgerPath, owner: "owner", repo: "repo", reader: github, clock: fixedClock(at),
+      log: (line) => logs.push(line),
+    });
+    assert.deepEqual(result, { status: "failed", reason: "coverage-nightly workflow run response is null" });
+    assert.deepEqual(logs, ["coverage-nightly intake failed: coverage-nightly workflow run response is null"]);
+    assert.deepEqual(rows(ledgerPath), []);
+  });
+});
+
 test("an empty workflow list is no-run, while malformed and non-main runs fail visibly", async () => {
   await withTempDir("nightly-intake-test", async (stateDir) => {
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
