@@ -5650,8 +5650,7 @@ export interface OpenPrView {
   repeatedFixRefusal?: string;
   /** W1-T7096: the progress judge ruled this exhausted PR a loop — it enters the strikes-exhausted route. */
   progressEscalation?: { loop: string; reason: string; judged: boolean };
-  /** W1-T7096: the progress judge ruled another round (or deferred the ruling to the fixable path). Absent,
-   *  a PR whose judgment is due takes the strikes-exhausted route — exactly the stand-in's former bound. */
+  /** W1-T7096: the progress judge ruled another round, or deferred the ruling to the fixable path. */
   progressContinue?: { reason: string; unavailable?: boolean };
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
@@ -8560,15 +8559,12 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
  */
 /** W1-T7096: exhausted rounds the progress judge (or the announced stand-in) ruled a loop. */
 export function isFixStrikeJudgedExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
-  // The judge (or the announced stand-in) ruled the rounds a loop. A repeated identical refusal keeps its
-  // former stop until a judge rules otherwise — that bar is W1-T7243's budget, not this task's strike cap.
+  // A judged loop; a repeated identical refusal keeps its former stop (W1-T7243's budget) until ruled otherwise.
   return isFixStrikeExhausted(pr, policy) && (pr.progressEscalation !== undefined ||
     (pr.repeatedFixRefusal !== undefined && pr.progressContinue === undefined));
 }
 
-/** W1-T7096: every spot where the former fixed rung stopped a PR makes a progress JUDGMENT due instead —
- *  the reached ceiling or a repeated refusal, a repeat of the identical unmet criteria, and a CodeQL
- *  repair at the ceiling. The judge (or, unwired, the stand-in) rules each one. */
+/** W1-T7096: every former stop (ceiling, repeated refusal, identical unmet set, CodeQL at the ceiling) is a judgment due. */
 export function fixProgressJudgmentDue(pr: OpenPrView, policy: SweepPolicy): boolean {
   return isFixStrikeExhausted(pr, policy) ||
     (pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)) ||
@@ -8884,8 +8880,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T1269 + W1-T7096 — a repeat of the identical unmet criteria makes a progress judgment due; absent a
-    // "continue" ruling it takes the former earlier stop (escalating before the cap).
+    // W1-T1269 + W1-T7096 — an identical unmet repeat the judge ruled a loop takes the former earlier stop.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr) && pr.progressEscalation !== undefined,
     blocker: "escalated",
@@ -13208,9 +13203,7 @@ export async function runSweep(
       // A repeated refusal is judged later, with its parked reason; only a reached ceiling is judged here.
       // The parked waits W1-T7096 owns (a refused commit at this head, a metadata or proof repair in
       // flight) are judged later on the fixable path, which supplies their parked reason.
-      // A wired judge rules a reached ceiling or a repeated refusal here; an identical unmet set and a CodeQL
-      // repair at the ceiling reach it on the fixable path, with their own evidence. The unwired stand-in rules
-      // every former stop here, so a fixture keeps the pre-judge dispositions exactly.
+      // A wired judge rules the ceiling and refusals here (other stops on the fixable path); the stand-in rules all.
       const due = judged ? isFixStrikeExhausted(pr, policy) : fixProgressJudgmentDue(pr, policy);
       if (!due) { next.push(pr); continue; }
       if (pr.repeatedFixRefusal === undefined && (sameHeadRedFixRefusal(ledgerLines, pr) !== undefined ||
@@ -15766,7 +15759,6 @@ export async function runSweep(
               }
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
               // dispatch, including one beyond its former strike ceiling, remains judge-gated.
-              // W1-T5544's rung two (the plan-shard flag after refused proof-repair rounds) is not a round either.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
