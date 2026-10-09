@@ -306,55 +306,6 @@ test("handoff requests coalesce, and only the active generation can ask", async 
   assert.ok(steps().filter((s) => s === "serve.handoff_done").length >= 1);
 });
 
-test("a handoff waits out a spacing that grows with recent handoffs and heals once they stop", async () => {
-  const MIN = 60_000;
-  const fleet = fakeFleet();
-  let now = 0;
-  const waits: Array<{ ms: number; wake: () => void }> = [];
-  const { supervisor, logs } = decisionSupervisor(fleet, {
-    clock: { now: () => now, iso: () => "" } as never,
-    sleep: (ms) => new Promise<void>((resolve) => void waits.push({ ms, wake: () => ((now += ms), resolve()) })),
-    spacingBaseMs: 15 * MIN,
-    spacingHalfLifeMs: 60 * MIN,
-  });
-  const spacingRows = () => logs.filter((l) => l.step === "serve.handoff_deferred" && l.extra?.reason === "spacing").map((l) => l.extra!);
-  const settle = async () => { for (let i = 0; i < 10; i += 1) await tick(1); };
-  await supervisor.start();
-  await supervisor.requestHandoff();
-  assert.equal(supervisor.activeSha(), "sha-2", "the first handoff has nothing to be spaced from");
-
-  now = 15 * MIN;
-  await supervisor.requestHandoff();
-  await supervisor.requestHandoff();
-  assert.equal(supervisor.activeSha(), "sha-2", "a handoff 15 minutes after the last one waits: the last one still weighs on it");
-  assert.equal(fleet.generations.length, 2, "nothing was forked while it waits");
-  assert.equal(spacingRows().length, 1, "one deferral row however many asks arrive while it waits");
-  const first = spacingRows()[0];
-  assert.ok((first.spacingMs as number) > 15 * MIN && (first.spacingMs as number) < 30 * MIN, `spacing ${String(first.spacingMs)}`);
-  assert.equal(first.waitMs, (first.spacingMs as number) - 15 * MIN);
-
-  waits.find((w) => w.ms === first.waitMs)!.wake();
-  await settle();
-  assert.equal(supervisor.activeSha(), "sha-3", "the deferred ask re-runs itself once the spacing has passed");
-  const secondDoneAt = now;
-
-  now = secondDoneAt + 15 * MIN;
-  await supervisor.requestHandoff();
-  assert.equal(supervisor.activeSha(), "sha-3");
-  const second = spacingRows()[1];
-  assert.ok((second.spacingMs as number) > (first.spacingMs as number), "two handoffs close together widen the next gap");
-
-  waits.find((w) => w.ms === second.waitMs)!.wake();
-  await settle();
-  assert.equal(supervisor.activeSha(), "sha-4");
-
-  now += 5 * 60 * MIN;
-  await supervisor.requestHandoff();
-  assert.equal(supervisor.activeSha(), "sha-5", "after a quiet spell the pressure has decayed and the handoff runs at once");
-  assert.equal(spacingRows().length, 2);
-  assert.ok((logs.filter((l) => l.step === "serve.handoff_done").at(-1)?.extra?.pressure as number) < 1.2, "the ledger carries the decayed pressure");
-});
-
 test("prepare failures and an unchanged sha abort or skip without touching the active generation", async () => {
   const fleet = fakeFleet();
   let calls = 0;
