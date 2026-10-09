@@ -73,7 +73,7 @@ test("the light pass observes main at most once per interval, and again after it
     async () => {
       observations += 1;
     },
-    { now: () => clock },
+    { clock: { now: () => clock, date: () => new Date(clock), iso: () => new Date(clock).toISOString() } },
   );
   await light();
   clock += 10_000;

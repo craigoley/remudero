@@ -7,6 +7,7 @@ import {
 } from "./escalate.js";
 import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import {
@@ -1150,19 +1151,19 @@ export function withMainHealthOnLightPass<A extends unknown[]>(
   rung: (() => Promise<void>) | undefined,
   options: {
     readonly intervalMs?: number;
-    readonly now?: () => number;
+    readonly clock?: Clock;
     readonly log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): (...args: A) => Promise<void> {
   if (!rung) return lightPass;
   const intervalMs = Math.max(0, options.intervalMs ?? MAIN_HEALTH_LIGHT_PASS_INTERVAL_MS);
-  const now = options.now ?? Date.now;
+  const clock = options.clock ?? systemClock;
   let lastAtMs: number | undefined;
   return async (...args: A) => {
     try {
       await lightPass(...args);
     } finally {
-      const atMs = now();
+      const atMs = clock.now();
       if (lastAtMs === undefined || atMs < lastAtMs || atMs - lastAtMs >= intervalMs) {
         lastAtMs = atMs;
         try {
