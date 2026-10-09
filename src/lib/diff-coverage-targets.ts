@@ -6,8 +6,6 @@
  * so the fix prompt can name them as the round's work.
  */
 
-const BLOCKED_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
-
 export interface DiffCoverageTarget {
   file: string;
   lines: number[];
@@ -25,7 +23,7 @@ export function diffCoverageTargets(logTails: readonly string[]): DiffCoverageTa
   let unlisted = 0;
   let blocked = false;
   for (const tail of logTails) {
-    if (!BLOCKED_RE.test(tail)) continue;
+    if (!/diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i.test(tail)) continue;
     blocked = true;
     for (const raw of tail.split("\n")) {
       const listed = /^\s*-\s+((?:src|scripts|bin|deploy|packages|apps)\/[\w./@-]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
