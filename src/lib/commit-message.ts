@@ -3,7 +3,8 @@ import { join } from "node:path";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
-import { prepareWorktreeTypecheck } from "./typecheck-buildinfo.js";
+import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, prepareWorktreeTypecheck } from "./typecheck-buildinfo.js";
+import { acquireTestSlot, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -518,10 +519,15 @@ export function commitlintStep(
  * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the same invocation CI's `ci` job runs. `npm test`
  * strips types via `tsx` without checking them, so a green test run is not a compile (PR #477).
  */
-export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): PreflightStepResult {
+export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn, testSlot: TestSlotOptions = {}): PreflightStepResult {
+  let slot: TestSlotLease | undefined;
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
-    const res = spawn(tsc, prepareWorktreeTypecheck(repoRoot).args, { cwd: repoRoot });
+    const prepared = prepareWorktreeTypecheck(repoRoot);
+    if (!hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot))) {
+      slot = acquireTestSlot("typecheck:preflight", testSlot);
+    }
+    const res = spawn(tsc, prepared.args, { cwd: repoRoot });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
@@ -534,6 +540,8 @@ export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultP
     };
   } catch (e) {
     return { name: "typecheck", ok: false, detail: `typecheck: FAIL — ${String((e as Error)?.message ?? e)}` };
+  } finally {
+    slot?.release();
   }
 }
 
