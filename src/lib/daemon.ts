@@ -1050,6 +1050,8 @@ export interface DaemonDeps {
   } | undefined;
   /** W1-T6358: renews the breaker gate's ledger snapshot; forwarded into tick selection and every lane refill. */
   beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
+  /** W1-T5724: await lazy lifetime history before the synchronous selection predicates run. */
+  prepareSelection?: () => Promise<void>;
   /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
    * composition root. Missing/unreadable state returns an empty map and therefore fails open. */
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
@@ -2721,6 +2723,7 @@ export async function runDaemon(
           completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - startedAtMs) });
           if (backgroundSweep === pass) backgroundSweep = undefined;
           openBootGate("first_pass");
+          startDeferredKnowledgeGarden();
         });
         backgroundSweep = pass;
       },
@@ -3026,7 +3029,7 @@ export async function runDaemon(
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
   const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
   const bootGateStartedAtMs = daemonClock.now();
-  const bootGateHolds = deps.sweep !== undefined && ((deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
+  const bootGateHolds = deps.sweep !== undefined && (deps.knowledgeGardener !== undefined || (deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
   let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
   let releaseBootGate = (): void => {};
   const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
@@ -3034,9 +3037,16 @@ export async function runDaemon(
   const deferBootCadence = (cadence: string): void =>
     log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
   const gardens = [
-    ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
+  let knowledgeGardenStarted = false;
+  const startDeferredKnowledgeGarden = (): void => {
+    if (!deps.knowledgeGardener || knowledgeGardenStarted || bootGateTrigger === "exited" || repositoryMaintenanceStopped) return;
+    knowledgeGardenStarted = true;
+    gardens.push(startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs));
+  };
+  if (!deps.sweep) startDeferredKnowledgeGarden();
+  else if (deps.knowledgeGardener) deferBootCadence("knowledgeGardener");
   gardenerRef.stop = () => gardens.forEach((g) => g.stop());
   if (deferredGardens.length > 0) deferBootCadence("gardens");
   const openBootGate = (trigger: string): void => {
@@ -4564,6 +4574,7 @@ export async function runDaemon(
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.());
+      if (deps.prepareSelection) await deps.prepareSelection();
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,

@@ -33764,7 +33764,7 @@ export function breakerGateFor(
     | null
     | undefined
     | (() => ReadonlyArray<PrRef> | null | undefined),
-  auditedLifetimeHistory?: LifetimeHistory,
+  auditedLifetimeHistory?: LifetimeHistory | (() => LifetimeHistory | undefined),
 ): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
@@ -33842,7 +33842,8 @@ export function breakerGateFor(
       const live = snap.lines;
       const liveTally = lifetimeDispatchTally(live, taskId);
       const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
-      const archived = auditedLifetimeHistory?.tallyFor(taskId, snap) ?? { starts: 0, capacityBlocked: 0 };
+      const history = typeof auditedLifetimeHistory === "function" ? auditedLifetimeHistory() : auditedLifetimeHistory;
+      const archived = history?.tallyFor(taskId, snap) ?? { starts: 0, capacityBlocked: 0 };
       pressure =
         hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
         effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1;
@@ -37149,6 +37150,7 @@ export function orphanSweepRunActive(
 export async function daemonCommand(
   rest: string[],
   deps: {
+    loadLifetimeHistory?: typeof auditedLifetimeTalliesFromArchives;
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -37564,23 +37566,27 @@ export async function daemonCommand(
     }
     return openHeadBranchesMemo;
   };
-  // W1-T3758: one bounded archive scan before the daemon starts dispatching. The live ledger is
-  // still read at each gate consultation; unread history retains the old live-only behaviour.
-  const archivedLifetime = await auditedLifetimeTalliesFromArchives(dirname(ledgerPath));
-  if (archivedLifetime.history === undefined) {
-    log("dispatch.lifetime_history_unavailable", {
-      archive_count: archivedLifetime.archiveCount,
-      unread_archives: archivedLifetime.unread,
-      reason: archivedLifetime.unavailableReason,
-    });
-  } else {
-    log("dispatch.lifetime_history_loaded", {
-      archive_count: archivedLifetime.archiveCount,
-      records: archivedLifetime.records,
-    });
-  }
+  // W1-T5724: selection shares one pending archive scan; boot and review never start it.
+  let lifetime: LifetimeHistory | undefined;
+  let lifetimeReady: Promise<void> | undefined;
+  const prepareSelection = (): Promise<void> => lifetimeReady ??= Promise.resolve().then(async () => {
+    const archivedLifetime = await (deps.loadLifetimeHistory ?? auditedLifetimeTalliesFromArchives)(dirname(ledgerPath));
+    lifetime = archivedLifetime.history;
+    if (lifetime === undefined) {
+      log("dispatch.lifetime_history_unavailable", {
+        archive_count: archivedLifetime.archiveCount,
+        unread_archives: archivedLifetime.unread,
+        reason: archivedLifetime.unavailableReason,
+      });
+    } else {
+      log("dispatch.lifetime_history_loaded", {
+        archive_count: archivedLifetime.archiveCount,
+        records: archivedLifetime.records,
+      });
+    }
+  });
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
-  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, archivedLifetime.history);
+  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker, () => lifetime);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
   // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
   // indeterminate when the ledger's dispatch-breaker read for this task cannot be
@@ -38053,6 +38059,7 @@ export async function daemonCommand(
         // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
         // "indeterminate" (handled above by isIndeterminate) rather than a false
         // "clear" that would silently untrip an already-tripped task.
+        prepareSelection,
         beginSelectionPass: breakerGate.beginSelectionPass,
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
