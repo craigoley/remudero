@@ -27,7 +27,9 @@ import {
   type CiFailure,
   type MergeConflictEvidence,
   type ProofDiscriminationEvidence,
+  type PriorPartialWork,
 } from "./sweep.js";
+export type { PriorPartialWork };
 import { envelope } from "./untrusted-envelope.js";
 
 /** W1-T4106: four hand-backgrounded coverage suites swap-thrashed the fleet host; hooks/deny-floor.sh
@@ -247,16 +249,6 @@ export interface FixEvidence {
   priorPartialWork?: PriorPartialWork;
 }
 
-/** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
-export interface PriorPartialWork {
-  recoveryRef: string;
-  stagedPaths: readonly string[];
-  /** Staged paths beyond {@link stagedPaths}' own bound. */
-  stagedMore?: number;
-  /** Size-capped, secret-scrubbed diff text read from the recovery ref. */
-  excerpt: string;
-  excerptTruncated: boolean;
-}
 
 /** W1-T6434: the PRIOR PARTIAL WORK block; `[]` when no preserved patch exists for this head. */
 export function priorPartialWorkLines(work: PriorPartialWork | undefined): string[] {

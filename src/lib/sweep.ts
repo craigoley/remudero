@@ -70,7 +70,6 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, scrubRiskJudgeText, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import type { PriorPartialWork } from "./prompt-render.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
@@ -259,6 +258,17 @@ import {
   type RefusalAmendmentResult,
   type RefusalCandidate,
 } from "./refusal-amendment.js";
+
+/** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
+export interface PriorPartialWork {
+  recoveryRef: string;
+  stagedPaths: readonly string[];
+  /** Staged paths beyond {@link stagedPaths}' own bound. */
+  stagedMore?: number;
+  /** Size-capped, secret-scrubbed diff text read from the recovery ref. */
+  excerpt: string;
+  excerptTruncated: boolean;
+}
 // Re-exported so existing `import type { … } from "./sweep.js"` call sites keep working.
 export type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 // W1-T2340: declared in a leaf module so open-prs-rest.ts's producer imports it without closing
