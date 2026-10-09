@@ -14,7 +14,7 @@ import {
 import { requeueActionsJob } from "../src/run-task.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { buildSweepHook } from "../src/run-task.js";
+import { buildSweepHook, buildSweepLightHook } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -469,4 +469,37 @@ test("requeueActionsJob: a refused API call is ledgered and returns false, never
   assert.equal(logged[0][1]?.check_name, "ci-shard (4/4)");
   assert.equal(logged[0][1]?.job_id, "999");
   assert.match(String(logged[0][1]?.error), /403 rate limited/);
+});
+
+test("the light pass also observes main, so a run in flight cannot starve the main-health rung", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "rmd-main-health-gh-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-main-health-light-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath}`;
+  let observations = 0;
+  try {
+    const light = buildSweepLightHook(
+      "o",
+      "r",
+      { root, claudeBin: "/bin/true" } as Config,
+      join(root, "ledger.ndjson"),
+      "DAEMON-TEST",
+      { tasks: [], byId: new Map() },
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        observations += 1;
+      },
+    );
+    await light();
+    assert.equal(observations, 1);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });

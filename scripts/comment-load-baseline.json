@@ -185,7 +185,7 @@
   "src/lib/provider-routing-policy.ts": 27,
   "src/lib/ratification.ts": 72,
   "src/lib/reachability.ts": 101,
-  "src/lib/read-model-worker.ts": 284,
+  "src/lib/read-model-worker.ts": 288,
   "src/lib/recap.ts": 48,
   "src/lib/receipt.ts": 145,
   "src/lib/relay-client.ts": 101,

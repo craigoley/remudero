@@ -9,8 +9,8 @@
   risk: high  # Rule 19: one concern — the ledger's ownership and release semantics. High for blast radius: it wraps every worker start, so a throw there would fail real work
   band_meaning: blast-radius
   origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
-  plan_refs: [W1-T6782, W1-T6090, W1-T6597, W1-T2931, W1-T3209, W1-T5347]
-  files: [src/lib/host-memory-ledger.ts, src/lib/worker.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts]
+  plan_refs: [W1-T6782, W1-T6090, W1-T6597, W1-T2931, W1-T3209, W1-T5347, W1-T147]
+  files: [src/lib/host-memory-ledger.ts, src/lib/worker.ts, src/lib/daemon.ts, src/run-task.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts, test/daemon-host-memory-reservation-sweep.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -23,6 +23,8 @@
     - Worker trees are large and outlive their bookkeeping: a tsc child of one worker held 2.1 GB with 136 threads;
       children totalled 0.5-4.6 GB per instance.
     - When a parent exits, its children are reparented to the container's init, so ancestry alone cannot attribute them.
+    - W1-T147 overlaps only in the daemon wiring files: it injects failures and checks recovery rows; this task adds
+      the ordinary, report-only heartbeat reconciliation of host-memory worker trees, which W1-T147 does not do.
     A budget cannot be computed, even counterfactually, until the host knows which trees are live. This task is the
     record only. The shadow evaluator (W1-T7094) and review priority (W1-T7095) consume it. Enforcement is out of scope for all
     three and needs a separate operator approval; nothing here activates on a timer.
@@ -70,6 +72,8 @@
       proof: "unit test: test/a-missing-memory-ledger-never-reads-as-empty.test.ts"
     - claim: "worker occupancy opens a ledger reservation"
       proof: "grep: openMemoryReservation( in src/lib/worker.ts"
+    - claim: "each daemon.alive heartbeat runs the best-effort reservation sweep, and daemonCommand wires it to the shared host-memory ledger"
+      proof: "unit test: test/daemon-host-memory-reservation-sweep.test.ts"
   falsifier: |
     Release on root-pid exit alone: the surviving-descendant case fails. Compare pids without start time: the pid-reuse
     case fails. Release on lease age: the missed-heartbeat case fails. Let a ledger write throw through: the

@@ -1636,9 +1636,28 @@ EOF_SMOKE
   return 0
 }
 
+# W1-T4102: a build daemon's share of the host — a low CPU weight, a memory ceiling that leaves the
+# console backend's reserve free, and THIS container's memory.high (a soft ceiling sized from one host
+# budget by weight, never below its working set). The same policy file
+# serve-container.sh reads. Absent (an isolated fixture copy), the daemon launches exactly as before
+# and the log says so. Evaluated BEFORE the smoke so the smoke container carries the same arguments:
+# a runtime that refuses one (the memory.high annotation) refuses the recycle while the running
+# container is still untouched, not after it was removed.
+RESOURCE_POLICY_BUILD_ARGS=()
+RESOURCE_POLICY_HIGH_MIB=""
+if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
+  # shellcheck source=./resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  resource_policy_build_args "${CONTAINER_NAME}"
+  RESOURCE_POLICY_HIGH_MIB="${RP_HIGH:-}"
+  echo "recycle-container: resource policy — ${RESOURCE_POLICY_NOTE}"
+else
+  echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
+fi
 SMOKE_TIMEOUT_S="${RMD_RECYCLE_SMOKE_TIMEOUT_S:-300}"
 SMOKE_ARGS=(
   --rm --name "${SMOKE_NAME}"
+  "${RESOURCE_POLICY_BUILD_ARGS[@]+"${RESOURCE_POLICY_BUILD_ARGS[@]}"}"
   --cap-drop ALL
   --security-opt seccomp=unconfined
   --security-opt apparmor=unconfined
@@ -1712,19 +1731,6 @@ echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Bash 3.2 treats an empty array as unset under `set -u`, even when it was initialized with `=()`.
 # Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
 # while optional mounts are appended only when their host directories actually exist.
-# W1-T4102: a build daemon's share of the host — a low CPU weight and a memory ceiling that leaves
-# the console backend's reserve free, so a worker's test fan-out pages its own container rather than
-# serve. The same policy file serve-container.sh reads. Absent (an isolated fixture copy), the
-# daemon launches exactly as before and the log says so.
-RESOURCE_POLICY_BUILD_ARGS=()
-if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
-  # shellcheck source=./resource-policy.sh
-  . "${SCRIPT_DIR}/resource-policy.sh"
-  resource_policy_build_args
-  echo "recycle-container: resource policy — ${RESOURCE_POLICY_NOTE}"
-else
-  echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
-fi
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
 if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
   . "${SCRIPT_DIR}/scratch-mounts.sh"
@@ -1777,6 +1783,11 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
   echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
+fi
+# The memory.high annotation is the one policy argument Docker accepts without proving it reached
+# the cgroup — read the kernel's own value back and name a miss in the log (never fatal).
+if [ -n "${RESOURCE_POLICY_HIGH_MIB}" ] && command -v resource_policy_probe_memory_high >/dev/null 2>&1; then
+  resource_policy_probe_memory_high "${CONTAINER_NAME}" "${RESOURCE_POLICY_HIGH_MIB}" || true
 fi
 
 # ── 7.5. PROVE THE PROVIDER RUNTIME MOUNTS SELECTED BEFORE LAUNCH ──

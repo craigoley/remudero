@@ -12085,9 +12085,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
 /** W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
  *  NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears only
  *  on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and every
- *  later pass stands down FOREVER. `fix.resolved` is never counted as stalled. TASK-ID KEYED, safe
- *  because every caller guards on the PR's CURRENT head. W1-T1210 — A TASKID WITH NO `fix.dispatch`
- *  ROW IS THE SAME SHAPE ONE STEP EARLIER, and the ABSENCE of the row is the falsifier. */
+ *  later pass stands down FOREVER; a `fix.stood_down` is such an end. `fix.resolved` is never stalled.
+ *  TASK-ID KEYED (callers guard on the CURRENT head). W1-T1210: no `fix.dispatch` row ⇒ stalled. */
 export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
@@ -12115,6 +12114,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
+    } else if (line.step === "fix.stood_down") {
+      stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
@@ -12846,6 +12847,11 @@ export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 
 export function emptyDiffReviewFailure(pr: OpenPrView): boolean {
   return !isBlockedCi(pr) && pr.changedFiles?.length === 0;
+}
+
+export function emptyDiffSupersedes(pr: OpenPrView, disposition: Disposition): boolean {
+  return pr.changedFiles?.length === 0 && disposition !== "mergeable" && disposition !== "stale" &&
+    !(pr.ciFailures ?? []).some((failure) => failure.name === "proof-discrimination");
 }
 
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
@@ -14140,6 +14146,12 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    const emptyDiffSupersession = emptyDiffSupersedes(pr, disposition) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
+    if (emptyDiffSupersession) {
+      staleProofCloses += 1;
+      reason = `superseded — this PR's diff against main is empty, so nothing is left to merge (was ${derived.blocker}: ${reason})`;
+      disposition = "stale";
+    }
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
@@ -14629,6 +14641,7 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
+    if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
@@ -15436,7 +15449,13 @@ export async function runSweep(
                 await deps.close(pr, reason);
                 break;
               }
-              if (emptyDiffReviewFailure(pr) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS) {
+              if (emptyDiffReviewFailure(pr)) {
+                if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                  acted = false;
+                  standDownReason = `empty-diff supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
+                  extraDisposedFields = { ...extraDisposedFields, empty_diff_close_deferred: true };
+                  break;
+                }
                 staleProofCloses += 1;
                 reason = `superseded — this PR's diff against main is empty, so nothing is left to merge; its failed review cannot be repaired in it (#10265)`;
                 extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
@@ -17076,8 +17095,8 @@ export function checkQueueGovernor(
 }
 
 /** W1-T4465 design (ii) — the trailing flow {@link checkQueueGovernor}'s tiered admission compares:
- *  merges (`verdict.merged` rows, or a `verdict` row itself carrying `verdict: "merged"` — the SAME
- *  two-shape match `routeAdaptiveLifetimePressure`, run-task.ts, already uses) against opens
+ *  merges (`verdict.merged`, a `verdict` row reading `merged`, or a `pr.terminal` row reading
+ *  `merged`, one per PR) against opens
  *  (`pr.opened` rows) inside the trailing `policy.queueGovernorFlowWindowMinutes` window ending at
  *  `nowMs`. PURE over an already-read ledger array — never reads a file itself, mirroring every
  *  other sweep.ts window derivation (e.g. {@link deriveWindowCostUsd}). */
@@ -17087,16 +17106,23 @@ export function deriveQueueGovernorTrailingFlow(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): { trailingMergedCount: number; trailingOpenedCount: number } {
   const windowStartMs = nowMs - policy.queueGovernorFlowWindowMinutes * 60_000;
-  let trailingMergedCount = 0;
+  let unkeyedMerges = 0;
+  const mergedPrs = new Set<string>();
   let trailingOpenedCount = 0;
   for (const line of lines) {
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
-    if (line.step === "pr.opened") trailingOpenedCount++;
-    else if (line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")) trailingMergedCount++;
+    if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
+    // Most merges are ledgered only as a sweep `pr.terminal` row, never as `verdict.merged`.
+    const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
+      || (line.step === "pr.terminal" && line.state === "merged");
+    if (!merged) continue;
+    const key = typeof line.pr_number === "number" ? `#${line.pr_number}` : typeof line.pr_url === "string" ? line.pr_url : undefined;
+    if (key === undefined) unkeyedMerges++;
+    else mergedPrs.add(key);
   }
-  return { trailingMergedCount, trailingOpenedCount };
+  return { trailingMergedCount: mergedPrs.size + unkeyedMerges, trailingOpenedCount };
 }
 
 /** A throttled pass is NOT silent: the dispatch path calls this exactly when

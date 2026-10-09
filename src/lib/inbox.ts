@@ -1833,9 +1833,10 @@ function draftPlaceholderViolations(
       block("draft-path-proof", `unit-test path ${JSON.stringify(label)} must be under test/`);
     }
   }
-  for (const path of task.files ?? []) {
-    const directory = dirname(path);
-    if (directory !== "." && !directoryExists(directory)) {
+  const aimedElsewhere = task.repo !== undefined && task.repo !== "none" && task.repo !== "remudero"; // W1-T5890: top dir, this repo only
+  for (const path of aimedElsewhere ? [] : task.files ?? []) {
+    const directory = path.includes("/") ? path.split("/")[0] : ".";
+    if (directory !== "." && directory !== "" && !directoryExists(directory)) {
       block("draft-missing-directory", `files entry ${JSON.stringify(path)} names a nonexistent directory ${JSON.stringify(directory)}`);
     }
   }

@@ -175,7 +175,7 @@ export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidenc
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
-import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
@@ -183,8 +183,8 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
@@ -198,8 +198,8 @@ import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
-import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
+import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
@@ -565,6 +565,7 @@ import {
 } from "./lib/open-prs-rest.js";
 import {
   buildMainHealthRung,
+  withMainHealthOnLightPass,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairRevertOutcome,
@@ -1473,6 +1474,7 @@ import {
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -1497,7 +1499,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, feedbackStatusOnMain, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -4583,9 +4585,13 @@ function draftPrCreate(
   const draftedBody = bodyParts.filter((p) => p.length > 0).join("\n\n");
   // A filed run branch takes its Acceptance block from the task record inside the checked opener.
   // Other lanes retain the open-time fallback that predates the task-aware check.
+  // A test the branch ADDS gives a proof that misses at base. The generic block stays only as the last resort, because
+  // openPullRequestChecked refuses a body with no block at all, and that would stop the PR opening.
+  const added = filedTaskIdFromRunBranch(branch) ? undefined : addedTestFilesAtHead("HEAD", worktreePath);
+  const headOnly = added?.kind === "read" ? added.files.map(addedTestCriterion) : [];
   const body = filedTaskIdFromRunBranch(branch)
     ? draftedBody
-    : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
+    : ensureJudgeableBody(draftedBody, headOnly.length ? headOnly : PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
   return { title: resolvedTitle, body };
 }
 
@@ -5513,6 +5519,8 @@ export async function repairPrMetadata(
   },
   /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
   planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
+  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5542,11 +5550,22 @@ export async function repairPrMetadata(
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
     const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
-    const repair = acceptanceGateBodyRepair(
-      live.body,
-      SWEEP_METADATA_ACCEPTANCE_FALLBACK,
-      gateRed ? { planCriteria } : undefined,
-    );
+    // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
+    // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
+    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
+    const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    const gate = acceptanceAuthorTimeCheck(live.body);
+    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
+      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
+      return {
+        repaired: false,
+        noCure: true,
+        reason:
+          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
+          "a generic block would pass at base and fail proof-discrimination",
+      };
+    }
+    const repair = acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -5768,12 +5787,35 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-const SWEEP_METADATA_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
-  {
-    claim: "this PR body carries a judgeable Acceptance block added by the metadata repair sweep",
-    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
-  },
-];
+function addedTestCriterion(path: string): AcceptanceCriterion {
+  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
+}
+
+/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
+
+/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/*.test.ts` files added since the merge base with
+ *  origin/main. */
+export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
+  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+  try {
+    let base: string;
+    try {
+      base = mergeBase();
+    } catch {
+      // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
+      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      base = mergeBase();
+    }
+    const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => /^test\/[^/]+\.test\.ts$/.test(p));
+    return { kind: "read", files };
+  } catch (err) {
+    return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
+  }
+}
 
 /** {@link acceptanceGateBodyRepair}'s verdict. */
 export interface AcceptanceGateBodyRepair {
@@ -10860,6 +10902,8 @@ export async function runFixRung(opts: {
      * report is still used for this round's verdict even if persisting it to GitHub failed).
      */
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
+    /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
+    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
     /**
      * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
      * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
@@ -11484,7 +11528,10 @@ export async function runFixRung(opts: {
       } catch (e) {
         deps.log("fix.body_gate_check_error", { strike: strikes + 1, error: String((e as Error)?.message ?? e) });
       }
-      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody) : undefined;
+      // A proof from a test the PR adds misses at base; the generic default does not, so it is the last resort only.
+      const added = (deps.addedTestsAtHead ?? ((sha: string) => addedTestFilesAtHead(sha, opts.worktreePath)))(review.headSha);
+      const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody, headOnly.length ? headOnly : undefined) : undefined;
       // W1-T3506 — THE WRITE-BOUNDARY CALL W1-T3389's HELPER WAS SHIPPED WITHOUT. `repair` above is
       // PURE and never inspects whether its own authored `grep:` proofs actually run — that is
       // exactly the asymmetry `repairedProofsAreSafeToPush` (lib/body-repair.ts) exists to close,
@@ -25962,6 +26009,16 @@ export function checkProofCommand(
     try {
       baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
+      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      const missingExport =
+        w!.kind === "test" && typeof loadOutput === "string"
+          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
+          : undefined;
+      if (missingExport !== undefined) {
+        console.log(`base:       COULD NOT LINK — ${missingExport}`);
+        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
+        return headExit;
+      }
       console.log(
         `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",
@@ -36643,6 +36700,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
+    pendingSignal: (prUrl: string) => {
+      const open = readOpenBoardSnapshot(config.root, owner, repo);
+      return gardenPendingSignal(prUrl, open.ok ? open.snapshot.rows : undefined, readOriginMainSha(repoRoot));
+    },
     log,
     ...(escalate ? { escalate } : {}),
   });
@@ -36784,13 +36846,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow":
       return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     case "evidence-coverage":
-      return () => {
+      return withDue(() => {
         try {
           runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log }));
         } catch (e) {
           log("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again", error: String((e as Error)?.message ?? e) });
         }
-      };
+      }, () => evidenceCoveragePassDue(stateDir));
     // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
     // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
     case "overseer":
@@ -36816,15 +36878,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work. W1-T5361 moved it off
     // the daemon loop; a pass that throws is still ledgered as machine_judge.failed.
+    // Paced (gardenPacingDue): a pass that judged nothing new widens the wait, and a changed plan tree or
+    // operator release is due at once.
     case "machine-judge": {
       const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
-      return async () => {
+      const inputs = () => machineJudgeInputs(repoRoot, stateDir);
+      return withDue(async () => {
+        const seen = inputs();
+        let found = false;
         try {
-          await runMachineFilingJudge(ports);
+          found = machineJudgeFoundWork(await runMachineFilingJudge(ports));
         } catch (error) {
           log("machine_judge.failed", { error: String((error as Error)?.message ?? error) });
         }
-      };
+        recordGardenPacing(stateDir, "machine-judge", found, { inputs: seen });
+      }, () => gardenPacingDue(stateDir, "machine-judge", { inputs }));
     }
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
@@ -38450,6 +38518,8 @@ export async function daemonCommand(
           resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
+          // A run in flight starves the full sweep, so the light pass also watches main.
+          mainHealthRung,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -38551,6 +38621,7 @@ export async function daemonCommand(
         // cached OPEN that has since merged/closed stands the guard down instead of parking a
         // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
         readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readFeedbackStatusOnMain: (feedbackId) => feedbackStatusOnMain(repoRoot, feedbackId),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
@@ -40693,6 +40764,31 @@ function retainGeneratorRemediesForRegion(fullLog: string, region: string): stri
   return [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
 }
 
+const PROOF_DISCRIMINATION_FAIL_LINE = /proof-discrimination: FAIL — \d+ proof\(s\) pass at both PR head and merge base/;
+const PROOF_DISCRIMINATION_PROOF_LINE = /^\s*proof: \S/;
+/** PRIMARY CONTROL: the gate's FAIL header plus the stale proofs it names, kept wherever they sit in the job. */
+export const MAX_RETAINED_VERDICT_LINES = 64;
+export const RETAINED_VERDICT_HEADER = "--- proof-discrimination verdict line(s) retained from earlier in this job ---";
+
+/** The proof-discrimination gate prints each stale proof's full output AFTER naming it, so the region
+ *  ending at `##[error]` kept only that output and the sweep's proof-repair route never saw a stale
+ *  proof: #10234 escalated instead of being repaired. The verdict lines ride along like remedies. */
+export function gateVerdictRetention(): { push(line: string): void; wrap(region: string): string } {
+  const kept: string[] = [];
+  let open = false;
+  return {
+    push(line) {
+      if (PROOF_DISCRIMINATION_FAIL_LINE.test(line)) open = true;
+      else if (!open || !PROOF_DISCRIMINATION_PROOF_LINE.test(line)) return;
+      const trimmed = line.trim();
+      if (kept.length < MAX_RETAINED_VERDICT_LINES && !kept.includes(trimmed)) kept.push(trimmed);
+    },
+    wrap(region) {
+      return kept.every((line) => region.includes(line)) ? region : [RETAINED_VERDICT_HEADER, ...kept, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -40707,6 +40803,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let stepErrors = 0;
   let inTapFailure = false;
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
+  const verdict = gateVerdictRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -40720,6 +40817,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
     push(rawLine: string): void {
       index += 1;
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
+      verdict.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -40755,7 +40853,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
+      return verdict.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"));
     },
   };
 }
@@ -40878,7 +40976,9 @@ function* ciFailuresSteps(
           const extracted = extractCiFailureRegion(out, tailLines);
           // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
           // Identical bytes to the region whenever the log names no recognised remedy.
-          logTail = retainGeneratorRemediesForRegion(out, extracted);
+          const verdict = gateVerdictRetention();
+          for (const line of out.split("\n")) verdict.push(line.replace(ACTIONS_LOG_TIMESTAMP, ""));
+          logTail = verdict.wrap(retainGeneratorRemediesForRegion(out, extracted));
         }
         logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
         if (logUnavailable === undefined) tailSource = "log";
@@ -43511,6 +43611,9 @@ export function ciLogNamedSourcePaths(
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
 
+/** W1-T5868: the reason prefix for a path left unmerged OUTSIDE the staged surface; it names the paths. */
+export const UNRESOLVED_CONFLICT_REFUSAL_PREFIX = "unresolved merge conflict outside the declared paths in";
+
 /**
  * W1-T5227: WHICH OF `paths` STILL HOLD A CONFLICT MARKER. Git's own detector, never a hand-rolled
  * regex: `git diff --check` prints `<path>:<line>: leftover conflict marker` for each one (plus
@@ -43639,6 +43742,15 @@ export function commitWorkerEdits(
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
     regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
+  // W1-T5868: a path still UNMERGED outside what this commit stages cannot be committed — `git commit`
+  // throws on it, and the guarded tree would carry its conflict stages. A merge of current main can
+  // conflict in files the task never declared. REFUSE by name (a strike), before anything is staged.
+  const unresolvedOutside = nulPaths(runGit(["diff", "--name-only", "--diff-filter=U", "-z"]))
+    .filter((path) => !declared.includes(path)).sort();
+  if (unresolvedOutside.length > 0) {
+    return { committed: false, undeclared, conflictMarkerFiles: unresolvedOutside,
+      reason: `${UNRESOLVED_CONFLICT_REFUSAL_PREFIX} ${unresolvedOutside.join(", ")}; nothing was staged` };
+  }
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
@@ -46201,6 +46313,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
+  mainHealthRung?: () => Promise<void>,
 ): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -46212,7 +46325,7 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async (scope) => {
+  return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
@@ -46330,7 +46443,7 @@ export function buildSweepLightHook(
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, mainHealthRung, { log });
 }
 
 /** What `routeFix` did with one PR — mirrors the sweep's per-PR action shape. */
