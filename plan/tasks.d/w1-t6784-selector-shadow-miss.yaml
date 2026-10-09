@@ -1,0 +1,27 @@
+- id: W1-T6784
+  title: "REPAIR THE SELECTOR EDGE INTO test/proof-exec-tmp-hygiene.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/proof-exec-tmp-hygiene.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37877770799 for PR #10227 at 5c7f6ab845489a0b5397d5e50ecb794aefe3ac7f: src/lib/ci-parity.ts, test/the-coverage-entry-shards-the-way-ci-does.test.ts, test/the-local-coverage-shard-count-equals-cis.test.ts -> test/proof-exec-tmp-hygiene.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/proof-exec-tmp-hygiene.test.ts when this edge is exercised"
+      proof: "grep: test/proof-exec-tmp-hygiene\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed plan proposes one selector-edge repair in src/lib/affected-suites.ts, with acceptance naming the same test path; the declared scope is coherent with that repair."
+      - "The supplied family record reports 8 merged and 0 declined tasks, supporting established practice."
+      - "The filing-time gates report no failure, and the supplied scope describes no sensitive access, destructive action, policy change, or operator-only decision. Implementation and proof execution remain unverified at this pre-diff stage."
+    judged_at: "2026-10-09T03:57:16.018Z"
+    pin: "54dac6a44cccdeca2fd6679aaadcedc1894015cfa106a8a2f7498807d576175b"

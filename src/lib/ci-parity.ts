@@ -2699,6 +2699,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "selected — never a property every walked file must hold, and it carries no baseline table",
   ),
   refusedForPredicate(
+    "test/the-affected-suite-reach-ratchet.test.ts",
+    "a",
+    "W1-T5702's reach ratchet. Its `git ls-files` over src/, scripts/, bin/ and test/ builds the selector's import graph " +
+      "and asserts three AGGREGATES of it (run-task.ts importer count, largest SCC, median reach) against " +
+      "scripts/affected-reach-baseline.json — a tree-wide fact, never a property each walked file must hold, the same shape " +
+      "as test/env-var-registry.test.ts below",
+  ),
+  refusedForPredicate(
     "test/tracked-source-write-guard.test.ts",
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +

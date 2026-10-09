@@ -3819,6 +3819,8 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       /** The raw proposal summary (the console's Details). */
       summary: string;
@@ -3829,6 +3831,8 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
@@ -3837,6 +3841,8 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
@@ -3858,6 +3864,8 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
