@@ -1,0 +1,3 @@
+- id: lint-plan-refuses-before-pr
+  # knowledge gardener: retire lint-plan-refuses-before-pr
+  lifecycle: superseded
