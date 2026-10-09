@@ -124,6 +124,7 @@ import {
   type WorkerHomeReapResult,
   type WorkerKeychainSummary,
 } from "./worker-home.js";
+import { openMemoryReservation, type HostMemoryLedgerDeps, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -1066,6 +1067,8 @@ export interface SpawnWorkerArgs {
     checkVersion?: (bin: string) => string;
     startProxy?: (policy: unknown) => Promise<WorkerEgressProxy>;
   };
+  /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
+  workerClass?: WorkerClass;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2055,20 +2058,64 @@ export function activeWorkerCount(): number {
   return activeWorkerSpawns;
 }
 
-function claimWorkerOccupancy(): () => void {
+/** What a claim records in the host memory ledger (W1-T7093). Bookkeeping only: nothing reads it to admit work. */
+export interface WorkerOccupancyReservation {
+  workerClass?: WorkerClass;
+  root?: string;
+  ledger?: HostMemoryLedgerDeps;
+}
+
+/** A claim's release plus its host memory reservation. `openMemoryReservation` never throws, so the claim cannot fail. */
+function claimWorkerOccupancy(reservation: WorkerOccupancyReservation = {}): { release: () => void; memory: MemoryReservationHandle } {
   activeWorkerSpawns += 1;
+  const memory = openMemoryReservation(
+    { workerClass: reservation.workerClass ?? "unclassified", root: reservation.root },
+    reservation.ledger,
+  );
   let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    activeWorkerSpawns = Math.max(0, activeWorkerSpawns - 1);
+  return {
+    memory,
+    release: () => {
+      if (released) return;
+      released = true;
+      activeWorkerSpawns = Math.max(0, activeWorkerSpawns - 1);
+      memory.releaseOccupancy();
+    },
+  };
+}
+
+/** The class a spawn records when its caller names none: a disposable review sandbox is a review, a spawn carrying the
+ * implement lane's rule lookup is an implement, and anything else says "unclassified" rather than guessing. */
+function workerClassOf(args: Pick<SpawnWorkerArgs, "workerClass" | "sandboxIntent" | "ruleLookup">): WorkerClass {
+  if (args.workerClass) return args.workerClass;
+  if (args.sandboxIntent === "disposable-review") return "review";
+  return args.ruleLookup ? "implement" : "unclassified";
+}
+
+/** The contained spawn, wrapped so each process it starts is bound to the claim's reservation as (pid, start time). */
+function reservationBoundContainment(
+  containment: SpawnWorkerArgs["containment"],
+  memory: MemoryReservationHandle,
+): NonNullable<SpawnWorkerArgs["containment"]> {
+  const spawn = containment?.spawn ?? spawnDetachedGroup;
+  return {
+    ...containment,
+    spawn: (opts, onStderr, onSpawnError) => {
+      const spawned = spawn(opts, onStderr, onSpawnError);
+      memory.bindRoot(spawned.pid);
+      return spawned;
+    },
   };
 }
 
 /** Claim one process-wide worker slot for the complete async operation and release it on every settlement, including an
- * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. */
-export async function withWorkerOccupancy<T>(operation: () => Promise<T>): Promise<T> {
-  const release = claimWorkerOccupancy();
+ * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. The claim
+ * also opens a host memory ledger reservation, released only once its whole tree is verified gone (W1-T7093). */
+export async function withWorkerOccupancy<T>(
+  operation: () => Promise<T>,
+  reservation: WorkerOccupancyReservation = {},
+): Promise<T> {
+  const { release } = claimWorkerOccupancy(reservation);
   try {
     return await operation();
   } finally {
@@ -2239,7 +2286,11 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
-  const releaseWorkerOccupancy = claimWorkerOccupancy();
+  const { release: releaseWorkerOccupancy, memory: memoryReservation } = claimWorkerOccupancy({
+    workerClass: workerClassOf(args),
+    root: args.config?.root,
+  });
+  const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
@@ -2594,7 +2645,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // process boundary while the worker's SHELL still read the operator's exported value from `$HOME/.bashrc`.
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
-        const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        const result = await runCodex({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
         if (args.model) result.model = args.model;
@@ -2671,7 +2722,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
-      const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      const result = await runCodex({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
       if (args.model) result.model = args.model;
@@ -2765,7 +2816,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
@@ -2930,7 +2981,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
-    const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
+    const spawnContained = boundContainment.spawn ?? spawnDetachedGroup;
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
