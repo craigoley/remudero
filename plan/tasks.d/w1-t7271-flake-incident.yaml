@@ -26,3 +26,11 @@
     CI runs: 37862576629, 37944299457, 37947872859.
     Retry outcomes: 1 recovered on retry, 2 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.8
+    reasons:
+      - "high-risk verdict at confidence 0.80 — on the change's description/files alone, no diff was read — The acceptance criterion locates the remedy in test/fast-gate-admits-the-census-class.test.ts, but the declared scope also includes src/lib/ci-parity.ts without explaining the intended source change.; on the change's description/files alone, no diff was read — No cause, supporting reproduction evidence, or explanation of the source change is supplied; its necessity and alignment with the test-focused remedy cannot be verified from the shown record."
+    judged_at: "2026-10-09T17:04:46.701Z"
+    pin: "02f857db9b78e7ec712ed543fc44de830a6ce53fd98f765b1ed67b6f397b0ab1"
