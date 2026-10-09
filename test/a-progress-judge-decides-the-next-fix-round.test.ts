@@ -105,6 +105,15 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     assert.equal(result.verdict, "continue");
   });
 
+  test("a proof-amendment identity row is not presented to the progress judge as a worker round", () => {
+    const input = buildFixProgressInput({ taskId: TASK, headSha: "head-3", currentRed: ["ci"], ledger: [
+      { task_id: TASK, step: "fix.dispatch", kind: "proof_amendment", identity_key: "amendment-1" },
+      { task_id: TASK, step: "fix.dispatch", round_id: "worker-1", head_sha: "head-3", ci_failures: [{ check: "ci" }] },
+      { task_id: TASK, step: "fix.done", round_id: "worker-1", head_sha: "head-3", subtype: "success" },
+    ] });
+    assert.deepEqual(input.rounds.map(round => round.id), ["worker-1"]);
+  });
+
   test("a throwing judge yields unavailable with its reason", async () => {
     const input = buildFixProgressInput({ taskId: TASK, headSha: "head-3", currentRed: ["ci"], ledger: [] });
     const result = await judgeFixProgress(input, async () => { throw new Error("provider unavailable"); });

@@ -8,8 +8,16 @@ export async function runSweep(...args: Parameters<typeof runSweepProduction>) {
   const [openPrs, deps, policy] = args;
   const fixtureProgressJudge: FixProgressJudge = async input => {
     const pr = openPrs.find(candidate => candidate.prNumber === input.prNumber || candidate.taskId === input.taskId);
+    const spentRounds = Math.max(input.strikesSpent, pr?.priorStrikes ?? 0);
+    if (input.signals.refusedRounds >= 2 && input.parkedReason) {
+      return {
+        verdict: "escalate",
+        loop: `repeated refusal: ${input.parkedReason}`,
+        reason: "the fixture models the existing no-information stand-down for an identical refusal",
+      };
+    }
     if (input.formerCeiling !== undefined &&
-        (input.rounds.length >= input.formerCeiling || (pr?.priorStrikes ?? 0) >= input.formerCeiling)) {
+        (spentRounds >= input.formerCeiling || (pr?.priorStrikes ?? 0) >= input.formerCeiling)) {
       return {
         verdict: "escalate",
         loop: `fix strikes exhausted at former ceiling ${input.formerCeiling}`,

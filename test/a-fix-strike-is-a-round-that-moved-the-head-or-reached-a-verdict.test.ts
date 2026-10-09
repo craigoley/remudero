@@ -56,10 +56,10 @@ test("W1-T5542: refused rounds are never strikes and both readers agree", async 
     const rows = [...round(identified ? "r1" : undefined, REASON), ...round(identified ? "r2" : undefined, REASON)];
     assert.equal(priorStrikesFor(rows, TASK, "executed", HEAD), 0);
     const disposition = sweep.deriveDisposition(view(rows));
-    assert.equal(disposition.disposition, "blocked-ambiguous");
+    assert.equal(disposition.disposition, "blocked-fixable", "the sweep asks the progress judge to rule on repeated refusals");
     const claimed = await underClaim(rows);
     assert.equal(claimed.dispatched, 0, "the stale view cannot authorize a third refused round");
-    assert.match(String(claimed.disposed?.stand_down_reason), /refused twice/);
+    assert.match(String(claimed.result.actions[0]?.reason), /fix progress judgment due after repeated refusal/);
     assert.equal(sweep.fixRoundTally(rows, TASK, HEAD).strikes, 0);
   }
   const single = await underClaim(round("r1", REASON), true);
@@ -117,8 +117,8 @@ test("W1-T5542: a round that moved the head or reached a verdict is one strike",
 test("W1-T5542: a repeated identical refusal stops the rung without a strike", async () => {
   const identical = [...round("r1", REASON), ...round("r2", REASON)];
   const disposition = sweep.deriveDisposition(view(identical));
-  assert.equal(disposition.disposition, "blocked-ambiguous");
-  assert.match(disposition.reason, /fix rounds refused twice at this head.*the worker changed nothing.*no strike spent/);
+  assert.equal(disposition.disposition, "blocked-fixable");
+  assert.match(disposition.reason, /fix progress judgment due after repeated refusal: the worker changed nothing/);
   assert.match(disposition.reason, /ci/);
   assert.doesNotMatch(disposition.reason, /\d+\/\d+/);
   const different = [...round("r1", REASON), ...round("r2", "outside its declared files")];
@@ -136,7 +136,7 @@ test("W1-T5542: the 8868 ledger shape never renders an overshoot", async () => {
   assert.equal(tally.refusals.length, 3);
   const disposition = sweep.deriveDisposition(view(rows));
   assert.doesNotMatch(disposition.reason, /3\/2/);
-  assert.match(disposition.reason, /refused twice/);
+  assert.match(disposition.reason, /fix progress judgment due after repeated refusal/);
   assert.equal((await underClaim(rows)).dispatched, 0);
 });
 

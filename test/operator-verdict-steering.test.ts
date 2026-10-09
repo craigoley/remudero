@@ -129,9 +129,10 @@ function strikesExhaustedPr(): OpenPrView {
 
 const NOW = Date.parse("2026-08-12T12:00:00Z");
 
-test("FALSIFIER 1: a wrong-verdict-with-note fixture RE-ARMS the fix rung — unanswered it escalates, with the note quoted it re-arms to blocked-fixable", () => {
+test("FALSIFIER 1: a wrong-verdict-with-note fixture RE-ARMS the fix rung — disposition marks judgment due until the sweep answers", () => {
   const baseline = deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(baseline.disposition, "blocked-ambiguous", "an exhausted PR with no operator signal must still escalate");
+  assert.equal(baseline.disposition, "blocked-fixable", "pure disposition marks progress judgment due; it does not decide without the sweep judge");
+  assert.match(baseline.reason, /fix progress judgment due/);
 
   const note = "the assertion is checking the wrong field — compare status, not code";
   const pendingAnswer = operatorVerdictEvidence(TASK, [feedbackLine({ verdict: "wrong", note })], []);
@@ -171,13 +172,14 @@ test("FALSIFIER 1 (the fix prompt quotes the note verbatim): buildFixRungDispatc
 
 // ── End-to-end falsifier (2): a good verdict + an unanswered question re-arm NOTHING ─────────
 
-test("FALSIFIER 2: a good verdict plus an unanswered question produce NO re-arm — the strikes-exhausted PR stays blocked-ambiguous, exactly as with no operator signal at all", () => {
+test("FALSIFIER 2: a good verdict plus an unanswered question produce NO re-arm — the sweep still owns the due progress judgment", () => {
   const pendingAnswer = operatorVerdictEvidence(TASK, [feedbackLine({ verdict: "good", note: "nice work" })], [questionLine()]);
   assert.equal(pendingAnswer, undefined, "neither the praise nor the silent question earns a re-arm");
 
   const notRearmed: OpenPrView = { ...strikesExhaustedPr(), pendingAnswer };
   const result = deriveDisposition(notRearmed, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(result.disposition, "blocked-ambiguous", "a rung that re-armed here would spin forever on praise or on silence");
+  assert.equal(result.disposition, "blocked-fixable", "without a judge result, the pure disposition only marks judgment due");
+  assert.match(result.reason, /fix progress judgment due/);
 });
 
 test("every answer to the task steers the fix, in order, not only the latest", () => {

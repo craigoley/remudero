@@ -8823,7 +8823,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: isFixStrikeExhausted,
     blocker: "review-failed",
     reason: (pr, policy) => {
-      if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}`;
+      if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}` +
+        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "");
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       return `fix progress judgment due after ${pr.priorStrikes} rounds (former ceiling ${ceiling})`;
     },
@@ -12503,6 +12504,14 @@ export function fixRoundTally(
   const noCommitCounts = new Map<string, number>();
   for (const round of rounds) {
     if (!selected.has(round.dispatch)) continue;
+    // W1-T5864: a shell-less attempt that cannot begin the required current-main merge
+    // spends a fix strike, even though it uses the shared refusal receipt for compatibility.
+    // It is distinct from a worker refusing a commit: no worker ran, and the merge-start failure
+    // itself is the failed attempt the next progress judgment must count.
+    if (round.refusal?.merge_start_failed === true || round.refusal?.merge_commit_refused === true) {
+      tally.strikes++;
+      continue;
+    }
     if (round.refusal || round.done?.subtype === "commit_refused") {
       const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
       tally.refusals.push({ reason, round_id: round.id });
@@ -13146,6 +13155,7 @@ export async function runSweep(
   // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
   const judgedContinue = new Map<number, FixProgressVerdict>();
   const judgedUnavailable = new Map<number, string>();
+  const preflightEscalations = new Map<number, { loop: string; reason: string; inputKey: string; alreadyDelivered: boolean }>();
   // An unwired caller (a fixture) keeps the former bound as an announced stand-in: escalate once the
   // former ceiling is reached, continue below it. Production always wires the judge (W1-T7096 guard suite).
   let standInAnnounced = false;
@@ -13163,27 +13173,61 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
-      // A repeated refusal is judged later, with its parked reason; only a reached ceiling is judged here.
-      // The parked waits W1-T7096 owns (a refused commit at this head, a metadata or proof repair in
-      // flight) are judged later on the fixable path, which supplies their parked reason.
-      if (!isFixStrikeExhausted(pr, policy) || pr.repeatedFixRefusal !== undefined ||
-          sameHeadRedFixRefusal(ledgerLines, pr) !== undefined || metadataOnlyRed(pr) !== undefined ||
-          proofRepairRouteEvidence(pr) !== undefined) { next.push(pr); continue; }
-      const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
-        currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
-        ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
-        formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: pr.repeatedFixRefusal });
-      const result = await judgeFixProgress(input, progressJudge);
-      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
-        step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha, site: "exhaustion",
-        round_count: input.rounds.length, signals: input.signals, ...result });
-      if (result.verdict === "escalate") {
-        next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
+      // The REST/open-PR projection can be stale relative to the ledger (for example, a caller
+      // may have built it before a worker refusal was appended). Reconcile the current-head
+      // strike/refusal facts before deciding whether judgment is due, so stale snapshots cannot
+      // authorize another round after the ledger has already exhausted or refused it.
+      const currentTally = fixRoundTally(ledgerLines, pr.taskId, pr.headSha);
+      const judgedPr: OpenPrView = {
+        ...pr,
+        priorStrikes: Math.max(pr.priorStrikes, currentTally.strikes),
+        ...(pr.repeatedFixRefusal === undefined && currentTally.repeatedRefusal !== undefined
+          ? { repeatedFixRefusal: currentTally.repeatedRefusal } : {}),
+      };
+      // A same-head refusal is part of the judgment input, not an exemption: an exhausted refused
+      // round must reach the same loop decision as any other exhausted round so the ladder can own
+      // an escalation verdict. Metadata and stale-proof repairs retain their deterministic routes.
+      const sameHeadRefusal = sameHeadRedFixRefusal(ledgerLines, pr);
+      // A refusal with no paired dispatch receipt is intentionally held once by the fixable
+      // route so the next pass can distinguish incomplete legacy history from a repeated refusal.
+      // Do not let the exhaustion preflight bypass that one-pass recovery window.
+      const incompleteSameHeadRefusal = sameHeadRefusal !== undefined && currentTally.refusals.length === 0;
+      if (!isFixStrikeExhausted(judgedPr, policy) || judgedPr.isPlanFiling === true ||
+          sameHeadRefusal?.scopeAmendment !== undefined || incompleteSameHeadRefusal ||
+          metadataOnlyRed(judgedPr) !== undefined ||
+          proofRepairRouteEvidence(judgedPr) !== undefined) { next.push(judgedPr); continue; }
+      const input = buildFixProgressInput({ taskId: judgedPr.taskId, prNumber: judgedPr.prNumber, headSha: judgedPr.headSha,
+        strikesSpent: judgedPr.priorStrikes,
+        currentRed: [...redCheckNames(judgedPr).filter(r => !r.startsWith("review:")), ...judgedPr.unmetCriteria.map(c => `review:${c.claim}`)],
+        ledger: ledgerLines, operatorAnswer: judgedPr.pendingAnswer?.constraint,
+        formerCeiling: fixCeilingInForce(judgedPr, policy.strikeCap, policy.clarify),
+        parkedReason: judgedPr.repeatedFixRefusal ?? sameHeadRefusal?.reason });
+      const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+      const priorEscalation = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === judgedPr.prNumber &&
+        row.head_sha === judgedPr.headSha && row.progress_escalated_key === inputKey);
+      if (priorEscalation) {
+        preflightEscalations.set(judgedPr.prNumber, { loop: "previously judged loop", reason: "same input already escalated",
+          inputKey, alreadyDelivered: true });
+        next.push(judgedPr);
         continue;
       }
-      if (result.verdict === "continue" || result.verdict === "change-approach") judgedContinue.set(pr.prNumber, result);
-      else judgedUnavailable.set(pr.prNumber, result.reason);
-      next.push(pr);
+      const result = await judgeFixProgress(input, progressJudge);
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: judgedPr.taskId ?? `PR-${judgedPr.prNumber}`,
+        step: "fix.progress_judged", pr_number: judgedPr.prNumber, head_sha: judgedPr.headSha, site: "exhaustion",
+        input_key: inputKey, round_count: input.rounds.length, signals: input.signals, ...result });
+      if (result.verdict === "escalate") {
+        if (deps.strikeLadder !== undefined ||
+            (judgedPr.repeatedFixRefusal === undefined && currentTally.strikes === 0)) {
+          next.push({ ...judgedPr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
+        } else {
+          preflightEscalations.set(judgedPr.prNumber, { loop: result.loop, reason: result.reason, inputKey, alreadyDelivered: false });
+          next.push(judgedPr);
+        }
+        continue;
+      }
+      if (result.verdict === "continue" || result.verdict === "change-approach") judgedContinue.set(judgedPr.prNumber, result);
+      else judgedUnavailable.set(judgedPr.prNumber, result.reason);
+      next.push(judgedPr);
     }
     openPrs = next;
   }
@@ -14970,6 +15014,20 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const preflightEscalation = preflightEscalations.get(pr.prNumber);
+              if (preflightEscalation !== undefined) {
+                const reason = preflightEscalation.alreadyDelivered
+                  ? "this fix progress loop is already escalated; awaiting new evidence or an operator answer"
+                  : `fix progress loop: ${preflightEscalation.loop} — ${preflightEscalation.reason}`;
+                if (!preflightEscalation.alreadyDelivered) {
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                }
+                extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: preflightEscalation.inputKey };
+                acted = false;
+                spent = false;
+                standDownReason = reason;
+                break;
+              }
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
               const askProgress = async (): Promise<boolean> => {
@@ -14982,7 +15040,9 @@ export async function runSweep(
                   return false;
                 }
                 const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber,
-                  headSha: pr.headSha, currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                  headSha: pr.headSha,
+                  strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, pr.taskId, pr.headSha).strikes),
+                  currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
                     ...pr.unmetCriteria.map(c => `review:${c.claim}`),
                     ...(pr.reviewState === "failure" && pr.unmetCriteria.length === 0 ? ["remudero-review"] : [])], ledger: ledgerLines,
                   operatorAnswer: pr.pendingAnswer?.constraint,
@@ -15554,9 +15614,13 @@ export async function runSweep(
                 proofRepairRoute !== undefined && proofRepairState !== undefined &&
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
               if (proofRepairRoute && proofRepairState && !proofRepairActive) {
-                progressParkedReason = `proof-repair refused ${proofRepairState.refusals} rounds at this head`;
-                if (!await askProgress()) break;
-                proofRepairActive = true;
+                const planFlagAvailable = typeof deps.dispatchPlanOnlyRepair === "function" &&
+                  priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES;
+                if (!planFlagAvailable) {
+                  progressParkedReason = `proof-repair refused ${proofRepairState.refusals} rounds at this head`;
+                  if (!await askProgress()) break;
+                  proofRepairActive = true;
+                }
               }
               const fixEvidence: FixDispatchEvidence = proofRepairActive
                 ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }

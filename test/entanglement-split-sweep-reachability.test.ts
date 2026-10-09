@@ -360,12 +360,12 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
 });
 
 // W1-T3172 exhaustion and prerequisite safety still win.
-test("strike exhaustion precedes the split route", () => {
+test("the former strike ceiling routes the split case to a progress judgment", () => {
   const { view, cleanup } = boardView([reviewRow()]);
   try {
     const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
-    assert.equal(exhausted.disposition, "blocked-ambiguous");
-    assert.match(exhausted.reason, /strikes exhausted/);
+    assert.equal(exhausted.disposition, "blocked-fixable");
+    assert.match(exhausted.reason, /fix progress judgment due/);
     assert.doesNotMatch(exhausted.reason, /W1-T2436/);
   } finally {
     cleanup();

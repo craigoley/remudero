@@ -58,11 +58,20 @@ test("W1-T5537: one disposition splits into the blocker each PR actually waits o
     const d = deps();
     const summary = await runSweep([view], d);
     const [row] = disposed(d);
+    const expectedDisposition = blocker === "strikes-exhausted" ? "blocked-ambiguous"
+      : blocker === "plan-proof-unrunnable" ? "refused-escalate" : before.disposition;
     assert.equal(row.blocker, blocker);
     assert.equal(row.blocker_owner, owner);
-    assert.equal(row.disposition, before.disposition);
-    assert.equal(row.reason, before.reason);
-    assert.equal(summary.actions[0].disposition, before.disposition);
+    assert.equal(row.disposition, expectedDisposition);
+    if (blocker === "strikes-exhausted") {
+      assert.equal(before.disposition, "blocked-fixable", "pure disposition leaves the judgment due, not decided");
+      assert.match(String(row.reason), /fix strikes exhausted/);
+    } else if (blocker === "plan-proof-unrunnable") {
+      assert.match(String(row.reason), /plan-only PR is red/);
+    } else {
+      assert.equal(row.reason, before.reason);
+    }
+    assert.equal(summary.actions[0].disposition, expectedDisposition);
   }
 });
 

@@ -9,7 +9,21 @@ export * from "../../src/run-task.js";
  * Tests for the new unbounded, judge-led path inject their own judge and bypass this default.
  */
 const legacyFixtureJudge: FixProgressJudge = async input => {
-  if (input.formerCeiling !== undefined && input.rounds.length >= input.formerCeiling) {
+  if (input.signals.refusedRounds >= 2 && input.parkedReason) {
+    return {
+      verdict: "escalate",
+      loop: `repeated refusal: ${input.parkedReason}`,
+      reason: "the fixture models the existing no-information stand-down for an identical refusal",
+    };
+  }
+  if (input.parkedReason?.includes("ci-log false-block") && input.signals.noOpRounds > 0) {
+    return {
+      verdict: "escalate",
+      loop: input.parkedReason,
+      reason: "the fixture models the no-information handoff for an unchanged CI finding",
+    };
+  }
+  if (input.formerCeiling !== undefined && input.strikesSpent >= input.formerCeiling) {
     return {
       verdict: "escalate",
       loop: `fixture-selected former ceiling ${input.formerCeiling}`,
@@ -21,11 +35,9 @@ const legacyFixtureJudge: FixProgressJudge = async input => {
 
 export async function runFixRung(...args: Parameters<typeof runFixRungProduction>) {
   const [options] = args;
-  return runFixRungProduction({
-    ...options,
-    deps: {
-      ...options.deps,
-      fixProgressJudge: options.deps.fixProgressJudge ?? legacyFixtureJudge,
-    },
-  });
+  // Preserve the caller's option/dependency object identity. A few lifecycle regressions mutate
+  // worktreePath from inside spawn to model a worktree disappearing after dispatch; cloning the
+  // options here hid that state change from the production rung.
+  options.deps.fixProgressJudge ??= legacyFixtureJudge;
+  return runFixRungProduction(options);
 }

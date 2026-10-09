@@ -207,7 +207,9 @@ test("W1-T5864: an already-up-to-date merge reports not started and spends no wo
     assert.deepEqual(strikes.map((r) => r.strike), Array.from({ length: strikeCap }, (_, i) => i + 1));
     assert.match(String(strikes[0]!.reason), /no MERGE_HEAD/, "the failed strike carries the reason");
     assert.equal(outcome.outcome, "escalated", "a failed strike escalates at the cap, never a silent stand-down");
-    assert.equal(outcome.reason, "merge_conflict_unresolved");
+    assert.match(String(outcome.reason), /^fix progress loop:/, "the progress judge owns the stop reason");
+    assert.equal(round.rows.findLast((r) => r.step === "fix.exhausted")?.reason, "merge_conflict_unresolved",
+      "the terminal receipt retains the typed merge-conflict cause");
     assert.equal(outcome.strikes, strikeCap);
     assert.equal(round.issuesFiled.length, 1);
     assert.equal(sweepStrikes(round.rows, f.branchSha), strikeCap, "the ledger reads each as a strike");

@@ -263,7 +263,7 @@ test("runFixRung (criterion 1 + 4): an inert fix escalates immediately after ONE
   assert.equal(spawnCalls.length, 1, "only ONE strike is ever spent — the second is never dispatched to re-discover the same finding");
   assert.equal(outcome.outcome, "escalated");
   assert.equal(outcome.strikes, 1, "the strike counter stops at the one genuine strike that ran; no strike is granted to pay for the detection itself");
-  assert.equal(outcome.reason, "ci_false_block");
+  assert.match(outcome.reason ?? "", /fix progress loop: ci-log false-block/);
   assert.ok(outcome.issueUrl, "an inert fix costs no strike but still carries the evidence, via an escalation");
   assert.equal(issues.calls.length, 1);
   assert.match(issues.calls[0].body, /identical annotation finding set/);
@@ -425,10 +425,10 @@ test("runFixRung (criterion 6a): the UNCHANGED-TREE stand-down (W1-T1284) still 
 
 test("runFixRung (criterion 6b): the REVIEW FALSE-BLOCK escape still fires exactly as before this task, unaffected by the new ci-log sibling", async () => {
   const issues = fakeIssueStore();
-  const dispatchedReview = fakeReview("failure", [criterion({ claim: "does the thing", met: false })], "sha-1");
+  const dispatchedReview = { ...fakeReview("failure", [criterion({ claim: "does the thing", met: false })], "sha-1"), floorState: "success" as const };
   // The re-review posts against the SAME head sha with the SAME unmet criterion — no new work was
   // even offered (this is `detectReviewFalseBlock`'s own "no-progress" signal (a), untouched).
-  const reReview = fakeReview("failure", [criterion({ claim: "does the thing", met: false })], "sha-1");
+  const reReview = { ...fakeReview("failure", [criterion({ claim: "does the thing", met: false })], "sha-1"), floorState: "success" as const };
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts(),

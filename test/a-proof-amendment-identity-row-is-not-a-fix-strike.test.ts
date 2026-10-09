@@ -131,7 +131,7 @@ test("W1-T5032: a real worker dispatch still counts toward the cap", async () =>
   assert.equal(deps.fixed.length, 0);
   assert.equal(summary.actions[0]!.acted, false);
   const rows = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed" && l.pr_number === 5032);
-  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /fix strikes exhausted under the claim \(2\/2\)/);
+  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /fix progress loop: fix strikes exhausted at former ceiling 2/);
 });
 
 test("W1-T5032: the identity row is still written and resolved by its key", () => {
