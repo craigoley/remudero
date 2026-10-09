@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/a-red-branch-behind-its-base-spends-a-strike-first\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts for each recorded edge"
       proof: "grep: test/a-red-branch-behind-its-base-spends-a-strike-first\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files are limited to src/lib/affected-suites.ts (a test selector mapping) and one regression test, and neither touches secrets, auth, permissions, merge/deploy/infrastructure policy, or data deletion."
+      - "The acceptance criteria are grep-verifiable (a path appearing in the selector and in the shadow test), so the finding can be checked from what is shown and needs no operator decision."
+      - "The family track record is 8 merged and 0 declined (Beta mean 0.90), and the task is a routine selector-edge repair consistent with that family. The gates state is clean, and the PR still passes CI and review."
+    judged_at: "2026-10-09T23:04:34.126Z"
+    pin: "05cd0c685689ed7dad8b59b2a66de4282116afe9a30fea964172c6677b4e2981"
