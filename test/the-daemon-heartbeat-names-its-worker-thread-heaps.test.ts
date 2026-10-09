@@ -163,6 +163,52 @@ test("the registry sizes a real worker thread by its spawn site on the heartbeat
   }
 });
 
+test("a thread whose read rejects is named unsized with no byte count, never 0 bytes", async () => {
+  const refusing: WorkerThread = {
+    threadId: 8,
+    once: (() => undefined) as unknown as WorkerThread["once"],
+    getHeapStatistics: (() => Promise.reject(new Error("thread exited"))) as unknown as WorkerThread["getHeapStatistics"],
+  };
+  const book = workerHeapReadings({ live: () => [{ kind: "gone:exited", thread: refusing }], timeoutMs: 1_000 });
+  book.refresh();
+  await settle(20);
+  const fields = book.fields(MAIN);
+  assert.deepEqual(fields.worker_heaps, { "gone:exited": { threads: 1, total_bytes: 0, used_bytes: 0, unsized: [8] } });
+  assert.equal(fields.native_remainder_kind, "inferred-upper-bound", "a refused read leaves the remainder a bound");
+});
+
+test("a registry that throws is carried on the row as an error, and the next refresh recovers", async () => {
+  let broken = true;
+  const book = workerHeapReadings({
+    live: () => {
+      if (broken) throw new Error("registry unavailable");
+      return [{ kind: "ok:site", thread: fakeThread(9, { total: 10, used: 5 }) }];
+    },
+    timeoutMs: 1_000,
+  });
+  book.refresh();
+  assert.equal(book.fields(MAIN).mem_worker_heaps, "error:registry unavailable");
+  broken = false;
+  book.refresh();
+  await settle(20);
+  assert.deepEqual(book.fields(MAIN).worker_heaps, { "ok:site": { threads: 1, total_bytes: 10, used_bytes: 5 } });
+});
+
+test("a throwing afterRow hook is logged by name and never costs the tick its heartbeat", async () => {
+  const steps: { step: string; extra: Record<string, unknown> }[] = [];
+  const readMemoryTelemetry = Object.assign(() => ({ ...MAIN }), {
+    afterRow: () => { throw new Error("read start refused"); },
+  });
+  await heartbeat({
+    readMemoryTelemetry,
+    log: (step, extra = {}) => { steps.push({ step, extra }); },
+  }, { ticks: 3, settleMs: 10 });
+  assert.ok(steps.some((s) => s.step === "daemon.alive"), "the heartbeat was still written");
+  const failed = steps.find((s) => s.step === "daemon.memory_read_failed");
+  assert.ok(failed, "the failed read start is logged");
+  assert.equal(failed.extra.error, "read start refused");
+});
+
 test("the sampler module references no heap snapshot, inspector or gc entry point", () => {
   const text = readFileSync(join(REPO_ROOT, "src", "lib", "daemon-memory-telemetry.ts"), "utf8");
   for (const forbidden of [
