@@ -167,7 +167,7 @@ function harnessTypescript(): { tsc: string; version: string; modules: string } 
   return { tsc: join(pkgDir, pkg.bin.tsc), version: pkg.version, modules: dirname(pkgDir) };
 }
 
-const canonicalOrUndefined = (wt: string): { root: string; buildInfo: string } | undefined => {
+export const canonicalOrUndefined = (wt: string): { root: string; buildInfo: string } | undefined => {
   try {
     return canonicalBuildInfo(wt);
   } catch {
