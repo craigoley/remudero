@@ -3,15 +3,18 @@
 /**
  * W1-T7092 — THE DAEMON HEARTBEAT NAMES ITS WORKER THREAD HEAPS.
  *
- * The core daemon held 4.3-4.65 GB rss against a 0.45-0.60 GB main heap, and ran worker_threads
- * whose isolates `process.memoryUsage()` does not count. `workerHeapReadings`
- * (src/lib/daemon-memory-telemetry.ts) sizes each live thread in worker-heaps.ts's registry by spawn
- * site; the daemon's `afterRow` hook (daemon.ts) starts that read only after `daemon.alive` is
- * written, and the NEXT row carries it.
+ * The core daemon held 4.3-4.65 GB rss against a 0.45-0.60 GB main heap and ran worker_threads whose
+ * isolates `process.memoryUsage()` does not count. `workerHeapReadings`
+ * (src/lib/daemon-memory-telemetry.ts) reports each thread by creation site, role, thread id and daemon
+ * generation, with the main isolate's heap figures and an explicit state; the daemon's `afterRow` hook
+ * (daemon.ts) starts a request round only after `daemon.alive` is written.
  *
- * Every heartbeat case runs through the real `runDaemon` ticker. Awaiting the read inside the tick
- * fails the not-awaited case (the run never finishes); counting an unanswered thread as 0 bytes
- * fails the unsized case (no thread is named and the remainder carries no bound).
+ * MEASURED (isolated probe, node 24.21.0): a worker blocked in `execFileSync` cannot answer
+ * `getHeapStatistics()`, and every timed-out request stayed outstanding (1, 2, 3, 4) until it unblocked.
+ * The cases below hold the book to ONE unresolved request per worker generation.
+ *
+ * The production reader's own case lives in test/the-daemon-heartbeat-says-what-its-memory-is.test.ts,
+ * which already imports run-task.ts (the affected-suite reach ratchet counts every importer of it).
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -19,14 +22,195 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Worker } from "node:worker_threads";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { workerHeapReadings, type RemainderInputs } from "../src/lib/daemon-memory-telemetry.js";
-import { workerThreads, type TrackedWorker, type WorkerThread } from "../src/lib/worker-heaps.js";
+import { workerHeapReadings, type HeapStatistics, type WorkerHeapEntry, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
+import type { TrackedWorker, WorkerThread } from "../src/lib/worker-heaps.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A whole getHeapStatistics() answer whose every figure derives from `mb`, so each field is checkable. */
+function heap(mb: number): HeapStatistics {
+  const m = mb * 1_000_000;
+  return { used_heap_size: m, total_heap_size: 2 * m, total_physical_size: 2 * m - 1, external_memory: 3 * m, malloced_memory: 4 * m, heap_size_limit: 8_000 * 1_000_000 };
+}
+
+/** A thread double whose answers the test controls. `answer()` settles a request; `exit()` fires its exit. */
+function controlledThread(threadId: number) {
+  const requests: Array<{ resolve: (h: HeapStatistics) => void; reject: (e: Error) => void }> = [];
+  const exitListeners: Array<(code: number) => void> = [];
+  const thread = {
+    threadId,
+    once: ((event: string, listener: (code: number) => void) => {
+      if (event === "exit") exitListeners.push(listener);
+      return thread;
+    }) as unknown as WorkerThread["once"],
+    getHeapStatistics: (() => new Promise<HeapStatistics>((resolve, reject) => requests.push({ resolve, reject }))) as unknown as WorkerThread["getHeapStatistics"],
+  };
+  return {
+    thread: thread as unknown as WorkerThread,
+    get asked(): number { return requests.length; },
+    answer(h: HeapStatistics, index = 0): void { requests[index].resolve(h); },
+    exit(code: number): void { for (const listener of exitListeners.splice(0)) listener(code); },
+  };
+}
+
+const MAIN_HEAP = heap(500);
+const MAIN = { rss_bytes: 4_600_000_000, vm_swap_bytes: 400_000_000, external_bytes: 50_000_000 };
+
+function book(live: () => readonly TrackedWorker[], timeoutMs = 15) {
+  return workerHeapReadings({ live, mainHeap: () => MAIN_HEAP, generation: "DAEMON-1791542911631", timeoutMs });
+}
+const threadsOf = (fields: WorkerHeapFields): WorkerHeapEntry[] => fields.worker_heaps?.threads ?? [];
+const entry = (fields: WorkerHeapFields, threadId: number): WorkerHeapEntry | undefined => threadsOf(fields).find((t) => t.thread_id === threadId);
+
+test("a thread that never answers keeps exactly one outstanding request across repeated timeouts", async () => {
+  const stuck = controlledThread(21);
+  const readings = book(() => [{ kind: "read-plane:startReadPlane", thread: stuck.thread }]);
+  for (let i = 0; i < 6; i++) {
+    readings.refresh();
+    await settle(30); // twice the 15 ms timeout, every round
+  }
+  assert.equal(stuck.asked, 1, "a timeout neither cancels the request nor permits another");
+  const row = entry(readings.fields(MAIN), 21);
+  assert.equal(row?.state, "unanswered");
+  assert.ok((row?.outstanding_ms ?? 0) >= 150, `the one request's wait is reported (${row?.outstanding_ms} ms)`);
+  assert.equal(row?.total_heap_bytes, undefined, "an unanswered thread carries no figures, never zeros");
+});
+
+test("eventual completion clears the one request, and only then is the thread asked again", async () => {
+  const slow = controlledThread(22);
+  const readings = book(() => [{ kind: "read-plane:startReadPlane", thread: slow.thread }]);
+  readings.refresh();
+  await settle(30);
+  readings.refresh();
+  assert.equal(slow.asked, 1);
+  slow.answer(heap(300));
+  await settle(5);
+  const stale = entry(readings.fields(MAIN), 22);
+  assert.equal(stale?.state, "stale", "an answer to an earlier round is stale, with its figures and age");
+  assert.equal(stale?.total_heap_bytes, heap(300).total_heap_size);
+  readings.refresh();
+  assert.equal(slow.asked, 2, "the next round asks again once the request settled");
+  slow.answer(heap(310), 1);
+  await settle(5);
+  const fresh = entry(readings.fields(MAIN), 22);
+  assert.equal(fresh?.state, "fresh");
+  assert.equal(fresh?.used_heap_bytes, heap(310).used_heap_size);
+  assert.equal(fresh?.outstanding_ms, undefined);
+});
+
+test("an exited worker is reported exited once, and its late answer is dropped, not attributed", async () => {
+  const leaving = controlledThread(23);
+  let live: TrackedWorker[] = [{ kind: "ledger-union:rotationDigestCodec", thread: leaving.thread }];
+  const readings = book(() => live);
+  readings.refresh();
+  leaving.exit(1);
+  live = [];
+  const first = entry(readings.fields(MAIN), 23);
+  assert.deepEqual({ state: first?.state, exit_code: first?.exit_code }, { state: "exited", exit_code: 1 });
+  assert.equal(entry(readings.fields(MAIN), 23), undefined, "an exit is reported once, then dropped");
+  leaving.answer(heap(900));
+  await settle(5);
+  const after = readings.fields(MAIN);
+  assert.equal(entry(after, 23), undefined, "the late answer does not resurrect the exited thread");
+  assert.equal(after.worker_heaps?.late_dropped, 1, "the late answer is counted as dropped");
+});
+
+test("a replacement thread at the same site is a new generation that the old thread's late answer never reaches", async () => {
+  const old = controlledThread(24);
+  const replacement = controlledThread(25);
+  let live: TrackedWorker[] = [{ kind: "read-plane:startReadPlane", thread: old.thread }];
+  const readings = book(() => live);
+  readings.refresh();
+  old.exit(0);
+  live = [{ kind: "read-plane:startReadPlane", thread: replacement.thread }];
+  readings.refresh();
+  assert.equal(replacement.asked, 1, "the replacement is asked in its own right while the old request is still unresolved");
+  replacement.answer(heap(120));
+  old.answer(heap(999));
+  await settle(5);
+  const fields = readings.fields(MAIN);
+  assert.equal(entry(fields, 24)?.state, "exited");
+  const now = entry(fields, 25);
+  assert.equal(now?.state, "fresh");
+  assert.equal(now?.total_heap_bytes, heap(120).total_heap_size, "the replacement carries only its own answer");
+  assert.equal(fields.worker_heaps?.late_dropped, 1);
+});
+
+test("each thread is named by creation site, fixed-map role or unmapped, thread id and generation, with every heap figure", async () => {
+  const sites: Array<[string, number, number, string]> = [
+    ["read-plane:startReadPlane", 31, 300, "read-plane"],
+    ["secret-boundary:startSocketThread", 32, 20, "git-credential-socket"],
+    ["some-module:spawnSomething", 33, 40, "unmapped"],
+  ];
+  const threads = sites.map(([kind, id]) => ({ kind, t: controlledThread(id) }));
+  const readings = book(() => threads.map(({ kind, t }) => ({ kind, thread: t.thread })));
+  readings.refresh();
+  threads.forEach(({ t }, i) => t.answer(heap(sites[i][2])));
+  await settle(5);
+  const fields = readings.fields(MAIN);
+  assert.equal(fields.worker_heaps?.generation, "DAEMON-1791542911631");
+  assert.deepEqual(fields.worker_heaps?.main, {
+    role: "main", thread_id: 0, used_heap_bytes: MAIN_HEAP.used_heap_size, total_heap_bytes: MAIN_HEAP.total_heap_size,
+    physical_heap_bytes: MAIN_HEAP.total_physical_size, external_bytes: MAIN_HEAP.external_memory,
+    malloced_bytes: MAIN_HEAP.malloced_memory, heap_limit_bytes: MAIN_HEAP.heap_size_limit,
+  });
+  for (const [kind, id, mb, role] of sites) {
+    const row = entry(fields, id);
+    const h = heap(mb);
+    assert.ok(row && Number.isSafeInteger(row.age_ms), `thread ${id} is reported with its reading's age`);
+    assert.deepEqual({ ...row, age_ms: 0 }, {
+      site: kind, role, thread_id: id, state: "fresh", age_ms: 0,
+      used_heap_bytes: h.used_heap_size, total_heap_bytes: h.total_heap_size, physical_heap_bytes: h.total_physical_size,
+      external_bytes: h.external_memory, malloced_bytes: h.malloced_memory, heap_limit_bytes: h.heap_size_limit,
+    });
+  }
+});
+
+test("rss and swap stay separate, and the residual is an approximate unattributed figure only when every thread is fresh", async () => {
+  const a = controlledThread(41);
+  const b = controlledThread(42);
+  const live: TrackedWorker[] = [{ kind: "read-plane:startReadPlane", thread: a.thread }, { kind: "status:prewarm", thread: b.thread }];
+  const readings = book(() => live);
+  readings.refresh();
+  a.answer(heap(300));
+  await settle(30);
+  const partial = readings.fields(MAIN);
+  assert.equal(partial.unattributed_bytes_approx, undefined, "a thread not fresh leaves no residual");
+  assert.match(String(partial.unattributed_omitted), /threads-not-fresh:42=unanswered/);
+  b.answer(heap(100));
+  await settle(5);
+  readings.refresh();
+  a.answer(heap(300), 1);
+  b.answer(heap(100), 1);
+  await settle(5);
+  const whole = readings.fields(MAIN);
+  assert.equal(whole.unattributed_bytes_approx,
+    MAIN.rss_bytes - MAIN_HEAP.total_physical_size - heap(300).total_physical_size - heap(100).total_physical_size - MAIN.external_bytes);
+  assert.equal(whole.unattributed_omitted, undefined);
+  const flat = JSON.stringify(whole);
+  assert.doesNotMatch(flat, /native/i, "nothing is labelled native memory");
+  assert.ok(!flat.includes(String(MAIN.rss_bytes + MAIN.vm_swap_bytes)), "no figure adds swap to rss");
+});
+
+test("a thread list or heap read that throws is named, and leaves no request outstanding", () => {
+  const throwing = workerHeapReadings({ live: () => { throw new Error("registry gone"); }, mainHeap: () => MAIN_HEAP });
+  throwing.refresh();
+  assert.deepEqual(throwing.fields(MAIN), { mem_worker_heaps: "error:registry gone" });
+  const refusing = {
+    threadId: 51, once: (() => undefined) as unknown as WorkerThread["once"],
+    getHeapStatistics: (() => { throw new Error("worker is terminating"); }) as unknown as WorkerThread["getHeapStatistics"],
+  } as unknown as WorkerThread;
+  const readings = book(() => [{ kind: "read-plane:startReadPlane", thread: refusing }]);
+  readings.refresh();
+  const row = entry(readings.fields(MAIN), 51);
+  assert.equal(row?.state, "unanswered");
+  assert.equal(row?.error, "worker is terminating");
+  assert.equal(row?.outstanding_ms, undefined, "a request that never started is not outstanding");
+});
 
 function fixturePlan(): Plan {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-thread-heaps-`));
@@ -35,12 +219,8 @@ function fixturePlan(): Plan {
   return loadPlan(f);
 }
 
-const okResult = (id: string): Awaited<ReturnType<DaemonDeps["runOne"]>> =>
-  ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" });
-const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** One dispatch held open across `ticks` ticker sleeps; `events` records the row and read order. */
-async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; settleMs: number; events?: string[] }): Promise<Record<string, unknown>[]> {
+/** One dispatch held open across `ticks` ticker sleeps of `settleMs` each; returns every daemon.alive row. */
+async function heartbeat(extra: Partial<DaemonDeps>, ticks: number, settleMs: number, events: string[]): Promise<Record<string, unknown>[]> {
   const merged = new Set<string>();
   const rows: Record<string, unknown>[] = [];
   let sleeps = 0;
@@ -50,14 +230,10 @@ async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; sett
     fixturePlan(),
     {
       refreshMerged: () => (id) => merged.has(id),
-      runOne: async (id) => { await gate; merged.add(id); return okResult(id); },
+      runOne: async (id) => { await gate; merged.add(id); return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" }; },
       sweepLight: async () => {},
-      sleep: async () => { sleeps++; await settle(opts.settleMs); if (sleeps >= opts.ticks) release?.(); },
-      log: (step, e = {}) => {
-        if (step !== "daemon.alive") return;
-        rows.push(e);
-        opts.events?.push("row");
-      },
+      sleep: async () => { sleeps++; await settle(settleMs); if (sleeps >= ticks) release?.(); },
+      log: (step, e = {}) => { if (step === "daemon.alive") { rows.push(e); events.push("row"); } },
       ...extra,
     },
     { max: 1 },
@@ -65,109 +241,25 @@ async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; sett
   return rows;
 }
 
-/** A thread double: answers `heap`, or never answers when `heap` is undefined. */
-function fakeThread(threadId: number, heap: { total: number; used: number } | undefined, events?: string[]): WorkerThread {
-  return {
-    threadId,
-    once: (() => undefined) as unknown as WorkerThread["once"],
-    getHeapStatistics: (() => {
-      events?.push(`read:${threadId}`);
-      return heap === undefined
-        ? new Promise(() => {})
-        : Promise.resolve({ total_heap_size: heap.total, used_heap_size: heap.used });
-    }) as unknown as WorkerThread["getHeapStatistics"],
-  };
-}
-
-const MAIN: Required<RemainderInputs> = { rss_bytes: 4_600_000_000, vm_swap_bytes: 400_000_000, heap_total_bytes: 550_000_000, external_bytes: 50_000_000 };
-
-/** A telemetry reader built from the book alone, so every row value is a fixture value. */
-function bookReader(live: () => readonly TrackedWorker[], timeoutMs: number): DaemonDeps["readMemoryTelemetry"] {
-  const book = workerHeapReadings({ live, timeoutMs });
-  return Object.assign(() => ({ ...MAIN, ...book.fields(MAIN) }), { afterRow: () => book.refresh() });
-}
-
-test("daemon.alive carries per-spawn-site worker heap totals from the previous tick's read", async () => {
-  const live: TrackedWorker[] = [
-    { kind: "read-plane:startReadPlane", thread: fakeThread(1, { total: 300_000_000, used: 200_000_000 }) },
-    { kind: "read-plane:startReadPlane", thread: fakeThread(2, { total: 100_000_000, used: 60_000_000 }) },
-    { kind: "secret-boundary:spawnSocketThread", thread: fakeThread(3, { total: 50_000_000, used: 40_000_000 }) },
-  ];
-  const rows = await heartbeat({ readMemoryTelemetry: bookReader(() => live, 1_000) }, { ticks: 3, settleMs: 20 });
-  assert.ok(rows.length >= 2, `two heartbeats were written (got ${rows.length})`);
-  const [first, second] = rows;
-  assert.equal(first.mem_worker_heaps, "pending:first-read", "the first row precedes any completed read");
-  assert.equal("worker_heaps" in first, false, "no reading is invented before one completes");
-  assert.deepEqual(second.worker_heaps, {
-    "read-plane:startReadPlane": { threads: 2, total_bytes: 400_000_000, used_bytes: 260_000_000 },
-    "secret-boundary:spawnSocketThread": { threads: 1, total_bytes: 50_000_000, used_bytes: 40_000_000 },
-  });
-  assert.equal(second.worker_heap_total_bytes, 450_000_000);
-  assert.ok(Number.isInteger(second.worker_heap_age_ms) && (second.worker_heap_age_ms as number) >= 0, "the reading's age is recorded");
-  assert.equal(second.native_remainder_bytes, 4_600_000_000 + 400_000_000 - 550_000_000 - 50_000_000 - 450_000_000);
-  assert.equal(second.native_remainder_kind, "inferred", "every thread answered: the remainder is inferred, not bounded");
-  assert.equal(second.mem_worker_heaps, undefined);
-  assert.equal(second.phase, "dispatch", "the existing heartbeat fields still ride the row");
-});
-
-test("an unanswered thread is named unsized and makes the remainder a bound, never 0 bytes", async () => {
-  const live: TrackedWorker[] = [
-    { kind: "read-plane:startReadPlane", thread: fakeThread(4, { total: 300_000_000, used: 200_000_000 }) },
-    { kind: "read-plane:startReadPlane", thread: fakeThread(5, undefined) },
-    { kind: "board-worker:spawnBoard", thread: fakeThread(6, undefined) },
-  ];
-  const rows = await heartbeat({ readMemoryTelemetry: bookReader(() => live, 15) }, { ticks: 3, settleMs: 60 });
-  const read = rows.find((row) => row.worker_heaps !== undefined);
-  assert.ok(read, "a row carries the completed read");
-  assert.deepEqual(read.worker_heaps, {
-    "read-plane:startReadPlane": { threads: 2, total_bytes: 300_000_000, used_bytes: 200_000_000, unsized: [5] },
-    "board-worker:spawnBoard": { threads: 1, total_bytes: 0, used_bytes: 0, unsized: [6] },
-  }, "each unanswered thread is counted and named unsized at its own spawn site");
-  assert.equal(read.worker_heap_total_bytes, 300_000_000, "only sized threads are summed: the worker total is a lower bound");
-  assert.equal(read.native_remainder_bytes, 4_600_000_000 + 400_000_000 - 550_000_000 - 50_000_000 - 300_000_000);
-  assert.equal(read.native_remainder_kind, "inferred-upper-bound",
-    "the unsized heaps are still inside the remainder, so it is marked a bound rather than read as exact");
-});
-
-test("the heartbeat is written without awaiting the read", { timeout: 20_000 }, async () => {
+test("every heartbeat is written on time while a thread never answers, and it is asked once", { timeout: 20_000 }, async () => {
   const events: string[] = [];
-  // A thread that never answers, under a backstop far longer than this whole run.
-  const live: TrackedWorker[] = [{ kind: "stuck:never", thread: fakeThread(7, undefined, events) }];
-  const rows = await heartbeat({ readMemoryTelemetry: bookReader(() => live, 3_600_000) }, { ticks: 4, settleMs: 0, events });
-  assert.ok(rows.length >= 3, `every tick still wrote daemon.alive while the read hung (got ${rows.length})`);
-  assert.equal(events[0], "row", "the row is written before the read starts");
-  assert.equal(events[1], "read:7", "the read starts right after the first row");
-  assert.equal(events.filter((e) => e === "read:7").length, 1, "a read still in flight is not doubled");
-  assert.ok(rows.every((row) => row.mem_worker_heaps === "pending:first-read"), "an unfinished read is pending, never zero");
-});
-
-test("the registry sizes a real worker thread by its spawn site on the heartbeat", { timeout: 20_000 }, async () => {
-  const registry = workerThreads(); // subscribe before creating the worker, as the daemon does
-  const readMemoryTelemetry = bookReader(registry.live, 1_000);
-  const thread = new Worker("setInterval(() => {}, 1000);", { eval: true });
-  try {
-    await new Promise<void>((resolve) => thread.once("online", () => resolve()));
-    const rows = await heartbeat({ readMemoryTelemetry }, { ticks: 3, settleMs: 100 });
-    const read = rows.find((row) => row.worker_heaps !== undefined);
-    assert.ok(read, "a row carries the real thread's read");
-    const sites = read.worker_heaps as Record<string, { threads: number; total_bytes: number; used_bytes: number }>;
-    const mine = Object.entries(sites).find(([site]) => site.startsWith("the-daemon-heartbeat-names-its-worker-thread-heaps.test:"));
-    assert.ok(mine, `the thread is named by its spawn site (sites: ${Object.keys(sites).join(", ")})`);
-    assert.ok(mine[1].threads >= 1 && mine[1].total_bytes > 0 && mine[1].used_bytes > 0, "its isolate's heap is measured");
-    assert.equal(read.worker_heap_total_bytes, Object.values(sites).reduce((sum, s) => sum + s.total_bytes, 0));
-    assert.equal(read.native_remainder_bytes,
-      MAIN.rss_bytes + MAIN.vm_swap_bytes - MAIN.heap_total_bytes - MAIN.external_bytes -
-      (read.worker_heap_total_bytes as number));
-  } finally {
-    await thread.terminate();
-  }
+  const stuck = controlledThread(61);
+  const counted = { ...stuck.thread, getHeapStatistics: () => { events.push("read"); return stuck.thread.getHeapStatistics(); } } as unknown as WorkerThread;
+  const readings = book(() => [{ kind: "read-plane:startReadPlane", thread: counted }]);
+  const readMemoryTelemetry = Object.assign(() => ({ ...MAIN, ...readings.fields(MAIN) }), { afterRow: () => readings.refresh() });
+  const rows = await heartbeat({ readMemoryTelemetry }, 5, 30, events);
+  assert.ok(rows.length >= 4, `every tick wrote daemon.alive while the thread stayed silent (got ${rows.length})`);
+  assert.deepEqual(events.slice(0, 2), ["row", "read"], "the row is written before the request starts");
+  assert.equal(events.filter((e) => e === "read").length, 1, "the silent thread is never asked twice");
+  const last = rows.at(-1) as WorkerHeapFields;
+  assert.equal(entry(last, 61)?.state, "unanswered", "the silent thread is unanswered, never zero");
 });
 
 test("the sampler module references no heap snapshot, inspector or gc entry point", () => {
   const text = readFileSync(join(REPO_ROOT, "src", "lib", "daemon-memory-telemetry.ts"), "utf8");
   for (const forbidden of [
     /HeapSnapshot/, /\binspector\b/i, /\bgc\s*\(/, /expose[-_]gc/, /max[-_]old[-_]space/, /NODE_OPTIONS/, /setFlagsFromString/,
-    /resourceLimits/, /\bSession\b/,
+    /resourceLimits/, /\bSession\b/, /\.terminate\(/,
   ]) {
     assert.doesNotMatch(text, forbidden, `the sampler must stay passive: ${forbidden} found`);
   }

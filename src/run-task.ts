@@ -1029,6 +1029,7 @@ import {
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
+import { getHeapStatistics } from "node:v8";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
@@ -37172,13 +37173,18 @@ export function orphanSweepRunActive(
 }
 
 /** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. W1-T7092: each
- *  row also carries the previous tick's worker-thread heap read (by spawn site, from worker-heaps.ts's
- *  registry), which `afterRow` starts once the row is written. `liveThreads` is a test seam. */
+ *  row also carries every worker thread's heap, by creation site, role, thread id and daemon
+ *  generation, from request rounds `afterRow` starts once the row is written (never awaited; at most
+ *  one unresolved request per thread). `liveThreads` is a test seam. */
 export function daemonMemoryTelemetryReader(
   bootHeadSha: string | undefined,
-  liveThreads: () => readonly TrackedWorker[] = workerThreads().live,
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
 ): (() => Record<string, unknown>) & { afterRow: () => void } {
-  const threadHeaps = workerHeapReadings({ live: liveThreads });
+  const threadHeaps = workerHeapReadings({
+    live: opts.liveThreads ?? workerThreads().live,
+    mainHeap: getHeapStatistics,
+    ...(opts.generation ? { generation: opts.generation } : {}),
+  });
   const read = (): Record<string, unknown> => {
     const memory = sampleDaemonMemory({
       heapStatistics: v8HeapStatistics,
@@ -38046,7 +38052,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,

@@ -21,10 +21,11 @@
  * caught by the heartbeat itself (`mem_telemetry: "error:<message>"`), never by a zero here.
  *
  * W1-T7092: the daemon's worker threads are V8 isolates of their own that `process.memoryUsage()`
- * does not count. {@link workerHeapReadings} sizes each live thread in worker-heaps.ts's registry,
- * by spawn site, so the row names the remainder that is native memory rather than leaving it to a
- * guess. The heartbeat never waits on it: the read starts AFTER a row is written and the NEXT row
- * carries what it found.
+ * does not count. {@link workerHeapReadings} reports every live thread in worker-heaps.ts's registry
+ * by creation site, role, thread id and daemon generation, with the same heap figures as the main
+ * isolate and an explicit state and age, so what no isolate accounts for is a qualified,
+ * UNATTRIBUTED residual rather than a guess. rss and swap stay separate fields. The heartbeat never
+ * waits on it: a request round starts AFTER a row is written and later rows carry the answers.
  *
  * FALSIFIERS: test/the-daemon-heartbeat-says-what-its-memory-is.test.ts,
  * test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts.
@@ -33,7 +34,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock } from "./clock.js";
-import { WORKER_HEAP_TIMEOUT_MS, type TrackedWorker } from "./worker-heaps.js";
+import { WORKER_HEAP_TIMEOUT_MS, type TrackedWorker, type WorkerThread } from "./worker-heaps.js";
 
 /** The heartbeat fields. Every `_bytes` field is an integer byte count. */
 export interface DaemonMemoryFields {
@@ -219,129 +220,261 @@ export function sampleDaemonMemory(sources: DaemonMemorySources): DaemonMemoryFi
   return { ...fields, telemetry_sample_us: Number((nowNs() - startNs) / 1000n) };
 }
 
-/** One spawn site's live threads on the row. `unsized` names, by threadId, a thread that did not
- *  answer: its heap is NOT in `total_bytes`/`used_bytes`, and it is never read as zero bytes. */
-export interface WorkerHeapSite {
-  threads: number;
-  total_bytes: number;
-  used_bytes: number;
-  unsized?: number[];
+/** The six figures every isolate reports the same way, from V8's own `getHeapStatistics()`. `total_heap_bytes`
+ *  is the COMMITTED heap and `physical_heap_bytes` the part V8 counts as backed by memory; neither says whether a
+ *  page is resident or swapped, so none of them is a share of `rss_bytes`. */
+export interface IsolateHeap {
+  used_heap_bytes: number;
+  total_heap_bytes: number;
+  physical_heap_bytes: number;
+  external_bytes: number;
+  malloced_bytes: number;
+  heap_limit_bytes: number;
 }
 
-/** The `daemon.alive` fields the previous tick's thread read left behind. */
+/** What `getHeapStatistics()` returns, on the main thread and from a Worker alike. */
+export interface HeapStatistics {
+  used_heap_size: number;
+  total_heap_size: number;
+  total_physical_size: number;
+  external_memory: number;
+  malloced_memory: number;
+  heap_size_limit: number;
+}
+
+/** A thread's state on the row; none of them is ever a zero reading.
+ *  - `fresh`: it answered the most recent request round;
+ *  - `stale`: its newest answer is from an earlier round (its figures carry their age);
+ *  - `pending`: its first request is still inside the timeout;
+ *  - `unanswered`: its one request has waited longer than the timeout (`outstanding_ms`);
+ *  - `exited`: it exited since the last row (reported once, then dropped). */
+export type ThreadHeapState = "fresh" | "stale" | "pending" | "unanswered" | "exited";
+
+export interface WorkerHeapEntry extends Partial<IsolateHeap> {
+  /** `<module>:<function>` of the frame that called `new Worker` (worker-heaps.ts `spawnSite`). */
+  site: string;
+  /** {@link threadRole}: a fixed map of the daemon's known spawn sites, or `unmapped`. */
+  role: string;
+  thread_id: number;
+  state: ThreadHeapState;
+  /** Age of the figures carried, when any reading exists. */
+  age_ms?: number;
+  /** How long the thread's ONE unresolved request has waited. */
+  outstanding_ms?: number;
+  /** Why the newest request failed, when it did. */
+  error?: string;
+  exit_code?: number;
+  exited_ago_ms?: number;
+}
+
+/** The `daemon.alive` fields the worker-thread read adds. */
 export interface WorkerHeapFields {
-  worker_heaps?: Record<string, WorkerHeapSite>;
-  /** Sum of every SIZED thread's total heap: a lower bound when any site names an unsized thread. */
-  worker_heap_total_bytes?: number;
-  /** How old the reading is: ms since the read that produced it completed. */
-  worker_heap_age_ms?: number;
-  /** rss + vm_swap - heap_total - external - worker_heap_total: INFERRED, never measured. */
-  native_remainder_bytes?: number;
-  /** `inferred`, or `inferred-upper-bound` when a thread went unsized: that thread's heap is still
-   *  inside the remainder, so the worker total is a lower bound and the true native memory is at
-   *  most the remainder written. */
-  native_remainder_kind?: "inferred" | "inferred-upper-bound";
-  /** Present only when the fields above are absent or partial: `pending:first-read`,
-   *  `unknown:<missing input>`, or `error:<reason>`. */
+  worker_heaps?: {
+    /** The daemon generation the threads belong to: its `run_id`. Thread ids are unique within it. */
+    generation?: string;
+    main?: IsolateHeap & { role: "main"; thread_id: 0 };
+    threads: WorkerHeapEntry[];
+    /** Answers that arrived after their thread exited, dropped rather than attributed. */
+    late_dropped?: number;
+  };
+  /** APPROXIMATE, possibly negative: rss_bytes - the physical heap of every reported isolate - external_bytes.
+   *  Heap sizes are committed pages whose residency is unknown, so this is not a partition of rss; it is what
+   *  no isolate's heap accounts for, and it is never called native memory. */
+  unattributed_bytes_approx?: number;
+  /** Why `unattributed_bytes_approx` is absent: a thread not `fresh`, or a missing input. */
+  unattributed_omitted?: string;
+  /** `pending:first-read` before any request round, or `error:<reason>` when the thread list could not be read. */
   mem_worker_heaps?: string;
 }
 
-/** The main-process numbers the remainder is inferred from: this tick's {@link sampleDaemonMemory}. */
-export type RemainderInputs = Partial<Pick<DaemonMemoryFields, "rss_bytes" | "vm_swap_bytes" | "heap_total_bytes" | "external_bytes">>;
+/** The main-process figures the residual needs: this tick's {@link sampleDaemonMemory}. */
+export type ResidualInputs = Partial<Pick<DaemonMemoryFields, "rss_bytes" | "external_bytes">>;
+
+/** The daemon's known worker-thread spawn sites, by module (origin/main e3988577e). Anything else is `unmapped`. */
+export const DAEMON_THREAD_ROLES: Readonly<Record<string, string>> = {
+  "read-plane": "read-plane",
+  "ledger-union": "ledger-digest-codec",
+  "secret-boundary": "git-credential-socket",
+  status: "board-prewarm",
+  "worker-provider": "codex-probe",
+};
+
+/** The role for a `<module>:<function>` spawn site: the fixed map, never a guess. */
+export function threadRole(site: string): string {
+  const module = site.split(":")[0];
+  return Object.hasOwn(DAEMON_THREAD_ROLES, module) ? DAEMON_THREAD_ROLES[module] : "unmapped";
+}
+
+export function isolateHeap(s: HeapStatistics): IsolateHeap {
+  return {
+    used_heap_bytes: s.used_heap_size,
+    total_heap_bytes: s.total_heap_size,
+    physical_heap_bytes: s.total_physical_size,
+    external_bytes: s.external_memory,
+    malloced_bytes: s.malloced_memory,
+    heap_limit_bytes: s.heap_size_limit,
+  };
+}
 
 export interface WorkerHeapSources {
   /** The registry's live threads: `workerThreads().live` (worker-heaps.ts). */
   live: () => readonly TrackedWorker[];
+  /** The main isolate's statistics: `getHeapStatistics` from node:v8. */
+  mainHeap: () => HeapStatistics;
+  /** The daemon's `run_id`. */
+  generation?: string;
+  /** How long a request may wait before its thread reads `unanswered`. It never cancels the request. */
   timeoutMs?: number;
   nowMs?: () => number;
 }
 
-type ThreadRead = { site: string; threadId: number } & ({ total: number; used: number } | { unsized: string });
-
-/** One thread's heap sizes, or why it is unsized. Never rejects; a read past `timeoutMs` is unsized. */
-async function readThreadHeap({ kind, thread }: TrackedWorker, timeoutMs: number): Promise<ThreadRead> {
-  const threadId = thread.threadId;
-  const unsized = (why: string): ThreadRead => ({ site: kind, threadId, unsized: why.slice(0, REASON_MAX_CHARS) });
-  if (typeof thread.getHeapStatistics !== "function") return unsized("no-getHeapStatistics");
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<ThreadRead>((resolve) => {
-    timer = setTimeout(() => resolve(unsized(`no-answer-within-${timeoutMs}ms`)), timeoutMs);
-    timer.unref?.();
-  });
-  const read = (async (): Promise<ThreadRead> => {
-    try {
-      const heap = await thread.getHeapStatistics();
-      return { site: kind, threadId, total: heap.total_heap_size, used: heap.used_heap_size };
-    } catch (e) {
-      // Reason: a thread that exited or refused the read is named unsized, never read as 0 bytes.
-      return unsized(String((e as Error)?.message ?? e));
-    }
-  })();
-  try {
-    return await Promise.race([read, late]);
-  } finally {
-    clearTimeout(timer);
-  }
+/** One worker generation: a thread id, which Node never reuses within a process. */
+interface ThreadBook {
+  site: string;
+  role: string;
+  threadId: number;
+  thread: WorkerThread;
+  /** The ONE unresolved request. While it is set no other request is issued, whatever its age. */
+  outstanding?: { sinceMs: number };
+  last?: { atMs: number; round: number; heap: IsolateHeap };
+  failure?: string;
+  exited?: { atMs: number; code?: number };
 }
 
-/** Per-spawn-site totals; an unsized thread is counted in `threads` and named in `unsized`. */
-function bySite(reads: readonly ThreadRead[]): Record<string, WorkerHeapSite> {
-  const sites: Record<string, WorkerHeapSite> = {};
-  for (const r of reads) {
-    const site = (sites[r.site] ??= { threads: 0, total_bytes: 0, used_bytes: 0 });
-    site.threads += 1;
-    if ("unsized" in r) (site.unsized ??= []).push(r.threadId);
-    else {
-      site.total_bytes += r.total;
-      site.used_bytes += r.used;
-    }
-  }
-  return sites;
-}
-
-const REMAINDER_INPUTS = ["rss_bytes", "vm_swap_bytes", "heap_total_bytes", "external_bytes"] as const;
+const reasonOf = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, REASON_MAX_CHARS);
 
 /**
- * The daemon's worker-thread heap book. `refresh()` starts one read of every live thread (a read
- * still in flight is not doubled) and returns at once, never awaiting it; `fields()` returns what
- * the LAST COMPLETED read found, with the remainder inferred from this tick's main-process numbers.
- * Sizes and spawn sites only: each thread is asked for its heap statistics and nothing else.
+ * The daemon's worker-thread heap book. `refresh()` starts a request round and returns at once, never awaiting
+ * one; `fields()` reports what the rounds have answered so far.
+ *
+ * AT MOST ONE UNRESOLVED REQUEST PER WORKER GENERATION. A thread blocked in synchronous native code (measured:
+ * one inside `execFileSync`) cannot answer `getHeapStatistics()` until it returns, and a timeout settles nothing
+ * on the thread's side. So the timeout only RELABELS a waiting thread `unanswered`: it neither cancels the request
+ * nor permits another, and the thread is asked again only after its request settles. An answer that arrives after
+ * its thread exited is dropped and counted, never attributed to the thread that replaced it.
  */
-export function workerHeapReadings(sources: WorkerHeapSources): { refresh(): void; fields(main: RemainderInputs): WorkerHeapFields } {
+export function workerHeapReadings(sources: WorkerHeapSources): { refresh(): void; fields(main: ResidualInputs): WorkerHeapFields } {
   const timeoutMs = sources.timeoutMs ?? WORKER_HEAP_TIMEOUT_MS;
   const nowMs = sources.nowMs ?? (() => systemClock.now());
-  let last: { sites: Record<string, WorkerHeapSite>; atMs: number } | { error: string } | undefined;
-  let inFlight = false;
-  const failed = (e: unknown): void => { last = { error: String((e as Error)?.message ?? e).slice(0, REASON_MAX_CHARS) }; };
+  const books = new Map<number, ThreadBook>();
+  let round = 0;
+  let lateDropped = 0;
+  let listError: string | undefined;
+
+  const markExited = (book: ThreadBook, code?: unknown): void => {
+    book.exited ??= { atMs: nowMs(), ...(typeof code === "number" ? { code } : {}) };
+  };
+  const request = (book: ThreadBook, asked: number): void => {
+    const sinceMs = nowMs();
+    let answer: Promise<HeapStatistics>;
+    try {
+      answer = book.thread.getHeapStatistics() as Promise<HeapStatistics>;
+    } catch (e) {
+      book.failure = reasonOf(e); // Reason: carried on the thread's entry; no request is left outstanding.
+      return;
+    }
+    book.outstanding = { sinceMs };
+    void Promise.resolve(answer).then(
+      (heap) => {
+        if (book.exited) {
+          lateDropped += 1;
+          return;
+        }
+        book.last = { atMs: nowMs(), round: asked, heap: isolateHeap(heap) };
+        book.failure = undefined;
+      },
+      (e) => {
+        if (!book.exited) book.failure = reasonOf(e);
+      },
+    ).finally(() => {
+      book.outstanding = undefined;
+    });
+  };
+
   return {
     refresh(): void {
-      if (inFlight) return;
+      round += 1;
       let live: readonly TrackedWorker[];
       try {
         live = sources.live();
+        listError = undefined;
       } catch (e) {
-        failed(e); // Reason: carried as `mem_worker_heaps: error:<reason>` on the next row.
+        listError = reasonOf(e); // Reason: carried as `mem_worker_heaps: error:<reason>` on the next row.
         return;
       }
-      inFlight = true;
-      void Promise.all(live.map((worker) => readThreadHeap(worker, timeoutMs)))
-        .then((reads) => { last = { sites: bySite(reads), atMs: nowMs() }; }, failed)
-        .finally(() => { inFlight = false; });
+      const seen = new Set<number>();
+      for (const { kind, thread } of live) {
+        const threadId = thread.threadId;
+        if (!Number.isSafeInteger(threadId) || threadId < 0) continue; // an exited Worker reads -1
+        seen.add(threadId);
+        let book = books.get(threadId);
+        if (book === undefined) {
+          const created: ThreadBook = { site: kind, role: threadRole(kind), threadId, thread };
+          books.set(threadId, created);
+          try {
+            thread.once("exit", (code: unknown) => markExited(created, code));
+          } catch {
+            // Reason: a thread with no exit event is still marked exited once the registry stops listing it.
+          }
+          book = created;
+        }
+        if (book.exited || book.outstanding) continue;
+        request(book, round);
+      }
+      for (const book of books.values()) if (!seen.has(book.threadId)) markExited(book);
     },
-    fields(main: RemainderInputs): WorkerHeapFields {
-      if (last === undefined) return { mem_worker_heaps: "pending:first-read" };
-      if ("error" in last) return { mem_worker_heaps: `error:${last.error}` };
-      const sites = Object.values(last.sites);
-      const total = sites.reduce((sum, site) => sum + site.total_bytes, 0);
-      const out: WorkerHeapFields = { worker_heaps: last.sites, worker_heap_total_bytes: total, worker_heap_age_ms: Math.max(0, nowMs() - last.atMs) };
-      const missing = REMAINDER_INPUTS.filter((k) => main[k] === undefined);
-      if (missing.length > 0) return { ...out, mem_worker_heaps: `unknown:remainder-needs-${missing.join(",")}` };
-      const [rss, swap, heap, external] = REMAINDER_INPUTS.map((k) => main[k] as number);
-      return {
-        ...out,
-        native_remainder_bytes: rss + swap - heap - external - total,
-        native_remainder_kind: sites.some((site) => site.unsized !== undefined) ? "inferred-upper-bound" : "inferred",
+    fields(main: ResidualInputs): WorkerHeapFields {
+      if (listError !== undefined) return { mem_worker_heaps: `error:${listError}` };
+      if (round === 0) return { mem_worker_heaps: "pending:first-read" };
+      const now = nowMs();
+      const threads: WorkerHeapEntry[] = [];
+      for (const book of [...books.values()]) {
+        const id = { site: book.site, role: book.role, thread_id: book.threadId };
+        if (book.exited) {
+          threads.push({ ...id, state: "exited", ...(book.exited.code !== undefined ? { exit_code: book.exited.code } : {}),
+            exited_ago_ms: Math.max(0, now - book.exited.atMs) });
+          books.delete(book.threadId);
+          continue;
+        }
+        const waited = book.outstanding ? Math.max(0, now - book.outstanding.sinceMs) : undefined;
+        const state: ThreadHeapState = waited !== undefined && waited >= timeoutMs ? "unanswered"
+          : book.last?.round === round ? "fresh"
+          : book.last ? "stale"
+          : book.failure ? "unanswered"
+          : "pending";
+        threads.push({
+          ...id,
+          state,
+          ...(book.last ? { ...book.last.heap, age_ms: Math.max(0, now - book.last.atMs) } : {}),
+          ...(waited !== undefined ? { outstanding_ms: waited } : {}),
+          ...(book.failure ? { error: book.failure } : {}),
+        });
+      }
+      let mainHeap: IsolateHeap | undefined;
+      let mainError: string | undefined;
+      try {
+        mainHeap = isolateHeap(sources.mainHeap());
+      } catch (e) {
+        mainError = reasonOf(e);
+      }
+      const out: WorkerHeapFields = {
+        worker_heaps: {
+          ...(sources.generation ? { generation: sources.generation } : {}),
+          ...(mainHeap ? { main: { role: "main" as const, thread_id: 0 as const, ...mainHeap } } : {}),
+          threads,
+          ...(lateDropped > 0 ? { late_dropped: lateDropped } : {}),
+        },
       };
+      const notFresh = threads.filter((t) => t.state !== "fresh" && t.state !== "exited");
+      if (mainHeap === undefined) return { ...out, unattributed_omitted: `main-heap-unread:${mainError}` };
+      if (notFresh.length > 0) {
+        return { ...out, unattributed_omitted: `threads-not-fresh:${notFresh.map((t) => `${t.thread_id}=${t.state}`).join(",")}`.slice(0, REASON_MAX_CHARS * 2) };
+      }
+      if (main.rss_bytes === undefined || main.external_bytes === undefined) {
+        return { ...out, unattributed_omitted: "needs:rss_bytes,external_bytes" };
+      }
+      const physical = threads.reduce((sum, t) => sum + (t.state === "fresh" ? t.physical_heap_bytes ?? 0 : 0), mainHeap.physical_heap_bytes);
+      return { ...out, unattributed_bytes_approx: main.rss_bytes - physical - main.external_bytes };
     },
   };
 }
