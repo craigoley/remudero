@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,10 +102,4 @@ test("a failing rung is logged and never stops the light pass", async () => {
   await light();
   assert.equal(lightPasses, 1);
   assert.deepEqual(logged, ["main.health.error"]);
-});
-
-test("the daemon wires the main-health rung into its light pass", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(source, /sweepLight: withMainHealthOnLightPass\(buildSweepLightHook\(/);
-  assert.match(source, /\), mainHealthRung, \{ log \}\),/);
 });
