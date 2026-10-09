@@ -12081,12 +12081,20 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   let stalled = false;
   let dispatched = false;
   let ciHead: unknown;
+  let amendmentNumber: number | undefined;
+  let awaitingAmendment: number | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
+      awaitingAmendment = undefined;
       ciHead = line.mode === "ci-log" ? line.head_sha : undefined;
+    } else if (line.step === "fix.scope_amendment") {
+      const n = Number(line.amendmentNumber ?? line.amendment_number);
+      if (Number.isSafeInteger(n) && n > 0) amendmentNumber = n;
+    } else if (line.step === "fix.done" && line.subtype === "scope_amendment_pending") {
+      awaitingAmendment = amendmentNumber;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
@@ -12103,6 +12111,10 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
     }
+  }
+  if (awaitingAmendment !== undefined && lines.some((line) =>
+    line.step === PR_TERMINAL_STEP && line.state === "merged" && Number(line.pr_number) === awaitingAmendment)) {
+    return true;
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
