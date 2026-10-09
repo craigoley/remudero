@@ -1,5 +1,5 @@
 {
-  "_comment": "W1-T5616: the census suites CI runs that scripts/census-precheck.mjs does not ask before the push, measured 2026-10-04 (107 suites: 102 from listRuleSuites, 4 PRECHECK_EXTRA_CI_CENSUSES, this census; 4 asked). FROZEN: this list may only shrink. A new CI census is modeled in PRECHECK_PARITY, never added here; a row precheck comes to ask leaves (W1-T5617 moved the seven census-admitted suites, which it now runs). test/every-ci-census-is-asked-before-the-push.test.ts enforces both.",
+  "_comment": "W1-T5616: the census suites CI runs that scripts/census-precheck.mjs does not ask before the push, measured 2026-10-04 (107 suites: 102 from listRuleSuites, 4 PRECHECK_EXTRA_CI_CENSUSES, this census; 4 asked). FROZEN: this list may only shrink. A new CI census is modeled in PRECHECK_PARITY, never added here; a row precheck comes to ask leaves (W1-T5617 moved the seven census-admitted suites, which it now runs). test/every-ci-census-is-asked-before-the-push.test.ts enforces both. W1-T5737: ciOnlyScripts gives the ci.yml SCRIPT gates (script:<name> -> reason) the same shrink-only verdict; test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts enforces it.",
   "ciOnly": [
     "test/a-census-refused-push-kills-a-finished-build.test.ts",
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts",
@@ -88,5 +88,17 @@
     "test/workflow-guard-mutation-ratchet.test.ts",
     "test/workspace-node-modules-root-baseline.test.ts",
     "test/worktree-creation-census.test.ts"
-  ]
+  ],
+  "ciOnlyScripts": {
+    "script:baseline-monotonic-check": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (baseline-monotonic job)",
+    "script:claude-md-budget-ratchet": "CI-only: neither rmd preflight, the pre-push hook nor census-precheck runs it before the push",
+    "script:console-parity": "CI-only: neither rmd preflight, the pre-push hook nor census-precheck runs it before the push",
+    "script:coverage-merge-ratchet": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (coverage-ratchet job); CI-only at the push by cost (instrumented full suite)",
+    "script:coverage-ratchet": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (coverage-ratchet job); CI-only at the push by cost (instrumented full suite)",
+    "script:expiring-fixture-census": "CI-only: neither rmd preflight, the pre-push hook nor census-precheck runs it before the push",
+    "script:learnings-budget-ratchet": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (learnings-budget-ratchet job)",
+    "script:mutation-ratchet": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (mutation-ratchet job); CI-only at the push by cost (mutation run)",
+    "script:source-size-signal": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (source-size job); the worker contract tells the author to run it",
+    "script:workflow-guard-mutation-ratchet": "CI-only by cost: about four minutes, shard 1 only, and only when ci.yml is in the diff"
+  }
 }

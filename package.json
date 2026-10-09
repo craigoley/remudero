@@ -99,6 +99,7 @@
     "census:node24-runtime": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/node-24-runtime-compatibility.test.ts",
     "census:error-subclass": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/error-subclass-census.test.ts",
     "census:cycle-ratchet": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/cycle-ratchet.test.ts",
+    "census:affected-reach": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/the-affected-suite-reach-ratchet.test.ts",
     "census:source-size": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/source-size-baseline-is-enforced.test.ts",
     "census:citation-anchor": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/citation-anchor-census.test.ts",
     "census:every-priced-ledger-step": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts",

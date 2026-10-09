@@ -233,7 +233,32 @@ export function evaluateCensusPrecheck(input) {
     ...fixtureCopyViolations(input),
     ...houseLayoutViolations(input),
     ...depsInterfaceViolations(input),
+    ...scriptRatchetViolations(input),
   ];
+}
+
+const CI_YAML_PATH = ".github/workflows/ci.yml";
+
+/** W1-T5737: a push that edits ci.yml or the parity baseline must leave every script gate ci.yml runs with a
+ *  verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only the two files. */
+function scriptRatchetViolations({ changed, readHead }) {
+  if (!changed.includes(CI_YAML_PATH) && !changed.includes(PRECHECK_PARITY_BASELINE)) return [];
+  const ci = readHead(CI_YAML_PATH);
+  const baselineText = readHead(PRECHECK_PARITY_BASELINE);
+  if (ci === null || baselineText === null) return [];
+  let rows;
+  try {
+    rows = JSON.parse(baselineText).ciOnlyScripts;
+  } catch {
+    return [];
+  }
+  if (typeof rows !== "object" || rows === null || Array.isArray(rows)) return [];
+  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci), baseline: rows });
+  return verdict.unasked.map(
+    (key) =>
+      `script-ratchet: ${key} runs in ${CI_YAML_PATH} but nothing asks it before the push — model it in ` +
+      `PRECHECK_SCRIPT_PARITY (scripts/census-precheck.mjs) or record a reason under ciOnlyScripts in ${PRECHECK_PARITY_BASELINE}`,
+  );
 }
 
 const INSTRUMENT_SCOPE_RE = /^(?:\.github\/workflows\/|scripts\/|package\.json$|src\/lib\/review\.ts$)/;
@@ -625,6 +650,12 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
+  // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
+  { testFile: "test/the-affected-suite-reach-ratchet.test.ts", script: "census:affected-reach", structural: true,
+    trigger: (input) =>
+      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
+      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
+    remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
   { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", script: "census:every-priced-ledger-step",
@@ -705,6 +736,8 @@ export const PRECHECK_PARITY = {
   "test/deps-interface-census.test.ts": { modeled: depsInterfaceViolations },
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
+  // W1-T5737: the script gates ci.yml runs, read out of ci.yml whenever a push edits it or the parity baseline.
+  "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
@@ -752,6 +785,46 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
     stale: baseline.filter((p) => Object.hasOwn(parity, p) || !members.has(p)).sort(),
     grown: baseline.filter((p) => !carried.has(p)).sort(),
   };
+}
+
+/** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
+ *  SUITE, asked of every ci.yml script: `npm run --silent <script>` or `node scripts/<name>.mjs`, counted when the
+ *  enclosing step's id or the script's own name says ratchet, census, budget, monotonic, parity or signal. Each is
+ *  keyed `script:<name>` and counted once however many places ci.yml invokes it. Only .github/workflows/ci.yml. */
+const SCRIPT_GATE_NAME = /ratchet|census|budget|monotonic|parity|signal/;
+
+export function ciScriptRatchetPopulation(ciYamlText) {
+  const keys = new Set();
+  let stepId = "";
+  for (const line of String(ciYamlText).split("\n")) {
+    if (/^\s*-\s+\S/.test(line)) stepId = "";
+    const id = line.match(/^\s*(?:-\s+)?id:\s*([\w-]+)/);
+    if (id) stepId = id[1];
+    for (const m of line.matchAll(/npm run --silent\s+([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
+      const name = m[1] ?? m[2];
+      if (SCRIPT_GATE_NAME.test(`${stepId} ${name}`)) keys.add(`script:${name}`);
+    }
+  }
+  return [...keys].sort();
+}
+
+/** Every ci.yml script gate this script asks before the push: `modeled` names the check, `run` an npm script
+ *  that runs the gate's own census suite. A script gate on neither this nor `ciOnlyScripts` in
+ *  scripts/census-precheck-parity-baseline.json is named by test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts. */
+export const PRECHECK_SCRIPT_PARITY = {
+  "script:comment-load-signal": { modeled: commentLoadViolations },
+  "script:cycle-ratchet": { run: "census:cycle-ratchet" },
+};
+
+/** The verdict for the script gates: `precheckParityVerdict` over `script:<name>` keys. `baseline` and
+ *  `baseBaseline` are the `ciOnlyScripts` objects (the merge base's, or null when it had none). */
+export function scriptRatchetParityVerdict({ population, baseline, baseBaseline = null, parity = PRECHECK_SCRIPT_PARITY }) {
+  return precheckParityVerdict({
+    population,
+    baseline: Object.keys(baseline),
+    baseBaseline: baseBaseline === null ? null : Object.keys(baseBaseline),
+    parity,
+  });
 }
 
 function gitOut(root, args, options = {}) {

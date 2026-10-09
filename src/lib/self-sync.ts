@@ -56,6 +56,19 @@ export function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}):
     });
 }
 
+const inFlightFreshnessFetches = new Map<string, Promise<void>>();
+
+function fetchFreshnessMain(repoDir: string, deps: SelfSyncDeps, options: { maxBuffer?: number } = {}): Promise<void> {
+  const fetchMain = () => fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, options), undefined, undefined, deps.fetchTimeoutMs, "main");
+  if (deps.gitAsync) return fetchMain();
+  const key = resolve(repoDir);
+  const existing = inFlightFreshnessFetches.get(key);
+  if (existing) return existing;
+  const flight = fetchMain().finally(() => { inFlightFreshnessFetches.delete(key); });
+  inFlightFreshnessFetches.set(key, flight);
+  return flight;
+}
+
 export interface SelfSyncDeps {
   /** Defaults to a real `git -C <repoDir> <args>` via `execFileSync`. */
   git?: GitRunner;
@@ -498,7 +511,7 @@ export async function checkServiceFreshnessAsync(
 ): Promise<ServiceFreshness> {
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
-  const fetchMain = () => fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs, "main");
+  const fetchMain = () => fetchFreshnessMain(repoDir, deps);
   try {
     await fetchMain();
   } catch (err) {
@@ -729,7 +742,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
 
 async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: ReviewerCodeFreshnessOptions): Promise<ReviewerCodeFreshness> {
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER }), undefined, undefined, undefined, "main");
+    await fetchFreshnessMain(repoDir, deps, { maxBuffer: REVIEWER_GIT_MAX_BUFFER });
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }

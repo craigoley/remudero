@@ -20,10 +20,11 @@ raw: "Repair the hosted console analytics projection contract. OBSERVED against
   ceiling."
 attachments: []
 origin: cli
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
