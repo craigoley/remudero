@@ -1387,6 +1387,8 @@ export interface BuildSweepEffectsDeps {
     taskId: string,
     repoDir: string,
   ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
+  /** W1-T6434: reads a dead owner's preserved patch for the next round. Default: {@link readPreservedOwnerPatch}. */
+  readPreservedOwnerPatchImpl?: typeof readPreservedOwnerPatch;
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
@@ -1850,6 +1852,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
     reloadPlanForFixImpl,
     resolveTaskContractAtHeadImpl,
+    readPreservedOwnerPatchImpl = readPreservedOwnerPatch,
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
@@ -3619,7 +3622,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // as prior partial work. Best-effort: a ledger or ref that cannot be read leaves the prompt as before.
         let priorPartialWork: PriorPartialWork | undefined;
         try {
-          priorPartialWork = readPreservedOwnerPatch({
+          priorPartialWork = readPreservedOwnerPatchImpl({
             repoDir,
             prNumber: pr.prNumber,
             headSha: pr.headSha,
