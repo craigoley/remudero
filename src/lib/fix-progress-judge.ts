@@ -1,4 +1,3 @@
-
 export interface FixProgressRound {
   id: string;
   dispatchedHead?: string;

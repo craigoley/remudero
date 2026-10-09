@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict } from "../src/lib/fix-progress-judge.js";
-import { DEFAULT_SWEEP_POLICY, productionFixProgressJudge, runSweep, type OpenPrView,
-  type SweepDeps } from "../src/lib/sweep.js";
+import { productionFixProgressJudge, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { runFixRung, buildFixRungDispatchArgs, readFixRoundCommitsViaGit } from "./helpers/run-task-test.js";
 import type { ReviewRunResult } from "./helpers/run-task-test.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
