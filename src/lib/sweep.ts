@@ -15453,7 +15453,13 @@ export async function runSweep(
                 await deps.close(pr, reason);
                 break;
               }
-              if (emptyDiffReviewFailure(pr) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS) {
+              if (emptyDiffReviewFailure(pr)) {
+                if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                  acted = false;
+                  standDownReason = `empty-diff supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
+                  extraDisposedFields = { ...extraDisposedFields, empty_diff_close_deferred: true };
+                  break;
+                }
                 staleProofCloses += 1;
                 reason = `superseded — this PR's diff against main is empty, so nothing is left to merge; its failed review cannot be repaired in it (#10265)`;
                 extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };

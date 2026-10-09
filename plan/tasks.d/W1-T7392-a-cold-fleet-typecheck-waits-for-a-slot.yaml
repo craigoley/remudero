@@ -1,0 +1,40 @@
+- id: W1-T7392
+  title: "A COLD FLEET TYPECHECK WAITS FOR A HOST SLOT — #10374 made the fleet's tsc incremental, but a check that starts with no usable buildinfo still peaks at ~2.5-3 GB, and the merge-probe, preflight and bwrap checks admit themselves with no host-wide limit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-09: Azure-host performance work, follow-up to #10374"
+  plan_refs: [W1-T6155, W1-T5658]
+  files: [src/lib/test-slot.ts, src/lib/merge-probe.ts, src/lib/commit-message.ts, src/lib/worker-provider.ts, src/lib/typecheck-buildinfo.ts, test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-09 at origin/main 500b53676: #10374 runs the fleet's full `tsc -p tsconfig.json --noEmit`
+    incremental, seeded per worktree (src/lib/typecheck-buildinfo.ts). Its own measurements: warm 1,345-1,377 MB,
+    but a first incremental run with no seed 2,509-2,538 MB, and a cold run 2,698-3,025 MB. The 2026-10-09 host drag
+    map measured full tsc at 3-3.7 GB per run on a 15.6 GiB host whose daemon containers already hit memory.max.
+    The three fleet entry points spawn tsc with no host-wide admission:
+    - merge-probe: src/lib/merge-probe.ts:223 (harnessTypecheck spawns `mergedTypecheckArgv`, wired at :286);
+    - preflight: src/lib/commit-message.ts:521-533 (`typecheckStep`);
+    - bwrap open-weight check: src/lib/worker-provider.ts:3660 and :3962 (`openWeightIncrementalTypecheck`).
+    The host already has a slot mechanism for heavy suites: `acquireTestSlot` (src/lib/test-slot.ts:321), used by
+    src/lib/ci-parity.ts:1156 and scripts/preflight-author.mjs:223. It never refuses: a bounded wait, then the run
+    proceeds.
+  design: |
+    Before spawning tsc, decide whether the check starts cold: no buildinfo and no seed that typecheck-buildinfo.ts
+    would use. A warm check runs exactly as today. A cold one first takes a test slot (label
+    "typecheck:<entry>"), released when tsc exits, so cold checks queue behind running suites instead of stacking
+    3 GB peaks. The slot must stay never-refusing (bounded wait, then run). merge-probe runs on the daemon's event
+    loop, and acquireTestSlot waits synchronously (Atomics.wait), so it needs a non-blocking acquire (poll on a
+    timer, or acquire in the spawned child), never a synchronous wait on the loop.
+  acceptance:
+    - claim: "a cold merge-probe, preflight or bwrap typecheck takes a host test slot before spawning tsc, and a warm one does not"
+      proof: 'grep: test("W1-T7392: a cold fleet typecheck takes a host test slot and a warm one does not" in test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts'
+  falsifier: |
+    Spawn tsc without the slot: the test's slot directory holds no lease during a cold check, and it fails.

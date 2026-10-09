@@ -1474,6 +1474,7 @@ import {
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -4584,9 +4585,13 @@ function draftPrCreate(
   const draftedBody = bodyParts.filter((p) => p.length > 0).join("\n\n");
   // A filed run branch takes its Acceptance block from the task record inside the checked opener.
   // Other lanes retain the open-time fallback that predates the task-aware check.
+  // A test the branch ADDS gives a proof that misses at base. The generic block stays only as the last resort, because
+  // openPullRequestChecked refuses a body with no block at all, and that would stop the PR opening.
+  const added = filedTaskIdFromRunBranch(branch) ? undefined : addedTestFilesAtHead("HEAD", worktreePath);
+  const headOnly = added?.kind === "read" ? added.files.map(addedTestCriterion) : [];
   const body = filedTaskIdFromRunBranch(branch)
     ? draftedBody
-    : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
+    : ensureJudgeableBody(draftedBody, headOnly.length ? headOnly : PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
   return { title: resolvedTitle, body };
 }
 
@@ -5514,6 +5519,8 @@ export async function repairPrMetadata(
   },
   /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
   planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
+  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5543,11 +5550,22 @@ export async function repairPrMetadata(
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
     const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
-    const repair = acceptanceGateBodyRepair(
-      live.body,
-      SWEEP_METADATA_ACCEPTANCE_FALLBACK,
-      gateRed ? { planCriteria } : undefined,
-    );
+    // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
+    // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
+    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
+    const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    const gate = acceptanceAuthorTimeCheck(live.body);
+    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
+      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
+      return {
+        repaired: false,
+        noCure: true,
+        reason:
+          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
+          "a generic block would pass at base and fail proof-discrimination",
+      };
+    }
+    const repair = acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -5769,12 +5787,35 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-const SWEEP_METADATA_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
-  {
-    claim: "this PR body carries a judgeable Acceptance block added by the metadata repair sweep",
-    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
-  },
-];
+function addedTestCriterion(path: string): AcceptanceCriterion {
+  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
+}
+
+/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
+
+/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/*.test.ts` files added since the merge base with
+ *  origin/main. */
+export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
+  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+  try {
+    let base: string;
+    try {
+      base = mergeBase();
+    } catch {
+      // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
+      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      base = mergeBase();
+    }
+    const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => /^test\/[^/]+\.test\.ts$/.test(p));
+    return { kind: "read", files };
+  } catch (err) {
+    return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
+  }
+}
 
 /** {@link acceptanceGateBodyRepair}'s verdict. */
 export interface AcceptanceGateBodyRepair {
@@ -10861,6 +10902,8 @@ export async function runFixRung(opts: {
      * report is still used for this round's verdict even if persisting it to GitHub failed).
      */
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
+    /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
+    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
     /**
      * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
      * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
@@ -11485,7 +11528,10 @@ export async function runFixRung(opts: {
       } catch (e) {
         deps.log("fix.body_gate_check_error", { strike: strikes + 1, error: String((e as Error)?.message ?? e) });
       }
-      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody) : undefined;
+      // A proof from a test the PR adds misses at base; the generic default does not, so it is the last resort only.
+      const added = (deps.addedTestsAtHead ?? ((sha: string) => addedTestFilesAtHead(sha, opts.worktreePath)))(review.headSha);
+      const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody, headOnly.length ? headOnly : undefined) : undefined;
       // W1-T3506 — THE WRITE-BOUNDARY CALL W1-T3389's HELPER WAS SHIPPED WITHOUT. `repair` above is
       // PURE and never inspects whether its own authored `grep:` proofs actually run — that is
       // exactly the asymmetry `repairedProofsAreSafeToPush` (lib/body-repair.ts) exists to close,
@@ -25963,6 +26009,16 @@ export function checkProofCommand(
     try {
       baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
+      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      const missingExport =
+        w!.kind === "test" && typeof loadOutput === "string"
+          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
+          : undefined;
+      if (missingExport !== undefined) {
+        console.log(`base:       COULD NOT LINK — ${missingExport}`);
+        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
+        return headExit;
+      }
       console.log(
         `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",

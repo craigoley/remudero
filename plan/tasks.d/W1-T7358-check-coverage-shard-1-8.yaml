@@ -1,0 +1,40 @@
+- id: W1-T7358
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:coverage-shard (1/8) cost 3877.9 PR minute(s) across 40 round(s) on 241 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:coverage-shard (1/8)"
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/check-coverage-shard-1-8.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:coverage-shard (1/8)"
+      proof: "grep: test(\"W1-T7358: check:coverage-shard (1/8) is prevented, not retried\" in test/check-coverage-shard-1-8.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-shard (1/8)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:coverage-shard (1/8) cost 3877.9 PR minute(s) (seven-day half-life) across 40 fix round(s) on 241 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard (1/8)
+
+    RECENT ROUNDS (newest first):
+    - (none recorded)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The filed record names aggregate CI cost but supplies no root cause or prevention mechanism, so the proposed remedy cannot be verified from what is shown; the escalation rule explicitly includes unverifiable findings.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not require executing that test to establish that coverage-shard failures are prevented."
+    judged_at: "2026-10-09T19:14:42.080Z"
+    pin: "75a0faf0fefc47b0abed0bbf4099fa377c5f72968380c09ba97e085affa2aeeb"
