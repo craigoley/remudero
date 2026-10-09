@@ -55,11 +55,12 @@ export function headRehomePlan(
     return { action: "refused", reason: "other reds present or identity red no longer at this head" };
   }
   if (live.pendingChecks?.length) return { action: "refused", reason: `checks unfinished: ${live.pendingChecks.join(", ")}` };
-  if (!live.changedFiles?.length) return { action: "refused", reason: "diff unreadable or empty" };
+  if (live.changedFiles === undefined) return { action: "refused", reason: "diff unreadable" };
+  if (live.changedFiles.length === 0) return { action: "refused", reason: "diff empty" };
   if (!live.commitMessages.length) return { action: "refused", reason: "head commits unreadable" };
   if (extractTaskTrailerId(live.commitMessages.at(-1)!) !== undefined) return { action: "none", reason: "head commit already has a task trailer" };
-  if (!quiet?.quiet) return { action: "refused", reason: `quietness not established: ${quiet?.reason ?? "no judgment"}`,
-    needsQuietJudgment: quiet === undefined };
+  if (quiet === undefined) return { action: "refused", reason: "quietness not established: no judgment", needsQuietJudgment: true };
+  if (quiet.quiet !== true) return { action: "refused", reason: `quietness not established: ${quiet.reason}`, needsQuietJudgment: false };
   const trailered = new Set(live.commitMessages.map(extractTaskTrailerId).filter((id): id is string => id !== undefined));
   const mentioned = new Set(live.commitMessages.flatMap(message => message.match(/\bW\d+-T\d+\b/g) ?? []));
   const ids = trailered.size ? trailered : mentioned;

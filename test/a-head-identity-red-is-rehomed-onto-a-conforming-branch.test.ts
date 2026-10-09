@@ -333,7 +333,6 @@ test("existing ref and replacement are reused only when they identify the same o
 });
 
 test("the production sweep effects wire a quietness judge with no time threshold and reject unavailable answers", async () => {
-  await import("../src/run-task.js");
   let response = 'TYPED_JUDGMENT: {"wait":0.1,"rehome":0.9}';
   const effects = buildSweepEffects({ owner: "acme", repo: "repo", config: { root: process.cwd() } as never,
     ledgerPath: "/dev/null/rehome-judge.ndjson", runId: "rehome-judge", plan: { tasks: [], byId: new Map() } as never,
