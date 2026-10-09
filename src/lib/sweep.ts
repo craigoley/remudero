@@ -14223,7 +14223,14 @@ export async function runSweep(
           baseRedStandDownPrs.add(pr.prNumber);
           repair.reason = `plan-scoped round waits on base red: ${base.check}`;
         }
-        else if (!deps.dryRun && (deps.actionable?.("blocked-fixable") ?? true) && !deps.workerAdmissionHold?.()) {
+        else if (deps.dryRun) repair.reason = "plan-scoped round deferred: dry run";
+        else if (!(deps.actionable?.("blocked-fixable") ?? true)) {
+          repair.reason = "plan-scoped round deferred to the full sweep (light pass)";
+        }
+        else if (workerAdmissionHoldReason(deps)) {
+          repair.reason = `plan-scoped round held by worker admission: ${workerAdmissionHoldReason(deps)}`;
+        }
+        else {
           const claimed = claimFixDispatch({ ...pr, taskId: pr.taskId ?? escalationTaskIdFor(pr) });
           if (!claimed.ok) {
             repair.reason = claimed.reason;
