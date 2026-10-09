@@ -40661,6 +40661,31 @@ function retainGeneratorRemediesForRegion(fullLog: string, region: string): stri
   return [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
 }
 
+const PROOF_DISCRIMINATION_FAIL_LINE = /proof-discrimination: FAIL — \d+ proof\(s\) pass at both PR head and merge base/;
+const PROOF_DISCRIMINATION_PROOF_LINE = /^\s*proof: \S/;
+/** PRIMARY CONTROL: the gate's FAIL header plus the stale proofs it names, kept wherever they sit in the job. */
+export const MAX_RETAINED_VERDICT_LINES = 64;
+export const RETAINED_VERDICT_HEADER = "--- proof-discrimination verdict line(s) retained from earlier in this job ---";
+
+/** The proof-discrimination gate prints each stale proof's full output AFTER naming it, so the region
+ *  ending at `##[error]` kept only that output and the sweep's proof-repair route never saw a stale
+ *  proof: #10234 escalated instead of being repaired. The verdict lines ride along like remedies. */
+export function gateVerdictRetention(): { push(line: string): void; wrap(region: string): string } {
+  const kept: string[] = [];
+  let open = false;
+  return {
+    push(line) {
+      if (PROOF_DISCRIMINATION_FAIL_LINE.test(line)) open = true;
+      else if (!open || !PROOF_DISCRIMINATION_PROOF_LINE.test(line)) return;
+      const trimmed = line.trim();
+      if (kept.length < MAX_RETAINED_VERDICT_LINES && !kept.includes(trimmed)) kept.push(trimmed);
+    },
+    wrap(region) {
+      return kept.every((line) => region.includes(line)) ? region : [RETAINED_VERDICT_HEADER, ...kept, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -40675,6 +40700,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let stepErrors = 0;
   let inTapFailure = false;
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
+  const verdict = gateVerdictRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -40688,6 +40714,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
     push(rawLine: string): void {
       index += 1;
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
+      verdict.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -40723,7 +40750,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
+      return verdict.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"));
     },
   };
 }
@@ -40846,7 +40873,9 @@ function* ciFailuresSteps(
           const extracted = extractCiFailureRegion(out, tailLines);
           // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
           // Identical bytes to the region whenever the log names no recognised remedy.
-          logTail = retainGeneratorRemediesForRegion(out, extracted);
+          const verdict = gateVerdictRetention();
+          for (const line of out.split("\n")) verdict.push(line.replace(ACTIONS_LOG_TIMESTAMP, ""));
+          logTail = verdict.wrap(retainGeneratorRemediesForRegion(out, extracted));
         }
         logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
         if (logUnavailable === undefined) tailSource = "log";
