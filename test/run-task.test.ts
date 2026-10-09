@@ -3777,6 +3777,8 @@ test("runFixRung: only the FINAL fresh strike steps up to the step_up mount; ear
 });
 
 test("runFixRung: a second block after N strikes escalates rather than looping (P21's golden, verbatim) — no third spawn", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the stopping point here is the helper's explicit fixture judge
+  // (test/helpers/run-task-test.ts), not a production cap; the escalation must still name its evidence.
   const spawnCalls: SpawnWorkerArgs[] = [];
   const stillFailing = fakeReview(
     "failure",
@@ -4176,6 +4178,8 @@ test("runFixRung: once CI goes green and a real review posts (even a failing one
 });
 
 test("runFixRung: a blocked_ci dispatch that exhausts its strikes without CI EVER going green escalates naming the failing checks, never an empty/misleading 'Unmet criteria:' list", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the stopping point here is the helper's explicit fixture judge
+  // (test/helpers/run-task-test.ts), not a production cap; the escalation must still name its evidence.
   const spawnCalls: SpawnWorkerArgs[] = [];
   const noReviewYet = fakeReview("failure", []);
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
@@ -4256,7 +4260,9 @@ test("runFixRung: a seeded conflicted dispatch (mergeConflict, no review posted 
   assert.equal(outcome.strikes, 1);
 });
 
-test("runFixRung: a conflicted dispatch that exhausts its strikes without the merge state EVER resolving escalates naming the conflicting file(s), never an empty/misleading 'Unmet criteria:' list", async () => {
+test("runFixRung: a conflicted dispatch the progress judge stops without the merge state EVER resolving escalates naming the conflicting file(s), never an empty/misleading 'Unmet criteria:' list", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge decides WHEN the rung stops; this test keeps the safety property.
   const spawnCalls: SpawnWorkerArgs[] = [];
   const noReviewYet = fakeReview("failure", []);
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
@@ -4292,7 +4298,7 @@ test("runFixRung: a conflicted dispatch that exhausts its strikes without the me
   assert.equal(spawnCalls.length, 2, "exactly strikeCap merge-conflict spawns");
   assert.equal(outcome.outcome, "escalated");
   assert.equal(issueCalls.length, 1);
-  assert.match(issueCalls[0].title, /conflicted fix rung exhausted/, "the escalation names conflicted, not blocked_ci/blocked_review");
+  assert.match(issueCalls[0].title, /conflicted fix rung stopped by the progress judge/, "the escalation names conflicted, not blocked_ci/blocked_review");
   assert.match(issueCalls[0].body, /Conflicting file/i);
   assert.match(issueCalls[0].body, /src\/y\.ts/, "the conflicting file name is carried");
   assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the review-mode framing for a dispatch that never had a review");
@@ -4364,6 +4370,8 @@ test("runFixRung: a strike whose OWN push leaves a required check red routes the
 });
 
 test("runFixRung: the same mid-rung regression escalates naming the SPECIFIC check + finding, never the generic 'blocked_review fix rung exhausted' framing (the #292/#315 fix)", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the stopping point here is the helper's explicit fixture judge
+  // (test/helpers/run-task-test.ts), not a production cap; the escalation must still name its evidence.
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
   const codeqlFailure = {
@@ -4525,7 +4533,10 @@ test("runFixRung: a PR that goes MERGED mid-rung (after round 1's strike, before
   assert.equal(issueCalls.length, 0, "zero needs-human issues opened on a PR that no longer carries a live block");
 });
 
-test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) does NOT stand down — the needs-human issue still files as before, AND the indeterminate read is ledgered distinctly from site (i)'s", async () => {
+test("runFixRung: a FAILED/INDETERMINATE read at the judge-escalation check (site ii) does NOT stand down — the needs-human issue still files as before, AND the indeterminate read is ledgered distinctly from site (i)'s", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge now stops the rung at the top of the next round, after that round's
+  // own site-(i) read; site (ii) still re-reads immediately before the escalation it guards.
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const indeterminateLogs: unknown[] = [];
@@ -4563,8 +4574,11 @@ test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) 
 
   assert.equal(outcome.outcome, "escalated", "an unreadable state at the exhaustion check must NOT stand down — escalation proceeds exactly as today");
   assert.equal(issueCalls.length, 1, "the needs-human issue still files — a read failure is never treated as terminal");
-  assert.equal(indeterminateLogs.length, 1, "site (ii)'s indeterminate read is ledgered exactly once");
-  assert.deepEqual(indeterminateLogs[0], { site: "rung.exhaustion" });
+  const exhaustionReads = indeterminateLogs.filter((l) => (l as { site?: string }).site === "rung.exhaustion");
+  assert.equal(exhaustionReads.length, 1, "site (ii)'s indeterminate read is ledgered exactly once");
+  assert.deepEqual(exhaustionReads[0], { site: "rung.exhaustion" });
+  assert.ok(indeterminateLogs.every((l) => ["rung.exhaustion", "rung.strike"].includes(String((l as { site?: string }).site))),
+    "every other indeterminate read is site (i)'s, ledgered under its own name");
 });
 
 // ── W1-T168 (the #349/#360 stuck class): the fix rung must ESCAPE a review
@@ -4646,7 +4660,10 @@ test("detectReviewFalseBlock: a passing review is never a false-block, regardles
   );
 });
 
-test("runFixRung: a fix round with NO diff change that re-fails the SAME criterion ESCALATES as a false-block, not another silent strike toward exhaustion", async () => {
+test("runFixRung: a fix round with NO diff change that re-fails the SAME criterion reaches the judge as a false-block, and its escalate verdict stops the rung after strike 1", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge decides WHEN the rung stops; this test keeps the safety property.
+  const judgeInputs: Array<{ parkedReason?: string; rounds: unknown[] }> = [];
   const spawnCalls: SpawnWorkerArgs[] = [];
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const initialReview = fakeReview(
@@ -4661,6 +4678,13 @@ test("runFixRung: a fix round with NO diff change that re-fails the SAME criteri
     initialReview,
     deps: {
       fetchPrBody: fakePrBody,
+      // The no-diff false-block is a PRE-SIGNAL the judge reads; the judge, not a counter, stops the rung.
+      fixProgressJudge: async (input) => {
+        judgeInputs.push(input as never);
+        return /false-block/i.test(String(input.parkedReason ?? ""))
+          ? { verdict: "escalate", loop: "false-block: the round changed no diff", reason: String(input.parkedReason) }
+          : { verdict: "continue", reason: "no loop signal yet" };
+      },
       spawn: async (args) => {
         spawnCalls.push(args);
         return result({ sessionId: "fix-session-1" });
@@ -4685,6 +4709,7 @@ test("runFixRung: a fix round with NO diff change that re-fails the SAME criteri
     "the falsifier: a fix rung that strikes to EXHAUSTION (2 spawns) on unchanged code must never happen — it escalates after strike 1",
   );
   assert.equal(outcome.strikes, 1, "only ONE strike was spent — the escape fires before the cap is ever approached");
+  assert.ok(judgeInputs.some((i) => /false-block/i.test(String(i.parkedReason ?? ""))), "the false-block reached the judge as its pre-signal");
   assert.equal(issueCalls.length, 1);
   assert.match(issueCalls[0].body, /false-block/i);
   assert.match(issueCalls[0].body, /criterion A merges cleanly/);
@@ -5611,8 +5636,10 @@ if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRef
   }
 });
 
-test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung rather than dispatching a further fix — the SAME cap review-failure honors (W1-T100)", async () => {
-  const deps = fakeFixDeps();
+test("routeFix: a blocked_ci PR the progress judge stops escalates to the question rung rather than dispatching a further fix — the SAME judge review-failure honors (W1-T100)", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge decides WHEN the rung stops; this test keeps the safety property.
+  const deps = { ...fakeFixDeps(), fixProgressJudge: async () => ({ verdict: "escalate" as const, loop: "the same check stayed red", reason: "no progress" }) };
   const pr = fixPr({
     reviewState: "none",
     checksState: "red",
@@ -5623,8 +5650,45 @@ test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung 
   const result = await routeFix("OPEN", pr, deps);
 
   assert.equal(result.outcome, "escalated");
-  assert.equal(deps.fixed.length, 0, "an exhausted blocked_ci PR must NOT dispatch another fix strike");
+  assert.equal(deps.fixed.length, 0, "a blocked_ci PR the judge stopped must NOT dispatch another fix strike");
   assert.equal(deps.escalated.length, 1);
+  assert.match(result.reason, /the same check stayed red/, "the escalation names the judged loop");
+});
+
+test("routeFix: a blocked_ci PR the progress judge lets continue dispatches another round past the former cap", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge decides WHEN the rung stops; this test keeps the safety property.
+  const deps = { ...fakeFixDeps(), fixProgressJudge: async () => ({ verdict: "continue" as const, reason: "the red set is shrinking" }) };
+  const pr = fixPr({
+    reviewState: "none",
+    checksState: "red",
+    priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+    ciFailures: [{ name: "ci", logTail: "..." }],
+  });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1, "the judge, not the former cap, decided another round runs");
+  assert.equal(deps.escalated.length, 0);
+});
+
+test("routeFix: with NO judge wired, the announced former-bound stand-in still bounds a fixture — escalate at the former cap, dispatch below it", async () => {
+  // Ruling 2026-10-09 (W1-T7096): production always wires the judge (see
+  // every-production-fix-entrypoint-asks-the-progress-judge.test.ts); an unwired fixture keeps the old bound.
+  const logs: string[] = [];
+  const atCap = { ...fakeFixDeps(), log: (step: string) => { logs.push(step); } };
+  const capped = await routeFix("OPEN", fixPr({ reviewState: "failure", priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+    unmetCriteria: [criterion({ claim: "x", met: false })] }), atCap);
+  assert.equal(capped.outcome, "escalated");
+  assert.equal(atCap.fixed.length, 0);
+  assert.ok(logs.includes("fix.progress_judge_stand_in"), "the stand-in announced itself");
+
+  const below = fakeFixDeps();
+  const open = await routeFix("OPEN", fixPr({ reviewState: "failure", priorStrikes: 1,
+    unmetCriteria: [criterion({ claim: "x", met: false })] }), below);
+  assert.equal(open.outcome, "fixed");
+  assert.equal(below.fixed.length, 1);
 });
 
 test("routeFix: a MERGED PR refuses naming the state — zero spawns", async () => {
@@ -5782,8 +5846,10 @@ test("routeFix: an OPEN PR with no block evidence (review success) refuses — z
   assert.equal(deps.escalated.length, 0);
 });
 
-test("routeFix: strikes already at the cap escalate (naming the count) rather than dispatching another fix — the cap is honored, never bypassed", async () => {
-  const deps = fakeFixDeps();
+test("routeFix: a PR with rounds already spent escalates (naming the round count) when the progress judge says so, rather than dispatching another fix — the judge is honored, never bypassed", async () => {
+  // Ruling 2026-10-09 (Craig): "an llm judge should determine if more fix attempts should be made … I hate
+  // hard ceilings" (W1-T7096). The judge decides WHEN the rung stops; this test keeps the safety property.
+  const deps = { ...fakeFixDeps(), fixProgressJudge: async () => ({ verdict: "escalate" as const, loop: "the same criterion re-failed", reason: "no progress" }) };
   const pr = fixPr({
     reviewState: "failure",
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
@@ -5793,8 +5859,9 @@ test("routeFix: strikes already at the cap escalate (naming the count) rather th
   const result = await routeFix("OPEN", pr, deps);
 
   assert.equal(result.outcome, "escalated");
-  assert.match(result.reason, new RegExp(`${DEFAULT_SWEEP_POLICY.strikeCap}/${DEFAULT_SWEEP_POLICY.strikeCap}`));
-  assert.equal(deps.fixed.length, 0, "an exhausted PR must NOT dispatch another fix strike");
+  assert.match(result.reason, new RegExp(`after ${DEFAULT_SWEEP_POLICY.strikeCap} round\\(s\\)`), "the escalation names the round count");
+  assert.match(result.reason, /the same criterion re-failed/, "and the judged loop");
+  assert.equal(deps.fixed.length, 0, "a PR the judge stopped must NOT dispatch another fix strike");
   assert.equal(deps.escalated.length, 1, "escalate must fire exactly once");
   // W1-T78: `rmd fix` renders the SAME clarification question the sweep does —
   // one rung, one implementation, three callers.

@@ -1675,6 +1675,7 @@ const prFileSources = new Map<string, string>();
  */
 export const SWEEP_EFFECT_SURFACE = [
   "readerAgreement",
+  "fixProgressJudge", // W1-T7096
   "reproduceFailingTestsOnMain",
   "arm",
   "readArmFacts",

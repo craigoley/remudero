@@ -11529,14 +11529,44 @@ export async function runFixRung(opts: {
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
-        const reason = `fix progress loop: ${decision.loop} — ${decision.reason}`;
+        const loop = `fix progress loop: ${decision.loop} — ${decision.reason}`;
+        // W1-T177 SITE (ii): a PR that went terminal mid-rung never files a needs-human issue.
+        const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.exhaustion", deps.log);
+        if (preEscalateStandDown) {
+          deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
+          deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
+          return { outcome: "stood_down", review, strikes, retriggers, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
+        }
+        // The judge decides WHEN to stop; the escalation still names the mode's own evidence (W1-T100/W1-T106).
+        const stillConflicted = currentMergeConflict !== undefined;
+        const unmet = review.criteria.filter((c) => !c.met);
         const issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-          headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
-          summary: `${reason} — ${opts.prUrl}`, detail: JSON.stringify(input),
-          options: [{ label: "hand-fix", detail: reason }, { label: "close", detail: "re-scope the named loop" }],
+          headSha: review.headSha, cause: escalationCause(stillConflicted, noReviewYet),
+          summary: stillConflicted
+            ? `conflicted fix rung stopped by the progress judge (${strikes} strike(s), merge state never resolved): ${decision.loop} — ${opts.prUrl}`
+            : noReviewYet
+            ? `blocked_ci fix rung stopped by the progress judge (${strikes} strike(s), checks never went green): ${decision.loop} — ${opts.prUrl}`
+            : `blocked_review fix rung stopped by the progress judge (${strikes} strike(s)): ${decision.loop} — ${opts.prUrl}`,
+          detail: `${loop}\n\n` + (stillConflicted
+            ? `Conflicting file(s):\n\n` +
+              renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, true) +
+              (consecutiveMergeRefusalReasons.length > 0 ? `\n\nConsecutive merge refusals:\n${consecutiveMergeRefusalReasons.map((r, i) => `${i + 1}. ${r}`).join("\n")}` : "")
+            : noReviewYet
+            ? `Required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
+              renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
+              (() => {
+                const trajectory = renderCiTrajectoryLine(everRedCiCheckNames, (currentCiFailures ?? []).map((f) => f.name));
+                return trajectory ? `\n\n${trajectory}` : "";
+              })()
+            : `The review gate is STILL failing. Unmet criteria:\n\n` +
+              renderEscalationEvidence(unmet, (c) => `- ${c.claim}\n  reason: ${c.reason}`, review.criteria.length > 0)),
+          options: [{ label: "hand-fix", detail: loop }, { label: "close", detail: "close the PR and re-scope the task if the named loop cannot be broken." }],
           recommendation: "hand-fix" },
           { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
-        return { outcome: "escalated", review, strikes, retriggers, reason, issueUrl };
+        const exhaustionReason = stillConflicted ? "merge_conflict_unresolved" : noReviewYet ? "ci_never_green" : "review_still_failing";
+        deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason, judged_loop: decision.loop });
+        deps.say(`fix rung: stopped by the progress judge after ${strikes} strike(s) — escalated: ${issueUrl}`);
+        return { outcome: "escalated", review, strikes, retriggers, reason: loop, issueUrl };
       }
       progressApproach = decision.verdict === "change-approach" ? decision.approach : undefined;
     }
@@ -46317,6 +46347,11 @@ export type FixOutcome = "fixed" | "escalated" | "refused";
 export interface FixDeps {
   dispatchFix: SweepDeps["dispatchFix"];
   escalate: SweepDeps["escalate"];
+  /** W1-T7096: decides whether a PR that already spent rounds gets another; unwired ⇒ the announced stand-in. */
+  fixProgressJudge?: FixProgressJudge;
+  /** The ledger the judge reads the round history from. */
+  ledgerLines?: () => ReadonlyArray<Record<string, unknown>>;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
 /**
@@ -46330,8 +46365,8 @@ export interface FixDeps {
  *   - OPEN, disposition="blocked-fixable"             -> dispatchFix (fixed).
  *   - OPEN, disposition="conflicted" (W1-T106)         -> dispatchFix with
  *     merge-conflict evidence (fixed) — the SAME dispatch shape runSweep uses.
- *   - OPEN, failing review + strikes at/over the cap  -> escalate (escalated),
- *     naming the count — the cap is honored, never bypassed.
+ *   - OPEN, rounds already spent                      -> the progress judge decides
+ *     (W1-T7096): escalate names the judged loop; continue dispatches.
  *   - anything else (no block evidence: mergeable,
  *     stale, contradictory-failure)                   -> refused, naming the reason.
  */
@@ -46359,6 +46394,27 @@ export async function routeFix(
     return { outcome: "refused", reason: terminal };
   }
   const { disposition, reason } = deriveDisposition(pr, policy);
+  if (disposition === "blocked-fixable" && (pr.priorStrikes ?? 0) > 0) {
+    // W1-T7096 (ruling 2026-10-09): a PR that already spent rounds gets another only when the progress
+    // judge says so — never a fixed strike cap. Escalation still renders the operator question.
+    const log = deps.log ?? (() => {});
+    const judge = deps.fixProgressJudge ?? formerBoundStandIn(() => (pr.priorStrikes ?? 0) >= policy.strikeCap, log,
+      (line) => console.error(line));
+    const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      currentRed: isBlockedCi(pr) ? (pr.ciFailures ?? []).map((f) => f.name)
+        : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
+      ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap });
+    const decision = await judgeFixProgress(input, judge);
+    log("fix.progress_judged", { pr_number: pr.prNumber, head_sha: pr.headSha, prior_strikes: pr.priorStrikes, ...decision });
+    if (decision.verdict === "unavailable") {
+      return { outcome: "refused", reason: `fix progress judge unavailable: ${decision.reason}` };
+    }
+    if (decision.verdict === "escalate") {
+      const loopReason = `fix progress loop after ${pr.priorStrikes} round(s): ${decision.loop} — ${decision.reason}`;
+      await deps.escalate(pr, loopReason, renderClarificationQuestion(pr, loopReason, pr.strikeHistory ?? []));
+      return { outcome: "escalated", reason: loopReason };
+    }
+  }
   if (disposition === "blocked-fixable") {
     // W1-T100: the SAME evidence-shape selection runSweep uses, off the SAME
     // exported `isBlockedCi` predicate (never a second, independently-hardcoded
@@ -46536,7 +46592,7 @@ export async function fixCommand(
   const { outcome, reason } = await (deps.route ?? routeFix)(
     raw.state,
     operatorRequested ? requestedFixView(pr) : pr,
-    effects,
+    { ...effects, ledgerLines: () => readLedgerLines(ledgerPath), log },
     DEFAULT_SWEEP_POLICY,
   );
 
