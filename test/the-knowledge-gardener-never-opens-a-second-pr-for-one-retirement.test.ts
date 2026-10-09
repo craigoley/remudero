@@ -27,11 +27,11 @@ function corpus(): string {
   return root;
 }
 
-function run(open: OpenGardenPr | undefined) {
+async function run(open: OpenGardenPr | undefined) {
   const root = corpus();
   const opened: string[] = [];
   const updated: Array<{ pr: string; paths: string[] }> = [];
-  const result = runGardenPass({
+  const result = await runGardenPass({
     stateDir: join(root, "state"),
     repoRoot: root,
     openWorkspace: (): GardenWorkspace => ({
@@ -48,21 +48,21 @@ function run(open: OpenGardenPr | undefined) {
   return { root, opened, updated, result };
 }
 
-test("W1-T4927: a pass with an open gardener PR updates it instead of opening another", () => {
+test("W1-T4927: a pass with an open gardener PR updates it instead of opening another", async () => {
   const url = "https://github.com/acme/remudero/pull/1";
-  const { opened, updated, result } = run({ url, handled: [] });
+  const { opened, updated, result } = await run({ url, handled: [] });
   assert.deepEqual(result.plan?.acting, ["retire"]);
   assert.deepEqual(opened, [], "no second PR is opened");
   assert.equal(updated.length, 1);
   assert.equal(updated[0]!.pr, url);
   assert.equal(result.prUrl, url);
   assert.ok(updated[0]!.paths.includes("learnings/core.yaml"));
-  const fresh = run(undefined);
+  const fresh = await run(undefined);
   assert.deepEqual(fresh.opened, ["new"], "with no open PR the pass opens one");
 });
 
-test("W1-T4927: an entry already retired in the open PR is not retired again", () => {
-  const { root, opened, updated } = run({ url: "https://github.com/acme/remudero/pull/1", handled: ["rarely-used"] });
+test("W1-T4927: an entry already retired in the open PR is not retired again", async () => {
+  const { root, opened, updated } = await run({ url: "https://github.com/acme/remudero/pull/1", handled: ["rarely-used"] });
   assert.deepEqual(opened, []);
   assert.deepEqual(updated, [], "nothing left to add, so nothing is pushed");
   assert.doesNotMatch(readFileSync(join(root, "learnings", "core.yaml"), "utf8"), /retire rarely-used/);

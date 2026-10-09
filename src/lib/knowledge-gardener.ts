@@ -18,7 +18,7 @@ import {
   judgeGardenPending,
   planGarden,
   readGardenState,
-  runGarden,
+  runGardenAsync,
   startGarden,
   isPromiseLike,
   type GardenCheckout,
@@ -1175,8 +1175,8 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
 }
 
 /** One knowledge gardener pass. Returns what it did. */
-export function runGardenPass(deps: GardenerDeps<GardenWorkspace>): { ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard } {
-  const result = runGarden(knowledgeGardenSpec(deps), reusingOpenPr(deps));
+export async function runGardenPass(deps: GardenerDeps<GardenWorkspace>): Promise<{ ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard }> {
+  const result = await runGardenAsync(knowledgeGardenSpec(deps), reusingOpenPr(deps));
   return { ...result, scorecard: result.scorecard as unknown as KnowledgeScorecard | undefined };
 }
 

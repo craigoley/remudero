@@ -1,0 +1,16 @@
+- id: W1-T7090
+  title: "REPAIR THE SELECTOR EDGE INTO test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37919851949 for PR #10310 at 80aa617193a03c2fdc244b6e4f1e328e650cc4d0: src/run-task.ts, test/check-proof-grep-cause.test.ts, test/check-proof-warns-when-its-target-differs-from-head.test.ts -> test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts when this edge is exercised"
+      proof: "grep: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf\\.test\\.ts in src/lib/affected-suites.ts"

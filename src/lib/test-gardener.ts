@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import { systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenLedgerBucket, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { gardenLedgerBucket, runGardenAsync, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
@@ -486,7 +486,7 @@ export function startTestGarden(
           deps.log("test.evidence_failed", { error: feed.error });
         }
       }
-      const pass = runGarden(spec, deps);
+      const pass = await runGardenAsync(spec, deps);
       if (hourly) {
         reportedBucket = bucket;
         deps.log("test.pass", {
