@@ -5,12 +5,13 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(ROOT, "scripts", "test-with-retry.mjs");
 
 test("unit test: a coverage shard that cannot report names the truncated raw file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cov-trunc-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cov-trunc-`));
   const raw = join(dir, "raw");
   mkdirSync(raw);
   writeFileSync(join(raw, "coverage-4242-1760000000000-0.json"), '{"result":[{"x":"' + "a".repeat(65536 - 17));
