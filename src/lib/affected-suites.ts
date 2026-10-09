@@ -360,6 +360,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   }
 
   const pathReaders = [...input.pathReaders];
+  // The mkdtemp census scans tracked src/, scripts/ and test/ .ts/.mjs files outside the maps.
+  const mkdtempCensus = "test/mkdtemp-allowlist-rekey.test.ts";
+  if (input.files.has(mkdtempCensus) && files.some((f) => /^(?:src|scripts|test)\/.*\.(?:ts|mjs)$/.test(f))) {
+    pathReaders.push(mkdtempCensus);
+  }
   const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
   // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
   const errorCensus = "test/error-subclass-census.test.ts";
