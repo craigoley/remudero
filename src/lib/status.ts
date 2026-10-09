@@ -2845,8 +2845,20 @@ function derivePrPrecedence(
   // exit-0 EMPTY result is INDETERMINATE rather than "not merged", so corroborate deterministically by head
   // branch and RE-ASSERT ownership. null on FAILURE and [] on a genuine miss keep the two apart.
   // Why: one body-index miss caused four spurious 07-24 re-dispatches
-  const reviewHead = (pr: PrRef): string | undefined =>
-    isPlanTextDeliverable(task, deps.mergedPathsByPr?.get(pr.number) ?? []) ? undefined : pr.headRefOid;
+  const changedFilesByPr = new Map<string, string[] | undefined>();
+  const changedFiles = (pr: PrRef): string[] | undefined => {
+    if (!changedFilesByPr.has(pr.url)) changedFilesByPr.set(pr.url, deps.github.changedFiles?.(pr.url));
+    return changedFilesByPr.get(pr.url);
+  };
+  const reviewHead = (pr: PrRef): string | undefined => {
+    let files = deps.mergedPathsByPr?.get(pr.number);
+    if ((!files || files.length === 0) &&
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex) &&
+        isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid)) {
+      files = changedFiles(pr);
+    }
+    return isPlanTextDeliverable(task, files ?? []) ? undefined : pr.headRefOid;
+  };
   const corroborateByBranch = (): StatusProjection | undefined => {
     // BATCHED first (W1-T257): the one-fetch-per-projection index, returning null ONLY when the batch FAILED —
     // then, and only then, the per-task fetch runs; on both failing, W1-T119 defers rather than a false none.
@@ -2858,7 +2870,7 @@ function derivePrPrecedence(
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
     // refused it, undoing the revalidation before this function even returns. W1-T5552: under EITHER source.
     const planOnlyByDiff = (pr: PrRef): boolean => {
-      const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
+      const files = deps.mergedPathsByPr?.get(pr.number) ?? changedFiles(pr);
       return files !== undefined && refusesAsPlanOnly(task, files);
     };
     const hit = cands.find(
@@ -2962,6 +2974,7 @@ function derivePrPrecedence(
             // would trade a rare wrong credit for 1,400 requests. So the fix is NARROW: the shortcut
             // no longer decides when free local evidence exists, and is untouched when it does not.
             if (ownsOwnRunBranch(head, task.id)) return false;
+            if (changedFilesByPr.has(trailerPr.url)) return refusesAsPlanOnly(task, changedFilesByPr.get(trailerPr.url) ?? []);
             const files = deps.github.changedFiles?.(trailerPr.url);
             return files !== undefined && refusesAsPlanOnly(task, files);
           })()
