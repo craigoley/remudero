@@ -1,0 +1,64 @@
+- id: W1-T7421
+  title: "THE FIX-LANE GARDENER: THE PR REPAIR BOTS IMPROVE THEMSELVES — every operator intervention on a fleet PR, every unparsed or refused fix round, every FIXED-but-still-red head and every red with no actionable failing test is clustered into a defect class, priced, and drafted as one remedy through the flow-remedy ladder, so a stuck PR becomes a filed fix to the fix lane instead of a hand fix"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — a gardener that reads fix-lane outcomes and files remedies through the existing flow-remedy ladder
+  band_meaning: span
+  origin: "operator ruling 2026-10-09: 'We should never be left with stuck prs. lean into automated flow and self improvement. There should be a gardener for the pr fix bots too, i think to keep them self improving'"
+  plan_refs: [W1-T5535, W1-T6360, W1-T7096, W1-T7243, W1-T5904, W1-T5361]
+  files: [src/lib/fix-lane-gardener.ts, src/run-task.ts, src/lib/flow-remedy-gardener.ts, src/lib/garden-registry.ts, test/the-fix-lane-gardener-files-one-remedy-per-defect-class.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    On 2026-10-09 an operator session hand-fixed 15+ PRs, and every one traced to a defect in the fix lane
+    itself, not in the PR: glossed FIX_OUTCOME lines read as "unstated" so FLAKE never reran (#10362; 125 unstated
+    vs 58 recognised fix rounds in the window); a rung parked on a merged scope amendment forever (#10330); a
+    stand-down deduped its head forever (#10375); the metadata repair appended a proof that passes at base
+    (#10427/#10439); the full pass walked newest-first and starved old PRs (#10392); the queue governor counted
+    merges only from verdict.merged and held dispatch 2.7 h (#10410); a fix round edited a file outside its declared
+    scope to paper over a main red (#10369); fixed strike caps stopped repair (W1-T7096/W1-T7243); and on #10400 the
+    coverage shards went red because a dynamic import stopped lcov from being written at all — a red with no
+    failing test for the lane to act on, which it never fixed (a different session hand-fixed it, 81d224ab1).
+    Nothing watched any of this: flow-remedy-gardener (src/lib/flow-remedy-gardener.ts) prices only sweep.disposed
+    blocker-hours, and W1-T5535 / W1-T6360 tune which model the fix lane routes to, not whether the lane's own
+    harness works. Each hand fix was the only signal, and it was carried in an operator's head.
+  design: |
+    1. src/lib/fix-lane-gardener.ts registers a "fix-lane" garden (garden-registry.ts) that once per UTC day reads
+       the ledger union (readLedgerUnionRecordsSync, requireArchives) for: fix.dispatch, fix.done (fix_outcome,
+       including "unstated"), fix.commit_refused and fix.stood_down (reason), sweep.disposed (blocker episodes and
+       SLO refreshes), pr.terminal, and fix.progress_judged once W1-T7096 lands.
+    2. HEADLINE SIGNAL — OPERATOR INTERVENTIONS, target zero: a push to a fleet-owned PR branch whose author is not
+       the fleet App, a close of a fleet PR by a non-fleet actor, or an operator run-unfiled PR touching fix-lane
+       code (src/lib/sweep.ts, src/lib/fix-outcome.ts, src/lib/fix-progress-judge.ts, the run-task fix paths, the
+       review acceptance repair). Read from git commit authors on the PR heads and GitHub PR close events through
+       the existing transport; an unreadable source is reported as unknown, never as zero.
+    3. Defect classes (normalised the way flow-remedy-gardener's reasonClass does): unstated or unparsed outcomes;
+       refusal and stand-down reasons; FIXED outcome whose next CI on the pushed head is still red; a fix commit
+       touching files outside the task's declared files; the same red set across consecutive rounds; RED WITH NO
+       ACTIONABLE FAILING TEST (required checks red while no test failure is extractable from the CI log, e.g. a
+       coverage shard that wrote no lcov); PRs blocked past their SLO. Each class is priced by blocked hours plus a
+       weight per operator intervention attributed to it.
+    4. REUSE, DO NOT FORK, THE FLOW-REMEDY LADDER: export from flow-remedy-gardener.ts the draft -> measure effect ->
+       escalate machinery and drive it with fix-lane classes (origin "fix-lane:<class>"), so one remedy per class is
+       drafted through renderMachineShard and the machine-filing judge, never a second while one is open, its effect
+       measured by the class's rate after the remedy merges, and the next rung escalated when there is none.
+    5. NO FIXED THRESHOLDS (operator ruling 2026-10-09, "I hate hard ceilings"): classes are ranked by price and the
+       judge decides whether the top class merits a draft; nothing gates on a constant count.
+    6. Output: one fixlane.report ledger row per pass (class, count, hours, interventions, open remedy) and a
+       markdown summary in the gardener state dir, beside flow-report.md.
+  acceptance:
+    - claim: "a fixture ledger with operator pushes on fleet PRs and a refusal class yields exactly one remedy draft for the top-priced class and none for a class whose remedy is still open"
+      proof: 'unit test: test/the-fix-lane-gardener-files-one-remedy-per-defect-class.test.ts'
+    - claim: "the fix-lane gardener is a registered garden"
+      proof: 'grep: "fix-lane", in src/lib/garden-registry.ts'
+    - claim: "the gardener writes its daily report row"
+      proof: 'grep: fixlane\.report in src/lib/fix-lane-gardener.ts'
+    - claim: "the daemon's garden runner passes the fix-lane garden spec"
+      proof: 'grep: fixLaneGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Drop the operator-intervention reader: the fixture whose only priced class comes from operator pushes on fleet
+    PRs drafts nothing, and the test asserting one draft for that class fails.

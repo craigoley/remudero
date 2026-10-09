@@ -42,7 +42,7 @@ import type { Proposal } from "../src/lib/inbox.js";
 import { rotateLedger } from "../src/lib/ledger.js";
 import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
+import { SELECTOR_SHADOW_MISS_TEST_PATH, selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
 import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
@@ -280,6 +280,17 @@ test("the filers write an honest risk and leave verify to the judge", () => {
   const yaml = selectorShadowMissTask(miss, "W1-T9040");
   assert.match(yaml, /^ {2}risk: low$/m, "a selector edge repair is not high risk");
   assert.match(yaml, /^ {2}verify: human$/m);
+});
+
+test("a narrow selector edge shard declares the test that covers its edge, so diff-coverage can pass in scope", () => {
+  const miss = { runId: 1, headSha: "abc", selection: "floor" as const, file: "test/prompt-render.test.ts" };
+  const task = loadPlanFromYaml(selectorShadowMissTask(miss, "W1-T9041", ["src/run-task.ts"]), "plan/tasks.d/a.yaml").tasks[0]!;
+  assert.deepEqual(task.files, ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH]);
+  assert.equal(task.risk, "low", "declaring the test file must not raise the edge repair's risk");
+  const proofs = (task.acceptance ?? []).map((a) => a.proof);
+  assert.ok(proofs.includes("grep: test/prompt-render\\.test\\.ts in src/lib/affected-suites.ts"), proofs.join(" | "));
+  assert.ok(proofs.includes(`grep: test/prompt-render\\.test\\.ts in ${SELECTOR_SHADOW_MISS_TEST_PATH}`), proofs.join(" | "));
+  assert.match(task.note ?? "", /diff-coverage blocks an edge no test exercises/);
 });
 
 test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", () => {

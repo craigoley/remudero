@@ -483,6 +483,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(nowViewRederives) && files.some((f) => nowViewRederivesEdges.includes(f))) {
     pathReaders.push(nowViewRederives);
   }
+  const promptRender = "test/prompt-render.test.ts";
+  const promptRenderEdges = [
+    "src/lib/prompt-render.ts",
+    "src/run-task.ts",
+    "test/the-prerequisite-split-contract-has-no-optional-seam.test.ts",
+  ];
+  if (input.files.has(promptRender) && files.some((f) => promptRenderEdges.includes(f))) {
+    pathReaders.push(promptRender);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
