@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -18,3 +18,13 @@
       proof: "grep: test/the-knowledge-gardener-pins-its-own-retirement-golden\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts for each recorded edge"
       proof: "grep: test/the-knowledge-gardener-pins-its-own-retirement-golden\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.92
+    reasons:
+      - "The filed plan limits the remedy to one named test-selection edge and regression coverage in two matching declared files."
+      - "The supplied family track record reports 8 merged and 0 declined tasks, supporting established practice."
+      - "The filing-time gates show no concerning status, and the stated scope names no operator-only decision, sensitive access, deletion, irreversible action, or merge, deploy, infrastructure, or review policy change."
+    judged_at: "2026-10-09T23:04:27.328Z"
+    pin: "87544bf1b22d59f8bc25cbad31b27ad734084cda0c8d76a4055e99365d71c2d3"

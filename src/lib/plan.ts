@@ -370,13 +370,27 @@ const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
  *  still parks for the judge; drain routes its build to an operator (W1-T5351). */
 const CI_FRICTION_OWNER = /^(?:src|scripts)\/|^\.github\/workflows\/[^/]+\.ya?ml$/;
 
+/** The machine remedy families whose record names the code that owns a cost plus the NEW regression
+ *  test proving it fell: ci-friction (a CI round's cause) and flow-regression (a slowed PR stage, owned
+ *  by the sweep or the CI workflow, flow-gardener.ts's STAGE_OWNER). */
+const CODE_OWNED_REMEDY_ORIGINS = ["ci-friction:", "flow-regression:"] as const;
+
 function isCiFrictionRemedyProposal(task: Task): boolean {
   const files = task.files ?? [];
   return (
-    task.origin?.startsWith("ci-friction:") === true &&
+    CODE_OWNED_REMEDY_ORIGINS.some((prefix) => task.origin?.startsWith(prefix) === true) &&
     files.some((f) => CI_FRICTION_OWNER.test(f)) &&
     files.every((f) => CI_FRICTION_OWNER.test(f) || NEW_TEST_FILE.test(f))
   );
+}
+
+/** A hot-file restructuring (W1-T4803): the hot file its origin names, first, plus the NEW regression
+ *  test proving two pull requests no longer conflict on it, and `.gitattributes` when a merge driver is
+ *  the remedy. The hot file is never a source module (hot-file-gardener.ts's hotFileRemedy). */
+function isHotFileRemedyProposal(task: Task): boolean {
+  const files = task.files ?? [];
+  const hot = task.origin?.startsWith("hot-file:") === true ? task.origin.slice("hot-file:".length) : undefined;
+  return hot !== undefined && files[0] === hot && files.slice(1).every((f) => NEW_TEST_FILE.test(f) || f === ".gitattributes");
 }
 
 function isFlowBlockerRemedyShape(task: Task): boolean {
@@ -404,7 +418,7 @@ function isJudgeReleasedFlowBlockerRemedy(task: Task): boolean {
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
-      (task.depends_on ?? []).length === 0 && isCiFrictionRemedyProposal(task)) return true;
+      (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
@@ -1281,8 +1295,10 @@ export function machineFilingAdmissionViolations(
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
   const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
-    isSelectorShadowStructuralShape(task);
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
+    isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
+  // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
+  const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
