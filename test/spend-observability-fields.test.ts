@@ -314,8 +314,9 @@ test("W1-T2383 (Q3): the digest's cost total is step-gated on `verdict`, so a pr
 
 test("W1-T2383 (Q3): the board's shared spend fold counts cost_usd and num_turns, not max_turns", () => {
   const board = readFileSync(new URL("../src/lib/board.ts", import.meta.url), "utf8");
-  assert.match(board, /import \{[^}]*liveRunSpend[^}]*\} from "\.\/status-stream-publisher\.js"/);
-  assert.match(board, /liveRunSpend\(lines, p\.taskId\)/);
+  // The board folds every running task in one pass (liveRunSpendByTask); liveRunSpend is that same fold for one task.
+  assert.match(board, /import \{[^}]*liveRunSpendByTask[^}]*\} from "\.\/status-stream-publisher\.js"/);
+  assert.match(board, /liveRunSpendByTask\(lines, /);
   assert.deepEqual(liveRunSpend([
     { task_id: "W1-A", step: "run.start" },
     { task_id: "W1-A", step: "implement.done", cost_usd: 1.25, num_turns: 2, max_turns: 99 },

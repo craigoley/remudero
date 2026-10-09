@@ -891,6 +891,7 @@ export function createNowView(opts: NowViewOptions): {
   stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
   perInstance: true;
+  readPaced: true;
 } {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
@@ -1267,6 +1268,8 @@ export function createNowView(opts: NowViewOptions): {
     name: NOW_VIEW_NAME,
     version: NOW_VIEW_VERSION,
     perInstance: true,
+    // ~4.8 s a core build, due on every ledger generation: rebuilt at full cadence only while someone reads it.
+    readPaced: true,
     /**
      * The shadow comparator's legacy side for one key, over the plan, GitHub snapshot and probe the compared
      * body was built from: GET /v1/status's board and PR queue over the rows the instance's live file held in

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 import { runServeSupervisor, serveArgsOf } from "../src/lib/serve-supervisor-main.js";
-import type { ServeSupervisor, ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
+import { SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -56,6 +56,7 @@ test("the supervisor entry passes serve its own arguments and makes the cold che
   writeFileSync(join(gensDir, "handoff.off"), "");
   assert.equal(built?.handoffEnabled?.(), false, "the kill switch file is read from the generations directory");
   assert.equal(typeof built?.prepare, "function");
+  assert.equal(built?.spacingBaseMs, SERVE_HANDOFF_SPACING_BASE_MS, "production spaces handoffs; only a bare createServeSupervisor does not");
   assert.deepEqual(calls, ["start"]);
   assert.deepEqual(logged, ["serve.supervisor_start"]);
   signals.get("SIGTERM")?.();
