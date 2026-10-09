@@ -310,43 +310,46 @@ test("W1-T2403: a real defect (never retrigger-shaped) still spends real strikes
   assert.ok(!lines.some((l) => l.step === "fix.retrigger"), "no fix.retrigger line exists — nothing was misclassified");
 });
 
-test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", () => {
+test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", async () => {
   assert.ok(DEFAULT_FIX_RETRIGGER_CAP >= 1 && DEFAULT_FIX_RETRIGGER_CAP <= 5, "small, per W1-T2345's own 'bound the repetition' shape");
-});
-
-test("W1-T7096: a judge that keeps saying continue runs the rung past the former retrigger count", async () => {
+  const { lines, log } = captureLog();
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const judgedRoundCounts: number[] = [];
   let spawnCalls = 0;
-  const RETRIGGER_CAP = 2, ROUNDS = RETRIGGER_CAP + 2;
+
   const rung = await runFixRung({
     ...fixRungBaseOpts(),
-    strikeCap: 50,
-    retriggerCap: RETRIGGER_CAP,
-    initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0"),
+    strikeCap: 1,
+    retriggerCap: 1,
+    initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false })], "sha-0"),
+    ciFailures: [{ name: "coverage-ratchet", logTail: "transient infra failure" }],
     deps: {
-      fixProgressJudge: async () => spawnCalls >= ROUNDS
-        ? { verdict: "escalate", loop: "judge-chosen stop", reason: "enough rounds" }
-        : { verdict: "continue", reason: "progress is still possible" },
-      spawn: async () => {
-        spawnCalls++;
-        return result({ sessionId: `fix-session-${spawnCalls}` });
+      fixProgressJudge: async input => {
+        judgedRoundCounts.push(input.rounds.length);
+        return { verdict: "continue", reason: "the transient check warrants another retrigger" };
       },
+      spawn: async () => result({ sessionId: `fix-session-${++spawnCalls}` }),
       readRoundCommits: async () => [RETRIGGER_COMMIT],
-      waitForCiGreen: async () => "green",
+      waitForCiGreen: async () => spawnCalls < 3 ? "red" : "green",
+      fetchCiFailures: async () => [{ name: "coverage-ratchet", logTail: "still transiently red" }],
       fetchPrBody: async () => FAKE_PR_BODY,
-      runReview: async () =>
-        fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], `sha-${spawnCalls}`),
+      runReview: async () => fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })], "sha-3"),
       push: () => {},
       issues: fakeIssues(issueCalls),
       ledgerPath: tmpLedgerPath(),
-      log: () => {},
+      log,
       say: () => {},
-      account: (r) => r,
+      account: r => r,
     },
   });
-  assert.equal(spawnCalls, ROUNDS, "the former retrigger count did not stop the rung; the judge did");
-  assert.ok(rung.retriggers > RETRIGGER_CAP, "retriggers ran past the former cap");
-  assert.notEqual(rung.reason, "retrigger_cap_exhausted", "the counter is never the stated reason");
+
+  assert.equal(spawnCalls, 3, "the judge permits retriggers past the former cap of one until CI is green");
+  assert.deepEqual(judgedRoundCounts, [0, 1, 2], "each next-round decision sees the completed round history");
+  assert.equal(rung.outcome, "fixed", "green CI and a successful review resolve the rung");
+  assert.equal(rung.retriggers, 3, "all retrigger rounds are still counted for diagnostics");
+  assert.equal(rung.strikes, 0, "retrigger rounds still spend no repair strikes");
+  assert.equal(lines.filter(l => l.step === "fix.retrigger").length, 3);
+  assert.equal(issueCalls.length, 0, "crossing the former cap never escalates against the judge's verdict");
 });
 
 test("W1-T2403: fixStrikeCap's own default is unchanged by this task, in either direction", () => {
