@@ -565,6 +565,7 @@ import {
 } from "./lib/open-prs-rest.js";
 import {
   buildMainHealthRung,
+  withMainHealthOnLightPass,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairRevertOutcome,
@@ -38435,7 +38436,8 @@ export async function daemonCommand(
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildSweepLightHook(
+        // A run in flight starves the full sweep, so the light pass also watches main.
+        sweepLight: withMainHealthOnLightPass(buildSweepLightHook(
           target.owner,
           target.repo,
           config,
@@ -38450,7 +38452,7 @@ export async function daemonCommand(
           resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
-        ),
+        ), mainHealthRung, { log }),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
