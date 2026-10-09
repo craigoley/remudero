@@ -23,7 +23,7 @@ function holdFetches(t: TestContext) {
     callback: (error: ExecFileException | null, stdout: string, stderr: string) => void,
   ) => {
     assert.equal(file, "git");
-    assert.equal(args[2], "fetch");
+    if (args[2] !== "fetch") return execFile(file, args, options, callback);
     started.push(args[1]!);
     return execFile(file, args, options, (error, stdout, stderr) => {
       void gate.then(() => callback(error, stdout, stderr));

@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { runCiParity } from "../src/lib/ci-parity.js";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
@@ -106,9 +107,11 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
       return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
     }
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
@@ -117,9 +120,9 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 test("ci-parity: the coverage-ratchet full-glob test run is spawned with the tmp-hygiene import — this step does NOT route through package.json's protected scripts", () => {
   const { spawn, calls } = recordingSpawn();
   runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
-  const coverage = calls.find((c) => c.args.includes("--experimental-test-coverage"));
-  assert.ok(coverage, "expected the coverage-run invocation");
-  assertHygienePair(coverage!.args, "coverage-ratchet:test-with-coverage");
+  const coverage = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
+  assert.equal(coverage.length, 8, "expected a coverage-run invocation for every CI shard");
+  for (const shard of coverage) assertHygienePair(shard.args, "coverage-ratchet:test-with-coverage");
 });
 
 test("ci-parity: the containment-probe test run (trigger REQUIRED) is spawned with the tmp-hygiene import", () => {
