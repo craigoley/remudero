@@ -233,7 +233,32 @@ export function evaluateCensusPrecheck(input) {
     ...fixtureCopyViolations(input),
     ...houseLayoutViolations(input),
     ...depsInterfaceViolations(input),
+    ...scriptRatchetViolations(input),
   ];
+}
+
+const CI_YAML_PATH = ".github/workflows/ci.yml";
+
+/** W1-T5737: a push that edits ci.yml or the parity baseline must leave every script gate ci.yml runs with a
+ *  verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only the two files. */
+function scriptRatchetViolations({ changed, readHead }) {
+  if (!changed.includes(CI_YAML_PATH) && !changed.includes(PRECHECK_PARITY_BASELINE)) return [];
+  const ci = readHead(CI_YAML_PATH);
+  const baselineText = readHead(PRECHECK_PARITY_BASELINE);
+  if (ci === null || baselineText === null) return [];
+  let rows;
+  try {
+    rows = JSON.parse(baselineText).ciOnlyScripts;
+  } catch {
+    return [];
+  }
+  if (typeof rows !== "object" || rows === null || Array.isArray(rows)) return [];
+  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci), baseline: rows });
+  return verdict.unasked.map(
+    (key) =>
+      `script-ratchet: ${key} runs in ${CI_YAML_PATH} but nothing asks it before the push — model it in ` +
+      `PRECHECK_SCRIPT_PARITY (scripts/census-precheck.mjs) or record a reason under ciOnlyScripts in ${PRECHECK_PARITY_BASELINE}`,
+  );
 }
 
 const INSTRUMENT_SCOPE_RE = /^(?:\.github\/workflows\/|scripts\/|package\.json$|src\/lib\/review\.ts$)/;
@@ -705,6 +730,8 @@ export const PRECHECK_PARITY = {
   "test/deps-interface-census.test.ts": { modeled: depsInterfaceViolations },
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
+  // W1-T5737: the script gates ci.yml runs, read out of ci.yml whenever a push edits it or the parity baseline.
+  "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.

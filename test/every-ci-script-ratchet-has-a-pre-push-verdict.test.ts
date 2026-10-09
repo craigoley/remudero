@@ -122,6 +122,24 @@ test("W1-T5737: every script ratchet ci.yml runs is asked before the push or has
   }
 });
 
+test("W1-T5737: the precheck names a script gate a push to ci.yml leaves with no verdict, and is silent otherwise", () => {
+  const evaluate = precheck.evaluateCensusPrecheck as (input: unknown) => string[];
+  const baselineText = JSON.stringify({ ciOnlyScripts: { "script:fixture-census": "CI-only: a fixture reason" } });
+  const run = (changed: string[]) =>
+    evaluate({
+      changed,
+      readHead: (p: string) => (p === ".github/workflows/ci.yml" ? FIXTURE_CI : p === BASELINE ? baselineText : null),
+      readBase: () => null,
+      measuredFiles: [],
+      testFiles: [],
+      srcFiles: [],
+    }).filter((v) => v.startsWith("script-ratchet:"));
+  const named = run([".github/workflows/ci.yml"]);
+  assert.equal(named.length, 1, named.join("\n"));
+  assert.match(named[0]!, /script:shiny-ratchet/);
+  assert.deepEqual(run(["src/unrelated.ts"]), [], "a push touching neither ci.yml nor the baseline asks nothing");
+});
+
 test("W1-T5737: every PRECHECK_SCRIPT_PARITY entry names how the push asks it", () => {
   const scripts = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> })
     .scripts;
