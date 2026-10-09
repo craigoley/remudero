@@ -1,0 +1,24 @@
+- id: W1-T7271
+  title: "FLAKE INCIDENT — 'real spawn' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/fast-gate-admits-the-census-class.test.ts#real spawn"
+  files:
+    - test/fast-gate-admits-the-census-class.test.ts
+  acceptance:
+    - claim: "the cause of 'real spawn' (test/fast-gate-admits-the-census-class.test.ts)'s intermittent failure is fixed in test/fast-gate-admits-the-census-class.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7271 pins the cause of the intermittent failure"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'real spawn' (test/fast-gate-admits-the-census-class.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10181, #10354, #10368.
+    CI runs: 37862576629, 37944299457, 37947872859.
+    Retry outcomes: 1 recovered on retry, 2 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
