@@ -308,12 +308,14 @@ scratch_preconditions() {
   return "${ok}"
 }
 
-# ── what systemd RESOLVED, never the files on disk; check mode adds the live mount and Docker. ─
+# ── configured bind source and resolved guards; check mode adds the live mount and Docker. ─
 check_scratch_static() {
-  local status=0 svc
+  local status=0 svc fragment
   scratch_preconditions || status=1
-  [ "$(unit_prop "${MOUNT_UNIT}" What)" = "${SCRATCH_CONTAINERD}" ] || { fail "MISSING — ${MOUNT_UNIT} What= is not ${SCRATCH_CONTAINERD}" || true; status=1; }
-  [ "$(unit_prop "${MOUNT_UNIT}" FragmentPath)" = "${UNIT_DIR}/${MOUNT_UNIT}" ] || { fail "MISSING — ${MOUNT_UNIT} is not loaded from ${UNIT_DIR}/${MOUNT_UNIT}" || true; status=1; }
+  fragment="$(unit_prop "${MOUNT_UNIT}" FragmentPath)"
+  # Active bind mounts report a device for What; validate the configured source (W1-T6975).
+  [ "$(sed -n 's/^What=//p' "${fragment}" 2>/dev/null)" = "${SCRATCH_CONTAINERD}" ] || { fail "MISSING — ${MOUNT_UNIT} What= is not ${SCRATCH_CONTAINERD}" || true; status=1; }
+  [ "${fragment}" = "${UNIT_DIR}/${MOUNT_UNIT}" ] || { fail "MISSING — ${MOUNT_UNIT} is not loaded from ${UNIT_DIR}/${MOUNT_UNIT}" || true; status=1; }
   for svc in containerd.service docker.service; do
     if [[ "$(unit_prop "${svc}" ExecStartPre)" == *"mountpoint -q ${SCRATCH_ROOT}"* ]]; then
       say "${svc} refuses to start without ${SCRATCH_ROOT} mounted"
