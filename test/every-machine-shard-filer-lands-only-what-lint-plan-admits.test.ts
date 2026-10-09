@@ -17,7 +17,8 @@ import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-g
 import { gateGardenSpec, type GateProbes } from "../src/lib/gate-gardener.js";
 import { runGarden, type GardenCheckout, type GardenerDeps, type GardenSpec } from "../src/lib/gardener.js";
 import { fileConsumerVia, type ConsumerFiling } from "../src/lib/host-resource-gardener.js";
-import { hotFileGardenSpec, type HotFileGardenSources } from "../src/lib/hot-file-gardener.js";
+import { hotFileGardenSpec, hotFileRemedy, hotFileShardStem, hotFileShardYaml, type HotFileGardenSources, type HotFilePrice } from "../src/lib/hot-file-gardener.js";
+import { flowFollowUpStem, renderFlowFollowUp, type FlowStageStat } from "../src/lib/flow-gardener.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, machineShardLandingRefusal } from "../src/lib/machine-filing.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
 import { scoutGardenSpec } from "../src/lib/scout-gardener.js";
@@ -222,4 +223,49 @@ test("the selector-shadow filer refuses a shard lint-plan would, before its PR o
     /machine-filing admission/,
   );
   assert.deepEqual(landed, []);
+});
+
+/** lint-plan's verdict on one real shard at its real path, with only `onMain` present in the tree. */
+function admitted(yaml: string, path: string, onMain: readonly string[]): { admission: string[]; refusal: string | undefined } {
+  const plan = loadPlanFromYaml(yaml, path);
+  const pathExists = (p: string) => onMain.includes(p);
+  return {
+    admission: machineFilingAdmissionViolations(plan.tasks[0]!, { plan, releasedIds: new Set(), pathExists }),
+    refusal: machineShardFilingRefusal(yaml, path, { pathExists }),
+  };
+}
+
+test("the real hot-file restructuring shard passes lint-plan's machine-filing admission for every remedy", () => {
+  const files = ["scripts/test-tier-manifest.json", "scripts/comment-load-baseline.json", "docs/ci-friction-garden-log.md", ".gitignore", ".github/workflows/ci.yml"];
+  assert.deepEqual(files.map((f) => hotFileRemedy(f)), ["generate-in-ci", "split-per-entry", "append-only", "merge-driver", "merge-driver"]);
+  for (const file of files) {
+    const price = { file, minutes: 40, rounds: 3, prs: 5, inferredMinutes: 0, recordedMinutes: 40 } as HotFilePrice;
+    const yaml = hotFileShardYaml(price, "W1-T9061");
+    const task = loadPlanFromYaml(yaml, "x.yaml").tasks[0]!;
+    assert.equal(task.files?.[0], file, "the shard declares the hot file itself");
+    assert.ok(!task.files?.includes("docs/hot-file-remedies.md"), "never a docs file that does not exist");
+    const verdict = admitted(yaml, `plan/tasks.d/W1-T9061-${hotFileShardStem(file)}.yaml`, [file]);
+    assert.deepEqual(verdict, { admission: [], refusal: undefined }, `${file}: ${JSON.stringify(verdict)}`);
+  }
+});
+
+test("a hot-file shard that declares any file but its own hot file first is refused", () => {
+  const yaml = hotFileShardYaml({ file: "scripts/test-tier-manifest.json", minutes: 40, rounds: 3, prs: 5, inferredMinutes: 0, recordedMinutes: 40 } as HotFilePrice, "W1-T9062")
+    .replace("    - scripts/test-tier-manifest.json\n", "    - scripts/test-tier-manifest.json\n    - src/lib/plan.ts\n");
+  const verdict = admitted(yaml, `plan/tasks.d/W1-T9062-${hotFileShardStem("scripts/test-tier-manifest.json")}.yaml`, ["scripts/test-tier-manifest.json", "src/lib/plan.ts"]);
+  assert.match(verdict.admission.join(" "), /verify:human/);
+});
+
+test("the real flow follow-up shard passes lint-plan's machine-filing admission for a sweep and a CI stage", () => {
+  for (const [stage, owner] of [["ready_to_merged", "src/lib/sweep.ts"], ["ci_wall_clock", ".github/workflows/ci.yml"]] as const) {
+    const stat = {
+      key: `plan:${stage}:all`, cls: "plan", stage, surface: "all", regressed: true,
+      current: { n: 4, p50: 25, p90: 40 }, baseline: { n: 6, p50: 10, p90: 10, source: "rolling" }, slowest: [{ pr: 1, value: 40 }],
+    } as unknown as FlowStageStat;
+    const rendered = renderFlowFollowUp(stat, "W1-T9063", [15]);
+    assert.equal(rendered.refused, undefined);
+    assert.equal(loadPlanFromYaml(rendered.text, "x.yaml").tasks[0]!.files?.[0], owner);
+    const verdict = admitted(rendered.text, `plan/tasks.d/W1-T9063-${flowFollowUpStem(stat)}.yaml`, [owner]);
+    assert.deepEqual(verdict, { admission: [], refusal: undefined }, `${stage}: ${JSON.stringify(verdict)}`);
+  }
 });
