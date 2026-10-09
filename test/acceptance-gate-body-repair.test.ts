@@ -259,6 +259,37 @@ test("runFixRung (acceptance 1): a no-header refusal is repaired with a body-onl
   assert.equal(outcome.strikes, 1);
 });
 
+test("runFixRung repairs a no-header body with a proof from a test the PR adds, not the base-passing generic grep", async () => {
+  const noReviewYet = fakeReview("failure", [], "head-with-a-suite");
+  const updateCalls: Array<{ prUrl: string; body: string }> = [];
+  await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: noReviewYet,
+    ciFailures: [AUTHOR_GATE_CI_FAILURE],
+    deps: {
+      spawn: async () => result({ sessionId: "should-never-run" }),
+      waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => [AUTHOR_GATE_CI_FAILURE],
+      fetchPrBody: async () => NO_HEADER_BODY,
+      updatePrBody: async (prUrl, body) => {
+        updateCalls.push({ prUrl, body });
+      },
+      addedTestsAtHead: (headSha) => ({ kind: "read", files: headSha === "head-with-a-suite" ? ["test/the-suite-this-pr-adds.test.ts"] : [] }),
+      runReview: async () => noReviewYet,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(updateCalls.length, 1);
+  assert.match(updateCalls[0].body, /unit test: test\/the-suite-this-pr-adds\.test\.ts/);
+  assert.doesNotMatch(updateCalls[0].body, /acceptanceAuthorTimeCheck/, "a proof main already satisfies can never discriminate");
+});
+
 test("runFixRung (acceptance 2): the repair is dispatched from the gate's own defect name, not any inspection of the body's prose — an unrelated-looking body with the SAME structural defect still repairs", async () => {
   // A body about something entirely different, but still headerless/trailerless — the repair
   // must fire on the STRUCTURAL defect (no-header), never on keywords in the prose.

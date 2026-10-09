@@ -1476,6 +1476,7 @@ import {
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -4587,9 +4588,13 @@ function draftPrCreate(
   const draftedBody = bodyParts.filter((p) => p.length > 0).join("\n\n");
   // A filed run branch takes its Acceptance block from the task record inside the checked opener.
   // Other lanes retain the open-time fallback that predates the task-aware check.
+  // A test the branch ADDS gives a proof that misses at base. The generic block stays only as the last resort, because
+  // openPullRequestChecked refuses a body with no block at all, and that would stop the PR opening.
+  const added = filedTaskIdFromRunBranch(branch) ? undefined : addedTestFilesAtHead("HEAD", worktreePath);
+  const headOnly = added?.kind === "read" ? added.files.map(addedTestCriterion) : [];
   const body = filedTaskIdFromRunBranch(branch)
     ? draftedBody
-    : ensureJudgeableBody(draftedBody, PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
+    : ensureJudgeableBody(draftedBody, headOnly.length ? headOnly : PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
   return { title: resolvedTitle, body };
 }
 
@@ -5551,7 +5556,7 @@ export async function repairPrMetadata(
     // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
     // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
     const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
-    const headOnly = added.kind === "read" ? added.files.map(sweepMetadataAddedTestCriterion) : [];
+    const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
     const gate = acceptanceAuthorTimeCheck(live.body);
     if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
       const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
@@ -5785,8 +5790,8 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-function sweepMetadataAddedTestCriterion(path: string): AcceptanceCriterion {
-  return { claim: `the suite this PR adds passes (derived from the diff by the metadata repair sweep): ${path}`, proof: `unit test: ${path}` };
+function addedTestCriterion(path: string): AcceptanceCriterion {
+  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
 }
 
 /** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
@@ -10927,6 +10932,8 @@ export async function runFixRung(opts: {
      * report is still used for this round's verdict even if persisting it to GitHub failed).
      */
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
+    /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
+    addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
     /**
      * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
      * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
@@ -11604,7 +11611,10 @@ export async function runFixRung(opts: {
       } catch (e) {
         deps.log("fix.body_gate_check_error", { strike: strikes + 1, error: String((e as Error)?.message ?? e) });
       }
-      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody) : undefined;
+      // A proof from a test the PR adds misses at base; the generic default does not, so it is the last resort only.
+      const added = (deps.addedTestsAtHead ?? ((sha: string) => addedTestFilesAtHead(sha, opts.worktreePath)))(review.headSha);
+      const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody, headOnly.length ? headOnly : undefined) : undefined;
       // W1-T3506 — THE WRITE-BOUNDARY CALL W1-T3389's HELPER WAS SHIPPED WITHOUT. `repair` above is
       // PURE and never inspects whether its own authored `grep:` proofs actually run — that is
       // exactly the asymmetry `repairedProofsAreSafeToPush` (lib/body-repair.ts) exists to close,
@@ -11860,10 +11870,16 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
+    const logNamedPaths = ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath);
+    const logNamedMain = mainOwnedPaths(opts.worktreePath, logNamedPaths.map((file) => file.path));
+    if (logNamedMain.owned.length > 0 || logNamedMain.outcome === "unreadable") {
+      deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
+        ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
+    }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
-      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
+      ...logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path)),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -13000,7 +13016,12 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
-      try {
+      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
+      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else try {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
@@ -25908,6 +25929,16 @@ export function checkProofCommand(
     try {
       baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
+      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      const missingExport =
+        w!.kind === "test" && typeof loadOutput === "string"
+          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
+          : undefined;
+      if (missingExport !== undefined) {
+        console.log(`base:       COULD NOT LINK — ${missingExport}`);
+        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
+        return headExit;
+      }
       console.log(
         `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",
@@ -43498,6 +43529,28 @@ export function ciLogNamedSourcePaths(
     }
   }
   return [...found].map(([path, job]) => ({ path, job }));
+}
+
+/** Paths main changed since the merge base and this branch did not: a red there is main's, so refresh, never patch (#10369). */
+export function mainOwnedPaths(
+  repoDir: string,
+  paths: readonly string[],
+  runGit: GitRunner = (args) => hostWorktreeGit(repoDir, args),
+): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; reason?: string } {
+  if (paths.length === 0) return { outcome: "compared", owned: [] };
+  try {
+    runGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]);
+  } catch (error) {
+    return { outcome: "no-base", owned: [], reason: String(error) };
+  }
+  try {
+    const base = runGit(["merge-base", "HEAD", "refs/remotes/origin/main"]).trim();
+    const changed = (to: string) => new Set(runGit(["diff", "--name-only", "-z", base, to, "--", ...paths]).split("\0").filter(Boolean));
+    const ours = changed("HEAD");
+    return { outcome: "compared", owned: [...changed("refs/remotes/origin/main")].filter((path) => !ours.has(path)) };
+  } catch (error) {
+    return { outcome: "unreadable", owned: [...paths], reason: String(error) };
+  }
 }
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";

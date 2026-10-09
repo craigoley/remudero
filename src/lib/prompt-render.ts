@@ -10,6 +10,7 @@ import {
 import type { CapabilityReceipt } from "./capability-grant.js";
 import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
 import type { RemedyFileForGate } from "./ci-parity.js";
+import { diffCoverageTargets, renderDiffCoverageTargets } from "./diff-coverage-targets.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from "./fix-fence.js";
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
@@ -786,6 +787,9 @@ export function renderFixPrompt(opts: {
       `criteria or task scope to chase a reviewer verdict here.`,
       "",
       rendered,
+      ...renderDiffCoverageTargets(diffCoverageTargets(failures.map((f) => f.logTail ?? "")), {
+        harnessCommits: opts.harnessCommits,
+      }),
       ...footer,
     ].join("\n");
   }
