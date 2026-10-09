@@ -230,7 +230,11 @@ function procMounted(): boolean {
 }
 
 /** The real bounded /proc listing. Hitting either bound, or an unreadable /proc, is INCOMPLETE — never empty. */
-export function defaultListProcesses(limits: WalkLimits, clock: Clock = systemClock): ProcessListing {
+export function defaultListProcesses(
+  limits: WalkLimits,
+  clock: Clock = systemClock,
+  readStat: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): ProcessListing {
   const startedAt = clock.now();
   let names: string[];
   try {
@@ -243,10 +247,15 @@ export function defaultListProcesses(limits: WalkLimits, clock: Clock = systemCl
     if (index >= limits.maxEntries) return { rows, complete: false, reason: `entry bound ${limits.maxEntries}` };
     if (clock.now() - startedAt > limits.maxMs) return { rows, complete: false, reason: `time bound ${limits.maxMs}ms` };
     try {
-      const stat = parseProcStat(readFileSync(`/proc/${name}/stat`, "utf8"));
-      if (stat && !stat.zombie) rows.push({ pid: Number(name), parent: stat.parent, start: stat.start });
+      const stat = parseProcStat(readStat(`/proc/${name}/stat`));
+      if (!stat) return { rows, complete: false, reason: `process ${name} stat unreadable` };
+      if (!stat.zombie) rows.push({ pid: Number(name), parent: stat.parent, start: stat.start });
     } catch (error) {
-      void error; // A process that exited mid-walk is simply not a live row.
+      // Only ENOENT proves a harmless process-exit race. EACCES, I/O errors, etc. make the
+      // listing incomplete; they must not turn an unreadable subtree into an empty one.
+      if (errnoOf(error) !== "ENOENT") {
+        return { rows, complete: false, reason: `process ${name} stat unreadable: ${error instanceof Error ? error.message : String(error)}` };
+      }
     }
   }
   return { rows, complete: true };
@@ -530,6 +539,10 @@ type Verdict = { release: SweepResult["released"][number]["rule"] } | { keep: Me
 
 function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: ProcessListing): Verdict {
   const nowIso = ctx.clock.iso();
+  // Once ancestry was missed, a later complete /proc snapshot cannot reconstruct descendants
+  // that have already been reparented. Preserve that uncertainty across retries, including when
+  // the incomplete snapshot happened before occupancy ended.
+  const hadIncompleteWalk = entry.walk?.complete === false || entry.holdReason?.startsWith("incomplete-process-walk") === true;
   const tree = union(entry.tree, walkDescendants(entry, listing));
   const walked: MemoryReservationEntry = {
     ...entry,
@@ -538,12 +551,15 @@ function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: Proces
     walk: { at: nowIso, complete: listing.complete, ...(listing.reason ? { reason: listing.reason } : {}) },
   };
   delete walked.holdReason;
+  if (entry.roots.length > 0 && (!listing.complete || hadIncompleteWalk)) {
+    return { keep: { ...walked, holdReason: "incomplete-process-walk" } };
+  }
   const occupancyOver = entry.occupancyReleasedAt !== undefined || identityState(ctx, entry.owner) === "gone";
   if (!occupancyOver) return { keep: walked };
   if (entry.roots.length === 0) return { release: "never-spawned" };
   const states = tree.map((identity) => identityState(ctx, identity));
-  if (states.every((state) => state === "gone")) return { release: "tree-gone" };
   if (states.includes("unknown")) return { keep: { ...walked, holdReason: "identity-unreadable" } };
+  if (states.every((state) => state === "gone")) return { release: "tree-gone" };
   return { keep: walked };
 }
 

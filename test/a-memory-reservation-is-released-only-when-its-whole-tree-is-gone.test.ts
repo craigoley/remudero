@@ -124,6 +124,23 @@ test("the real process walk uses the injected Clock for its deadline", { skip: !
   assert.equal(firstReservation(w).walk.reason, "time bound 1000ms");
 });
 
+test("the process walk treats only ENOENT as a process-exit race; other stat read errors make it incomplete", { skip: !existsSync("/proc/self/stat") }, () => {
+  const limits = { maxEntries: 100_000, maxMs: 60_000 };
+  const ownStat = `/proc/${process.pid}/stat`;
+  const unreadable = defaultListProcesses(limits, undefined, (path) => {
+    if (path === ownStat) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    return readFileSync(path, "utf8");
+  });
+  assert.equal(unreadable.complete, false);
+  assert.match(unreadable.reason ?? "", new RegExp(`process ${process.pid} stat unreadable`));
+
+  const exited = defaultListProcesses(limits, undefined, (path) => {
+    if (path === ownStat) throw Object.assign(new Error("process exited"), { code: "ENOENT" });
+    return readFileSync(path, "utf8");
+  });
+  assert.equal(exited.complete, true, "a process that vanished after readdir does not poison the whole walk");
+});
+
 test("a reservation survives its root's exit while a recorded descendant lives, and is released once every recorded (pid, start time) is gone", () => {
   const w = world();
   const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
@@ -146,6 +163,56 @@ test("a reservation survives its root's exit while a recorded descendant lives, 
   const swept = sweepMemoryReservations(w.deps());
   assert.deepEqual(swept?.released.map((r) => r.rule), ["tree-gone"]);
   assert.equal(reservationCount(w), 0);
+});
+
+test("an incomplete tree walk cannot release after its root exits before omitted descendants are recorded", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  w.procs.set(300, { start: "proc:30", parent: 200 });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+
+  const incomplete = w.deps({
+    listProcesses: () => ({ rows: [{ pid: 200, parent: OWNER, start: "proc:20" }], complete: false, reason: "entry bound" }),
+  });
+  sweepMemoryReservations(incomplete);
+  assert.equal(firstReservation(w).holdReason, "incomplete-process-walk");
+
+  w.procs.delete(200);
+  w.procs.set(300, { start: "proc:30", parent: 1 }); // omitted descendant has already been reparented
+  sweepMemoryReservations(w.deps());
+  assert.equal(firstReservation(w).holdReason, "incomplete-process-walk");
+  w.procs.delete(300);
+  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "we cannot prove the omitted tree was empty");
+  assert.equal(reservationCount(w), 1);
+
+  assert.deepEqual(
+    sweepMemoryReservations(w.deps({ gen: { containerId: "c2", initStart: "proc:2" } }))?.released.map((r) => r.rule),
+    ["generation-ended"],
+    "a verified end of the owning container generation remains a valid release proof",
+  );
+});
+
+test("a complete retry captures visible descendants but cannot erase an earlier incomplete ancestry gap", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  w.procs.set(300, { start: "proc:30", parent: 200 });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+  sweepMemoryReservations(w.deps({
+    listProcesses: () => ({ rows: [{ pid: 200, parent: OWNER, start: "proc:20" }], complete: false, reason: "entry bound" }),
+  }));
+
+  sweepMemoryReservations(w.deps());
+  assert.deepEqual(firstReservation(w).tree, [{ pid: 200, start: "proc:20" }, { pid: 300, start: "proc:30" }]);
+  assert.equal(firstReservation(w).holdReason, "incomplete-process-walk", "a later snapshot cannot prove no child escaped during the gap");
+  w.procs.delete(200);
+  w.procs.set(300, { start: "proc:30", parent: 1 });
+  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "the earlier incomplete ancestry gap remains fail-closed");
+  w.procs.delete(300);
+  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "unseen descendants cannot be ruled out, even after known identities exit");
 });
 
 test("a reused pid with a new start time does not hold a reservation", () => {
