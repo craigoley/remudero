@@ -1,0 +1,59 @@
+- id: W1-T7182
+  title: "A FIX ROUND RUNS THE GIT-READING CENSUSES FROM A HARNESS SNAPSHOT — a harness-commit fix round forbids git, so the worker cannot run census-precheck or the affected-suite reach ratchet (both shell git ls-files/ls-tree/show against origin/main) before it saves its edits, and a census red is first seen in hosted CI, a full round later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — censuses gain a git-free input path the fix round can use; their verdicts are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-09: root-causing fix rounds that push and leave the red (#10300, #10234)"
+  plan_refs: [W1-T3727, W1-T6138, W1-T7096]
+  files: [scripts/census-precheck.mjs, test/the-affected-suite-reach-ratchet.test.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 in the fix workers' own session transcripts (codex rollouts on the host):
+      - #10300 (W1-T5791), 10:09Z: the worker found the real defect and kept its test under the reach ratchet, then
+        reported "After scope amendment, run canonical ratchets and census checks; those invoke git, prohibited this
+        round". It could measure importer count only by hand ("Filesystem graph measurement: importer count 933/933;
+        canonical CI remains unverified").
+      - #10234 (W1-T5714), 05:02Z: "Source-size could not refresh the read-only Git directory. Hosted CI awaits the
+        harness push."
+    A harness-commit fix round (W1-T3727, prompt-render: "Do NOT run git or gh — you have no shell on this round")
+    is correct to withhold git: the harness owns the commit and the push. But census-precheck (scripts/census-
+    precheck.mjs spawns git merge-base, diff and show) and test/the-affected-suite-reach-ratchet.test.ts (git
+    ls-files, git ls-tree origin/main, git show origin/main:<baseline>) read the repository through git, so the
+    worker cannot run the gates that most often turn a fix round's push red. A census refusal is learned only from
+    hosted CI (~20-40 min), it costs a whole further round, and the reach ratchet refused two fix-round heads on
+    2026-10-09 alone (#10234 at 934 > 933, #10300 at 934 > 933).
+    "Allow git in the fix round" is the wrong remedy: it reopens the surface W1-T3727 closed (a shell-less writer
+    that can rewrite refs or push). What the censuses need is git's ANSWERS, not git.
+  design: |
+    A SANDBOX-SAFE CENSUS ENTRY POINT, fed by a harness-written snapshot:
+      1. Before spawning a harness-commit fix worker, the harness (which already runs host git into the worktree
+         through the W1-T6106 leaf) writes ONE read-only snapshot file inside the worktree's ignored state dir:
+         the head's `git ls-files` list for the census roots, the merge-base sha with origin/main, origin/main's
+         blob for each recorded census baseline (scripts/affected-reach-baseline.json and the baselines
+         census-precheck reads), and the base-side file list. It is plain JSON, written once and never refreshed
+         by the worker.
+      2. census-precheck and the reach ratchet each read their git answers through one small seam. When
+         RMD_CENSUS_SNAPSHOT names that file, the seam answers from it; otherwise it shells git exactly as today.
+         CI and the pre-push hook never set it, so their verdicts and inputs are unchanged.
+      3. The worker's working-tree EDITS are read from disk as today, never from the snapshot, so a census run
+         after an edit measures the edited tree against the snapshotted base: the same comparison CI makes.
+      4. The fix prompt names the command (`RMD_CENSUS_SNAPSHOT=<path> node scripts/census-precheck.mjs`, plus the
+         reach-ratchet suite) as the pre-save check, replacing "canonical CI remains unverified" with a local
+         verdict. The harness also runs the same entry point on the saved edits before it commits; a census
+         failure there is fed back as the next round's evidence (or the same session's re-ask, as W1-T4052 does
+         for a missing COMMIT_MESSAGE), never committed blind.
+      5. A snapshot that cannot be written (no origin/main, a fetch failure) is ledgered as fix.census_snapshot
+         {outcome: "unavailable", reason} and the round runs exactly as it does today; it is never a stand-down.
+  acceptance:
+    - claim: "a fix round's census run answers from the harness snapshot with no git on PATH, and refuses a new importer the way CI does"
+      proof: 'unit test: test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts'
+  falsifier: |
+    Remove the snapshot seam: with git absent from PATH, census-precheck and the reach ratchet throw spawn ENOENT
+    instead of reporting "importerCount: 934 > 933", and the test fails.
