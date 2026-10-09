@@ -1,4 +1,5 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
+import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -18475,9 +18476,6 @@ export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
  *  PRs prints a different one and therefore matched nothing at all. */
 const DIFF_COVERAGE_BLOCK_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
 
-/** `  - src/lib/foo.ts:123` — one uncovered line as the gate lists them. */
-const UNCOVERED_LINE_RE = /^\s*-\s+(\S+:\d+)\s*$/;
-
 /** What {@link diffCoverageReport} found: the check that blocked and the lines it named. */
 export interface DiffCoverageReport {
   check: string;
@@ -18491,11 +18489,8 @@ export interface DiffCoverageReport {
 export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverageReport | undefined {
   for (const f of failures) {
     if (!DIFF_COVERAGE_BLOCK_RE.test(f.logTail)) continue;
-    const uncovered: string[] = [];
-    for (const line of f.logTail.split("\n")) {
-      const m = line.match(UNCOVERED_LINE_RE);
-      if (m?.[1]) uncovered.push(m[1]);
-    }
+    const parsed = diffCoverageTargets([f.logTail]);
+    const uncovered = (parsed?.targets ?? []).flatMap((t) => t.lines.map((line) => `${t.file}:${line}`));
     return { check: f.name, uncovered };
   }
   return undefined;
