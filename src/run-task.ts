@@ -1717,7 +1717,8 @@ import {
   type FixRoundBranchClaim,
   inFlightReviewCount,
 } from "./lib/sweep.js";
-import { sampleDaemonMemory } from "./lib/daemon-memory-telemetry.js";
+import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
 export {
@@ -37170,13 +37171,23 @@ export function orphanSweepRunActive(
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
-/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. */
-export function daemonMemoryTelemetryReader(bootHeadSha: string | undefined): () => Record<string, unknown> {
-  return () => ({ ...sampleDaemonMemory({
-    heapStatistics: v8HeapStatistics,
-    workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
-    bootHeadSha,
-  }) });
+/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. W1-T7092: each
+ *  row also carries the previous tick's worker-thread heap read (by spawn site, from worker-heaps.ts's
+ *  registry), which `afterRow` starts once the row is written. `liveThreads` is a test seam. */
+export function daemonMemoryTelemetryReader(
+  bootHeadSha: string | undefined,
+  liveThreads: () => readonly TrackedWorker[] = workerThreads().live,
+): (() => Record<string, unknown>) & { afterRow: () => void } {
+  const threadHeaps = workerHeapReadings({ live: liveThreads });
+  const read = (): Record<string, unknown> => {
+    const memory = sampleDaemonMemory({
+      heapStatistics: v8HeapStatistics,
+      workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
+      bootHeadSha,
+    });
+    return { ...memory, ...threadHeaps.fields(memory) };
+  };
+  return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
 
 export async function daemonCommand(
@@ -37255,6 +37266,9 @@ export async function daemonCommand(
   // `deriveLedgerActor`'s doc (src/lib/ledger.ts) for why a worker this daemon later spawns is
   // still `"worker"` despite inheriting this same env marker.
   markDaemonProcessActor();
+  // W1-T7092: subscribe the worker-heaps registry before anything below can spawn a thread, exactly
+  // as serve does, so daemon.alive can size every worker isolate by its spawn site.
+  workerThreads();
 
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
