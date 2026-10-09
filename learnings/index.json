@@ -74,6 +74,7 @@
     "ci.yaml": {
       "entries": [
         "a-board-wide-plan-red-is-main",
+        "acceptance-author-gate-task-authoring-lane",
         "analyze-javascript-typescript-gate-pre-push-steps",
         "body-fetch-guards-on-http-not-size",
         "ci-gate-refusals-repaired-by-hand",
