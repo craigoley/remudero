@@ -8,7 +8,7 @@ import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
 
 function measure(
   overrides: Record<string, string> = {},
-  opts: { status?: number; inspect?: (dir: string) => void } = {},
+  opts: { status?: number; inspect?: (dir: string) => void; state?: string } = {},
 ): Record<string, string> {
   const dir = makeTempDir("heartbeat-consumers");
   try {
@@ -92,6 +92,7 @@ used=1000; mounted=/
 [ "$p" = /mnt/rmd ] && { used=61000000; mounted=/mnt/rmd; }
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 %s 90000000 1%% %s\\n' "$device" "$used" "$mounted"`);
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
+    if (opts.state !== undefined) writeFileSync(join(dir, "state-root/state/consumer-probe.state"), opts.state);
     const result = spawnSync("bash", [script], {
       encoding: "utf8",
       timeout: 15_000,
@@ -193,4 +194,41 @@ test("a measuring beat whose push fails still advances the consumer pacing count
     inspect: (dir) => { count = readFileSync(join(dir, "state-root/state/heartbeat-count.txt"), "utf8").trim(); },
   });
   assert.equal(count, "7", "a failed push must not leave the next beat on a measuring beat");
+});
+
+function walked(beatOverrides: Record<string, string>, state?: string): { beat: Record<string, string>; walks: number } {
+  let walks = 0;
+  const beat = measure(beatOverrides, {
+    state,
+    inspect: (dir) => {
+      try { walks = readFileSync(join(dir, "ionice.log"), "utf8").split("\n").filter(Boolean).length; } catch { walks = 0; }
+    },
+  });
+  return { beat, walks };
+}
+
+test("a measuring beat skips the du walk while the consumers' disks have not moved since the last walk", () => {
+  const first = walked({});
+  assert.equal(first.beat.consumer_walk_state, "walked", "no prior state always walks");
+  const used = Number(first.beat.consumer_walk_signature);
+  assert.ok(used > 0, "the signature is a statfs sum, read without a walk");
+  const now = Math.floor(Date.now() / 1000);
+  const quiet = walked({}, `walk_used_kb=${used}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=0\n`);
+  assert.equal(quiet.beat.consumer_walk_state, "unchanged");
+  assert.equal(quiet.walks, 0, "an unmoved disk must not be walked");
+  assert.deepEqual(Object.keys(quiet.beat).filter((key) => /^consumer_.*_kb$/.test(key)), [],
+    "a skipped walk publishes no consumer sizes, never stale or zero ones");
+});
+
+test("a measuring beat walks when the consumers' disks moved by more than their noise, or the backstop expired", () => {
+  const used = Number(walked({}).beat.consumer_walk_signature);
+  const now = Math.floor(Date.now() / 1000);
+  const moved = walked({}, `walk_used_kb=${used - 500000}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=1000\n`);
+  assert.equal(moved.beat.consumer_walk_state, "walked");
+  assert.ok(moved.walks > 0);
+  const withinNoise = walked({}, `walk_used_kb=${used - 1500}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=1000\n`);
+  assert.equal(withinNoise.beat.consumer_walk_state, "unchanged", "drift inside twice the noise is not movement");
+  const stale = walked({ RMD_CONSUMER_BACKSTOP_S: "3600" },
+    `walk_used_kb=${used}\nwalk_epoch=${now - 7200}\nprev_used_kb=${used}\nnoise_kb=0\n`);
+  assert.equal(stale.beat.consumer_walk_state, "walked", "the backstop walks a quiet disk eventually");
 });
