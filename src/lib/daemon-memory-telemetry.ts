@@ -32,6 +32,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { systemClock } from "./clock.js";
 import { WORKER_HEAP_TIMEOUT_MS, type TrackedWorker } from "./worker-heaps.js";
 
 /** The heartbeat fields. Every `_bytes` field is an integer byte count. */
@@ -308,7 +309,7 @@ const REMAINDER_INPUTS = ["rss_bytes", "vm_swap_bytes", "heap_total_bytes", "ext
  */
 export function workerHeapReadings(sources: WorkerHeapSources): { refresh(): void; fields(main: RemainderInputs): WorkerHeapFields } {
   const timeoutMs = sources.timeoutMs ?? WORKER_HEAP_TIMEOUT_MS;
-  const nowMs = sources.nowMs ?? (() => Date.now());
+  const nowMs = sources.nowMs ?? (() => systemClock.now());
   let last: { sites: Record<string, WorkerHeapSite>; atMs: number } | { error: string } | undefined;
   let inFlight = false;
   const failed = (e: unknown): void => { last = { error: String((e as Error)?.message ?? e).slice(0, REASON_MAX_CHARS) }; };
