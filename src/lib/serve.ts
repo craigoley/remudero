@@ -3222,6 +3222,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
+      readModel?.noteViewRead?.(route.path);
     });
   // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
   const memory = createServeMemoryRegistry();
