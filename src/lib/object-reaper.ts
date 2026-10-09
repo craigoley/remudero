@@ -712,7 +712,12 @@ export type MaintenanceChild = { ok: true; stdout: string } |
 export function runMaintenanceGit(repo: string, args: readonly string[], timeoutMs: number): Promise<MaintenanceChild> {
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32";
-    const child = spawn("git", ["-C", repo, ...args], { detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
+    // Git can return zero when another maintainer owns its database lock. Its default
+    // pipe mode also hides the warning; retain that diagnostic instead of claiming work.
+    const maintenanceRun = args[0] === "maintenance" && args[1] === "run";
+    const childArgs = maintenanceRun ? [...args, "--no-quiet"] : args;
+    const child = spawn("git", ["-C", repo, ...childArgs], { detached: grouped,
+      env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -743,7 +748,8 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
         clearTimeout(killTimer);
         signal("SIGKILL");
       }
-      resolve(code === 0 && !timedOut && !spawnError ? { ok: true, stdout } :
+      const skipped = maintenanceRun && /^warning: lock file '[^\r\n]+' exists, skipping maintenance\r?$/m.test(stderr);
+      resolve(code === 0 && !timedOut && !spawnError && !skipped ? { ok: true, stdout } :
         { ok: false, timedOut, error: spawnError ?? (stderr.trim() || `git exited ${code}`) });
     });
   });
