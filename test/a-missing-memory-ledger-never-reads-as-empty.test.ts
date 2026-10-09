@@ -161,3 +161,115 @@ test("an unwritable or full ledger store does not change worker-start behavior",
   assert.ok(w.logs.some((event) => event.op === "sentinel"));
   assert.ok(w.logs.some((event) => event.op === "open-write"));
 });
+
+test("an unreadable sentinel holds reservations and reports the storage error", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "fix" }, w.deps);
+  sweepMemoryReservations(w.deps);
+  const before = new Map(w.files);
+  const denied = { ...w.deps, read: (path: string) => {
+    if (path.endsWith("/.ledger-id")) throw Object.assign(new Error("sentinel permission denied"), { code: "EACCES" });
+    return w.deps.read!(path);
+  } };
+  const reading = readMemoryLedger(denied);
+  assert.equal(reading?.state, "unreadable");
+  assert.equal(reading?.reason, "sentinel permission denied");
+  assert.equal(reading?.counts.unreadable, 1);
+  assert.equal(reading?.entries[0]?.id, handle.id);
+  const swept = sweepMemoryReservations(denied);
+  assert.deepEqual(swept?.released, []);
+  assert.equal(swept?.reading.state, "unreadable");
+  assert.equal(swept?.reading.reason, "sentinel permission denied");
+  assert.equal(swept?.reading.reservedMib, 2048);
+  assert.deepEqual(w.files, before, "an unreadable sentinel prevents writes and release decisions");
+});
+
+test("a competing sentinel creator is read back and never overwritten", () => {
+  const w = world();
+  const competingId = `${randomUUID()}\n`;
+  const deps = { ...w.deps, createSentinel: (path: string) => {
+    w.files.set(path, competingId);
+    throw Object.assign(new Error("another owner won"), { code: "EEXIST" });
+  } };
+  const handle = openMemoryReservation({ workerClass: "review" }, deps);
+  assert.ok(handle.id);
+  assert.equal(w.files.get(join(w.dir, ".ledger-id")), competingId);
+  assert.equal(sweepMemoryReservations(deps)?.reading.state, "missing");
+  assert.equal(readMemoryLedger(deps)?.state, "present");
+  assert.equal(readMemoryLedger(deps)?.reservedMib, 1024);
+});
+
+for (const code of ["ENOENT", "EIO"] as const) {
+  test(`a sentinel that becomes ${code} after creation is reported without releasing owner copies`, () => {
+    const w = world();
+    let created = false;
+    const deps = { ...w.deps,
+      createSentinel: (path: string, content: string) => {
+        w.deps.createSentinel!(path, content);
+        created = true;
+      },
+      read: (path: string) => {
+        if (created && path.endsWith("/.ledger-id")) {
+          throw Object.assign(new Error(`sentinel read failed: ${code}`), { code });
+        }
+        return w.deps.read!(path);
+      },
+    };
+    const handle = openMemoryReservation({ workerClass: "implement" }, deps);
+    assert.ok(handle.id, "storage failure does not abort reservation creation");
+    const observation = w.logs.find((event) => event.op === (code === "ENOENT" ? "sentinel-missing" : "sentinel"));
+    assert.ok(observation);
+    assert.equal(observation.reason, code === "ENOENT"
+      ? `missing ${join(w.dir, ".ledger-id")} after create`
+      : "sentinel read failed: EIO");
+    const swept = sweepMemoryReservations(deps);
+    assert.deepEqual(swept?.released, []);
+    assert.equal(swept?.reading.state, code === "ENOENT" ? "missing" : "unreadable");
+    assert.equal(swept?.reading.entries[0]?.id, handle.id);
+    assert.equal(w.files.has(join(w.dir, `${handle.id}.json`)), true);
+  });
+}
+
+test("a vanished directory listing keeps owner copies visible and republishes them", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "fix" }, w.deps);
+  w.files.clear();
+  const vanished = { ...w.deps, list: () => {
+    throw Object.assign(new Error("directory vanished"), { code: "ENOENT" });
+  } };
+  const reading = readMemoryLedger(vanished);
+  assert.equal(reading?.state, "missing");
+  assert.equal(reading?.entries[0]?.id, handle.id);
+  assert.equal(reading?.reservedMib, 2048);
+  assert.equal(w.files.size, 0, "the reader does not recreate storage");
+  const swept = sweepMemoryReservations(vanished);
+  assert.deepEqual(swept?.released, []);
+  assert.equal(swept?.reading.state, "reset");
+  assert.equal(swept?.reading.entries[0]?.id, handle.id);
+  assert.equal(w.files.has(join(w.dir, `${handle.id}.json`)), true);
+});
+
+test("a failed directory listing reports unreadable storage and retains owner reservations", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "review" }, w.deps);
+  sweepMemoryReservations(w.deps);
+  const before = new Map(w.files);
+  const denied = { ...w.deps, list: () => {
+    throw Object.assign(new Error("ledger directory I/O failure"), { code: "EIO" });
+  } };
+  const reading = readMemoryLedger(denied);
+  assert.equal(reading?.state, "unreadable");
+  assert.equal(reading?.reason, "ledger directory I/O failure");
+  assert.equal(reading?.counts.unreadable, 1);
+  assert.equal(reading?.entries[0]?.id, handle.id);
+  assert.equal(reading?.reservedMib, 1024);
+  const swept = sweepMemoryReservations(denied);
+  assert.deepEqual(swept?.released, []);
+  assert.equal(swept?.reading.state, "unreadable");
+  assert.equal(swept?.reading.reason, "ledger directory I/O failure");
+  assert.equal(swept?.reading.counts.unreadable, 1);
+  assert.deepEqual(swept?.reading.entries, reading?.entries);
+  assert.ok(w.logs.some((event) => event.op === "read-list" && event.reason === "ledger directory I/O failure"));
+  assert.ok(w.logs.some((event) => event.op === "sweep-list" && event.reason === "ledger directory I/O failure"));
+  assert.deepEqual(w.files, before, "listing failures neither rewrite nor remove entries");
+});

@@ -402,3 +402,99 @@ test("process identity and instance parsing", () => {
   assert.deepEqual(defaultInstance("/home/node/Remudero", () => mountinfo), { name: "state-core", hostUnique: true });
   assert.deepEqual(defaultInstance("/home/node/Remudero", () => { throw new Error("ENOENT"); }), { name: "Remudero", hostUnique: false });
 });
+
+const processStat = (state = "S") => `42 (worker) ${state} 7 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0`;
+const noProc = () => { throw Object.assign(new Error("proc unavailable"), { code: "ENOENT" }); };
+
+test("a probe without proc verifies ESRCH through the real kernel pid check", () => {
+  assert.deepEqual(defaultProbe(2_147_483_647, { readStat: noProc }), { state: "gone" });
+});
+
+test("a malformed proc read falls back to the real process facts for a live pid", () => {
+  const expected = defaultProbe(process.pid);
+  assert.equal(expected.state, "alive");
+  assert.deepEqual(defaultProbe(process.pid, { readStat: () => "malformed stat" }), expected);
+});
+
+test("an EPERM pid check uses the fallback start identity rather than declaring termination", () => {
+  const calls: number[] = [];
+  const result = defaultProbe(42, {
+    readStat: noProc,
+    checkPid: (pid) => {
+      calls.push(pid);
+      throw Object.assign(new Error("different uid"), { code: "EPERM" });
+    },
+    processFacts: (pid) => {
+      calls.push(pid);
+      return { parent: 7, start: "ps:Thu Oct 8 20:00:00 2026" };
+    },
+  });
+  assert.deepEqual(calls, [42, 42]);
+  assert.deepEqual(result, { state: "alive", start: "ps:Thu Oct 8 20:00:00 2026" });
+});
+
+test("an unreadable start identity remains unknown even when the pid check succeeds", () => {
+  assert.deepEqual(defaultProbe(42, {
+    readStat: () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
+    checkPid: () => undefined,
+    processFacts: () => undefined,
+  }), { state: "unknown", reason: "start time unreadable" });
+  assert.deepEqual(defaultProbe(42, { readStat: () => processStat("Z") }), { state: "gone" });
+});
+
+test("an unreadable proc directory reports an incomplete walk with its error", () => {
+  const result = defaultListProcesses({ maxEntries: 100, maxMs: 100 }, fixedClock(0), undefined, () => {
+    throw new Error("proc directory denied");
+  });
+  assert.deepEqual(result, { rows: [], complete: false, reason: "proc unreadable: proc directory denied" });
+});
+
+test("a process walk rejects malformed stats and excludes zombies from live rows", () => {
+  const limits = { maxEntries: 100, maxMs: 100 };
+  assert.deepEqual(defaultListProcesses(limits, fixedClock(0), () => "malformed", () => ["42"]), {
+    rows: [], complete: false, reason: "process 42 stat unreadable",
+  });
+  assert.deepEqual(defaultListProcesses(limits, fixedClock(0), (path) => processStat(path.includes("/43/") ? "Z" : "S"),
+    () => ["self", "42", "43"]), {
+    rows: [{ pid: 42, parent: 7, start: "proc:98765" }], complete: true,
+  });
+});
+
+test("a failed root binding write preserves the identity in memory and diagnoses the failure", () => {
+  const w = world();
+  let failWrite = false;
+  const deps = w.deps({ write: (path, content) => {
+    if (failWrite) throw new Error(`binding store full: ${w.dir}`);
+    w.files.set(path, content);
+  } });
+  const handle = openMemoryReservation({ workerClass: "fix" }, deps);
+  w.procs.set(200, { parent: OWNER, start: "proc:20" });
+  failWrite = true;
+  assert.doesNotThrow(() => handle.bindRoot(200));
+  assert.equal(firstReservation(w).roots.length, 0, "the failed write left disk unchanged");
+  assert.equal(readMemoryLedger(deps)?.reservedMib, 2048, "the failed binding remains reserved");
+  assert.ok(w.logs.some((event) => event.op === "bind" && event.reason === `binding store full: ${w.dir}`));
+  failWrite = false;
+  sweepMemoryReservations(deps);
+  assert.deepEqual(firstReservation(w).roots, [{ pid: 200, start: "proc:20" }]);
+  handle.releaseOccupancy();
+  assert.equal(reservationCount(w), 1, "the live bound root still holds memory");
+  w.procs.delete(200);
+  assert.deepEqual(sweepMemoryReservations(deps)?.released, [{ id: handle.id, rule: "tree-gone" }]);
+});
+
+test("a throwing diagnostic logger does not change a worker result or leak occupancy", async () => {
+  const w = world();
+  let diagnostics = 0;
+  const before = activeWorkerCount();
+  const result = await withWorkerOccupancy(async () => {
+    assert.equal(activeWorkerCount(), before + 1);
+    return "worker completed";
+  }, { ledger: w.deps({
+    location: () => { throw new Error(`ledger unavailable: ${w.dir}`); },
+    log: () => { diagnostics++; throw new Error("logger unavailable"); },
+  }) });
+  assert.equal(result, "worker completed");
+  assert.equal(activeWorkerCount(), before);
+  assert.equal(diagnostics, 1, "the ledger attempted a diagnostic without propagating the logger failure");
+});

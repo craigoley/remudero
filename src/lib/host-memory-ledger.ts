@@ -201,28 +201,33 @@ function errnoOf(error: unknown): string | undefined {
 }
 
 /** The real identity probe: /proc first, then `kill(pid, 0)` for ESRCH, then the test slot's ps fallback. */
-export function defaultProbe(pid: number): ProbeResult {
+export function defaultProbe(pid: number, deps: {
+  readStat?: (path: string) => string;
+  checkPid?: (pid: number) => void;
+  processFacts?: typeof testSlotProcessFacts;
+} = {}): ProbeResult {
+  const readStat = deps.readStat ?? ((path: string) => readFileSync(path, "utf8"));
   if (!Number.isSafeInteger(pid) || pid <= 0) return { state: "unknown", reason: "invalid pid" };
   try {
-    const stat = parseProcStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    const stat = parseProcStat(readStat(`/proc/${pid}/stat`));
     if (stat) return stat.zombie ? { state: "gone" } : { state: "alive", start: stat.start };
   } catch (error) {
     // ENOENT on a host with /proc is a verified exit; anything else falls through to the next probe.
-    if (errnoOf(error) === "ENOENT" && procMounted()) return { state: "gone" };
+    if (errnoOf(error) === "ENOENT" && procMounted(readStat)) return { state: "gone" };
   }
   try {
-    process.kill(pid, 0);
+    (deps.checkPid ?? ((id) => { process.kill(id, 0); }))(pid);
   } catch (error) {
     // ESRCH is a verified exit; EPERM means alive under another uid, so the start-time read below decides.
     if (errnoOf(error) === "ESRCH") return { state: "gone" };
   }
-  const facts = testSlotProcessFacts(pid);
+  const facts = (deps.processFacts ?? testSlotProcessFacts)(pid);
   return facts ? { state: "alive", start: facts.start } : { state: "unknown", reason: "start time unreadable" };
 }
 
-function procMounted(): boolean {
+function procMounted(readStat: (path: string) => string): boolean {
   try {
-    return parseProcStat(readFileSync("/proc/self/stat", "utf8")) !== undefined;
+    return parseProcStat(readStat("/proc/self/stat")) !== undefined;
   } catch (error) {
     void error; // No /proc: an absent pid file proves nothing here.
     return false;
@@ -234,11 +239,12 @@ export function defaultListProcesses(
   limits: WalkLimits,
   clock: Clock = systemClock,
   readStat: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  listNames: () => string[] = () => readdirSync("/proc"),
 ): ProcessListing {
   const startedAt = clock.now();
   let names: string[];
   try {
-    names = readdirSync("/proc").filter((name) => /^[0-9]+$/.test(name));
+    names = listNames().filter((name) => /^[0-9]+$/.test(name));
   } catch (error) {
     return { rows: [], complete: false, reason: `proc unreadable: ${error instanceof Error ? error.message : String(error)}` };
   }
