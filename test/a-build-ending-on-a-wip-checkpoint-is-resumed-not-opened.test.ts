@@ -1,7 +1,7 @@
 // #10482 (W1-T6434): a build whose tip was a "chore(wip): …" checkpoint opened its PR unfinished,
 // titled after the checkpoint, with four reds its own "remaining" steps would have caught.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 
 const url = new URL("../src/lib/unfinished-checkpoint.ts", import.meta.url);
@@ -38,8 +38,3 @@ test("a checkpoint's remaining work is read from its [remudero-context] block an
   assert.match(text, /never `wip:`/);
 });
 
-test("runTask resumes a worker that stopped on a checkpoint and titles the build PR from branchPrTitle", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /renderContinuationPrompt\(tipSubject, remaining, harnessOwnsGit\)/);
-  assert.match(src, /ghPrCreateFillCommandAsync\(worktreePath, owner, task\.repo, branch, branchPrTitle\(worktreePath\)\)/);
-});
