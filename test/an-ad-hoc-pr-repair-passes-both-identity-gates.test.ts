@@ -38,10 +38,9 @@ function fixture(t: TestContext, commitMessage = message) {
 }
 
 function cli(script: string, path: string, base: string) {
-  const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1", NODE_V8_COVERAGE: "" };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_OPTIONS;
-  delete env.NODE_V8_COVERAGE;
   const result = spawnSync(process.execPath, ["--import", "tsx", script, "--worktree-path", path,
     ...(script.endsWith("worker-branch-shape.mjs") ? ["--base", base] : []), "--head-ref", headRef],
   { env, encoding: "utf8", timeout: 30_000, maxBuffer: 2 << 20 });
