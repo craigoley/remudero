@@ -37149,6 +37149,15 @@ export function orphanSweepRunActive(
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
+/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. */
+export function daemonMemoryTelemetryReader(bootHeadSha: string | undefined): () => Record<string, unknown> {
+  return () => ({ ...sampleDaemonMemory({
+    heapStatistics: v8HeapStatistics,
+    workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
+    bootHeadSha,
+  }) });
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -38002,12 +38011,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        // W1-T6782: what the daemon's own memory is, on the existing daemon.alive row.
-        readMemoryTelemetry: () => ({ ...sampleDaemonMemory({
-          heapStatistics: v8HeapStatistics,
-          workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
-          bootHeadSha: daemonLoadedCodeSha,
-        }) }),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,

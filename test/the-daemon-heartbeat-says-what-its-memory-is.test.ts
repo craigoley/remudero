@@ -19,8 +19,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { daemonMemoryTelemetryReader, type RunResult } from "../src/run-task.js";
+import { runDaemon, v8HeapStatistics, type DaemonDeps } from "../src/lib/daemon.js";
+import { activeWorkerCount } from "../src/lib/worker.js";
+import { drainInFlightReviews, inFlightReviewCount, trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { sampleCgroupMemory, sampleDaemonMemory, type DaemonMemorySources } from "../src/lib/daemon-memory-telemetry.js";
 
@@ -122,6 +124,33 @@ test("daemon.alive carries the process, cgroup, workload and identity fields fro
   assert.equal(alive.mem_cgroup, undefined, "a fully readable cgroup names no unreadable file");
   assert.equal(alive.mem_proc, undefined);
   assert.equal(alive.mem_telemetry, undefined);
+});
+
+test("the production memory reader samples real process memory and live review workload on each heartbeat", async () => {
+  const readMemoryTelemetry = daemonMemoryTelemetryReader(SHA);
+  const before = readMemoryTelemetry();
+  let release!: () => void;
+  const review = trackInFlightReview(new Promise<void>((resolve) => { release = resolve; }));
+  try {
+    const [alive] = await heartbeatRows({ readMemoryTelemetry });
+    assert.ok(alive, "the production reader reaches daemon.alive");
+    for (const field of PROCESS_FIELDS.filter((key) => key !== "vm_swap_bytes")) {
+      assert.ok(Number.isSafeInteger(alive[field]) && (alive[field] as number) > 0, `${field} measures this process`);
+    }
+    assert.equal(alive.heap_size_limit_bytes, v8HeapStatistics().heap_size_limit);
+    assert.equal(alive.active_workers, activeWorkerCount());
+    assert.equal(alive.in_flight_reviews, (before.in_flight_reviews as number) + 1);
+    assert.equal(alive.in_flight_reviews, inFlightReviewCount());
+    assert.equal(alive.boot_head_sha, SHA.slice(0, 12));
+    assert.ok(Math.abs((alive.uptime_s as number) - process.uptime()) <= 1);
+    assert.ok(Number.isSafeInteger(alive.telemetry_sample_us) && (alive.telemetry_sample_us as number) >= 0);
+    assert.equal(alive.mem_telemetry, undefined);
+  } finally {
+    release();
+    await review;
+    await drainInFlightReviews({ boundMs: 1_000 });
+  }
+  assert.equal(readMemoryTelemetry().in_flight_reviews, before.in_flight_reviews, "the same reader observes review settlement");
 });
 
 test("memory.max reading `max` is null, never a number standing in for unlimited", () => {
