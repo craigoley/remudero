@@ -36,6 +36,61 @@ deny() {
   exit 2
 }
 
+# Emit simple commands without data heredocs or comments; $1=1 retains shell/SSH bodies.
+cov_segments() {
+  awk -v keep_interpreters="${1:-0}" '
+    function flush() { print seg; seg = "" }
+    function interpreter(s, words, count, k, word) {
+      count = split(s, words, /[ \t]+/)
+      for (k = 1; k <= count; k++) {
+        word = words[k]; gsub(/[\047"]/, "", word)
+        if (word == "" || word ~ /^[A-Za-z_][A-Za-z_0-9]*=/) continue
+        if (word ~ /^(env|command|exec|nohup|time|do|then|else|if|while|until)$/ || word ~ /^-/) continue
+        sub(/^.*\//, "", word)
+        return word ~ /^(bash|sh|zsh|dash|ksh|fish|ssh)$/
+      }
+      return 0
+    }
+    BEGIN { q = ""; seg = ""; hd = 0 }
+    {
+      if (hd) {
+        line = $0; if (tabs[hd]) sub(/^\t+/, "", line)
+        if (line == delimiters[hd]) { hd++; if (hd > hdn) hd = 0 }
+        else if (keep_interpreters && readers[hd]) print $0
+        next
+      }
+      n = length($0); cont = 0; pend = 0
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; seg = seg c; continue }
+        if (c == "\\") { if (i == n) { cont = 1; seg = seg " " } else { seg = seg c substr($0, i + 1, 1) }; i++; continue }
+        if (q == "\"") { if (c == "\"") q = ""; seg = seg c; continue }
+        if (c == "\047" || c == "\"") { q = c; seg = seg c; continue }
+        if (c == "#" && (seg == "" || seg ~ /[ \t]$/)) break
+        if (c == "<" && substr($0, i, 2) == "<<" && substr($0, i, 3) != "<<<") {
+          j = i + 2; tab = 0
+          if (substr($0, j, 1) == "-") { tab = 1; j++ }
+          while (substr($0, j, 1) == " ") j++
+          d = substr($0, j, 1)
+          if (d ~ /[A-Za-z_\047"\\]/) {
+            while (substr($0, j, 1) ~ /[\047"\\]/) j++
+            w = ""
+            while (j <= n && substr($0, j, 1) !~ /[\047" \t;&|()<>\\]/) { w = w substr($0, j, 1); j++ }
+            pend++; delimiters[pend] = w; tabs[pend] = tab; readers[pend] = interpreter(seg)
+            if (substr($0, j, 1) ~ /[\047"]/) j++
+            i = j - 1; continue
+          }
+        }
+        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")" || c == "`") { flush(); continue }
+        seg = seg c
+      }
+      if (q != "") seg = seg " "
+      else if (!cont) flush()
+      if (pend) { hd = 1; hdn = pend }
+    }
+    END { flush() }'
+}
+
 # DOES THIS COMMAND ACTUALLY INVOKE `gh`? (W1-T3275)
 #
 # A bare substring test matches every command that merely MENTIONS the tool: a grep about this very
@@ -52,7 +107,8 @@ invokes_gh() {
   if printf '%s' "$1" | grep -Eq '[$`]\([[:space:]]*gh[[:space:]]|`[[:space:]]*gh[[:space:]]'; then
     return 0
   fi
-  printf '%s' "$1" \
+  printf '%s\n' "$1" \
+    | cov_segments 1 \
     | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g' \
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
@@ -469,41 +525,6 @@ fi
 #    per command segment at the PROGRAM position (through env assignments, `timeout <n>`, `time`, `env`,
 #    `nice`), so a grep, pgrep, echo, commit message or heredoc body that only NAMES the flag is never
 #    refused. `npm run` and `node scripts/diff-coverage-local.mjs` never carry the flag themselves.
-cov_segments() {  # stdin: a command -> one simple command per line; heredoc bodies and comments dropped
-  awk '
-    function flush() { print seg; seg = "" }
-    BEGIN { q = ""; seg = ""; hd = 0 }
-    {
-      if (hd) { line = $0; if (hdtab) sub(/^\t+/, "", line); if (line == hdword) hd = 0; next }
-      n = length($0); cont = 0; pend = 0
-      for (i = 1; i <= n; i++) {
-        c = substr($0, i, 1)
-        if (q == "\047") { if (c == "\047") q = ""; seg = seg c; continue }
-        if (c == "\\") { if (i == n) { cont = 1; seg = seg " " } else { seg = seg c substr($0, i + 1, 1) }; i++; continue }
-        if (q == "\"") { if (c == "\"") q = ""; seg = seg c; continue }
-        if (c == "\047" || c == "\"") { q = c; seg = seg c; continue }
-        if (c == "#" && (seg == "" || seg ~ /[ \t]$/)) break
-        if (c == "<" && substr($0, i, 2) == "<<" && substr($0, i, 3) != "<<<") {
-          j = i + 2; tab = 0
-          if (substr($0, j, 1) == "-") { tab = 1; j++ }
-          while (substr($0, j, 1) == " ") j++
-          d = substr($0, j, 1)
-          if (d ~ /[A-Za-z_\047"\\]/) {
-            while (substr($0, j, 1) ~ /[\047"\\]/) j++
-            w = ""
-            while (j <= n && substr($0, j, 1) !~ /[\047" \t;&|()<>\\]/) { w = w substr($0, j, 1); j++ }
-            hdword = w; hdtab = tab; pend = 1; i = j - 1; continue
-          }
-        }
-        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")" || c == "`") { flush(); continue }
-        seg = seg c
-      }
-      if (q != "") seg = seg " "
-      else if (!cont) flush()
-      if (pend) hd = 1
-    }
-    END { flush() }'
-}
 case "$cmd" in *--experimental-test-coverage*) cov_scan=1 ;; *) cov_scan=0 ;; esac
 if [ "$cov_scan" -eq 1 ]; then
   cov_sm=0
