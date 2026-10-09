@@ -1156,7 +1156,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function paced(unit: ViewUnit, finished: number): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
-    if (!unit.view.readPaced) return unit.baseDueAt;
+    if (unit.view.readPaced !== true) return unit.baseDueAt;
     const idleMs = finished - (readAt.get(unit.view.name) ?? pacedFrom);
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     return finished + waitMs * unit.stretch;
