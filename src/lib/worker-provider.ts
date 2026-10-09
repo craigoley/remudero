@@ -1523,6 +1523,8 @@ export async function readCodexRuntime(
     /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
      *  production would defeat the very stall this measurement exists to detect. */
     monotonicNow?: () => number;
+    /** Receives each spawned app-server's exit, so an off-thread probe can let it be reaped before its thread ends. */
+    onChildSpawned?: (exited: Promise<void>) => void;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -1535,6 +1537,10 @@ export async function readCodexRuntime(
     // A synchronous spawn failure excludes Codex without erasing its reason.
     return codexRuntimeFailure(`app-server spawn failed: ${(error as Error).message}`);
   }
+  deps.onChildSpawned?.(new Promise<void>((exited) => {
+    child.once("exit", () => exited());
+    child.once("error", () => exited());
+  }));
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
@@ -1663,7 +1669,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -1754,6 +1760,31 @@ export async function readCodexRuntimeWithTimeoutHedge(
       hedgeTimer = setTimeout(startHedge, remainingHedgeDelayMs);
     }
   });
+}
+
+/** Upper bound on waiting for a SIGKILLed app-server to exit before a probe thread reports. */
+export const CODEX_PROBE_REAP_GRACE_MS = 2_000;
+
+/**
+ * The off-thread probe's read. A child spawned on a worker thread is reaped by that thread's event
+ * loop, so the probe must not report (and be terminated) while a killed app-server is still
+ * unreaped: otherwise the dead child stays a zombie of the daemon process.
+ */
+export async function readCodexRuntimeAwaitingReap(
+  config: Config,
+  bin: string,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  graceMs = CODEX_PROBE_REAP_GRACE_MS,
+): Promise<CodexRuntimeResult> {
+  const exits: Promise<void>[] = [];
+  const result = await readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, onChildSpawned: (exited) => exits.push(exited) });
+  let grace: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all(exits),
+    new Promise<void>((done) => { grace = setTimeout(done, graceMs); }),
+  ]);
+  clearTimeout(grace);
+  return result;
 }
 
 export function readCodexRuntimeOffThread(
