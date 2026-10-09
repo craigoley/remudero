@@ -12797,8 +12797,6 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
   });
 }
 
-/** The walk's order, oldest-first for W1-T1218's reason: repairs claim the shared host budget as
- *  the walk reaches them, so a newest-first walk refused the same old PRs every scarce pass. */
 export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
   return orderPendingReviews(prs.map((pr, index) => ({ pr, index }))).map((job) => job.index);
 }
