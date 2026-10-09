@@ -1,3 +1,4 @@
+import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -320,6 +321,8 @@ export interface WorkerResult {
   /** The reasoning effort this call was CONFIGURED to run. Same INPUT-not-output rule as `model`: effort is absent from the
    * SDK result envelope, so this is the configured value (W1-T6). */
   effort: string;
+  /** Cash adapter request parameters; absent for providers without this observation. */
+  requestEfforts?: readonly CashRequestEffortCount[];
   /** Aggregate token usage off the result envelope (zeroed if none was seen). */
   tokens: TokenUsage;
   /** Explicit stream completeness when reported; absent on legacy results. */
@@ -567,6 +570,7 @@ export function workerLedgerFields(r: WorkerResult): {
   served_model: string | null;
   served_model_reason?: string;
   effort: string;
+  request_efforts?: readonly CashRequestEffortCount[];
   tokens: TokenUsage;
   token_usage_state?: "observed" | "partial" | "unavailable";
   cache_read_input_tokens: number;
@@ -636,6 +640,7 @@ export function workerLedgerFields(r: WorkerResult): {
       ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" }
       : {}),
     effort: r.effort,
+    ...(r.requestEfforts === undefined ? {} : { request_efforts: r.requestEfforts }),
     tokens: r.tokens,
     ...(r.tokenUsageState === undefined ? {} : { token_usage_state: r.tokenUsageState }),
     ...cacheTokenLedgerFields(r.tokens),

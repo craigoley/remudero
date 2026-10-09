@@ -3,6 +3,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
+import { mergeCashRequestEfforts, summarizeCashRequestEfforts, type CashRequestEffortEvidence } from "./cash-request-effort.js";
 
 /**
  * Live routing experiments (operator ruling 2026-09-24, DECISIONS.md). An assignment joins an
@@ -162,6 +163,7 @@ export interface ExperimentArmReport {
   meanNotionalCostUsd: number | null;
   costMissingAssignments: number;
   nonStarterAssignments: number;
+  requestEffortEvidence: ReturnType<typeof summarizeCashRequestEfforts>;
   receiptCoverage: {
     assignments: number;
     terminalAssignments: number;
@@ -215,7 +217,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean; requestEfforts?: CashRequestEffortEvidence }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -270,6 +272,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
         ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
         ...(str(row.served_model)?.trim() ? { servedModel: str(row.served_model) } : {}),
         ...(typeof row.success === "boolean" ? { success: row.success } : {}),
+        ...(Object.hasOwn(row, "request_efforts") ? { requestEfforts: mergeCashRequestEfforts(prior.requestEfforts, row.request_efforts) } : {}),
       });
     }
   }
@@ -298,6 +301,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || receipt.billingMode !== "subscription" ? [] : [priced(receipt)!]))),
       costMissingAssignments: armAssignments.filter((receipt) => receipt === undefined || priced(receipt) === undefined || receipt.billingMode === undefined).length,
       nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
+      requestEffortEvidence: summarizeCashRequestEfforts(armAssignments.map(receipt => receipt?.requestEfforts)),
       receiptCoverage: {
         assignments: armAssignments.length,
         terminalAssignments: armReceipts.length,
