@@ -113,6 +113,8 @@ export interface WalkLimits {
   maxMs: number;
 }
 
+/** BACKSTOP for one descendant walk: it fires only on an unusually large or slow process table, and a walk that hits it
+ *  is reported incomplete rather than empty. */
 export const DEFAULT_WALK_LIMITS: WalkLimits = { maxEntries: 8_192, maxMs: 250 };
 /** After this long without its owner's verification, a foreign entry is reported "uncertain". Never a release. */
 export const UNVERIFIED_AFTER_MS = 10 * 60_000;
@@ -168,7 +170,7 @@ export interface SweepResult {
 
 const seenDiagnostics = new Set<string>();
 
-function diagnose(deps: HostMemoryLedgerDeps, op: string, error: unknown): void {
+function recordError(deps: HostMemoryLedgerDeps, op: string, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
   const key = `${op}:${reason}`;
   if (seenDiagnostics.has(key)) return;
@@ -208,6 +210,7 @@ export function defaultProbe(pid: number): ProbeResult {
   try {
     process.kill(pid, 0);
   } catch (error) {
+    // ESRCH is a verified exit; EPERM means alive under another uid, so the start-time read below decides.
     if (errnoOf(error) === "ESRCH") return { state: "gone" };
   }
   const facts = testSlotProcessFacts(pid);
@@ -393,14 +396,14 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       tree: [],
     };
   } catch (error) {
-    diagnose(deps, "open", error);
+    recordError(deps, "open", error);
     return NOOP_HANDLE;
   }
   try {
     persist(ctx, entry);
   } catch (error) {
     // The handle keeps the entry in memory and retries the write on bind/release.
-    diagnose(deps, "open-write", error);
+    recordError(deps, "open-write", error);
   }
   return {
     id: entry.id,
@@ -412,7 +415,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
         entry = { ...entry, roots: union(entry.roots, [identity]), tree: union(entry.tree, [identity]) };
         mergeAndPersist(ctx, entry);
       } catch (error) {
-        diagnose(deps, "bind", error);
+        recordError(deps, "bind", error);
       }
     },
     releaseOccupancy(): void {
@@ -421,7 +424,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
         mergeAndPersist(ctx, entry);
         sweepWith(ctx, deps);
       } catch (error) {
-        diagnose(deps, "release", error);
+        recordError(deps, "release", error);
       }
     },
   };
@@ -563,7 +566,7 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerDeps): SweepResult {
         remaining.push({ entry: verdict.keep, path });
       }
     } catch (error) {
-      diagnose(deps, "sweep-entry", error);
+      recordError(deps, "sweep-entry", error);
       remaining.push(item);
     }
   }
@@ -578,7 +581,7 @@ export function sweepMemoryReservations(deps: HostMemoryLedgerDeps = {}): SweepR
   try {
     return sweepWith(contextOf(deps), deps);
   } catch (error) {
-    diagnose(deps, "sweep", error);
+    recordError(deps, "sweep", error);
     return undefined;
   }
 }
@@ -590,7 +593,7 @@ export function readMemoryLedger(deps: HostMemoryLedgerDeps = {}): HostMemoryRea
     const { live, unreadable } = listEntries(ctx);
     return readingOf(ctx, live, unreadable);
   } catch (error) {
-    diagnose(deps, "read", error);
+    recordError(deps, "read", error);
     return undefined;
   }
 }

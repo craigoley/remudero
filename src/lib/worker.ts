@@ -2065,23 +2065,20 @@ export interface WorkerOccupancyReservation {
   ledger?: HostMemoryLedgerDeps;
 }
 
-/** A claim's release plus its host memory reservation. `openMemoryReservation` never throws, so the claim cannot fail. */
-function claimWorkerOccupancy(reservation: WorkerOccupancyReservation = {}): { release: () => void; memory: MemoryReservationHandle } {
+function claimWorkerOccupancy(): () => void {
   activeWorkerSpawns += 1;
-  const memory = openMemoryReservation(
-    { workerClass: reservation.workerClass ?? "unclassified", root: reservation.root },
-    reservation.ledger,
-  );
   let released = false;
-  return {
-    memory,
-    release: () => {
-      if (released) return;
-      released = true;
-      activeWorkerSpawns = Math.max(0, activeWorkerSpawns - 1);
-      memory.releaseOccupancy();
-    },
+  return () => {
+    if (released) return;
+    released = true;
+    activeWorkerSpawns = Math.max(0, activeWorkerSpawns - 1);
   };
+}
+
+/** The host memory reservation a claim opens beside its counter. `openMemoryReservation` never throws, and its
+ * `releaseOccupancy` never throws either, so neither the claim nor its release can fail on the ledger's account. */
+function openOccupancyReservation(reservation: WorkerOccupancyReservation): MemoryReservationHandle {
+  return openMemoryReservation({ workerClass: reservation.workerClass ?? "unclassified", root: reservation.root }, reservation.ledger);
 }
 
 /** The class a spawn records when its caller names none: a disposable review sandbox is a review, a spawn carrying the
@@ -2115,11 +2112,13 @@ export async function withWorkerOccupancy<T>(
   operation: () => Promise<T>,
   reservation: WorkerOccupancyReservation = {},
 ): Promise<T> {
-  const { release } = claimWorkerOccupancy(reservation);
+  const release = claimWorkerOccupancy();
+  const memory = openOccupancyReservation(reservation);
   try {
     return await operation();
   } finally {
     release();
+    memory.releaseOccupancy();
   }
 }
 
@@ -2286,10 +2285,8 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
-  const { release: releaseWorkerOccupancy, memory: memoryReservation } = claimWorkerOccupancy({
-    workerClass: workerClassOf(args),
-    root: args.config?.root,
-  });
+  const releaseWorkerOccupancy = claimWorkerOccupancy();
+  const memoryReservation = openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
   const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
@@ -3200,6 +3197,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   }
   } finally {
     releaseWorkerOccupancy();
+    memoryReservation.releaseOccupancy();
   }
 }
 
