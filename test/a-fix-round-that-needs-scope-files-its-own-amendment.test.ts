@@ -156,7 +156,7 @@ test("scope amendment failures retain the scope escalation fallback", async () =
     if (mode === "write-failed") f.opts.deps.scopeAmendmentWritePorts = { ...f.p.deps, writeFile: () => { throw new Error("write failed"); } };
     const result = await runFixRung(f.opts);
     assert.equal(result.outcome, "stood_down");
-    assert.equal(f.rows.findLast((row) => row.step === "fix.scope_amendment")?.outcome, "refused");
+    assert.equal(f.rows.findLast((row) => row.step === "fix.scope_amendment")?.outcome, "refused", mode);
     assert.match(String(f.rows.find((row) => row.step === "fix.commit_refused")?.scope_amendment_detail), /src\/absent.ts/);
     assert.equal(f.p.prs.length, 0);
   }

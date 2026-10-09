@@ -16,6 +16,7 @@ export interface FixProgressInput {
   taskId?: string;
   prNumber?: number;
   headSha: string;
+  strikesSpent: number;
   currentRed: string[];
   rounds: FixProgressRound[];
   operatorAnswer?: string;
@@ -46,7 +47,7 @@ const redSet = (row: Record<string, unknown>): string[] => row.mode === "merge-c
 ]);
 
 export function buildFixProgressInput(facts: {
-  taskId?: string; prNumber?: number; headSha: string; currentRed: string[];
+  taskId?: string; prNumber?: number; headSha: string; strikesSpent?: number; currentRed: string[];
   ledger: readonly Record<string, unknown>[]; operatorAnswer?: string; formerCeiling?: number; parkedReason?: string;
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
@@ -54,6 +55,9 @@ export function buildFixProgressInput(facts: {
   for (const [index, row] of facts.ledger.entries()) {
     if (facts.taskId !== undefined ? row.task_id !== facts.taskId : row.pr_number !== facts.prNumber) continue;
     if (typeof row.pr_number === "number" && facts.prNumber !== undefined && row.pr_number !== facts.prNumber) continue;
+    // W1-T5032: this dispatch-shaped proof-amendment row is only an idempotency identity, not a
+    // worker round. Keep it out of the judge's progress history just as the strike tally does.
+    if (row.step === "fix.dispatch" && row.kind === "proof_amendment") continue;
     const id = stringValue(row.round_id);
     if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
       if (id && byId.has(id)) continue;
@@ -90,7 +94,8 @@ export function buildFixProgressInput(facts: {
     refusedRounds: rounds.filter(r => r.refusal !== undefined || r.subtype === "commit_refused").length,
     incompleteRounds: rounds.filter(r => !r.completed).length,
   };
-  return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha, currentRed, rounds,
+  return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
+    strikesSpent: facts.strikesSpent ?? 0, currentRed, rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals };
 }
 

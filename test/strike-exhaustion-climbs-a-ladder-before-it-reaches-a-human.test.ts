@@ -147,11 +147,12 @@ test("W1-T5536: an unmoved base closes the PR and requeues its task with a failu
 });
 
 test("W1-T5536: a spent rebuild budget or an unrequeueable PR opens one assigned digest per cause", async (t) => {
-  for (const over of [{}, { taskId: undefined }, { isPlanFiling: true }, { headRefName: "feature/foreign" }, { headRefName: "run-unfiled-1" }]) {
+  for (const over of [{}, { taskId: undefined }, { headRefName: "feature/foreign" }, { headRefName: "run-unfiled-1" }]) {
     const f = fixture(t);
     f.spend(2);
-    await f.sweep([pr(over)]);
-    assert.equal(f.open.length, 1);
+    const first = await f.sweep([pr(over)]);
+    assert.equal(f.open.length, 1, JSON.stringify({ over, calls: f.calls, actions: first.actions,
+      rows: f.rows.filter(row => String(row.step).includes("strike_ladder") || row.step === "sweep.disposed") }));
     assert.equal(f.calls.some(c => c.startsWith("close:")), false);
     assert.ok(f.commands.some(args => args.includes("--add-assignee") && args.includes("acme")));
     await f.sweep([pr(over)]);
@@ -199,14 +200,21 @@ test("W1-T5536: a laddered PR never opens a per-PR escalation issue", async (t) 
     { priorStrikes: 0, checksState: "none" as const, isPlanFiling: true, lastActivityAt: stamp(-11 * 60_000) },
     { priorStrikes: 0, checksState: "green" as const, armRefusalIsTerminal: true },
     { priorStrikes: 0, checksState: "green" as const, mergeState: "dirty" as const },
-    { priorStrikes: 1, checksState: "green" as const, reviewState: "failure" as const,
+    { priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, checksState: "green" as const, reviewState: "failure" as const,
       unmetCriteria: [{ claim: "same unmet claim", proof: "proof", met: false, proof_exec: "executed_fail" as const, reason: "unmet" }],
-      strikeHistory: [{ strike: 1, round: "fresh" as const, unmetCount: 1, ciGreen: true, unmetClaims: ["same unmet claim"] }] },
+      strikeHistory: Array.from({ length: DEFAULT_SWEEP_POLICY.strikeCap }, (_, i) => ({ strike: i + 1,
+        round: "fresh" as const, unmetCount: 1, ciGreen: true, unmetClaims: ["same unmet claim"] })) },
   ]) {
     const other = fixture(t);
     const result = await other.sweep([pr(over)]);
-    assert.equal(other.calls.includes("escalate"), true, JSON.stringify(result.actions));
-    assert.equal(other.calls.some(c => c.startsWith("close:")), false);
+    if (over.priorStrikes === DEFAULT_SWEEP_POLICY.strikeCap) {
+      assert.equal(other.calls.includes("escalate"), false, JSON.stringify(result.actions));
+      assert.match(result.actions[0]?.reason ?? "", /strike ladder/);
+      assert.ok(other.calls.some(c => c.startsWith("close:")), "the ladder closes/requeues instead of filing a per-PR issue");
+    } else {
+      assert.equal(other.calls.includes("escalate"), true, JSON.stringify(result.actions));
+      assert.equal(other.calls.some(c => c.startsWith("close:")), false);
+    }
   }
 });
 

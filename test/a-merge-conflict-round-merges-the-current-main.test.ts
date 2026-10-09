@@ -210,10 +210,11 @@ test("W1-T5864: an already-up-to-date merge reports not started and spends no wo
     assert.equal(outcome.reason, "merge_conflict_unresolved");
     assert.equal(outcome.strikes, strikeCap);
     assert.equal(round.issuesFiled.length, 1);
-    // W1-T7096 (ruling 2026-10-09): a merge that never started is a REFUSED round the progress judge sees,
-    // not a strike toward a fixed cap (W1-T5542: refused rounds are never strikes).
-    assert.equal(round.rows.filter((r) => r.step === "fix.commit_refused").length, strikeCap, "the ledger records each as a refused round");
-    assert.equal(sweepStrikes(round.rows, f.branchSha), 0, "and never as a strike");
+    // W1-T5864 + W1-T7096: a merge that never started is a FAILED strike (no worker ran), recorded with a
+    // refused-round receipt (`merge_start_failed`) so the progress judge also sees it as a refusal.
+    assert.equal(round.rows.filter((r) => r.step === "fix.commit_refused" && r.merge_start_failed === true).length, strikeCap,
+      "the ledger records each refused merge start");
+    assert.equal(sweepStrikes(round.rows, f.branchSha), strikeCap, "the ledger reads each as a strike");
   }
 });
 

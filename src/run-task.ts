@@ -11222,6 +11222,7 @@ export async function runFixRung(opts: {
   // invocation's pre-strike gate ran — `undefined` on the first round (nothing recorded yet;
   // see {@link unchangedTreeStandDownReason}'s own "first round" contract) and whenever
   // `deps.captureWorktreeSnapshot` is not wired at all.
+  let lastGateSnapshot: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
   // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
   // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
   // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
@@ -11302,7 +11303,6 @@ export async function runFixRung(opts: {
   };
 
   // W1-T7096: every completed round, including retriggers, returns to the progress judge.
-  let lastGateSnapshot: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
   const judgeIsStandIn = deps.fixProgressJudge === undefined && !opts.useProductionProgressJudge;
   // `forJudge`: whether a wired judge is shown the site's reason as its parked reason. A reached bound or an
   // unchanged tree is already in the judge's own signals; a false-block finding and merge refusals are not.
@@ -11590,7 +11590,10 @@ export async function runFixRung(opts: {
     if (!consultedThisRound && (roundRows.some(row => row.step === "fix.dispatch" || row.step === "fix.retrigger") || !opts.progressDecision)) {
       const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
       const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
-        headSha: review.headSha, currentRed: currentMergeConflict !== undefined
+        headSha: review.headSha,
+        strikesSpent: Math.max(strikes, priorStrikesFor([...persisted, ...roundRows], opts.taskId,
+          strikeRegimeForDispatch(review.criteria), review.headSha)),
+        currentRed: currentMergeConflict !== undefined
           ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
           : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
           : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
@@ -12592,7 +12595,7 @@ export async function runFixRung(opts: {
           conflicted_files: conflictedFilePaths(currentMergeConflict),
         });
         deps.log("fix.commit_refused", { round_id: refusedRoundId, head_sha: priorHeadSha,
-          strike: attempt, mode: fixMode, reason: refusal });
+          strike: attempt, mode: fixMode, merge_start_failed: true, reason: refusal });
         deps.log("fix.done", { round_id: refusedRoundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, subtype: "commit_refused" });
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
@@ -12933,6 +12936,7 @@ export async function runFixRung(opts: {
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        ...(mergeCommitRefused ? { merge_commit_refused: true } : {}),
         fix_outcome: fixOutcome?.kind ?? "unstated",
         ...(fixOutcome?.kind === "FIXED" && harnessCommitRefusalReason === "the worker changed nothing" ? { fix_outcome_contradiction: true } : {}),
         ...(scopeAmendment ? { scope_amendment_detail: scopeAmendment } : {}),
@@ -42242,6 +42246,9 @@ function* openPrViewSteps(
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       repeatedFixRefusal: fixRoundTally(ledger, taskId, pr.headRefOid).repeatedRefusal,
       fixRefusalsAtHead: fixRoundTally(ledger, taskId, pr.headRefOid).refusals.length,
+      // W1-T7096: initialized at the canonical OpenPrView producer, then populated only by
+      // runSweep after its progress judge rules on the exact exhausted head.
+      progressEscalation: undefined,
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
       // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
@@ -46742,6 +46749,7 @@ export async function routeFix(
     const judge = deps.fixProgressJudge ?? formerBoundStandIn(() => (pr.priorStrikes ?? 0) >= policy.strikeCap, log,
       (line) => console.error(line));
     const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      strikesSpent: pr.priorStrikes,
       currentRed: isBlockedCi(pr) ? (pr.ciFailures ?? []).map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
       ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap });

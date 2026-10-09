@@ -8842,7 +8842,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (pr, policy) => isFixStrikeExhausted(pr, policy) && !isFixStrikeJudgedExhausted(pr, policy),
     blocker: "review-failed",
     reason: (pr, policy) => {
-      if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}`;
+      if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}` +
+        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "");
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       return `fix progress judgment due after ${pr.priorStrikes} rounds (former ceiling ${ceiling})`;
     },
@@ -12535,6 +12536,14 @@ export function fixRoundTally(
   const noCommitCounts = new Map<string, number>();
   for (const round of rounds) {
     if (!selected.has(round.dispatch)) continue;
+    // W1-T5864: a shell-less attempt that cannot begin the required current-main merge
+    // spends a fix strike, even though it uses the shared refusal receipt for compatibility.
+    // It is distinct from a worker refusing a commit: no worker ran, and the merge-start failure
+    // itself is the failed attempt the next progress judgment must count.
+    if (round.refusal?.merge_start_failed === true || round.refusal?.merge_commit_refused === true) {
+      tally.strikes++;
+      continue;
+    }
     if (round.refusal || round.done?.subtype === "commit_refused") {
       const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
       tally.refusals.push({ reason, round_id: round.id });
@@ -13178,6 +13187,7 @@ export async function runSweep(
   // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
   const judgedContinue = new Map<number, FixProgressVerdict>();
   const judgedUnavailable = new Map<number, string>();
+  const preflightEscalations = new Map<number, { loop: string; reason: string; inputKey: string; alreadyDelivered: boolean }>();
   // An unwired caller (a fixture) keeps the former bound as an announced stand-in: escalate once the
   // former ceiling is reached, continue below it. Production always wires the judge (W1-T7096 guard suite).
   let standInAnnounced = false;
@@ -15030,6 +15040,20 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const preflightEscalation = preflightEscalations.get(pr.prNumber);
+              if (preflightEscalation !== undefined) {
+                const reason = preflightEscalation.alreadyDelivered
+                  ? "this fix progress loop is already escalated; awaiting new evidence or an operator answer"
+                  : `fix progress loop: ${preflightEscalation.loop} — ${preflightEscalation.reason}`;
+                if (!preflightEscalation.alreadyDelivered) {
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                }
+                extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: preflightEscalation.inputKey };
+                acted = false;
+                spent = false;
+                standDownReason = reason;
+                break;
+              }
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
               const askProgress = async (): Promise<boolean> => {
@@ -15042,7 +15066,9 @@ export async function runSweep(
                   return false;
                 }
                 const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber,
-                  headSha: pr.headSha, currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                  headSha: pr.headSha,
+                  strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, pr.taskId, pr.headSha).strikes),
+                  currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
                     ...pr.unmetCriteria.map(c => `review:${c.claim}`),
                     ...(pr.reviewState === "failure" && pr.unmetCriteria.length === 0 ? ["remudero-review"] : [])], ledger: ledgerLines,
                   operatorAnswer: pr.pendingAnswer?.constraint,

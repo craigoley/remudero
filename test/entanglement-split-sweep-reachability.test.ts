@@ -360,7 +360,7 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
 });
 
 // W1-T3172 exhaustion and prerequisite safety still win.
-test("strike exhaustion precedes the split route", () => {
+test("the former strike ceiling routes the split case to a progress judgment", () => {
   const { view, cleanup } = boardView([reviewRow()]);
   try {
     // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
