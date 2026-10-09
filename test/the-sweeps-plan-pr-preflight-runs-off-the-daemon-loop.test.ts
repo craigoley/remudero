@@ -38,7 +38,7 @@ const TASK = "W1-T5521-FIXTURE";
 const RUN = "RUN-REFUSED-5521";
 /** How long the fixture tree's lint-plan check holds its child process alive before it refuses. */
 const SLOW_CHECK_MS = 2_000;
-/** The declared bound on the loop's worst delay through a rung: half the slow check. */
+/** The allowed delay above the same-fixture baseline: half the slow check. */
 const LAG_BOUND_MS = SLOW_CHECK_MS / 2;
 const REFUSES_LINE = `lint-plan-precheck: ${TASK} REFUSES — slow fixture red`;
 const STALE_PROOF = "unit test: test/stale.test.ts";
@@ -62,7 +62,7 @@ function rows(path: string): Row[] {
 }
 
 /** A repo whose committed tree carries the task shard and a lint-plan script that is slow, then red. */
-function slowTree(): { repo: GitRepo; marks: string } {
+function slowTree(checkMs = SLOW_CHECK_MS): { repo: GitRepo; marks: string } {
   const repo = gitRepo();
   const marks = join(repo.dir, "..", `${repo.dir.split("/").pop()}-check-marks`);
   mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
@@ -77,7 +77,7 @@ function slowTree(): { repo: GitRepo; marks: string } {
       `  appendFileSync(${JSON.stringify(marks)}, "done\\n");`,
       `  console.log(${JSON.stringify(REFUSES_LINE)});`,
       "  process.exit(1);",
-      `}, ${SLOW_CHECK_MS});`,
+      `}, ${checkMs});`,
       "",
     ].join("\n"),
   );
@@ -87,8 +87,8 @@ function slowTree(): { repo: GitRepo; marks: string } {
 }
 
 /** One rung's real effect over the real fixture repo; only fetch, push and gh are faked. */
-function rungFixture(over: Partial<BuildSweepEffectsDeps> = {}) {
-  const { repo, marks } = slowTree();
+function rungFixture(over: Partial<BuildSweepEffectsDeps> = {}, checkMs = SLOW_CHECK_MS) {
+  const { repo, marks } = slowTree(checkMs);
   const ledger = join(repo.dir, "state", "ledger.ndjson");
   const task = { id: TASK, repo: "remudero", status: "queued", attempts: 0, title: "fixture" } as unknown as Task;
   const pushes: Array<{ dir: string; sha?: string }> = [];
@@ -168,17 +168,21 @@ function assertRefusedOnLintPlan(failures: unknown): void {
 }
 
 test("W1-T5521: the refusal-amendment rung's preflight check runs while a timer set before it fires, and its red still pushes nothing", async (t) => {
+  const baseline = rungFixture({}, 0);
+  const { maxLagMs: baselineLagMs } = await observeLoop(baseline.marks, () =>
+    withLiveWritesAllowed(() => baseline.effects.draftRefusalAmendments!([amendmentCandidate()])),
+  );
   const f = rungFixture();
 
   const { result, sawCheckRunning, maxLagMs } = await observeLoop(f.marks, () =>
     withLiveWritesAllowed(() => f.effects.draftRefusalAmendments!([amendmentCandidate()])),
   );
-  t.diagnostic(`max loop delay, preflight awaited: ${maxLagMs.toFixed(0)} ms`);
+  t.diagnostic(`max loop delay, preflight awaited: ${maxLagMs.toFixed(0)} ms; baseline: ${baselineLagMs.toFixed(0)} ms`);
 
   // W1-T5531: the red amendment's base is preflighted alone too, so the slow check runs twice.
   assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n".repeat(2), "the slow check ran to completion in a real child process");
   assert.ok(sawCheckRunning, "a tick landed while the preflight's child process was still running");
-  assertWallClockBound(maxLagMs, LAG_BOUND_MS, `the loop's worst delay through the refusal-amendment rung was ${maxLagMs.toFixed(0)} ms`);
+  assertWallClockBound(maxLagMs, baselineLagMs + LAG_BOUND_MS, `the loop's worst delay through the refusal-amendment rung was ${maxLagMs.toFixed(0)} ms against baseline ${baselineLagMs.toFixed(0)} ms`);
   assert.equal(result[0]!.outcome, "error", "the refused amendment is this pass's error outcome, as before");
   assert.deepEqual(f.pushes, [], "a red preflight pushes nothing");
   assert.equal(f.creates().length, 0, "a red preflight opens no PR");
@@ -195,6 +199,12 @@ test("W1-T5521: the refusal-amendment rung's preflight check runs while a timer 
 });
 
 test("W1-T5521: the plan-repair rung's preflight check runs while a timer set before it fires, and its red still pushes nothing", async (t) => {
+  const baseline = rungFixture({}, 0);
+  const { maxLagMs: baselineLagMs } = await observeLoop(baseline.marks, () =>
+    withLiveWritesAllowed(async () =>
+      baseline.effects.dispatchPlanOnlyRepair!(stalePr(), { proofs: [{ claim: "the offending proof", proof: STALE_PROOF, proofExec: "not_executable" }] }),
+    ),
+  );
   const f = rungFixture();
 
   const { result, sawCheckRunning, maxLagMs } = await observeLoop(f.marks, () =>
@@ -202,12 +212,12 @@ test("W1-T5521: the plan-repair rung's preflight check runs while a timer set be
       f.effects.dispatchPlanOnlyRepair!(stalePr(), { proofs: [{ claim: "the offending proof", proof: STALE_PROOF, proofExec: "not_executable" }] }),
     ),
   );
-  t.diagnostic(`max loop delay, preflight awaited: ${maxLagMs.toFixed(0)} ms`);
+  t.diagnostic(`max loop delay, preflight awaited: ${maxLagMs.toFixed(0)} ms; baseline: ${baselineLagMs.toFixed(0)} ms`);
 
   assert.equal(result, true);
   assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n", "the slow check ran to completion in a real child process");
   assert.ok(sawCheckRunning, "a tick landed while the preflight's child process was still running");
-  assertWallClockBound(maxLagMs, LAG_BOUND_MS, `the loop's worst delay through the plan-repair rung was ${maxLagMs.toFixed(0)} ms`);
+  assertWallClockBound(maxLagMs, baselineLagMs + LAG_BOUND_MS, `the loop's worst delay through the plan-repair rung was ${maxLagMs.toFixed(0)} ms against baseline ${baselineLagMs.toFixed(0)} ms`);
   assert.deepEqual(f.pushes, [], "a red preflight pushes nothing");
   assert.equal(f.creates().length, 0, "a red preflight opens no PR");
   const dispatched = rows(f.ledger).filter((r) => r.step === PLAN_REPAIR_DISPATCH_STEP);

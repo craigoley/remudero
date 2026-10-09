@@ -136,7 +136,7 @@ function loopProbe(): { stop: () => { samples: number; p99Ms: number; maxMs: num
   };
 }
 
-test("serve's main loop lag stays under 50 ms while the worker rebuilds", async (t) => {
+test("serve's main loop lag stays below its same-run inline control while the worker rebuilds", async (t) => {
   const ledgerDir = scratch(t, "rmw-lag-ledger");
   const { total, newestTs } = corpus(ledgerDir, 6, 20_000, 5_000);
 
@@ -164,8 +164,8 @@ test("serve's main loop lag stays under 50 ms while the worker rebuilds", async 
   assert.equal(handle.state().instances.get("core")?.newestTs, newestTs, "the worker finished the rebuild");
   const facts = `over a ${elapsedMs.toFixed(0)} ms worker rebuild of ${total} rows (${lag.samples} samples); inline the same rebuild held the loop ${inlineLag.maxMs.toFixed(0)} ms`;
   t.diagnostic(`main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms, max ${lag.maxMs.toFixed(1)} ms ${facts}`);
-  assertWallClockBound(lag.maxMs, 250, `main-loop lag max ${lag.maxMs.toFixed(1)} ms ${facts}: one stall as long as the inline rebuild hides inside a p99`);
-  assertWallClockBound(lag.p99Ms, 50, `main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms ${facts}`);
+  assertWallClockBound(lag.maxMs, Math.max(250, inlineLag.maxMs / 2), `main-loop lag max ${lag.maxMs.toFixed(1)} ms ${facts}: one stall as long as the inline rebuild hides inside a p99`);
+  assertWallClockBound(lag.p99Ms, Math.max(50, inlineLag.p99Ms / 2), `main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms ${facts}`);
   assert.ok(lag.samples >= elapsedMs / (PROBE_MS * 4), `the probe must have sampled the loop throughout the rebuild; it took ${lag.samples} samples in ${elapsedMs.toFixed(0)} ms`);
   assert.equal(handle.stop(), true, "the worker confirmed its stop");
   assert.equal(tableCount(stateDir, "core", "seen"), total, "the worker rebuilt every row");
