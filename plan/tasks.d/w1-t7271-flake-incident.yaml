@@ -1,0 +1,36 @@
+- id: W1-T7271
+  title: "FLAKE INCIDENT — 'real spawn' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:flake-incident:test/fast-gate-admits-the-census-class.test.ts#real spawn"
+  files:
+    - src/lib/ci-parity.ts
+    - test/fast-gate-admits-the-census-class.test.ts
+  acceptance:
+    - claim: "the cause of 'real spawn' (test/fast-gate-admits-the-census-class.test.ts)'s intermittent failure is fixed in test/fast-gate-admits-the-census-class.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7271 pins the cause of the intermittent failure"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Pending CI friction remedy: retain verify: human and author_class: machine until the machine-filing judge releases it or an operator rules.
+    Include src/lib/ci-parity.ts, which the failing test imports and exercises through runPreflightFast, so investigation can repair the runtime path as well as pin the failing order in the test.
+    Original incident origin: flake-incident:test/fast-gate-admits-the-census-class.test.ts#real spawn
+    Test: 'real spawn' (test/fast-gate-admits-the-census-class.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10181, #10354, #10368.
+    CI runs: 37862576629, 37944299457, 37947872859.
+    Retry outcomes: 1 recovered on retry, 2 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.8
+    reasons:
+      - "high-risk verdict at confidence 0.80 — on the change's description/files alone, no diff was read — The acceptance criterion locates the remedy in test/fast-gate-admits-the-census-class.test.ts, but the declared scope also includes src/lib/ci-parity.ts without explaining the intended source change.; on the change's description/files alone, no diff was read — No cause, supporting reproduction evidence, or explanation of the source change is supplied; its necessity and alignment with the test-focused remedy cannot be verified from the shown record."
+    judged_at: "2026-10-09T17:04:46.701Z"
+    pin: "02f857db9b78e7ec712ed543fc44de830a6ce53fd98f765b1ed67b6f397b0ab1"

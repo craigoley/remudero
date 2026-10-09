@@ -375,8 +375,22 @@ export function shouldAttemptRetry({ budgetSeconds, firstPassElapsedMs }) {
   return remainingSeconds >= firstPassSeconds;
 }
 
+/**
+ * W1-T7125: the label after `FLAKE-RETRY: <headline> — `. Names are normally joined with ", ", but a
+ * test title may itself contain ", " -- a consumer splitting on ", " would read one title as two
+ * incidents. So whenever the plain join would be ambiguous (a name containing ", ", or a label
+ * that would start with "[" and be mistaken for the array form) the names are written as a JSON
+ * string array instead. Consumers parse a "[...]" label as that array and still split the plain
+ * form, so logs written before this change stay readable.
+ */
+export function formatFlakeLabel(names) {
+  if (names.length === 0) return "(no test name parsed from output)";
+  const plain = names.join(", ");
+  return names.some((n) => n.includes(", ")) || plain.startsWith("[") ? JSON.stringify(names) : plain;
+}
+
 function recordFlakeEvidence(headline, names) {
-  const label = names.length > 0 ? names.join(", ") : "(no test name parsed from output)";
+  const label = formatFlakeLabel(names);
   const line = `FLAKE-RETRY: ${headline} — ${label}`;
   console.log(line);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
