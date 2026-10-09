@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
+import { prepareWorktreeTypecheck } from "./typecheck-buildinfo.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -520,7 +521,7 @@ export function commitlintStep(
 export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): PreflightStepResult {
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
-    const res = spawn(tsc, ["-p", "tsconfig.json", "--noEmit"], { cwd: repoRoot });
+    const res = spawn(tsc, prepareWorktreeTypecheck(repoRoot).args, { cwd: repoRoot });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;

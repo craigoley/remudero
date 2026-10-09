@@ -615,6 +615,7 @@ if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
 fi
 
 RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
+RESOURCE_POLICY_SERVE_HIGH_MIB="" # read back from the cgroup after start; see resource_policy_probe_memory_high
 if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
   resource_policy_serve_args
@@ -744,6 +745,9 @@ RUNNING="$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/d
 if [ "${RUNNING}" != "true" ]; then
   echo "serve-container: FAILED — ${CONTAINER_NAME} is not running." >&2
   FAIL=1
+fi
+if [ "${RUNNING}" = "true" ] && [ -n "${RESOURCE_POLICY_SERVE_HIGH_MIB}" ]; then
+  resource_policy_probe_memory_high "${CONTAINER_NAME}" "${RESOURCE_POLICY_SERVE_HIGH_MIB}" || true
 fi
 
 ON_NET="$(docker inspect --format "{{if index .NetworkSettings.Networks \"${NETWORK}\"}}yes{{end}}" "${CONTAINER_NAME}" 2>/dev/null || true)"
