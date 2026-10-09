@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { parseDocument } from "yaml";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ciFrictionGardenSpec, ciFrictionLadder, gitCiFrictionOwnerSearch, workflowJobCheckNames } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionGardenSpec, ciFrictionLadder, expandWorkflowMatrix, gitCiFrictionOwnerSearch, workflowJobCheckNames } from "../src/lib/ci-friction-gardener.js";
 import { locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
 import type { CiFrictionRemedyTask } from "../src/lib/ci-friction-remedy.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
@@ -323,4 +323,19 @@ test("CI friction expands codeql.yml's language matrix into its checks and never
   if (inventory.next?.decision.kind !== "escalate") assert.fail("expected the gap to escalate");
   assert.match(inventory.next.decision.why, /workflow ownership unsupported for Analyze \(javascript-typescript\)/);
   assert.deepEqual(spec.scorecard(inventory, { actions: [], acting: [] }).workflow_ownership_unresolved, inventory.workflowGaps);
+});
+
+test("CI friction expands a workflow matrix the way GitHub does, and says why when it cannot", () => {
+  assert.deepEqual(expandWorkflowMatrix(undefined), [{}]);
+  assert.deepEqual(expandWorkflowMatrix({ os: ["a", "b"], node: [1, 2], exclude: [{ os: "b", node: 2 }], include: [{ os: "a", extra: true }, { os: "c" }] }),
+    [{ os: "a", node: 1, extra: true }, { os: "a", node: 2, extra: true }, { os: "b", node: 1 }, { os: "c" }]);
+  assert.equal(expandWorkflowMatrix("${{ fromJSON(needs.plan.outputs.matrix) }}"), "matrix is not a literal mapping");
+  assert.equal(expandWorkflowMatrix({ os: "${{ inputs.os }}" }), "matrix.os is not a literal list");
+  assert.equal(expandWorkflowMatrix({ include: ["a"] }), "matrix.include is not a literal list of mappings");
+  assert.equal(expandWorkflowMatrix({ exclude: "a" }), "matrix.exclude is not a literal list of mappings");
+  assert.deepEqual(workflowJobCheckNames("lint", undefined), ["lint"]);
+  assert.deepEqual(workflowJobCheckNames("t (${{ matrix.os }}, ${{ matrix.node }})", { os: ["a"], node: [1, 2] }), ["t (a, 1)", "t (a, 2)"]);
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", { os: [{ name: "a" }] }), "${{ matrix.os }} has no literal value");
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", { os: [] }), "matrix expands to no combination");
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", "${{ fromJSON(x) }}"), "matrix is not a literal mapping");
 });
