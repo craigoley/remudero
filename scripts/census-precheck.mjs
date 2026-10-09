@@ -754,6 +754,46 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
   };
 }
 
+/** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
+ *  SUITE, asked of every ci.yml script: `npm run --silent <script>` or `node scripts/<name>.mjs`, counted when the
+ *  enclosing step's id or the script's own name says ratchet, census, budget, monotonic, parity or signal. Each is
+ *  keyed `script:<name>` and counted once however many places ci.yml invokes it. Only .github/workflows/ci.yml. */
+const SCRIPT_GATE_NAME = /ratchet|census|budget|monotonic|parity|signal/;
+
+export function ciScriptRatchetPopulation(ciYamlText) {
+  const keys = new Set();
+  let stepId = "";
+  for (const line of String(ciYamlText).split("\n")) {
+    if (/^\s*-\s+\S/.test(line)) stepId = "";
+    const id = line.match(/^\s*(?:-\s+)?id:\s*([\w-]+)/);
+    if (id) stepId = id[1];
+    for (const m of line.matchAll(/npm run --silent\s+([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
+      const name = m[1] ?? m[2];
+      if (SCRIPT_GATE_NAME.test(`${stepId} ${name}`)) keys.add(`script:${name}`);
+    }
+  }
+  return [...keys].sort();
+}
+
+/** Every ci.yml script gate this script asks before the push: `modeled` names the check, `run` an npm script
+ *  that runs the gate's own census suite. A script gate on neither this nor `ciOnlyScripts` in
+ *  scripts/census-precheck-parity-baseline.json is named by test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts. */
+export const PRECHECK_SCRIPT_PARITY = {
+  "script:comment-load-signal": { modeled: commentLoadViolations },
+  "script:cycle-ratchet": { run: "census:cycle-ratchet" },
+};
+
+/** The verdict for the script gates: `precheckParityVerdict` over `script:<name>` keys. `baseline` and
+ *  `baseBaseline` are the `ciOnlyScripts` objects (the merge base's, or null when it had none). */
+export function scriptRatchetParityVerdict({ population, baseline, baseBaseline = null, parity = PRECHECK_SCRIPT_PARITY }) {
+  return precheckParityVerdict({
+    population,
+    baseline: Object.keys(baseline),
+    baseBaseline: baseBaseline === null ? null : Object.keys(baseBaseline),
+    parity,
+  });
+}
+
 function gitOut(root, args, options = {}) {
   const res = git(args, { cwd: root, ...options });
   if (res.status !== 0) throw new Error(`git ${args[0]}: ${(res.stderr || "no diagnostic").trim()}`);
