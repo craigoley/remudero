@@ -2014,7 +2014,7 @@
     "test/project-plan-trailer-lookup.test.ts": 520,
     "test/prompt-contracts-name-the-commit-contract.test.ts": 2000,
     "test/prompt-manifest.test.ts": 2300,
-    "test/prompt-render.test.ts": 2005,
+    "test/prompt-render.test.ts": 5000,
     "test/proof-codespan-strip.test.ts": 2300,
     "test/proof-debt-becomes-a-proposal.test.ts": 1200,
     "test/proof-dialect-doc.test.ts": 17000,
