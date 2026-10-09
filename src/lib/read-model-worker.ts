@@ -1151,10 +1151,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const pacedFrom = clock.now();
 
   /** A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. */
-  function paced(unit: ViewUnit, finished: number): number {
+  function paced(unit: ViewUnit, finished: number, live: ReadModelView | undefined): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
-    if (!unit.view.readPaced) return unit.baseDueAt;
+    if (live?.readPaced !== true) return unit.baseDueAt;
     const idleMs = finished - (readAt.get(unit.view.name) ?? pacedFrom);
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     return finished + waitMs * unit.stretch;
@@ -1186,7 +1186,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
-    unit.dueAt = ready ? paced(unit, finished) : finished;
+    unit.dueAt = ready ? paced(unit, finished, live) : finished;
     if (ready) {
       unit.startedAt = undefined;
       unit.peakMs = undefined;
