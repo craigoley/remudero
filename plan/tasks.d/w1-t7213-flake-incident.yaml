@@ -1,5 +1,5 @@
 - id: W1-T7213
-  title: "FLAKE INCIDENT — 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' failed CI on 3 pull requests whose diffs do not touch it"
+  title: "CI FRICTION — repair the readPaced view union type error exposed by the prerequisite compiler test"
   repo: remudero
   depends_on: []
   type: implement
@@ -9,14 +9,19 @@
   status: queued
   attempts: 0
   author_class: machine
-  origin: "flake-incident:test/prompt-render.test.ts#test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments"
+  origin: "ci-friction:check:ci-shard:read-model-worker-readPaced-type-error"
   files:
-    - test/prompt-render.test.ts
+    - src/lib/read-model-worker.ts
+    - test/read-paced-view-union-typecheck.test.ts
   acceptance:
-    - claim: "the cause of 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' (test/prompt-render.test.ts)'s intermittent failure is fixed in test/prompt-render.test.ts, pinned by a test that forces the failing order"
-      proof: "unit test: W1-T7213 pins the cause of the intermittent failure"
-  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+    - claim: "the readPaced access in src/lib/read-model-worker.ts type-checks for both ReadModelView and ReadModelViewFactory; a new compiler regression covers both view kinds and fails on the original unguarded union access, while the existing prerequisite compiler test continues rejecting omitted branch and reader arguments"
+      proof: "unit test: test/read-paced-view-union-typecheck.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406), reclassified in PR-10378 as a CI-friction remedy proposal. MACHINE-AUTHORED — verify: human is retained pending a pinned machine-filing judge release or escalation to a person. This filing does not implement or credit the source repair."
   rationale: |
+    PR-10378 round 1 reports TS2339 in src/lib/read-model-worker.ts: paced reads unit.view.readPaced from ReadModelView | ReadModelViewFactory, but ReadModelViewFactory has no readPaced property.
+    The named test in test/prompt-render.test.ts invokes tsc on its import graph and requires exit 0; a source type error can therefore fail that test even when its own file is unchanged.
+    The cited retries all failed again. They do not establish an intermittent ordering failure; this task proposes repairing the observed compiler error and retaining the negative prerequisite type checks, without asserting that error caused every historical failure.
+    Original gardener origin: flake-incident:test/prompt-render.test.ts#test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments
     Test: 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' (test/prompt-render.test.ts)
     Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10265, #10362, #10369.
     CI runs: 37941672866, 37941954001, 37943097615.
