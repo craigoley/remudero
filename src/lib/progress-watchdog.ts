@@ -39,6 +39,8 @@ export interface ProgressWatchdogVerdict {
   action: ProgressWatchdogAction;
   /** Age of the newest progress row, or null when none was read. */
   progressAgeMs: number | null;
+  /** W1-T6598: the boot that started the current generation, when it is newer than every progress row. */
+  generationBootMs?: number | null;
   failedBoots15m: number;
   reason: string;
 }
@@ -92,6 +94,32 @@ export function failedBootTimes(rows: ReadonlyArray<Record<string, unknown>>, no
   return failed;
 }
 
+/**
+ * W1-T6598 — the boot that started the current generation, when it is NEWER than every progress row:
+ * the newest `daemon.boot`, or a `daemon.paths` still inside BOOT_GRACE_MS with no `daemon.boot` yet
+ * (plan sync runs before `daemon.boot`, so a just-recycled daemon is mid-boot for tens of seconds).
+ * A failed boot (past the grace, never booted) starts nothing: it is CRASH_LOOP's evidence.
+ */
+export function generationBootMsFromRows(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+  newestProgressMs: number | undefined,
+): number | null {
+  const booted = new Set<string>();
+  for (const row of rows) if (row.step === "daemon.boot") booted.add(typeof row.run_id === "string" ? row.run_id : "");
+  let newest: number | undefined;
+  for (const row of rows) {
+    const ms = rowMs(row);
+    if (ms === undefined) continue;
+    const runId = typeof row.run_id === "string" ? row.run_id : "";
+    const starts = row.step === "daemon.boot"
+      || (row.step === "daemon.paths" && !booted.has(runId) && nowMs - ms <= BOOT_GRACE_MS);
+    if (starts && (newest === undefined || ms > newest)) newest = ms;
+  }
+  if (newest === undefined) return null;
+  return newestProgressMs === undefined || newest > newestProgressMs ? newest : null;
+}
+
 export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWatchdogVerdict {
   const { rows, nowMs, openPrCount } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
@@ -102,8 +130,10 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
     if (ms !== undefined && (newestProgressMs === undefined || ms > newestProgressMs)) newestProgressMs = ms;
   }
   const progressAgeMs = newestProgressMs === undefined ? null : Math.max(0, nowMs - newestProgressMs);
+  // A generation's stall is aged from its OWN boot, never from the dead generation's last progress row.
+  const generationBootMs = generationBootMsFromRows(rows, nowMs, newestProgressMs);
   const verdict = (state: ProgressWatchdogState, action: ProgressWatchdogAction, reason: string): ProgressWatchdogVerdict =>
-    ({ state, action, progressAgeMs, failedBoots15m, reason });
+    ({ state, action, progressAgeMs, generationBootMs, failedBoots15m, reason });
 
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);
@@ -111,6 +141,14 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   if (rows.length === 0) return verdict("UNKNOWN", "none", "no ledger rows were read");
   if (openPrCount === undefined) return verdict("UNKNOWN", "none", "the open-PR count is unknown (no sweep.pass row with an enumerated count)");
   if (openPrCount === 0) return verdict("IDLE", "none", "no open PRs, so no progress is owed");
+  if (generationBootMs !== null) {
+    // Bounded startup allowance: the existing STALL_* bounds, run from this generation's own boot.
+    const bootAgeMs = Math.max(0, nowMs - generationBootMs);
+    const said = `this generation booted ${Math.floor(bootAgeMs / 60_000)} min ago and has written no progress row`;
+    if (bootAgeMs > STALL_RECYCLE_AFTER_MS) return verdict("STALLED", "recycle", `${said}, with ${openPrCount} open PR(s)`);
+    if (bootAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said}, with ${openPrCount} open PR(s)`);
+    return verdict("PROGRESSING", "none", `${said} yet; its first pass is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after boot`);
+  }
   if (progressAgeMs === null) return verdict("UNKNOWN", "none", "no sweep.pass, review.posted or verdict.merged row was read");
   const minutes = Math.floor(progressAgeMs / 60_000);
   if (progressAgeMs > STALL_RECYCLE_AFTER_MS) {
