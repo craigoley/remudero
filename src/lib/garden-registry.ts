@@ -181,7 +181,7 @@ export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, op
   const pacing = readGardenPacing(stateDir, name);
   if (pacing === undefined) return true;
   if (opts.inputs !== undefined && opts.inputs() !== pacing.inputs) return true;
-  const last = Date.parse(pacing.lastPassAt);
+  const last = Date.parse(pacing.lastPassAt); // expiring-fixture: exempt -- written by recordGardenPacing from the injected clock; tests derive it from that clock, never a fixed literal.
   const quiet = Math.max(0, last - Date.parse(pacing.lastNewAt));
   return (opts.clock ?? systemClock).now() - last >= quiet / GARDEN_QUIET_BACKOFF_DIVISOR;
 }
