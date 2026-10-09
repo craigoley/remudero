@@ -1913,8 +1913,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     });
   const repoRoot = entrypointRepoRoot;
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
+  // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = productionFixProgressJudge({ cwd: repoRoot,
-    settingsFile: join(repoRoot, "settings", "worker.json"), spawn: spawnImpl });
+    settingsFile: join(repoRoot, "settings", "worker.json") });
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
@@ -3605,7 +3606,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
           deps: {
-            fixProgressJudge: effectsProgressJudge,
+            fixProgressJudge: evidence.progressJudge ?? effectsProgressJudge,
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
             // W1-T3718: the repair ladder's fleet state follows THIS spawn — a capacity refusal
@@ -10244,6 +10245,8 @@ export function operatorVerdictEvidence(
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];
   progressDecision?: FixProgressVerdict;
+  /** W1-T7096: the judge the sweep asked, so the dispatched rung asks the same one. */
+  progressJudge?: FixProgressJudge;
   progressApproach?: string;
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
@@ -14995,7 +14998,7 @@ export async function runSweep(
                 });
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
-                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
+                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision, progressJudge: deps.fixProgressJudge,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
                   detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase)), dedupeKey);
@@ -15541,6 +15544,7 @@ export async function runSweep(
               // dispatch, including one beyond its former strike ceiling, remains judge-gated.
               if (!planShardRepairDue && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
+              fixEvidence.progressJudge = deps.fixProgressJudge;
               if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
