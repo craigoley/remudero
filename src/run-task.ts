@@ -2815,6 +2815,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -38309,6 +38310,22 @@ export async function daemonCommand(
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
+        // W1-T7093: maintain the worker-tree ledger on the same recurring heartbeat the reader
+        // consumes. This is report-only bookkeeping; a failure never alters dispatch or workers.
+        sweepHostMemoryReservations: () => {
+          const swept = sweepMemoryReservations({ root: config.root, log: (event) => log(String(event.event ?? "host_memory_ledger.diagnostic"), event) });
+          if (swept) {
+            log("daemon.host_memory_reservations.swept", {
+              state: swept.reading.state,
+              scope: swept.reading.scope,
+              live: swept.reading.entries.length,
+              released: swept.released.length,
+              uncertain: swept.reading.counts.uncertain,
+              incomplete_walk: swept.reading.counts.incompleteWalk,
+              reserved_mib: swept.reading.reservedMib,
+            });
+          }
+        },
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
