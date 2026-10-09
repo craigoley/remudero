@@ -91,15 +91,20 @@ const SUITE = /^test\/.*\.test\.ts$/;
 const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
 const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
+const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
 const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
 
-/** The file that forces a full run, or undefined when every change is modelled. A file the read map
- *  speaks for ({@link READ_MAPPED}) forces one only when `readMapUsable` is false. */
+/** The two modelled contracts use content readers; other contract-tree paths force a full run.
+ *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */
 export function fullRunTrigger(changed: readonly string[], readMapUsable = false): string | undefined {
-  return changed.find((f) => !(readMapUsable && READ_MAPPED.test(f)) &&
-    (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f))));
+  return changed.find((f) => {
+    if (CONTRACT_FILE.test(f)) return false;
+    if (/^(?:openapi|packages)\//.test(f)) return true;
+    return !(readMapUsable && READ_MAPPED.test(f)) &&
+      (!MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
+  });
 }
 
 export const READ_MAP_FORMAT = "rmd-read-map-v1";
@@ -247,9 +252,9 @@ function specifiers(content: string): string[] {
  *  a suite reaches a script it spawns or loads by URL rather than imports. `at` is the offset of the
  *  path's first quote. */
 function namedPaths(content: string): Array<{ path: string; at: number }> {
-  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs))["'`]/g)]
+  const out = [...content.matchAll(/["'`]((?:src|scripts|bin|test)\/[\w./-]+\.(?:ts|mts|mjs|js|cjs)|openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)["'`]/g)]
     .map((m) => ({ path: m[1]!, at: m.index }));
-  for (const m of content.matchAll(/["'](src|scripts|bin)["']\s*,\s*((?:["'][\w.-]+["']\s*,\s*)*)["']([\w.-]+\.(?:ts|mjs|js|cjs))["']/g)) {
+  for (const m of content.matchAll(/["'](src|scripts|bin|openapi|packages)["']\s*,\s*((?:["'][\w.-]+["']\s*,\s*)*)["']([\w.-]+\.(?:ts|mjs|js|cjs|yaml))["']/g)) {
     const middle = [...m[2]!.matchAll(/["']([\w.-]+)["']/g)].map((p) => p[1]);
     out.push({ path: [m[1], ...middle, m[3]].join("/"), at: m.index });
   }
@@ -286,7 +291,7 @@ function usedAtRuntime(masked: string, at: number): boolean {
   return false;
 }
 
-/** The named-path edges `file` contributes to the graph. A src/ path written as a STRING inside a
+/** The named-path edges `file` contributes to the graph. A repo path written as a STRING inside a
  *  src/ module is usually data — authority.ts, config-schema.ts, worktree-sites.ts and
  *  baked-runtime-inputs.ts list src paths in tables — never an import: MEASURED 2026-10-06 those 114
  *  string edges made almost every module reach src/run-task.ts. It stays an edge only when the module
@@ -297,7 +302,7 @@ function namedEdges(file: string, content: string, known: ReadonlySet<string>): 
   let masked: string | undefined;
   return namedPaths(content).filter(({ path, at }) => {
     if (!known.has(path)) return false;
-    if (!fromSrc || !path.startsWith("src/")) return true;
+    if (!fromSrc) return true;
     masked ??= maskLiterals(content);
     return usedAtRuntime(masked, at);
   }).map(({ path }) => path);
@@ -352,7 +357,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const mapProblem = readMapProblem(input.readMap);
   const trigger = fullRunTrigger(files, mapProblem === undefined);
   if (trigger !== undefined) {
-    const why = READ_MAPPED.test(trigger) ? ` (the read map cannot speak for it: ${mapProblem})` : "";
+    const why = READ_MAPPED.test(trigger) && mapProblem !== undefined ? ` (the read map cannot speak for it: ${mapProblem})` : "";
     return {
       suites: [], fullRun: true, reasons: [`full run: ${trigger} is outside what the selector models${why}`], recentOnly: { floor: [] },
       ...(why === "" ? {} : { readMapFallback: mapProblem! }),
@@ -365,7 +370,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   };
   for (const f of files) if (SUITE.test(f)) pick(f, "changed test");
 
-  // The reverse import graph, walked breadth-first from every changed module.
+  // The reverse import graph, walked breadth-first from every changed module or contract.
   const { importers, namedDependencies } = buildAffectedSuitesGraph(input.files, files);
   const changedSet = new Set(files);
   // Suites that name a changed file by path (spawn it, read it): a one-hop read the narrow arm keeps.
@@ -374,12 +379,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     if (SUITE.test(file) && [...named].some((p) => changedSet.has(p))) pathNamers.add(file);
   }
   const seen = new Set<string>();
-  const queue = files.filter((f) => CODE_FILE.test(f)).map((f) => ({ file: f, root: f }));
+  const contractSeen = new Set<string>();
+  const queue = files.filter((f) => CODE_FILE.test(f) || CONTRACT_FILE.test(f)).map((f) => ({ file: f, root: f }));
   while (queue.length > 0) {
     const { file, root } = queue.shift()!;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    if (SUITE.test(file) && file !== root) pick(file, `reaches ${root}`);
+    const visited = CONTRACT_FILE.test(root) ? contractSeen : seen;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    if (SUITE.test(file) && file !== root) {
+      pick(file, `reaches ${root}`);
+      if (CONTRACT_FILE.test(root)) pathNamers.add(file);
+    }
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
