@@ -1,0 +1,72 @@
+- id: W1-T6782
+  title: "THE DAEMON CANNOT SAY WHAT ITS OWN 4-5 GB IS — no row records the main process's RSS, V8 heap or swap, or its container's cgroup memory, so a fixed baseline, retained state, uncollected garbage and worker peaks are indistinguishable after the fact; add payload-free memory fields to the existing daemon.alive heartbeat, with no new timer, heap dump, forced GC or heap-limit change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what the existing liveness row reports about memory; nothing it decides. High for blast radius: daemon.alive is the row the progress watchdog and doctor read, so a sampler that breaks it reads as a dead daemon
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: read-only daemon memory diagnosis during the serve capacity outage"
+  plan_refs: [W1-T3335, W1-T2932, W1-T2744, W1-T5355, W1-T1038, W1-T147]
+  files: [src/lib/daemon-memory-telemetry.ts, src/lib/daemon.ts, src/run-task.ts, test/the-daemon-heartbeat-says-what-its-memory-is.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 on the Azure host (16.8 GB RAM), read only: /proc status fields and cgroup v2 files sampled every
+    10 s from the host; no dumps.
+    - The core daemon's main process holds 4.0 GB rss+swap 11 min after boot and 3.3-4.8 GB through 23 min. The previous
+      generation held 4.9 GB at 74 min. Every other process in the container idles under 0.1 GB.
+    - Worker children (codex/claude CLIs, garden, census and tsc node children) add 0.5-4.6 GB. The container then hits
+      memory.max (9.25 GB): 7,778 memory.events `max` in about 2.5 h, and 5,778 in the first 40 min of the next generation.
+      The main process's resident set FALLS as children rise (4.2 -> 1.0-1.6 GB, up to 2.75 GB swapped), and it swaps back
+      in when touched. That is a direct source of the host swap-in that kept remudero-serve from restarting.
+    - Whether the 4-5 GB baseline is retained state or garbage that V8 never had to collect under its 8 GB ceiling
+      (NODE_OPTIONS --max-old-space-size=8192, W1-T2932) cannot be told: the daemon writes v8 heap numbers only in
+      daemon.heap_pressure_exit (W1-T3335) when it is about to exit. Nothing records rss, heapUsed, the process's swap or
+      the cgroup's state over time. The host-resource gardener (W1-T4804) samples disk and host swap from heartbeats, not
+      process memory. serve has this telemetry (sampleServeMemory, W1-T5355); the daemon does not.
+    - Every later decision waits on this: a heap reduction needs retained-vs-slack, and a host-wide worker memory budget
+      needs measured service baselines and worker peaks.
+    - W1-T147 (the overnight chaos drill) shares src/lib/daemon.ts and src/run-task.ts only because both are the daemon's
+      wiring files. It injects failures and checks recovery rows; this task adds memory fields to the heartbeat. Neither
+      supersedes the other.
+  design: |
+    (1) A pure sampler, sampleDaemonMemory in src/lib/daemon-memory-telemetry.ts, returns flat fields, all integers in bytes unless named:
+        - process (process.memoryUsage()): rss_bytes, heap_used_bytes, heap_total_bytes, external_bytes,
+          array_buffers_bytes; heap_size_limit_bytes from the existing v8HeapStatistics seam; vm_swap_bytes from
+          /proc/self/status VmSwap (this process's pages in swap).
+        - cgroup v2 (/sys/fs/cgroup), with their kernel meanings in the doc comment: cg_memory_current_bytes (everything
+          charged to the container: every process's anon and page cache plus kernel memory, not this process alone);
+          cg_swap_current_bytes (the container's pages in swap); cg_memory_max_bytes (null for "max"); cg_anon_bytes and
+          cg_file_bytes (memory.stat anon and file); and the cumulative memory.events counters since the cgroup was
+          created: cg_events_high (times usage exceeded memory.high and was throttled), cg_events_max (times usage was about to exceed memory.max and reclaim ran),
+          cg_events_oom (times an allocation was about to fail at the limit), cg_events_oom_kill (processes killed).
+        - workload: active_workers (activeWorkerCount), in_flight_reviews (inFlightReviewCount); detached_sweep_actions
+          and phase already ride the row.
+        - identity: the row already carries run_id (DAEMON-<boot ms>), actor_pid and host. Add uptime_s and the boot
+          head_sha, so a generation is named without joining daemon.boot.
+    (2) Wiring: run-task.ts binds sampleDaemonMemory to a `readMemoryTelemetry` dep, spread into the existing log("daemon.alive", …) in startInFlightTicker, as
+        readLoopTelemetry is. No new timer, row, or step name; the cadence is pollIntervalMs.
+    (3) Unknown is never zero. If the cgroup files are unreadable (no cgroup v2, a host run), the cgroup fields are absent
+        and mem_cgroup carries "unreadable:<reason>". If the whole sampler throws, mem_telemetry carries
+        "error:<message>". The heartbeat row is still written either way.
+    (4) Overhead is measured, not asserted: telemetry_sample_us on the row records the sampler's own wall time.
+    (5) Payload-free and passive. No heap snapshot, writeHeapSnapshot, inspector session, global.gc or --expose-gc, and
+        no NODE_OPTIONS or heap-limit change. Nothing reads the new fields to decide anything in this task.
+    (6) After adoption the operator reports the measured cost from production rows: telemetry_sample_us p50 and p99, and
+        the added bytes per day against LEDGER_ROTATION_CEILING_BYTES. If either is material, the cgroup half moves to the
+        existing HEADROOM_SAMPLE_MAX_AGE_MS sub-sample rather than dropping fields.
+  acceptance:
+    - claim: "daemon.alive carries the process, cgroup, workload and identity fields from fixture cgroup and proc files; unreadable cgroup files yield mem_cgroup unreadable and no zero-valued cgroup fields; a throwing sampler still writes the heartbeat with mem_telemetry error; the added fields stay under 600 serialized bytes; and the sampler module references no heap snapshot, inspector or gc entry point"
+      proof: "unit test: test/the-daemon-heartbeat-says-what-its-memory-is.test.ts"
+    - claim: "the heartbeat spreads the memory sampler"
+      proof: "grep: readMemoryTelemetry in src/lib/daemon.ts"
+    - claim: "the daemon wiring calls the sampler"
+      proof: "grep: sampleDaemonMemory( in src/run-task.ts"
+  falsifier: |
+    Remove the readMemoryTelemetry spread from daemon.alive: the field assertions fail. Return 0 for an unreadable
+    cgroup file: the unknown-is-never-zero case fails. Let the sampler's throw escape: the heartbeat-still-written case
+    fails.
