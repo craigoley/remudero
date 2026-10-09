@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -7,6 +7,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import { buildCoverageNightlyDaemonHook } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   readCoverageNightlySummary,
   coverageNightlyGithubReader,
@@ -116,11 +117,11 @@ test("the GitHub reader asks for the newest completed main nightly, including a 
     const calls: string[][] = [];
     let downloadDir = "";
     const github = coverageNightlyGithubReader({
-      json: async (args) => {
+      ghJsonAsync: async (args) => {
         calls.push(args);
         return { workflow_runs: [run] };
       },
-      download: async (args) => {
+      ghTextAsync: async (args) => {
         calls.push(args);
         downloadDir = args[args.indexOf("--dir") + 1];
         writeFileSync(join(downloadDir, "coverage-nightly-summary.json"), JSON.stringify(summary));
@@ -141,8 +142,8 @@ test("a failed artifact download logs once, cleans up, and retries next cadence"
     let downloadDir = "";
     const logs: string[] = [];
     const github = coverageNightlyGithubReader({
-      json: async () => ({ workflow_runs: [run] }),
-      download: async (args) => {
+      ghJsonAsync: async () => ({ workflow_runs: [run] }),
+      ghTextAsync: async (args) => {
         downloads++;
         downloadDir = args[args.indexOf("--dir") + 1];
         if (downloads === 1) throw new Error("artifact expired");
@@ -184,12 +185,13 @@ test("the daemon GitHub cadence invokes the intake before its sibling check can 
 
 test("both default GitHub transports really spawn and propagate their child failure", { concurrency: false }, async () => {
   await withTempDir("nightly-intake-test", async (root) => {
-    const bin = join(root, "bin");
-    mkdirSync(bin);
-    symlinkSync(process.execPath, join(bin, "gh"));
+    const shim = ghShim([
+      { when: "api repos/owner/repo/actions/workflows/", stderr: "nightly list unavailable", exit: 1 },
+      { when: "run download 1234", stderr: "nightly artifact unavailable", exit: 1 },
+    ]);
     const previousPath = process.env.PATH;
     const previousCache = process.env.RMD_GH_CACHE_HOME;
-    process.env.PATH = bin;
+    process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
     process.env.RMD_GH_CACHE_HOME = join(root, "cache");
     try {
       for (const useDefaultDownload of [false, true]) {
@@ -198,14 +200,17 @@ test("both default GitHub transports really spawn and propagate their child fail
         const logs: string[] = [];
         const result = await readCoverageNightlySummary({
           ledgerPath: join(stateDir, LEDGER_FILENAME), owner: "owner", repo: "repo", clock: fixedClock(at),
-          reader: useDefaultDownload ? coverageNightlyGithubReader({ json: async () => ({ workflow_runs: [run] }) }) : undefined,
+          reader: useDefaultDownload ? coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [run] }) }) : undefined,
           log: (line) => logs.push(line),
         });
         assert.equal(result.status, "failed");
         assert.equal(logs.length, 1);
-        assert.match(logs[0], /Cannot find module/);
+        assert.match(logs[0], useDefaultDownload ? /nightly artifact unavailable/ : /nightly list unavailable/);
         assert.deepEqual(rows(join(stateDir, LEDGER_FILENAME)), []);
       }
+      assert.equal(shim.calls().length, 2);
+      assert.match(shim.calls()[0], /^api repos\/owner\/repo\/actions\/workflows\/coverage-nightly\.yml\/runs\?/);
+      assert.match(shim.calls()[1], /^run download 1234 --repo owner\/repo --name coverage-nightly --dir /);
     } finally {
       if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
       if (previousCache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = previousCache;
@@ -233,12 +238,12 @@ test("an empty workflow list is no-run, while malformed and non-main runs fail v
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
     const logs: string[] = [];
     const opts = { ledgerPath, owner: "owner", repo: "repo", log: (line: string) => logs.push(line) };
-    const empty = coverageNightlyGithubReader({ json: async () => ({ workflow_runs: [] }) });
+    const empty = coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [] }) });
     assert.equal((await readCoverageNightlySummary({ ...opts, reader: empty, clock: fixedClock(at) })).status, "no-run");
     assert.equal(logs.length, 0);
-    const malformed = coverageNightlyGithubReader({ json: async () => ({ message: "unreadable" }) });
+    const malformed = coverageNightlyGithubReader({ ghJsonAsync: async () => ({ message: "unreadable" }) });
     assert.equal((await readCoverageNightlySummary({ ...opts, reader: malformed, clock: fixedClock(at + day) })).status, "failed");
-    const other = coverageNightlyGithubReader({ json: async () => ({ workflow_runs: [{ ...run, head_branch: "other" }] }) });
+    const other = coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [{ ...run, head_branch: "other" }] }) });
     assert.equal((await readCoverageNightlySummary({ ...opts, reader: other, clock: fixedClock(at + 2 * day) })).status, "failed");
     assert.deepEqual(rows(ledgerPath), []);
     assert.equal(logs.length, 2);

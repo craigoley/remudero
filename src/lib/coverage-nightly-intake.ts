@@ -35,13 +35,12 @@ function completedMainRun(value: unknown): CoverageNightlyRun {
   return run;
 }
 
-export function coverageNightlyGithubReader(deps: {
-  json?: typeof ghJsonAsync;
-  download?: typeof ghTextAsync;
-} = {}): CoverageNightlyReader {
+export function coverageNightlyGithubReader(
+  deps: Partial<Pick<typeof import("./github-transport.js"), "ghJsonAsync" | "ghTextAsync">> = {},
+): CoverageNightlyReader {
   return {
     async newestCompletedRun(owner, repo) {
-      const payload = await (deps.json ?? ghJsonAsync)([
+      const payload = await (deps.ghJsonAsync ?? ghJsonAsync)([
         "api", `repos/${owner}/${repo}/actions/workflows/coverage-nightly.yml/runs?branch=main&status=completed&per_page=1`,
       ]) as { workflow_runs?: unknown[] } | null;
       if (!Array.isArray(payload?.workflow_runs)) throw new Error("coverage-nightly workflow run list is unreadable");
@@ -49,7 +48,7 @@ export function coverageNightlyGithubReader(deps: {
     },
     async summaryForRun(owner, repo, run) {
       return withTempDir("coverage-nightly", async (dir) => {
-        await (deps.download ?? ghTextAsync)([
+        await (deps.ghTextAsync ?? ghTextAsync)([
           "run", "download", String(run.id), "--repo", `${owner}/${repo}`,
           "--name", "coverage-nightly", "--dir", dir,
         ]);
