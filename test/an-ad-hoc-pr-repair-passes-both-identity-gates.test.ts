@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -45,7 +45,7 @@ function cli(script: string, path: string, base: string) {
   delete env.NODE_OPTIONS;
   delete env.NODE_V8_COVERAGE;
   const result = spawnSync(process.execPath, ["--import", "tsx", script, "--worktree-path", path,
-    ...(script === workerScript ? ["--base", base] : []), "--head-ref", headRef],
+    ...(script.endsWith("worker-branch-shape.mjs") ? ["--base", base] : []), "--head-ref", headRef],
   { env, encoding: "utf8", timeout: 30_000, maxBuffer: 2 << 20 });
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
@@ -110,4 +110,16 @@ test("unreadable or malformed plan evidence cannot prove a PR number is ad-hoc",
     assert.equal(result.status, 1, defect + result.stdout + result.stderr);
     assert.match(result.stderr, /REFUSED.*PR-10450/);
   }
+});
+
+test("a standalone gate without the YAML parser refuses the ad-hoc exemption instead of crashing", (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.path, "scripts", "lib"), { recursive: true });
+  for (const file of ["worker-branch-shape.mjs", "lib/argv.mjs", "lib/git.mjs"]) {
+    copyFileSync(join(root, "scripts", file), join(f.path, "scripts", file));
+  }
+  const result = cli(join(f.path, "scripts", "worker-branch-shape.mjs"), f.path, f.base);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /REFUSED.*PR-10450/);
+  assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
 });

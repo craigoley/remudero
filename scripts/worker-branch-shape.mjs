@@ -21,8 +21,8 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
-import { parse as parseYaml } from "yaml";
 import { isMainModule } from "./lib/argv.mjs";
 import { git, gitOrThrow } from "./lib/git.mjs";
 
@@ -144,6 +144,14 @@ export function declaredTaskIds(worktreePath) {
  * @param {string} worktreePath
  */
 export function inspectDeclaredTaskIds(worktreePath) {
+  let parseYaml;
+  try {
+    // The dependency-free pre-push self-credit mode must still run before an install.
+    // No parser means no proven absence, never an ad-hoc exemption.
+    ({ parse: parseYaml } = createRequire(import.meta.url)("yaml"));
+  } catch {
+    return { ids: declaredTaskIds(worktreePath), complete: false };
+  }
   const ids = new Set();
   let complete = true;
   const readIds = (path) => {
