@@ -29,4 +29,8 @@ test("unit test: test/the-gh-shim-answers-its-routes-verbatim.test.ts", () => {
   shim.addRoute({ when: "plain", stdout: "$NAME\\n" });
   assert.equal(run(shim, "plain").stdout, "$NAME\\n\n");
   assert.equal(run(shim, "json").stdout, `${JSON.stringify(value)}\n`);
+
+  const envShim = ghShim([{ when: "env", stdoutEnv: "NAME" }]);
+  assert.equal(run(envShim, "env").stdout, "expanded\n");
+  assert.throws(() => envShim.addRoute({ when: "bad", stdoutEnv: "X; rm -rf /" }), /environment variable name/);
 });
