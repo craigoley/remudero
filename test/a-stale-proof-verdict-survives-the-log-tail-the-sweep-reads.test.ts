@@ -9,7 +9,10 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { proofDiscriminationEvidenceFromCheckLog } from "../src/lib/sweep.js";
-import { CI_STEP_ERROR_CONTEXT_LINES } from "../src/run-task.js";
+
+// The failed-step extractor currently keeps eight lines before GitHub's error marker.
+// Keep the regression at that narrow tail without importing the full run-task command module.
+const STEP_TAIL_LINES = 8;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const gate = (await import(pathToFileURL(join(ROOT, "scripts", "proof-discrimination-gate.mjs")).href)) as {
@@ -18,7 +21,7 @@ const gate = (await import(pathToFileURL(join(ROOT, "scripts", "proof-discrimina
 
 /** What the sweep keeps of a failed step: the lines just before GitHub's `##[error]` marker. */
 function stepTail(lines: string[]): string {
-  return lines.slice(-CI_STEP_ERROR_CONTEXT_LINES).join("\n");
+  return lines.slice(-STEP_TAIL_LINES).join("\n");
 }
 
 function runGate(proofs: string[], outputLines: number): string[] {
@@ -40,7 +43,6 @@ function runGate(proofs: string[], outputLines: number): string[] {
 }
 
 test("a stale unit-test proof with long output is still named in the log tail the sweep reads", () => {
-  assert.ok(CI_STEP_ERROR_CONTEXT_LINES > 0, "the sweep keeps a positive number of context lines");
   const proof = "unit test: test/an-unfiled-prs-review-contract-has-a-sweep-side-producer.test.ts";
   const tail = stepTail(runGate([proof], 40));
   const evidence = proofDiscriminationEvidenceFromCheckLog([{ name: "proof-discrimination", logTail: tail }]);
