@@ -152,6 +152,28 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
   return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
+/** W1-T5714 — the sweep-side producer of an untasked PR's review contract. `runReview` records an
+ * untasked PR's contract from its body under `PR-<n>`: a deterministic review omits risk and
+ * budget, a semantic one carries the untasked defaults. Recompute both from the current body and
+ * keep the semantic form only when it equals the recorded digest, so an unchanged contract reuses. */
+export function bodyReviewContractDigest(input: {
+  reviewLedgerKey: string;
+  body: string;
+  unfiled: boolean;
+  recordedDigest?: string;
+  semanticRisk: TaskRisk;
+  semanticBudgetUsd: number;
+}): string | undefined {
+  const acceptance = parseAcceptanceBlock(input.body);
+  if (acceptance.length === 0) return undefined;
+  const deterministic = reviewContractDigest({ taskId: input.reviewLedgerKey, acceptance });
+  if (!input.unfiled) return deterministic;
+  const semantic = reviewContractDigest({
+    taskId: input.reviewLedgerKey, acceptance, risk: input.semanticRisk, budgetUsd: input.semanticBudgetUsd,
+  });
+  return semantic === input.recordedDigest ? semantic : deterministic;
+}
+
 export interface ReviewEvaluatorProvenance {
   provider: string | null;
   requestedModel: string | null;
