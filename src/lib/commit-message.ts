@@ -517,8 +517,6 @@ export function commitlintStep(
 /**
  * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the same invocation CI's `ci` job runs. `npm test`
  * strips types via `tsx` without checking them, so a green test run is not a compile (PR #477).
- * Incremental against this checkout's own buildinfo, seeded from the canonical checkout's: the same
- * diagnostics at about half the peak memory (lib/typecheck-buildinfo.ts).
  */
 export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): PreflightStepResult {
   try {

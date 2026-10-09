@@ -48,6 +48,7 @@ export function gitDirOf(root: string): string | undefined {
     const dir = resolve(root, m[1]!);
     return existsSync(dir) ? dir : undefined;
   } catch {
+    // No readable `.git`: this tree has no git directory to keep a buildinfo in, so it runs the plain check.
     return undefined;
   }
 }
@@ -103,6 +104,7 @@ export function rebaseBuildInfo(
   try {
     info = JSON.parse(text) as Record<string, unknown>;
   } catch {
+    // Not JSON: not a buildinfo tsc could use either, so there is nothing to seed from.
     return undefined;
   }
   if (info === null || typeof info !== "object" || info.version !== tsVersion) return undefined;
@@ -129,6 +131,7 @@ export function installedTypescriptVersion(root: string): string | undefined {
     const pkg = JSON.parse(readFileSync(join(root, "node_modules", "typescript", "package.json"), "utf8")) as { version?: unknown };
     return typeof pkg.version === "string" ? pkg.version : undefined;
   } catch {
+    // No readable typescript install: no version to match a seed against, so no seed is written.
     return undefined;
   }
 }
@@ -182,6 +185,7 @@ export function seedFromCanonical(root: string, buildInfo: string): SeedOutcome 
   try {
     canonical = canonicalBuildInfo(root);
   } catch {
+    // An unreadable commondir names no canonical checkout, so there is no seed to look for.
     return "no-seed";
   }
   if (canonical === undefined || resolve(canonical.buildInfo) === resolve(buildInfo)) return "no-seed";
