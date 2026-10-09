@@ -192,7 +192,7 @@ test("W1-T4843: nested precondition reads stand down without spawning", () => {
 });
 
 test("W1-T4843: the default reader really shells out to the shipped rmd help", () => {
-  const output = readTaskPrecondition(["--help"]);
+  const output = readTaskPrecondition(["--help"], execFileSync, 120_000);
   assert.match(output, /rmd run-task/);
   const subject = plan(`  precondition: ${JSON.stringify({ read: ["--help"], expect: output.trim() })}`);
   assert.equal(unmetTaskPrecondition(subject.tasks[0]), undefined);
