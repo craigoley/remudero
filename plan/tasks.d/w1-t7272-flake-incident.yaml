@@ -1,0 +1,35 @@
+- id: W1-T7272
+  title: "FLAKE INCIDENT — test/the-census-admission-set-is-derived-not-enumerated.test.ts failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+  files:
+    - test/the-census-admission-set-is-derived-not-enumerated.test.ts
+  acceptance:
+    - claim: "the cause of test/the-census-admission-set-is-derived-not-enumerated.test.ts's intermittent failure is fixed in test/the-census-admission-set-is-derived-not-enumerated.test.ts, pinned by a test that forces the failing order"
+      proof: 'grep: test("W1-T7272 pins the cause of the intermittent failure" in test/the-census-admission-set-is-derived-not-enumerated.test.ts'
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: test/the-census-admission-set-is-derived-not-enumerated.test.ts
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10221, #10354, #10368.
+    CI runs: 37875878236, 37944299457, 37947872859.
+    Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Codex fix-round assessment: the task declares only test/the-census-admission-set-is-derived-not-enumerated.test.ts, an existing test. Its proposed test repair is reversible and remains subject to CI and review."
+      - "The task requests no privileged access, destructive operation, merge or deploy policy change, or operator-only decision. Its declared files and behavioral acceptance claim are unchanged; its grep proof names the same required regression test in the declared file so the future repair can distinguish itself from the base tree."
+      - "This judgment assesses the filed task, not a completed flake repair. The incident record supplies three PR and CI run identifiers with no recovered retries; those remote runs were not independently re-read in this round, and the cause remains to be investigated."
+      - "Live family merge-credit and gardener state were unavailable in this fix round, so the judgment uses the neutral family prior and the current policy confidence threshold without claiming measured family outcomes."
+    judged_at: "2026-10-09T17:24:16.000Z"
+    pin: "10dddbacdd9ec1b1ca4e4f983d2ad237bdb1a63e0474c7e70c2974bbb02f63e0"
