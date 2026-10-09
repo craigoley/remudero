@@ -16525,15 +16525,9 @@ export async function runSweep(
   return summary;
 }
 
-/** W1-T7214 — overlapping light passes share one ready refresh, so two passes cannot pick one head. */
 let lightPassReadyRefreshInFlight = false;
 
-/** W1-T7214 — A READY PR MAIN MOVED UNDER IS REFRESHED ON THE LIGHT PASS. W1-T6022's `ready-overlap`
- *  arm, read ONCE over the whole snapshot (never per PR, so W1-T528's fan-out cannot recur), presses
- *  update-branch on AT MOST the single oldest-head candidate. It spends W1-T5921's one update per
- *  (PR, head) through the same `sweep.update_branch.attempted` row the full sweep reads, and stands
- *  down under W1-T5939's incident hold and W1-T5903's merge queue. Returns the refreshed PR number. */
-export async function runLightPassReadyRefresh(
+export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
@@ -16546,7 +16540,7 @@ export async function runLightPassReadyRefresh(
   try {
     const appendLine = deps.appendLine ?? appendLedger;
     const now = deps.now ? deps.now() : Date.now();
-    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live
+    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
     const spentHeads = new Set<string>();
     for (const l of ledgerLines) {
       if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
@@ -16560,7 +16554,6 @@ export async function runLightPassReadyRefresh(
     const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
     let candidates = select(facts);
     if (candidates.length === 0) return undefined;
-    // The status page is read only when a candidate exists, exactly as the full sweep's ready arm reads it.
     if (deps.readActionsStatusSummary !== undefined) {
       const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
         .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
@@ -16573,7 +16566,7 @@ export async function runLightPassReadyRefresh(
         try {
           queued = mergeQueue(c.prUrl) === true;
         } catch {
-          queued = false; // a queue read that fails is "no queue", as the full sweep reads it
+          queued = false; // an unread queue is "no queue", as in the full sweep
         }
         if (queued && !ledgerLines.some((l) => l.step === "sweep.update_branch.skipped_queue" &&
           l.pr_number === c.prNumber && l.head_sha === c.headSha)) {
