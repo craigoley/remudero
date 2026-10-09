@@ -45,6 +45,7 @@ export interface ModelApproval {
 export interface Config {
   claudeBin: string;
   root: string;
+  diskArtifactScanRoots?: string[];
   installRoot?: string;
   zdotdir?: string;
   workerShell?: string;
@@ -277,6 +278,7 @@ const workerProvidersShape: ValueSchema = {
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("claudeBin", "string", false, undefined, "config.json", "Absolute path to the real Claude CLI binary.", stringShape),
   configField("root", "string", false, undefined, "config.json", "Workspace root.", stringShape),
+  configField("diskArtifactScanRoots", "string[]", true, "<root>/..", "config.json", "Artifact scan roots, each checked for its own filesystem's free space.", stringArrayShape),
   configField("installRoot", "string", true, "<root>/daemon-install", "config.json", "Daemon git checkout root.", stringShape),
   configField("zdotdir", "string", true, "<root>/../.config/remudero/zdotdir", "config.json", "Worker shell ZDOTDIR.", stringShape),
   configField("workerShell", "string", true, "/bin/bash", "config.json", "Worker Bash-tool shell.", stringShape),

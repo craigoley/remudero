@@ -113,3 +113,9 @@ Learnings used when offered: 22%. Dangling Why pointers: 1.
 - retire lint-plan-refuses-before-pr: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 24%. Dangling Why pointers: 1.
+
+## Pass 2026-10-09T10:04:45.519Z
+
+- retire squash-trailer-gate-task-authoring-lane: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 25%. Dangling Why pointers: 1.

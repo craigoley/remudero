@@ -230,6 +230,17 @@ test("GOLDEN — LINT-PLAN LESSON: the task-authoring lane's cited incident exec
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — ACCEPTANCE-AUTHOR LESSON: the cited refusal reaches task authors and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-acceptance-author-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T6921-the-acceptance-author-gate-gate-refused-2-pull-requests-in-this-window-a.yaml";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "acceptance-author-gate-task-authoring-lane"));
+});
+
 test("GOLDEN — RULE-CHECKS LESSON: the cited gate refusal reaches the worker lane and its proof executes", () => {
   const { verdict, golden } = judgeCase("ci-rule-checks-lesson");
   assert.equal(golden.violation, "none");
@@ -306,6 +317,36 @@ test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task auth
   const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
   const selected = selectLearnings(entries, [taskFile]).selected;
   assert.ok(selected.some((entry) => entry.id === "prompt-surface-gate-learning-path-evidence"));
+});
+
+test("GOLDEN — UNWIRED-GATE LESSON: the cited proof executes and the gate lanes receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-unwired-gate-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of [
+    ".github/workflows/unwired-gate.yml",
+    "scripts/unwired-gate-check.mjs",
+    "src/lib/ci-parity.ts",
+  ]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "unwired-gate-repair-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-shard-seven-eight-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6919.yaml", "plan/feedback/example.yaml", "deploy/example.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "ci-shard-seven-eight-refusals-reach-task-authoring-lane"), taskFile);
+  }
 });
 
 test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {

@@ -20,7 +20,7 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
+  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
@@ -7638,6 +7638,7 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 }
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
+export const BASE_REPRODUCTION_CONTRADICTED_STEP = "sweep.base_reproduction.contradicted";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
@@ -9063,7 +9064,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // weakens no floor, grants no override. `blocked-ambiguous` dedups per `pr@sha`, so a new head
     // re-earns its question and an override stops this row matching — `mergeable` then arms it.
     disposition: "blocked-ambiguous",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    when: (pr) => isCappedArmEscalation(pr),
     blocker: "plan-proof-unrunnable",
     reason: () =>
       "every required check is green and remudero-review reports success, but the verdict ledgered " +
@@ -10416,6 +10417,17 @@ export interface CappedRoutingDiagnosis {
   detail: string;
 }
 
+export function isCappedArmEscalation(pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">): boolean {
+  return pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true;
+}
+
+export function cappedRouteReadsDisposition(
+  pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">,
+  disposition: Disposition,
+): boolean {
+  return disposition === "mergeable" || (disposition === "blocked-ambiguous" && isCappedArmEscalation(pr));
+}
+
 /**
  * W1-T3669 — LEGIBILITY FOR A ROUTE THAT SHIPPED SILENT. `runSweep`'s capped-routing block (W1-T3306)
  * has four preconditions and, until this task, standing down on any of them looked identical to
@@ -10431,7 +10443,7 @@ export function diagnoseCappedRoutingBlock(
   disposition: Disposition,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): CappedRoutingDiagnosis {
-  if (disposition !== "mergeable") {
+  if (!cappedRouteReadsDisposition(pr, disposition)) {
     return {
       blocked: true,
       precondition: "not-mergeable",
@@ -11000,9 +11012,10 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
-  /** W1-T5749 — a fresh read of ONE PR's live head sha, consulted immediately before ANY acting
-   *  disposition fires. A head that differs from the snapshot's stands the act down as
-   *  `sweep.head_moved`. Omitted, or `undefined` (unreadable): the act proceeds as before. */
+  /** Full act-time guard read, shared with fix arms; stale-red release still reads again. */
+  readLiveStateAtAct?: SweepDeps["readLiveState"];
+  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
+   *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
@@ -12080,12 +12093,20 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   let stalled = false;
   let dispatched = false;
   let ciHead: unknown;
+  let amendmentNumber: number | undefined;
+  let awaitingAmendment: number | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
+      awaitingAmendment = undefined;
       ciHead = line.mode === "ci-log" ? line.head_sha : undefined;
+    } else if (line.step === "fix.scope_amendment") {
+      const n = Number(line.amendmentNumber ?? line.amendment_number);
+      if (Number.isSafeInteger(n) && n > 0) amendmentNumber = n;
+    } else if (line.step === "fix.done" && line.subtype === "scope_amendment_pending") {
+      awaitingAmendment = amendmentNumber;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
     } else if (line.step === "fix.commit_refused") {
@@ -12102,6 +12123,10 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
     }
+  }
+  if (awaitingAmendment !== undefined && lines.some((line) =>
+    line.step === PR_TERMINAL_STEP && line.state === "merged" && Number(line.pr_number) === awaitingAmendment)) {
+    return true;
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
@@ -14202,12 +14227,12 @@ export async function runSweep(
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
     }
-    // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
-    // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
-    // its claim re-read and shared strike cap remain the sole spending boundary. An operator
-    // override keeps `arm` true and therefore retains the ordinary mergeable arm route.
+    // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
+    // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,
+    // which claims every capped head first; that escalation now stands only with nothing to repair.
+    // An operator override keeps `arm` true and therefore retains the ordinary mergeable arm route.
     const proofDiscrimination =
-      disposition === "mergeable" && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
+      cappedRouteReadsDisposition(pr, disposition) && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
@@ -14622,10 +14647,13 @@ export async function runSweep(
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
           // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
-          const liveHead = deps.repairAdmissionSurface === "light" && disposition !== "mergeable"
-            ? undefined : await deps.readLiveHeadSha?.(pr);
+          const guardHead = deps.repairAdmissionSurface !== "light" || disposition === "mergeable";
+          const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
+          const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
+            ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
             acted = false;
+            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead };
             standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
               "since this pass's snapshot — not acting; the next pass re-derives from the live head";
             appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
@@ -14833,7 +14861,7 @@ export async function runSweep(
               // FRESH, right before a strike is spent, never the snapshot this pass started from.
               // Omitted or indeterminate behaves exactly as before — dispatch proceeds, failing
               // OPEN rather than closed to a stand-down.
-              const live = await deps.readLiveState?.(pr);
+              const live = liveAtAct ?? await deps.readLiveState?.(pr);
               let terminal: string | undefined;
               if (live) {
                 if (live.ok) {
@@ -15285,7 +15313,10 @@ export async function runSweep(
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
                 const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
                 const { verdict } = row;
-                if (verdict === "reproduced") {
+                const contradicted = verdict !== "clear" && reproductionFiles.every((file) => ciContradictedProbeFiles([...reproductionHistory, { ...row, step: "sweep.base_reproduction" }]).has(file));
+                if (contradicted) {
+                  appendLine(deps.ledgerPath, { ...row, step: BASE_REPRODUCTION_CONTRADICTED_STEP });
+                } else if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
                     const refund = { run_id: deps.runId, task_id: pr.taskId!, step: "fix.strike_refunded", pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -15301,7 +15332,7 @@ export async function runSweep(
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
                 // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
-                const mainFailing = verdict === "clear" ? undefined : mainFailingTestFiles(reproductionHistory);
+                const mainFailing = verdict === "clear" || contradicted ? undefined : mainFailingTestFiles(reproductionHistory);
                 if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
                   acted = false;
                   const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
@@ -15517,7 +15548,7 @@ export async function runSweep(
             case "conflicted": {
               // W1-T106: the SAME terminal-state pre-flight (W1-T177) as blocked-fixable — never
               // spend a merge-conflict fix strike on a PR that went terminal since the snapshot.
-              const live = await deps.readLiveState?.(pr);
+              const live = liveAtAct ?? await deps.readLiveState?.(pr);
               let terminal: string | undefined;
               if (live) {
                 if (live.ok) {

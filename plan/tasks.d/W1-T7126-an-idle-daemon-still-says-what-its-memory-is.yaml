@@ -1,0 +1,47 @@
+- id: W1-T7126
+  title: "AN IDLE DAEMON NEVER SAYS WHAT ITS MEMORY IS — W1-T6782's fields ride daemon.alive, which only the in-flight ticker writes, so the idle site daemon wrote 0 memory samples (283 daemon.tick rows against 3 daemon.alive in one ledger) and the console wrote 1; carry the same sampler on the existing unconditional daemon.tick row when no memory sample has been written within one poll interval, with no new timer and no artificial work"
+  repo: remudero
+  depends_on: [W1-T7092]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which existing row carries the memory sample when the ticker is not running. High for blast radius: daemon.tick is the loop's unconditional liveness row (W1-T1274)
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: idle instances produce no memory samples, so site and console baselines are unmeasured"
+  plan_refs: [W1-T6782, W1-T7092, W1-T1274, W1-T2744, W1-T147]
+  files: [src/lib/daemon.ts, test/an-idle-daemon-still-says-what-its-memory-is.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 in the current, unrotated ledger.ndjson of each instance (rotations not counted for this line):
+    - core: daemon.tick 1, daemon.alive 4. site: daemon.tick 283, daemon.alive 3. console: daemon.tick 16,
+      daemon.alive 1.
+    - Across every ledger form from W1-T6782's adoption to 11:30Z, memory-bearing daemon.alive rows: 134 core, 5
+      console, 0 site.
+    - daemon.alive is written only inside startInFlightTicker, which runs only in the phases that have an in-flight
+      window. daemon.tick is "the one row this loop writes unconditionally, every iteration" (W1-T1274), so an idle
+      daemon writes ticks and no heartbeat.
+    The host-wide budget (W1-T7094) needs each instance's baseline and growth, and today the two idle instances supply
+    none. Missing samples are not measurements.
+    - W1-T147 (the overnight chaos drill) shares src/lib/daemon.ts only because it is the daemon's wiring file. Neither
+      task supersedes the other.
+  design: |
+    (1) Reuse, do not re-implement: the daemon.tick row spreads the same readMemoryTelemetry reading (W1-T6782) and the same
+        worker-thread reading (W1-T7092) that daemon.alive carries. This adds no sampler, field set, timer, row or step name.
+    (2) De-duplicate by time: a tick carries the sample only when no daemon.tick or daemon.alive row has carried one within
+        the last pollIntervalMs. A busy instance therefore keeps sampling on daemon.alive as now, and an idle one samples
+        on its ticks. Each sampled row carries mem_sample_via: "alive" or "tick".
+    (3) daemon.tick stays the loop body's first statement and is written even when the sampler throws. A throw is carried as
+        mem_telemetry "error:…", as on daemon.alive.
+    (4) Nothing is started, woken or scheduled to produce a sample. An instance whose loop does not iterate produces no
+        sample, and that gap stays visible as a gap.
+  acceptance:
+    - claim: "an idle loop's daemon.tick carries the memory fields with mem_sample_via tick; a tick within one poll interval of a sampled daemon.alive carries none; a busy instance's daemon.alive keeps sampling as before; a throwing sampler still writes daemon.tick first with mem_telemetry error; and no timer or extra loop iteration is introduced"
+      proof: "unit test: test/an-idle-daemon-still-says-what-its-memory-is.test.ts"
+    - claim: "the loop's tick row carries the memory sample"
+      proof: "grep: mem_sample_via in src/lib/daemon.ts"
+  falsifier: |
+    Sample on every tick regardless of the last sample: the de-duplication case fails. Move the sample before the tick
+    row or let its throw escape: the tick-still-first case fails.

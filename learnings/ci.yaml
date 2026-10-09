@@ -136,6 +136,41 @@
   src: "ci-learning:8551:ci-shard (1/8)"
   cited: "2026-10-08"
 
+- id: unwired-gate-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/unwired-gate.yml", scripts/unwired-gate-check.mjs, src/lib/ci-parity.ts]
+  fact: >-
+    Before opening a PR that adds or changes a gate-shaped script, npm check script, or its CI
+    registration, run `npm run --silent unwired-gate:check` on the proposed tree. The check reads
+    parsed workflow steps and package.json script calls; register each gate in an executable
+    workflow or package script, and remove stale allowance rows when wiring lands. This is the
+    local check for the unwired-gate refusal, not a textual mention or a unit test of the checker.
+  evidence: >-
+    The unwired-gate gate refused pull requests #10137, #10215, and #10271, and each was repaired.
+    `scripts/unwired-gate-check.mjs` reports gate-shaped scripts that no workflow or package script
+    invokes, plus stale allowances; `.github/workflows/unwired-gate.yml` runs the checker. The
+    individual refusal logs were not available to establish a narrower shared cause.
+  src: "ci-learning:10137:unwired-gate"
+  cited: "2026-10-09"
+
+- id: ci-shard-seven-eight-refusals-reach-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/feedback/**", "deploy/**"]
+  fact: >-
+    When ci-shard (7/8) refuses a pull request, inspect that shard's failure before repairing; the
+    repair window included selector-plan updates, deployment tests, feedback proposals, and plan
+    guidance, so the PR list alone does not establish a shared cause. Route the verified failure and
+    its narrow repair into the task-authoring lane, then rerun the affected proof before resubmitting.
+  evidence: >-
+    The window recorded as ci-learning:9979:ci-shard (7/8) includes PRs #9979, #10001, #10135,
+    #10140, #10186, and #10255, each followed by a repair. Their recorded diffs span plan task
+    shards, a CI learning, deployment code/tests, feedback records, and master-plan guidance; the
+    available commit evidence does not establish one common shard failure cause.
+  src: "ci-learning:9979:ci-shard (7/8)"
+  cited: "2026-10-09"
+
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active
@@ -222,7 +257,8 @@
 
 - id: squash-trailer-gate-task-authoring-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire squash-trailer-gate-task-authoring-lane
+  lifecycle: superseded
   files: ["plan/tasks.d/**", src/run-task.ts, .github/workflows/ci.yml]
   fact: >-
     Before opening a plan-only PR, inspect the commits reachable from its head for
@@ -237,6 +273,23 @@
     ci-learning:5433:squash-trailer-gate.
   src: "ci-learning:5433:squash-trailer-gate"
   cited: "2026-10-08"
+
+- id: acceptance-author-gate-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts, ".github/workflows/ci.yml"]
+  fact: >-
+    Before opening a PR from the task-authoring lane, ensure its acceptance block has the required
+    header and at least one executable proof using a supported dialect (`unit test:` or `grep:`),
+    and that each proof matches evidence in the proposed tree. The acceptance-author-gate refuses
+    bodies it cannot judge; repair the block and open a new head so CI evaluates the corrected body.
+  evidence: >-
+    The acceptance-author-gate runs the shared acceptance-author-time predicate on pull request
+    bodies. Pull requests #10003 and #10010 were refused by that gate and repaired; their filing
+    records identify this task-authoring lane and the acceptance-block gate as the recurring
+    refusal surface.
+  src: "ci-learning:10003:acceptance-author-gate"
+  cited: "2026-10-09"
 
 - id: comment-load-ratchet-lane
   subsystem: ci

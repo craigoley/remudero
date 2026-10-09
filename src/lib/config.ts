@@ -134,6 +134,12 @@ export class ConfigValidationError extends Error {
  */
 export function validateConfig(config: Config): void {
   validateConfigShape(config, "validateConfig input");
+  const scanRoots = config.diskArtifactScanRoots;
+  if (scanRoots !== undefined && (scanRoots.length === 0 ||
+      scanRoots.some(root => root.trim() === "" || !isAbsolute(root) || root.includes("\0")) ||
+      new Set(scanRoots.map(root => resolve(root))).size !== scanRoots.length)) {
+    throw new ConfigValidationError("invalid config: diskArtifactScanRoots requires non-empty unique absolute paths");
+  }
   const operators = config.operatorGithubLogins;
   if (operators !== undefined && (operators.length === 0 ||
       operators.some(login => !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(login)) ||
@@ -187,6 +193,11 @@ export function validateConfig(config: Config): void {
       throw new ConfigValidationError(`invalid config: workerProviders.codexModels.${tier} contains a duplicate model`);
     }
   }
+}
+
+/** The scan parents are machine configuration, never host paths hardcoded into the sweep. */
+export function resolveArtifactScanRoots(config: Pick<Config, "root" | "diskArtifactScanRoots">): string[] {
+  return config.diskArtifactScanRoots ?? [join(config.root, "..")];
 }
 
 // Why: the ZDOTDIR-vs-HOME finding and the W1-T1C compinit stall — docs/forensics/config.md#workershell.

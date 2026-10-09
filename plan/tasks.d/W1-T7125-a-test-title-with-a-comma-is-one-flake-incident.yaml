@@ -1,0 +1,34 @@
+- id: W1-T7125
+  title: "A TEST TITLE WITH A COMMA IS ONE FLAKE INCIDENT — the FLAKE-RETRY headline joins failing titles with ', ' and the selector-shadow gardener splits on ', ', so one title containing a comma becomes two incidents and the flake gardener files two tasks for one test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the FLAKE-RETRY title list round-trips a title that contains ', '
+  band_meaning: span
+  origin: "operator session 2026-10-09: stuck-PR root causes (#10298 duplicate flake incident)"
+  plan_refs: [W1-T6406]
+  files: [scripts/test-with-retry.mjs, scripts/flake-retry-aggregate.mjs, src/lib/selector-shadow-gardener.ts, test/a-test-title-with-a-comma-is-one-flake-incident.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09: the test "runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD —
+    the roster itself asserts nothing, the measured bound does" (test/the-census-roster-is-named-not-numbered.test.ts:164)
+    was filed TWICE by the flake-incident gardener: W1-T6884 (origin '…#runPreflightFast … asserts nothing') and
+    W1-T6885 (origin '…#the measured bound does'). scripts/test-with-retry.mjs prints `FLAKE-RETRY: <headline> — <names>`
+    with the names joined by ', ', and selector-shadow-gardener.ts's shardEvidence splits that list on ', ', so a title
+    that itself contains ', ' becomes two titles, two origins and two incident tasks. W1-T6884's PR (#10298) then sat
+    CAPPED for hours; a person had to work out it duplicated W1-T6885.
+  design: |
+    Make the title list round-trip: the producer writes the names in an unambiguous form (for example a JSON array after
+    the ' — '), and both consumers (flake-retry-aggregate.mjs and selector-shadow-gardener.ts) parse that form, still
+    reading the old ', '-joined form from logs written before the change. Add a test that feeds a title containing
+    ', ' through producer → gardener and asserts one title and one origin.
+  acceptance:
+    - claim: "a failing test whose title contains ', ' yields one flake-retry title and one incident origin"
+      proof: 'grep: test("W1-T7125: a test title containing a comma is one flake incident, not two" in test/a-test-title-with-a-comma-is-one-flake-incident.test.ts'
+  falsifier: |
+    Keep the ', ' join and split: the title splits into two, the gardener groups two origins, and the test fails.

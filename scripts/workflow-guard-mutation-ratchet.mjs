@@ -23,26 +23,124 @@
 //   node scripts/workflow-guard-mutation-ratchet.mjs --seed     # record every currently-UNCOVERED guard
 //   node scripts/workflow-guard-mutation-ratchet.mjs --base <ref>  # judge inherited-vs-caused against <ref> (default origin/main)
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // W1-T3703: reuses comment-load-ratchet's own caused-vs-inherited rule (see
 // splitCoverageViolations below) rather than restating it, the way W1-T3701 reused it for
 // repo-layout's house-literal counts.
 import { splitBaseInheritedViolations as splitCommentLoadViolations } from "./comment-load-ratchet.mjs";
+import { gitOrThrow } from "./lib/git.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const BASELINE = join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json");
+
+/** Scope reclamation to this checkout; live owners keep their copies (W1-T5828). */
+export function scratchPrefix(root) {
+  return `rmd-workflow-mutant-${createHash("sha256").update(realpathSync(root)).digest("hex").slice(0, 16)}-`;
+}
+
+export function createScratchCopy(root = REPO_ROOT, suites = [], parent = tmpdir()) {
+  parent = realpathSync(parent);
+  const prefix = scratchPrefix(root);
+  const git = (args) => gitOrThrow(args, { cwd: root });
+  const remove = (dir) => {
+    const checkout = join(dir, "checkout");
+    const registered = git(["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${checkout}`);
+    if (registered) git(["worktree", "remove", "--force", checkout]);
+    rmSync(dir, { recursive: true, force: true });
+  };
+  for (const entry of readdirSync(parent, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+    const owner = /^(\d+)-/.exec(entry.name.slice(prefix.length));
+    if (!owner) continue;
+    try {
+      process.kill(Number(owner[1]), 0);
+    } catch (error) {
+      if (error.code === "ESRCH") remove(join(parent, entry.name));
+      else if (error.code !== "EPERM") throw error;
+    }
+  }
+  const dir = mkdtempSync(join(parent, `rmd-workflow-mutant-${prefix.slice("rmd-workflow-mutant-".length)}${process.pid}-`));
+  const checkout = join(dir, "checkout");
+  const cleanup = () => remove(dir);
+  try {
+    git(["-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet", "--detach", checkout, "HEAD"]);
+    const changedTests = [
+      ...git(["diff", "--name-only", "-z", "HEAD", "--", "test/"]).split("\0"),
+      ...git(["ls-files", "-z", "--others", "--exclude-standard", "--", "test/"]).split("\0"),
+    ].filter(Boolean);
+    for (const path of new Set([".github/workflows/ci.yml", "scripts/workflow-guard-mutation-ratchet.mjs", ...suites, ...changedTests])) {
+      const from = join(root, path);
+      const to = join(checkout, path);
+      if (existsSync(from)) {
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      } else rmSync(to, { force: true });
+    }
+    symlinkSync(realpathSync(join(root, "node_modules")), join(checkout, "node_modules"), "dir");
+    return { root: checkout, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function withScratchCopy(root, suites, fn, parent = tmpdir()) {
+  const scratch = createScratchCopy(root, suites, parent);
+  process.once("exit", scratch.cleanup);
+  try {
+    return fn(scratch.root);
+  } finally {
+    process.removeListener("exit", scratch.cleanup);
+    scratch.cleanup();
+  }
+}
 /** Excluded from the corpus - see {@link ciReadingSuites}. */
 export const OWN_SUITE = "test/a-ci-skip-guard-can-fire-unconditionally.test.ts";
+const LINKED_GUARD_SUITE = "test/a-skip-guard-reached-through-a-class-variable-is-enumerated.test.ts";
 
-// A guard is skip-shaped when its block reaches `exit 0` - that is what makes an always-true
-// condition a SILENT PASS rather than a visible failure. The window is deliberately small: a
-// distant `exit 0` belongs to some later branch, not to this guard.
+// Keep the direct-exit window; W1-T5829 also follows assignments to later skip readers in a step.
 const EXIT_LOOKAHEAD_LINES = 8;
 const IF_FORM = /^(\s*)if (.+); then\s*$/;
 const OR_FORM = /^(\s*)(\[ .+ \]) \|\| (\{.*)$/;
+const CASE_FORM = /^(\s*)case (.+) in\s*$/;
+
+function blockEnd(lines, start, limit, closing) {
+  let depth = 1;
+  const closer = new RegExp(`^\\s*${closing}\\b`);
+  for (let i = start + 1; i < limit; i += 1) {
+    const opens = closing === "fi" ? IF_FORM.test(lines[i]) || /^\s*if .*\\\s*$/.test(lines[i]) : CASE_FORM.test(lines[i]);
+    if (opens) depth += 1;
+    if (closer.test(lines[i])) depth -= 1;
+    if (depth === 0) return i;
+  }
+  return limit;
+}
+
+function skipCasePattern(lines, start, end) {
+  let armIndent;
+  let pattern;
+  for (let i = start + 1; i < end; i += 1) {
+    const arm = /^(\s*)\(?([^()]+)\)\s*(.*)$/.exec(lines[i]);
+    if (arm && (armIndent === undefined || arm[1] === armIndent)) {
+      armIndent = arm[1];
+      pattern = arm[2].trim().split("|")[0];
+      if (/\bexit 0\b/.test(arm[3])) return pattern;
+      if (arm[3].includes(";;")) pattern = undefined;
+    } else if (pattern !== undefined) {
+      if (/\bexit 0\b/.test(lines[i])) return pattern;
+      if (lines[i].includes(";;")) pattern = undefined;
+    }
+  }
+  return undefined;
+}
+
+function variableReads(line) {
+  return [...line.matchAll(/\$(?:\{([A-Za-z_]\w*)(?:[^}]*)\}|([A-Za-z_]\w*))/g)].map((match) => match[1] ?? match[2]);
+}
 
 /**
  * ENUMERATED FROM THE TREE, NEVER FROM A LIST - the constraint W1-T2680 and W1-T2521 already
@@ -51,24 +149,48 @@ const OR_FORM = /^(\s*)(\[ .+ \]) \|\| (\{.*)$/;
  */
 export function enumerateSkipGuards(text) {
   const lines = text.split("\n");
-  const guards = [];
+  const candidates = [];
   const seenPerJob = new Map();
   let job = "(top level)";
+  let step = 0;
+  let stepEnd = lines.length;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const jobHeader = /^ {2}([A-Za-z][\w-]*):\s*$/.exec(line);
     if (jobHeader) job = jobHeader[1];
-    const form = IF_FORM.test(line) ? "if" : OR_FORM.test(line) ? "or" : undefined;
+    const run = /^(\s*)(?:-\s+)?run:\s*[|>]/.exec(line);
+    if (run) {
+      step = i + 1;
+      stepEnd = lines.findIndex((next, index) => index > i && next.trim() && /^\s*/.exec(next)[0].length <= run[1].length);
+      if (stepEnd === -1) stepEnd = lines.length;
+    }
+    const form = IF_FORM.test(line) ? "if" : OR_FORM.test(line) ? "or" : CASE_FORM.test(line) ? "case" : undefined;
     if (form === undefined) continue;
-    const block = lines.slice(i, i + EXIT_LOOKAHEAD_LINES).join("\n");
-    if (!/\bexit 0\b/.test(block)) continue;
-    const trimmed = line.trim();
+    const end = form === "or" ? i + 1 : blockEnd(lines, i, stepEnd, form === "case" ? "esac" : "fi");
+    const skipPattern = form === "case" ? skipCasePattern(lines, i, end) : undefined;
+    const direct = form === "case" ? skipPattern !== undefined : /\bexit 0\b/.test(lines.slice(i,
+      Math.min(i + EXIT_LOOKAHEAD_LINES, form === "if" ? end + 1 : stepEnd, stepEnd)).join("\n"));
+    const assignments = form === "if"
+      ? lines.slice(i + 1, end).flatMap((bodyLine) => /^\s*(?:export\s+)?([A-Za-z_]\w*)=/.exec(bodyLine)?.[1] ?? [])
+      : [];
+    candidates.push({ job, step, line: i + 1, text: line, form, skipPattern, assignments, reads: variableReads(line), skip: direct });
+  }
+  for (const candidate of [...candidates].reverse()) {
+    if (candidate.form === "if" && !candidate.skip) {
+      candidate.skip = candidates.some((reader) => reader.skip && reader.job === candidate.job && reader.step === candidate.step &&
+        reader.line > candidate.line && candidate.assignments.some((variable) => reader.reads.includes(variable)));
+    }
+  }
+  const guards = [];
+  for (const candidate of candidates.filter((guard) => guard.skip)) {
+    const { job, line, text, form, skipPattern } = candidate;
+    const trimmed = text.trim();
     const nth = (seenPerJob.get(`${job} ${trimmed}`) ?? 0) + 1;
     seenPerJob.set(`${job} ${trimmed}`, nth);
     // The key is job + text + occurrence, never the line number: a guard added above this one
     // shifts every index below it, and a baseline keyed on indexes would silently re-point at a
     // different guard rather than failing.
-    guards.push({ key: `${job}#${nth}: ${trimmed}`, job, line: i + 1, text: line, form });
+    guards.push({ key: `${job}#${nth}: ${trimmed}`, job, line, text, form, ...(form === "case" ? { skipPattern } : {}) });
   }
   return guards;
 }
@@ -80,8 +202,7 @@ export function enumerateSkipGuards(text) {
  * fast-lane case, and left the guard under test untouched - so a new test appeared to survive a
  * falsifier it had never been given. Same shape as this repo's whole-file lcov-edit trap.
  *
- * The two forms invert: an `if` guard skips when its condition is TRUE, an `[ .. ] || { .. }`
- * guard skips when its test is FALSE. "Always skip" therefore means different constants.
+ * Force an `if` condition true, an `[ .. ] || { .. }` test false, or a case's exit-zero arm.
  */
 export function mutateGuardLine(text, guard) {
   const before = text.split("\n");
@@ -92,9 +213,16 @@ export function mutateGuardLine(text, guard) {
   }
   const ifMatch = IF_FORM.exec(original);
   const orMatch = OR_FORM.exec(original);
+  const caseMatch = CASE_FORM.exec(original);
+  const quotedPattern = caseMatch && /^(['"])(.*)\1$/.exec(guard.skipPattern);
+  const caseValue = caseMatch && (quotedPattern ? quotedPattern[2] : guard.skipPattern
+    .replace(/\[([!^]?)([^\]]+)\]/g, (_match, negated, chars) => negated
+      ? [..."abcdefghijklmnopqrstuvwxyz0123456789"].find((char) => !new RegExp(`^[${chars}]$`).test(char))
+      : chars[0]));
   lines[guard.line - 1] = ifMatch
     ? `${ifMatch[1]}if [ "1" = "1" ]; then`
-    : `${orMatch[1]}[ "1" = "0" ] || ${orMatch[3]}`;
+    : caseMatch ? `${caseMatch[1]}case '${caseValue.replace(/'/g, "'\\''")}' in`
+      : `${orMatch[1]}[ "1" = "0" ] || ${orMatch[3]}`;
   const changed = lines.flatMap((l, i) => (l === before[i] ? [] : [i + 1]));
   if (changed.length !== 1 || changed[0] !== guard.line) {
     throw new Error(`refusing a mutant that touched line(s) ${changed.join(", ")} rather than only ${guard.line}`);
@@ -111,7 +239,7 @@ export function mutateGuardLine(text, guard) {
  * one behaviour: MEASURED, a re-seed with it in the corpus read 14 covered / 2 uncovered where the
  * honest figure was 5 / 11. That is the general hazard - a purely STRUCTURAL suite over ci.yml's
  * text reacts to the edit, not to what the guard does - and it is stated here rather than
- * detected, because only this one suite is guaranteed to have the property.
+ * detected, because both inventory suites have this property.
  *
  * `--untracked` IS LOAD-BEARING, not tidiness. `git grep` reads the index, so a suite added in the
  * very commit that adds a guard is INVISIBLE to it until staged - and this check's whole job is to
@@ -127,7 +255,7 @@ export function ciReadingSuites(root = REPO_ROOT) {
   return out
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE);
+    .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE && l !== LINKED_GUARD_SUITE);
 }
 
 /**
@@ -146,11 +274,11 @@ export function suiteVerdictFrom(out) {
 // diff-cov: process-boundary — running a suite in a child node cannot carry a DA hit without
 // forking; everything this decides lives in suiteVerdictFrom above, unit-tested against the
 // truncated, green and failing shapes, and every caller takes it as an injectable `runSuite`.
-function suiteFails(suite) {
+function suiteFails(suite, root = REPO_ROOT) {
   const res = spawnSync(
     process.execPath,
     ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite],
-    { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   return { failed: suiteVerdictFrom(out), out };
@@ -166,16 +294,18 @@ export function readBaseline(path = BASELINE, read = readFileSync) {
   }
 }
 
-/** Restore the workflow whatever happens - a crashed run must never leave a mutant on disk. */
-export function withMutant(guard, original, fn, io = { path: CI_YML, write: writeFileSync }) {
+/** Only scratch workflows are mutated; an interrupted run cannot alter the checkout. */
+export function withMutant(guard, original, fn, io) {
+  if (io === undefined) {
+    return withScratchCopy(REPO_ROOT, ciReadingSuites(), (root) =>
+      withMutant(guard, original, () => fn(root), { path: join(root, ".github/workflows/ci.yml"), write: writeFileSync }));
+  }
   io.write(io.path, mutateGuardLine(original, guard));
   const restore = () => io.write(io.path, original);
-  process.once("exit", restore);
   try {
     return fn();
   } finally {
     restore();
-    process.removeListener("exit", restore);
   }
 }
 
@@ -206,9 +336,9 @@ export function redCorpus(suites, runSuite = suiteFails) {
 }
 
 export function classifyGuard(guard, original, suites, runSuite = suiteFails, apply = withMutant) {
-  return apply(guard, original, () => {
+  return apply(guard, original, (root) => {
     for (const suite of suites) {
-      const { failed } = runSuite(suite);
+      const { failed } = runSuite(suite, root);
       // STOP AT THE FIRST SUITE THAT NOTICES. One is the whole question: a guard is COVERED when
       // some test can tell the mutant from the real thing. Running the rest buys nothing and is
       // what would make this too slow to keep.
@@ -270,21 +400,44 @@ export function inheritedGuardReason(mergeBase) {
  * real one and the behaviour is byte-identical.
  */
 export function main(argv, io = {}) {
-  const readCi = io.readCi ?? (() => readFileSync(CI_YML, "utf8"));
-  const baselineOf = io.readBaseline ?? (() => readBaseline());
-  const suitesOf = io.suites ?? (() => ciReadingSuites());
-  const classify = io.classify ?? classifyGuard;
-  const corpusCheck = io.redCorpus ?? redCorpus;
-  const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(BASELINE, text));
+  let scratch;
+  const cleanup = () => scratch?.cleanup();
+  const getScratch = (suites) => {
+    if (scratch === undefined) {
+      scratch = createScratchCopy(io.root ?? REPO_ROOT, suites, io.scratchParent ?? tmpdir());
+      process.once("exit", cleanup);
+    }
+    return scratch.root;
+  };
+  try {
+    return measure(argv, io, getScratch);
+  } finally {
+    process.removeListener("exit", cleanup);
+    cleanup();
+  }
+}
+
+function measure(argv, io, getScratch) {
+  const root = io.root ?? REPO_ROOT;
+  const readCi = io.readCi ?? (() => readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"));
+  const baselineOf = io.readBaseline ?? (() => readBaseline(join(root, "scripts/workflow-guard-mutation-baseline.json")));
+  const suitesOf = io.suites ?? (() => ciReadingSuites(root));
+  const runSuite = (suite, suites) => (io.runSuite ?? suiteFails)(suite, getScratch(suites));
+  const classify = io.classify ?? ((guard, original, suites) => classifyGuard(
+    guard, original, suites, (suite) => runSuite(suite, suites),
+    (g, text, fn) => withMutant(g, text, fn, { path: join(getScratch(suites), ".github/workflows/ci.yml"), write: writeFileSync }),
+  ));
+  const corpusCheck = io.redCorpus ?? ((suites) => redCorpus(suites, (suite) => runSuite(suite, suites)));
+  const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(join(root, "scripts/workflow-guard-mutation-baseline.json"), text));
   // W1-T3703: the merge-base a "caused vs inherited" split is judged against, resolved fresh each
   // run (never a stored number) — same shape as comment-load-ratchet's own readBaseDiff.
   const resolveMergeBase = io.resolveMergeBase ?? ((ref) => {
-    const out = execFileSync("git", ["-C", REPO_ROOT, "merge-base", ref, "HEAD"], { encoding: "utf8" }).trim();
+    const out = execFileSync("git", ["-C", root, "merge-base", ref, "HEAD"], { encoding: "utf8" }).trim();
     if (!/^[0-9a-f]{40}$/i.test(out)) throw new Error(`git did not return a commit identity for ${ref}`);
     return out;
   });
   const readCiAtBase = io.readCiAtBase ?? ((base) => {
-    const res = spawnSync("git", ["-C", REPO_ROOT, "show", `${base}:.github/workflows/ci.yml`], { encoding: "utf8" });
+    const res = spawnSync("git", ["-C", root, "show", `${base}:.github/workflows/ci.yml`], { encoding: "utf8" });
     return res.status === 0 ? res.stdout : undefined;
   });
   const log = io.log ?? console.log;

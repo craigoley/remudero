@@ -31,7 +31,7 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
+import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
@@ -422,6 +422,11 @@ export interface DraftExclusion {
   detail: string;
 }
 
+export type DraftSelectionContext = Pick<
+  ReadinessContext,
+  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds"
+>;
+
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
     return check();
@@ -433,7 +438,7 @@ function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclu
 
 /** The draft-independent reason a proposal can never render READY. Unreadable facts return
  *  `undefined`, so the daemon spends rather than silently dropping uncertain work. */
-export function draftExclusionForProposal(proposal: Proposal, ctx: ReadinessContext): DraftExclusion | undefined {
+export function draftExclusionForProposal(proposal: Proposal, ctx: DraftSelectionContext): DraftExclusion | undefined {
   const ratified = readDraftExclusion(() =>
     ctx.isRatified(proposal.id) ? { predicate: "ratified", detail: `${proposal.id} is already ratified` } : undefined,
   );
@@ -488,7 +493,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
 /** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
  *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
@@ -577,7 +582,7 @@ export function draftsDueOnDaemon(
   drafts: DraftCache,
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
-  ctx?: ReadinessContext,
+  ctx?: DraftSelectionContext,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
   const due = rankDraftSelection(
@@ -3256,8 +3261,9 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
       edits.push({ start: scalar.range[0], end, text: `${space}${rendered}\n` });
     } else if (pair && isScalar(pair.key) && pair.key.range) {
       const start = pair.key.range[1] + 1;
-      const end = fragmentYaml.indexOf("\n", start);
-      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + 1, text: ` ${rendered}\n` });
+      const end = isNode(pair.value) && pair.value.range
+        ? pair.value.range[1] : fragmentYaml.indexOf("\n", start);
+      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + (fragmentYaml[end] === "\n" ? 1 : 0), text: ` ${rendered}\n` });
     } else {
       edits.push({ start: node.range[1], end: node.range[1], text: `\n  rationale: ${rendered}\n` });
     }

@@ -3,7 +3,7 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
-import { renameSync } from "node:fs";
+import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -845,6 +845,7 @@ import {
   writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftSelectionContext,
   type DraftRungOutcome,
   type EvidenceAnchor,
   type BatchApproveResult,
@@ -1427,6 +1428,7 @@ import {
   claimReviewDecision,
   reviewDecisionDigest,
   reviewTaskIdEvidenceAsync,
+  bodyReviewContractDigest,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -1624,7 +1626,6 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
-  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -9708,7 +9709,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
   taskId: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
-  prerequisiteBranch?: string;
+  prerequisiteBranch: string;
 }): SpawnWorkerArgs {
   return {
     cwd: args.worktreePath,
@@ -9734,18 +9735,18 @@ export function buildPrerequisitePrDispatchArgs(args: {
   };
 }
 
-/** W1-T5779: why an opened prerequisite PR cannot pass head-identity-gate or acceptance-author-gate, or undefined
- *  when it can or a read gave no evidence (an `ok:false` head, a throwing body read), which leaves the CI wait as before. */
+/** W1-T5810: requires both readers; an `ok:false` head or throwing body read leaves the CI wait as before.
+ *  Returns why the prerequisite fails admission, or undefined when the available evidence admits it. */
 export async function prerequisitePrAdmissionRefusal(
   prUrl: string,
   mintedBranch: string,
-  read: { readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody?: (prUrl: string) => Promise<string> },
+  read: { readLiveHead: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody: (prUrl: string) => Promise<string> },
 ): Promise<string | undefined> {
-  const head = read.readLiveHead ? await read.readLiveHead(prUrl) : undefined;
+  const head = await read.readLiveHead(prUrl);
   if (head?.ok && head.headRefName !== undefined && head.headRefName !== mintedBranch) {
     return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
   }
-  const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const body = await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) }));
   const trailer = typeof body === "string" ? extractTaskTrailerId(body) : undefined;
   if (trailer !== undefined) return `prerequisite ${prUrl} body carries "Remudero-Task: ${trailer}" — a prerequisite credits no task`;
   const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
@@ -10792,7 +10793,7 @@ export async function runFixRung(opts: {
      * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
      * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
      * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
-     * cached snapshot, mirroring `readLiveState`. Omitted, or a failed/indeterminate read, the rung proceeds.
+     * cached snapshot, mirroring `readLiveState`. Omission refuses a prerequisite dispatch; indeterminate reads proceed.
      */
     readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
     /**
@@ -10836,7 +10837,7 @@ export async function runFixRung(opts: {
      * sites wire {@link fetchPrBodyViaGh} explicitly. Every fix mode also uses the fetched
      * snapshot only as its retry/backoff identity, so a worker transcript never masquerades as PR
      * input. Best-effort: a throwing fetcher falls back to the worker-text report for judgment
-     * and leaves the exact-input identity unset.
+     * and leaves the exact-input identity unset. Omission refuses a prerequisite dispatch (W1-T5810).
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
     /**
@@ -11111,6 +11112,7 @@ export async function runFixRung(opts: {
   // resolved enough for GitHub to compute the merge ref, so every later
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
+  const consecutiveMergeRefusalReasons: string[] = [];
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -11212,7 +11214,7 @@ export async function runFixRung(opts: {
   // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
   // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
   // timer.
-  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
+  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap && consecutiveMergeRefusalReasons.length < 2) {
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -11271,7 +11273,7 @@ export async function runFixRung(opts: {
       currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
-      deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      deps.captureWorktreeSnapshot && consecutiveMergeRefusalReasons.length === 0 ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
       opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
@@ -12032,7 +12034,12 @@ export async function runFixRung(opts: {
           });
           return await escalateAndExhaust();
         }
-        const admissionRefusal = await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, deps);
+        const missingReaders = [!deps.readLiveHead && "readLiveHead", !deps.fetchPrBody && "fetchPrBody"].filter(Boolean);
+        const admissionRefusal = missingReaders.length
+          ? `prerequisite ${prerequisiteUrl} missing required reader(s): ${missingReaders.join(", ")}`
+          : await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, {
+              readLiveHead: deps.readLiveHead!, fetchPrBody: deps.fetchPrBody!,
+            });
         if (admissionRefusal) {
           deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();
@@ -12369,6 +12376,7 @@ export async function runFixRung(opts: {
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
       if (!merged.started) {
+        consecutiveMergeRefusalReasons.push(merged.reason ?? "the merge of current main did not start (no reason reported)");
         strikes = attempt;
         deps.log("fix.dispatch", {
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
@@ -12588,6 +12596,8 @@ export async function runFixRung(opts: {
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
     const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
+    if (mergeCommitRefused) consecutiveMergeRefusalReasons.push(MERGE_HEAD_ABSENT_REASON);
+    else consecutiveMergeRefusalReasons.length = 0;
     // W1-T5227: a refusal for leftover conflict markers IS an unresolved conflict. The merge stays pending
     // (nothing was staged), so the next strike is a merge-conflict round on those files; exhaustion then
     // reports the existing merge_conflict_unresolved. No new outcome, no new escalation path.
@@ -13479,9 +13489,10 @@ export async function runFixRung(opts: {
         ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
         : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
       detail: stillConflicted
-        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
+        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) spent ${strikes} bounded strike(s) ` +
           `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
-          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined)
+          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined) +
+          (consecutiveMergeRefusalReasons.length > 0 ? `\n\nConsecutive merge refusals:\n${consecutiveMergeRefusalReasons.map((reason, i) => `${i + 1}. ${reason}`).join("\n")}` : "")
         : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
@@ -25573,6 +25584,7 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
 export function checkProofCommand(
   rest: string[],
   deps: {
+    pathStatus?: (cwd: string, path: string) => string;
     /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
      *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
      *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
@@ -25770,6 +25782,25 @@ export function checkProofCommand(
   // still be printed — this file never reads `diag` to decide the verdict.
   let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
   const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+    const proofPaths = grepTargetPath === undefined
+      ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
+        .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
+      : [grepTargetPath];
+    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => hostWorktreeGitAtTopLevel(
+      cwd, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", resolve(cwd, path)],
+      { log: () => {} },
+    ));
+    for (const path of new Set(proofPaths)) {
+      let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
+      try {
+        status = { kind: "read", text: pathStatus(spawnCwd, path) };
+      } catch (error) {
+        status = { kind: "unreadable", error };
+      }
+      if (status.kind === "read" && status.text.trim() !== "") {
+        console.error(`warning:    ${path} differs from HEAD; the pushed head may answer differently.`);
+      }
+    }
     try {
       const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
       diag = { stdout: out, status: 0, signal: null };
@@ -26331,9 +26362,9 @@ export function gitRunAdapter(
 }
 
 export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
-  const log = (step: string, extra: Record<string, unknown>) => {
+  const log = opts.log ?? ((step: string, extra: Record<string, unknown>) => {
     if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
-  };
+  });
   for (let at = resolve(dir); ; at = dirname(at)) {
     try {
       return hostWorktreeGit(at, args, { ...opts, log });
@@ -36245,10 +36276,10 @@ export function shardRepairsPending(stateDir: string, clock: Clock = systemClock
 }
 
 /** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
-export function withShardRepairs(stateDir: string, repairs: () => void, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
-  return Object.assign(() => {
+export function withShardRepairs(stateDir: string, repairs: () => void | Promise<void>, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
+  return Object.assign(async () => {
     try {
-      repairs();
+      await repairs();
     } catch (e) {
       log("plan.shard_repair_failed", { stage: "pass", reason: String((e as Error)?.message ?? e) });
     }
@@ -36262,16 +36293,16 @@ type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 /** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
 type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
 
-function repairRequestedShard(
+async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined; prState: (prUrl: string) => PrState },
-): ShardRepairOutcome {
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
   let text: string;
   try {
-    text = opts.readOriginBlob(rel);
+    text = await opts.readOriginBlob(rel);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("read", e));
     return { retry: true };
@@ -36293,7 +36324,7 @@ function repairRequestedShard(
     return { done: true };
   }
   if (prior !== undefined) {
-    const prState = opts.prState(prior);
+    const prState = await opts.prState(prior);
     if (prState === "unknown") {
       opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR" });
       return { retry: true, blob };
@@ -36320,7 +36351,7 @@ function repairRequestedShard(
   };
   let prUrl: string | undefined;
   try {
-    prUrl = opts.land(rel, verdict.text, pr);
+    prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
@@ -36354,38 +36385,39 @@ function rescheduleShardRepair(path: string, request: ShardRepairRequest, blob: 
 
 /**
  * Off the loop, inside the plan garden's child: each due request is repaired from origin/main's blob
- * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
+ * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckoutAsync} (its
  * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`, unless that PR was
  * closed unmerged, when one fresh PR is opened (W1-T5618). A request is consumed only at an end state — a PR
  * open or merged, a refusal, a request that cannot be read; a not-landed or failed attempt backs off and is
  * retried on a later pass until {@link SHARD_REPAIR_ATTEMPT_CAP} abandons it.
  */
-export function runShardRepairPass(opts: {
+export async function runShardRepairPass(opts: {
   stateDir: string;
   repoDir: string;
   worktreesRoot: string;
   owner: string;
   repo: string;
   log: ShardRepairLog;
-  readOriginBlob?: (rel: string) => string;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
-  prState?: (prUrl: string) => PrState;
+  readOriginBlob?: (rel: string) => string | Promise<string>;
+  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  prState?: (prUrl: string) => PrState | Promise<PrState>;
+  openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
-}): void {
+}): Promise<void> {
   const readOriginBlob =
-    opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
+    opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
-    ((rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = gardenCheckout({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log });
+    (async (rel: string, text: string, pr: { title: string; body: string }) => {
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
       try {
         writeFileSync(join(checkout.root, rel), text);
-        return checkout.land({ paths: [rel], ...pr });
+        return await checkout.land({ paths: [rel], ...pr });
       } finally {
-        checkout.dispose();
+        await checkout.dispose();
       }
     });
-  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
+  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJsonAsync));
   const now = (opts.clock ?? systemClock).now();
   for (const path of shardRepairRequests(opts.stateDir)) {
     if (!shardRepairRequestDue(path, now)) continue;
@@ -36397,7 +36429,7 @@ export function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
     if ("done" in outcome) rmSync(path, { force: true });
     else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
@@ -41687,10 +41719,20 @@ function* openPrViewSteps(
   const reviewOrphanedPrs = raw
     .filter((pr) => {
       const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-      return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
+      return reviewOrphansFor(ledger, reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(
+    owner, repo, "main", reviewOrphanedPrs, fetch, undefined,
+    (prNumber, reason) => {
+      const pr = raw.find((candidate) => candidate.number === prNumber)!;
+      appendLedger(ledgerPath, {
+        run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
+        step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
+        head_sha: pr.headRefOid, reason,
+      });
+    },
+  );
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
@@ -41769,13 +41811,13 @@ function* openPrViewSteps(
     const ciFailures = ciFailuresByPr.get(pr.number);
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
+    const reviewOrphans = reviewOrphansFor(ledger, reviewLedgerKey, pr.headRefOid, undefined, pr.url);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
+    const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
     const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
@@ -41784,7 +41826,14 @@ function* openPrViewSteps(
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
         })
-      : undefined;
+      : taskRecord
+        ? undefined
+        : bodyReviewContractDigest({
+            reviewLedgerKey, body: pr.body ?? "",
+            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            recordedDigest: priorReviewForReuse?.reviewContractDigest,
+            semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
+          });
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
@@ -45746,7 +45795,7 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
@@ -45837,7 +45886,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
-          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+          readLiveStateAtAct: effects.readLiveState,
           ledgerPath,
           runId,
           log,
@@ -46201,7 +46250,7 @@ export function buildSweepLightHook(
             // sees one consistent answer.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
-            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            readLiveStateAtAct: effects.readLiveState,
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
@@ -48641,24 +48690,23 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-  github?: GitHub,
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  legacyGrepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
   // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
   // that injects only the sync seam warms through that same seam, so its answers are unchanged.
   const grepAnchorSync = grepAnchor ?? ((ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, ref, anchor));
   const grepAnchorWarm =
+    legacyGrepAnchorAsync ??
     grepAnchorAsync ??
     (grepAnchor
       ? async (ref: string, anchor: EvidenceAnchor) => grepAnchor(ref, anchor)
       : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
-  let lazyGithub: GitHub | undefined;
-  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
-  return async (tickRead) => {
+  return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -48711,21 +48759,13 @@ export function buildInboxDraftHook(
         }
       }
 
-      let draftReadiness: ReadinessContext | undefined;
+      let draftSelection: DraftSelectionContext | undefined;
       try {
-        const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
-        const { isMerged, depsUnobservable } = tickRead
-          ? projectionReadinessAccessors(new Map(tickRead.projection))
-          : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
-        draftReadiness = {
-          plan,
-          isMerged,
-          depsUnobservable,
+        draftSelection = {
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -48736,7 +48776,7 @@ export function buildInboxDraftHook(
       }
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -48746,7 +48786,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -53080,8 +53120,8 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
   }
 }
 
-// W1-T5687: `rmd progress-watchdog` — read-only; names a stalled sweep by progress rows, never `daemon.*`.
-// Recycling on the verdict is W1-T5688.
+// W1-T5687: capture-diagnostics writes a bundle under <state>/diagnostics/, at most one per 15 min.
+// Runs docker; recycles nothing (W1-T5688).
 export function progressWatchdogCommand(
   rest: string[],
   run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
@@ -53354,7 +53394,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "progress-watchdog",
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
-    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
+    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {
     name: "claim",
