@@ -117,7 +117,12 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/deployer.ts": { count: 1, reason: "CHECKOUT: realDeployDeps reads the install checkout (-C o.installPath)" },
   "src/lib/dispatch-claim.ts": { count: 1, reason: "CHECKOUT: gitClaimRunnerAsync runs claim refs in the managed checkout (-C repoDir)" },
   "src/lib/export-gardener.ts": { count: 1, reason: "CHECKOUT: referencesOutside reads the repo root (-C root)" },
-  "src/lib/feedback-landing.ts": { count: 2, reason: "CHECKOUT: defaultGit (-C root) and sourceRepositoryFromCwd (-C process.cwd())" },
+  "src/lib/feedback-landing.ts": {
+    count: 3,
+    reason:
+      "CHECKOUT: defaultGit and its off-loop twin defaultGitAsync (W1-T5672) (-C root), and " +
+      "sourceRepositoryFromCwd (-C process.cwd())",
+  },
   "src/lib/feedback-reconcile.ts": { count: 1, reason: "CHECKOUT: defaultGit reads the repo root (-C root)" },
   "src/lib/feedback.ts": { count: 1, reason: "CHECKOUT: defaultUpstreamGit reads the repo root (-C root)" },
   "src/lib/fleet-control.ts": { count: 1, reason: "CHECKOUT: realSharedPauseGitDeps pushes the pause ref from the repo root" },
