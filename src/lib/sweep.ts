@@ -2269,7 +2269,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           const result = await (idleDeps
             ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
             : sweepArmImpl(prUrl, taskId, checksGreenReviewSuccess(pr)));
-          if (typeof result !== "string") attemptError = result.error;
+          if (typeof result !== "string") {
+            attemptError = result.error;
+            const preflight = result.directMergePreflight;
+            if (result.outcome === "plan-pr-held" && preflight?.reason === "plan_pr_refresh_bound") {
+              tryEscalate(
+                {
+                  class: "MANUAL",
+                  taskId: escalationTaskIdFor(pr),
+                  runId,
+                  headSha: pr.headSha,
+                  headDedup: "independent",
+                  summary: `plan PR reached its refresh bound — ${pr.prUrl}`,
+                  detail:
+                    `Plan PR ${pr.prUrl} remains unsafe to merge after its bounded refreshes. ` +
+                    `Refreshed heads: ${(preflight.refreshedHeads ?? []).join(", ")}. ` +
+                    `Unsafe merged plan: ${preflight.planMergeUnsafe ?? "preflight supplied no unsafe-plan details"}.`,
+                  options: [
+                    { label: "direct-merge after checking the merged plan", detail: "check that the merged plan loads and satisfies its contracts before merging by hand." },
+                    { label: "close and re-file", detail: "close this PR and file a replacement against the current plan." },
+                  ],
+                  recommendation: "close and re-file",
+                  consequence: "the PR stays unarmed and the sweep will not refresh it again while it awaits an operator decision.",
+                },
+                { issues, ledgerPath, runId },
+              );
+            }
+          }
           return result;
         },
         "sweep",
