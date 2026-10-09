@@ -55,7 +55,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     // that wants a failing resolve can still override it.
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -207,12 +207,12 @@ test("coverage-ratchet job: the diff piped into diff-coverage.mjs is exactly wha
 
 // ── acceptance 3: coverage flags — source maps, test/** excluded, balanced full manifest ────
 
-test("coverage-ratchet job: coverage retains source maps and test exclusions while four duration-balanced selectors partition the full manifest", () => {
+test("coverage-ratchet job: coverage retains source maps and test exclusions while eight duration-balanced selectors partition the full manifest", () => {
   const { spawn, calls } = recordingSpawn();
   runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-  assert.equal(coverageCalls.length, 4, "expected one coverage invocation for every CI shard");
+  assert.equal(coverageCalls.length, 8, "expected one coverage invocation for every CI shard");
   for (const coverageCall of coverageCalls) {
     assert.ok(coverageCall.args.includes("--enable-source-maps"), "source maps must be enabled — without it lcov's DA: line numbers disagree with git diff's (W1-T210)");
     assert.ok(coverageCall.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the coverage ratio, same as ci.yml");
@@ -222,7 +222,7 @@ test("coverage-ratchet job: coverage retains source maps and test exclusions whi
     .filter((c) => c.args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && c.args.includes("--select-all"))
     .map((c) => c.args[c.args.indexOf("--shard") + 1])
     .sort();
-  assert.deepEqual(selectorShards, ["1/4", "2/4", "3/4", "4/4"], "the coverage selectors must partition the complete manifest");
+  assert.deepEqual(selectorShards, ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"], "the coverage selectors must partition the complete manifest");
 });
 
 test("coverage-ratchet job: the coverage invocation's argv has no scope-narrowing parameter at all — the function that builds it is not parameterized by a caller-supplied file list, so a scoped call is structurally impossible, not just discouraged", () => {
