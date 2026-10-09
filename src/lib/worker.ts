@@ -124,7 +124,7 @@ import {
   type WorkerHomeReapResult,
   type WorkerKeychainSummary,
 } from "./worker-home.js";
-import { openMemoryReservation, type HostMemoryLedgerDeps, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
+import { openMemoryReservation, type HostMemoryLedgerOptions, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -2062,7 +2062,7 @@ export function activeWorkerCount(): number {
 export interface WorkerOccupancyReservation {
   workerClass?: WorkerClass;
   root?: string;
-  ledger?: HostMemoryLedgerDeps;
+  ledger?: HostMemoryLedgerOptions;
 }
 
 function claimWorkerOccupancy(): () => void {
