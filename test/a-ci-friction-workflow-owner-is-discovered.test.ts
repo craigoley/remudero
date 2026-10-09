@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { parseDocument } from "yaml";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ciFrictionGardenSpec, ciFrictionLadder, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionGardenSpec, ciFrictionLadder, expandWorkflowMatrix, gitCiFrictionOwnerSearch, workflowJobCheckNames } from "../src/lib/ci-friction-gardener.js";
 import { locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
 import type { CiFrictionRemedyTask } from "../src/lib/ci-friction-remedy.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
@@ -33,6 +34,14 @@ function fixture(workflow = YAML) {
   commit();
   const search = () => gitCiFrictionOwnerSearch(args => repo.git(...args));
   return { repo, put, commit, search };
+}
+
+/** Resolve `key` and return why its workflow owner was a gap: it must resolve to no owner and say why. */
+function gapFor(search: ReturnType<typeof gitCiFrictionOwnerSearch>, key: string): string {
+  assert.equal(locateCiFrictionOwner(key, [], search), undefined);
+  const gaps = search.workflowGaps!();
+  assert.equal(gaps.length, 1, JSON.stringify(gaps));
+  return gaps[0]!.reason;
 }
 
 function ladder(search: ReturnType<typeof gitCiFrictionOwnerSearch>, records: readonly LedgerRecord[] = [], tasks: CiFrictionRemedyTask[] = [], receipts = new Set<string>()) {
@@ -74,24 +83,26 @@ test("CI friction preserves distinctive ownership and distinguishes unreadable d
   assert.equal(locateCiFrictionOwner("check:absent-job", [], f.search()), undefined);
   f.put(WORKFLOW, "jobs: [");
   f.commit();
-  assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /workflow.*ci.yml/i);
+  assert.match(gapFor(f.search(), KEY), /unreadable.*ci.yml/i);
   f.put(WORKFLOW, YAML + '  other:\n    name: coverage-shard (${{ matrix.shard }}/8)\n    strategy:\n      matrix:\n        shard: [1, 2]\n');
   f.commit();
-  assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /ambiguous.*coverage/i);
+  assert.match(gapFor(f.search(), KEY), /ambiguous.*coverage/i);
   f.put(WORKFLOW, 'jobs:\n  coverage:\n    name: coverage-shard (${{ inputs.shard }}/8)\n');
   f.commit();
-  assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /unsupported.*coverage/i);
+  assert.match(gapFor(f.search(), KEY), /unsupported.*coverage/i);
   for (const malformed of ["null\n", "jobs: []\n", "jobs:\n  coverage: null\n", "jobs:\n  coverage:\n    name: 42\n"]) {
     f.put(WORKFLOW, malformed);
     f.commit();
-    assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /workflow.*unsupported/i);
+    assert.match(gapFor(f.search(), KEY), /unreadable.*unsupported/i);
   }
   f.put(WORKFLOW, YAML.replace("[1, 2, 3, 4, 5, 6, 7, 8]", "[one, two]"));
   f.commit();
-  assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /unsupported.*coverage/i);
+  const named = f.search();
+  assert.equal(locateCiFrictionOwner(KEY, [], named), undefined, "a string shard names another check");
+  assert.deepEqual(named.workflowGaps!(), []);
   f.put(WORKFLOW, 'jobs:\n  unknown:\n    name: ${{ inputs.check }}\n');
   f.commit();
-  assert.throws(() => locateCiFrictionOwner(KEY, [], f.search()), /unsupported.*coverage/i);
+  assert.match(gapFor(f.search(), KEY), /unsupported.*coverage.*inputs\.check/i);
 });
 
 test("CI friction reconsiders only a no-owner hold once per changed ownership witness", () => {
@@ -219,4 +230,112 @@ test("CI friction workflow ownership uses real pinned git reads and reports nati
   assert.throws(() => runGarden(spec, deps), /blob|object|bad file/i);
   assert.equal(readFileSync(statePath, "utf8"), previous);
   assert.equal(events.includes("ci-friction.scorecard"), false);
+});
+
+test("CI friction resolves ci-gate to the merge-queue producer when ci.yml and ci-gate.yml both declare it", () => {
+  const f = fixture();
+  const real = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const GATE = ".github/workflows/ci-gate.yml";
+  f.put(WORKFLOW, real(WORKFLOW));
+  f.put(GATE, real(GATE));
+  f.commit();
+  const owner = locateCiFrictionOwner("check:ci-gate", [], f.search());
+  assert.deepEqual(owner?.files, [WORKFLOW]);
+  assert.match(owner!.why[0]!, /merge_group.*ci-gate\.yml:ci-gate/);
+  const gateLadder = ciFrictionLadder({
+    priced: [{ cause: { kind: "check", name: "ci-gate" }, minutes: 12, rounds: 3, prs: 2 }],
+    rounds: [], tasks: [], receipts: new Set(), escalated: new Set(["ci-friction:check:ci-gate"]),
+    ownerSearch: f.search(), nowMs: NOW,
+    holds: [{ step: "ci-friction.remedy_escalated", origin: "ci-friction:check:ci-gate", why: "no code in src/ or scripts/ names check:ci-gate, so no remedy can be drafted against it" }],
+  });
+  const decision = gateLadder.next?.decision;
+  if (decision?.kind !== "draft") assert.fail(`expected the ci-gate cause to draft, got ${decision?.kind}`);
+  assert.deepEqual(decision.reconsideration?.owner.files, [WORKFLOW]);
+  // Two producers on the queue is still ambiguity, and so is a job whose `if:` keeps it off the queue.
+  const both = 'on: [pull_request, merge_group]\njobs:\n  ci-gate:\n    runs-on: ubuntu-latest\n';
+  f.put(GATE, both);
+  f.put(WORKFLOW, both);
+  f.commit();
+  assert.match(gapFor(f.search(), "check:ci-gate"), /ambiguous.*ci-gate/);
+  f.put(WORKFLOW, "on:\n  merge_group:\njobs:\n  ci-gate:\n    if: github.event_name != 'merge_group'\n    runs-on: ubuntu-latest\n");
+  f.put(GATE, "on: pull_request\njobs:\n  ci-gate:\n    runs-on: ubuntu-latest\n");
+  f.commit();
+  assert.match(gapFor(f.search(), "check:ci-gate"), /ambiguous.*ci-gate/);
+});
+
+test("CI friction expands codeql.yml's language matrix into its checks and never fails a pass over a workflow it cannot name", () => {
+  const f = fixture();
+  const real = new URL("../.github/workflows/", import.meta.url);
+  const files = readdirSync(real).filter(file => /\.ya?ml$/.test(file));
+  assert.ok(files.includes("codeql.yml") && files.length >= 5, `the fixture copies every real workflow (${files.length})`);
+  for (const file of files) f.put(`.github/workflows/${file}`, readFileSync(new URL(file, real), "utf8"));
+  f.commit();
+  const CODEQL = ".github/workflows/codeql.yml";
+  assert.deepEqual(workflowJobCheckNames("Analyze (${{ matrix.language }})",
+    { include: [{ language: "javascript-typescript", "build-mode": "none" }, { language: "actions", "build-mode": "none" }] }),
+  ["Analyze (javascript-typescript)", "Analyze (actions)"]);
+  const search = f.search();
+  for (const check of ["Analyze (javascript-typescript)", "Analyze (actions)"]) {
+    assert.deepEqual(locateCiFrictionOwner(`check:${check}`, [], search)?.files, [CODEQL], check);
+  }
+  // Every check any real workflow declares resolves without a gap.
+  let declared = 0;
+  for (const file of files) {
+    const workflow = parseDocument(readFileSync(new URL(file, real), "utf8")).toJS() as { jobs?: Record<string, { name?: string; uses?: string; strategy?: { matrix?: unknown } }> };
+    for (const [jobId, job] of Object.entries(workflow.jobs ?? {})) {
+      const names = workflowJobCheckNames(job.name ?? jobId, job.strategy?.matrix);
+      assert.ok(Array.isArray(names), `${file}:${jobId} names its checks (${String(names)})`);
+      for (const name of names) {
+        declared += 1;
+        // A reusable-workflow caller's checks are `<name> / <called job>`; its bare name is no check of its own.
+        const check = job.uses ? `${name} / called-job` : name;
+        // ci-gate.yml's `edited`-only re-aggregation defers to ci.yml's merge-queue producer.
+        const owner = `${file}:${jobId}` === "ci-gate.yml:ci-gate" ? "ci.yml" : file;
+        assert.deepEqual(locateCiFrictionOwner(`check:${check}`, [], search)?.files, [`.github/workflows/${owner}`],
+          `${file}:${jobId} owns ${check} ${JSON.stringify(search.workflowGaps!())}`);
+      }
+    }
+  }
+  assert.deepEqual(locateCiFrictionOwner("check:scan", [], search)?.files, [".github/workflows/semgrep.yml"],
+    "osv-scanner.yml's `scan` caller reports `scan / …` checks, so semgrep.yml's `Scan` owns the bare name");
+  assert.ok(declared >= 30, `every real job was read (${declared} checks)`);
+  assert.deepEqual(search.workflowGaps!(), []);
+
+  // An unexpandable name is a gap for its own check, with a reason row, and the pass still completes.
+  f.put(".github/workflows/odd.yml", "on: push\njobs:\n  analyze:\n    name: Analyze (${{ inputs.language }})\n    runs-on: ubuntu-latest\n");
+  f.commit();
+  assert.deepEqual(workflowJobCheckNames("Analyze (${{ inputs.language }})", undefined), "${{ inputs.language }} has no literal value");
+  const stateDir = join(f.repo.dir, "state");
+  mkdirSync(stateDir);
+  const rows: LedgerRecord[] = [
+    { step: "pr.opened", run_id: "r", pr_url: "https://github.com/acme/repo/pull/1", ts: new Date(NOW - 3600000).toISOString() },
+    { step: "fix.dispatch", run_id: "r", mode: "Analyze (javascript-typescript)", round: 1, ts: new Date(NOW - 1800000).toISOString() },
+  ];
+  const deps: GardenerDeps = { repoRoot: f.repo.dir, stateDir, seed: 1, clock: clockFromMillisFn(() => NOW),
+    log: (step, extra) => rows.push({ step, ...extra }),
+    openWorkspace: () => ({ root: f.repo.dir, branch: "fixture", land: () => { assert.fail("fixture does not publish"); }, dispose: () => {} }) };
+  const spec = ciFrictionGardenSpec(deps, { ownerSearch: f.search(), planState: () => ({ tasks: [] }), ledgerRecords: () => rows,
+    mintTaskId: () => { throw new Error("fixture filing failure"); } });
+  const inventory = spec.inventory();
+  const gap = rows.find(row => row.step === "ci-friction.workflow_ownership_unresolved");
+  assert.match(JSON.stringify(gap?.gaps), /Analyze \(javascript-typescript\).*unsupported.*odd\.yml:analyze.*inputs\.language/);
+  assert.equal(inventory.next?.decision.kind, "escalate");
+  if (inventory.next?.decision.kind !== "escalate") assert.fail("expected the gap to escalate");
+  assert.match(inventory.next.decision.why, /workflow ownership unsupported for Analyze \(javascript-typescript\)/);
+  assert.deepEqual(spec.scorecard(inventory, { actions: [], acting: [] }).workflow_ownership_unresolved, inventory.workflowGaps);
+});
+
+test("CI friction expands a workflow matrix the way GitHub does, and says why when it cannot", () => {
+  assert.deepEqual(expandWorkflowMatrix(undefined), [{}]);
+  assert.deepEqual(expandWorkflowMatrix({ os: ["a", "b"], node: [1, 2], exclude: [{ os: "b", node: 2 }], include: [{ os: "a", extra: true }, { os: "c" }] }),
+    [{ os: "a", node: 1, extra: true }, { os: "a", node: 2, extra: true }, { os: "b", node: 1 }, { os: "c" }]);
+  assert.equal(expandWorkflowMatrix("${{ fromJSON(needs.plan.outputs.matrix) }}"), "matrix is not a literal mapping");
+  assert.equal(expandWorkflowMatrix({ os: "${{ inputs.os }}" }), "matrix.os is not a literal list");
+  assert.equal(expandWorkflowMatrix({ include: ["a"] }), "matrix.include is not a literal list of mappings");
+  assert.equal(expandWorkflowMatrix({ exclude: "a" }), "matrix.exclude is not a literal list of mappings");
+  assert.deepEqual(workflowJobCheckNames("lint", undefined), ["lint"]);
+  assert.deepEqual(workflowJobCheckNames("t (${{ matrix.os }}, ${{ matrix.node }})", { os: ["a"], node: [1, 2] }), ["t (a, 1)", "t (a, 2)"]);
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", { os: [{ name: "a" }] }), "${{ matrix.os }} has no literal value");
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", { os: [] }), "matrix expands to no combination");
+  assert.equal(workflowJobCheckNames("t (${{ matrix.os }})", "${{ fromJSON(x) }}"), "matrix is not a literal mapping");
 });
