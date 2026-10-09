@@ -36,6 +36,8 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
+// @ts-expect-error executable census module has no declaration file.
+import { CENSUS_SNAPSHOT_ENV, CENSUS_SNAPSHOT_ROOTS } from "../scripts/census-precheck.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -1460,6 +1462,8 @@ import {
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
   registerReviewerCheckout,
+  INSTRUMENT_SURFACE,
+  INSTRUMENT_SURFACE_EXCLUSIONS,
 } from "./lib/review.js";
 import {
   proofQueueAudit,
@@ -2535,7 +2539,7 @@ export function buildSweepEffects(
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
-    runFixRungImpl: runFixRung,
+    runFixRungImpl: (opts) => runFixRung({ ...opts, deps: { ...opts.deps, writeFixCensusSnapshot } }),
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
@@ -10943,6 +10947,7 @@ export async function runFixRung(opts: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    writeFixCensusSnapshot?: typeof writeFixCensusSnapshot;
     readMainTip?: () => string | Promise<string>;
     reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
     requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
@@ -12490,6 +12495,10 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
+    const censusSnapshotPath = fixHarnessOwnsGit ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    if (fixHarnessOwnsGit && !deps.writeFixCensusSnapshot) {
+      deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
+    }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
     // the census-baseline offers and every src/plan path are left out, so the harness commit refuses them by name.
     const proofRepairStageable = proofRepairRound
@@ -12510,6 +12519,7 @@ export async function runFixRung(opts: {
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
+        censusSnapshotPath,
         task: opts.task,
         round: attempt,
         branch: opts.branch,
@@ -12559,6 +12569,7 @@ export async function runFixRung(opts: {
       maxBudgetUsd: opts.budgetUsd,
       config: opts.config,
       prompt,
+      ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
       // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
       // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
@@ -12704,6 +12715,7 @@ export async function runFixRung(opts: {
         standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
+    const censusCheck = checkFixCensusSnapshot(opts.worktreePath, censusSnapshotPath, deps.log);
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -12716,8 +12728,12 @@ export async function runFixRung(opts: {
     let harnessCommitUndeclared: readonly string[] = [];
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
-    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
-      (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) => {
+      if (censusCheck?.refusal) {
+        harnessCommitRefusalReason = censusCheck.refusal.text;
+        return 0;
+      }
+      return (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? roundBase.baseSha : roundBase.baseSha, branch: opts.branch } : {}),
@@ -12740,6 +12756,7 @@ export async function runFixRung(opts: {
         },
         onCommit: (sha) => { harnessCommittedSha = sha; },
       });
+    };
     const fixReport = workerTranscript(fixResult);
     let fixOutcome = anchoredFixOutcome(fixReport);
     let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
@@ -12897,7 +12914,7 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
+      if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused || censusCheck?.refusal !== undefined)) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
         ...fixReceipt.joinFields(),
@@ -13142,6 +13159,15 @@ export async function runFixRung(opts: {
         });
       }
       logFixDone();
+      if (censusCheck?.refusal) {
+        pushRefusal = censusCheck.refusal;
+        currentCiFailures = [{ name: CENSUS_PUSH_CHECK, logTail: censusCheck.refusal.text }];
+        everRedCiCheckNames.add(CENSUS_PUSH_CHECK);
+        noReviewYet = true;
+        currentMergeConflict = undefined;
+        baseRefreshChecked = true;
+        continue;
+      }
       if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
@@ -17379,6 +17405,92 @@ const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
 
+export function writeFixCensusSnapshot(
+  root: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  runGit: typeof hostWorktreeGit = hostWorktreeGit,
+): string | undefined {
+  try {
+    const headSha = runGit(root, ["rev-parse", "HEAD"]).trim();
+    const mainSha = runGit(root, ["rev-parse", "origin/main"]).trim();
+    const mergeBase = runGit(root, ["merge-base", headSha, mainSha]).trim();
+    const censusPath = (p: string) =>
+      (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
+      (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
+    const paths = (args: string[]) => runGit(root, args).split("\n").filter((p) => p && censusPath(p));
+    const headPaths = paths(["ls-files"]);
+    const basePaths = paths(["ls-tree", "-r", "--name-only", mergeBase]);
+    const mainPaths = paths(["ls-tree", "-r", "--name-only", mainSha, "--", "scripts"])
+      .filter((p) => p.endsWith("baseline.json"));
+    const blobs = (ref: string, names: string[]): Record<string, string> => {
+      if (names.length === 0) return {};
+      const output = Buffer.from(runGit(root, ["cat-file", "--batch"], {
+        input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
+      }));
+      const texts: Record<string, string> = {};
+      let offset = 0;
+      for (const path of names) {
+        const end = output.indexOf(10, offset);
+        const header = output.subarray(offset, end).toString("utf8");
+        const match = /^[a-f0-9]+ blob (\d+)$/.exec(header);
+        if (end < 0 || !match) throw new Error(`census base blob unreadable: ${path}`);
+        const size = Number(match[1]);
+        offset = end + 1;
+        if (output[offset + size] !== 10) throw new Error(`census base blob truncated: ${path}`);
+        texts[path] = output.subarray(offset, offset + size).toString("utf8");
+        offset += size + 1;
+      }
+      return texts;
+    };
+    const snapshot = { version: 1, root: resolve(root), headSha, mainSha, mergeBase, headPaths, basePaths,
+      baseBlobs: blobs(mergeBase, basePaths), mainBlobs: blobs(mainSha, mainPaths),
+      instrumentSurface: INSTRUMENT_SURFACE, instrumentExclusions: INSTRUMENT_SURFACE_EXCLUSIONS };
+    mkdirSync(join(root, "state"), { recursive: true });
+    if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
+    const path = join(mkdtempSync(join(root, "state", "rmd-census-")), "snapshot.json");
+    writeFileSync(path, JSON.stringify(snapshot), { flag: "wx", mode: 0o444 });
+    log("fix.census_snapshot", { outcome: "available", path, head_sha: headSha, main_sha: mainSha, merge_base: mergeBase });
+    return path;
+  } catch (error) {
+    log("fix.census_snapshot", { outcome: "unavailable", reason: String(error) });
+    return undefined;
+  }
+}
+
+export function checkFixCensusSnapshot(
+  root: string,
+  path: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: typeof spawnSync = spawnSync,
+): { refusal?: CensusPushRefusal; unmeasured?: string } | undefined {
+  if (!path) return undefined;
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
+  env[CENSUS_SNAPSHOT_ENV] = path;
+  const scriptsRoot = repoRoot;
+  const precheck = run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
+  let refusal = censusPushRefusal(text);
+  let unmeasured = precheck.status === 2 ? text.trim() : undefined;
+  if (!refusal) {
+    const reach = "test/the-affected-suite-reach-ratchet.test.ts";
+    const result = run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
+      "./test/setup/tmp-hygiene.ts", reach],
+      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    if (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2) || result.error || result.signal ||
+        result.status !== 0 || !/^# tests [1-9]\d*$/m.test(output)) {
+      const reason = String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000);
+      refusal = { text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
+        censuses: ["census-suite"], offeredBaselines: [] };
+    }
+  }
+  log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
+    ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
+  return { refusal, unmeasured };
+}
+
 /** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */
 export class FixRoundPushError extends RmdError {
   constructor(readonly pushCause: RunErrorCause, readonly refusal: CensusPushRefusal | undefined, readonly detail: string) {
@@ -17696,12 +17808,14 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
+    const censusSnapshotPath = harnessCommits ? writeFixCensusSnapshot(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,
         round: strike,
         branch: input.branch,
         harnessCommits,
+        censusSnapshotPath,
         evidence: { ciFailures: [{ name: input.recheck ? COVERAGE_PUSH_CHECK : CENSUS_PUSH_CHECK, logTail: refusal.text }] },
         reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
       }),
@@ -17726,6 +17840,7 @@ export async function repairCensusRefusedPush(input: {
         maxBudgetUsd: input.budgetUsd,
         config: input.config,
         prompt,
+        ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
         resumeSessionId: strike === 1 ? input.resumeSessionId : undefined,
         tools: harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
         ...(cashTools === undefined ? {} : { cashTools }),
@@ -17736,6 +17851,13 @@ export async function repairCensusRefusedPush(input: {
     );
     if (spawned.kind !== "spawned") return { outcome: "refused", strikes: strike, refusal, reason: `fix worker ${spawned.kind} after ${spawned.elapsedMs}ms` };
     const result = input.account(spawned.result);
+    const censusCheck = checkFixCensusSnapshot(cwd, censusSnapshotPath, log);
+    if (censusCheck?.refusal) {
+      refusal = censusCheck.refusal;
+      log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
+        reason: "saved edits refused by census before commit", refusal: refusal.text });
+      continue;
+    }
     harnessCommitForShellLessWorker({
       harnessOwnsGit: harnessCommits,
       commitCount: commitsAhead(cwd, roundStart),
@@ -19860,6 +19982,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
+          writeFixCensusSnapshot,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),

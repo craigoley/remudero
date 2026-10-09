@@ -449,6 +449,7 @@ export function renderFixPrompt(opts: {
   /** W1-T3727: the harness owns this round's COMMIT, so the prompt must not ask for git. True only
    *  where the spawn was also bounded without a shell — see FIX_CASH_TOOLS. */
   harnessCommits?: boolean;
+  censusSnapshotPath?: string;
   // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
   // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
   // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
@@ -456,6 +457,8 @@ export function renderFixPrompt(opts: {
   reachableRemedyFiles?: readonly RemedyFileForGate[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
+  const censusSnapshotEnv = opts.censusSnapshotPath === undefined ? undefined :
+    `RMD_CENSUS_SNAPSHOT='${opts.censusSnapshotPath.replace(/'/g, "'\\''")}'`;
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
   // W1-T78: an operator's clarification answer, when present, is carried
   // VERBATIM ahead of the mode-specific content — mode-agnostic, never dropped.
@@ -601,6 +604,13 @@ export function renderFixPrompt(opts: {
     // because CI went red, and a ratchet an earlier round left unrecorded is the commonest reason.
     ...ratchetContractLines(),
     ONE_TEST_SUITE_AT_A_TIME_LINE,
+    ...(censusSnapshotEnv ? [
+      "When your check tool accepts command arguments, check the edited tree with the harness's read-only census snapshot:",
+      `${censusSnapshotEnv} node scripts/census-precheck.mjs`,
+      `${censusSnapshotEnv} node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts test/the-affected-suite-reach-ratchet.test.ts`,
+      "If your tool only offers run_check(unit_test/typecheck), save your edits and report that limit; the harness runs these census checks before committing.",
+      "Repair any census refusal before finishing. NOT MEASURED is not a passing verdict; hosted CI remains required.",
+    ] : []),
     // W1-T464: this rung used to spread ciParityContractLines() here — the same
     // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
     // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
