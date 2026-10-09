@@ -36245,10 +36245,10 @@ export function shardRepairsPending(stateDir: string, clock: Clock = systemClock
 }
 
 /** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
-export function withShardRepairs(stateDir: string, repairs: () => void, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
-  return Object.assign(() => {
+export function withShardRepairs(stateDir: string, repairs: () => void | Promise<void>, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
+  return Object.assign(async () => {
     try {
-      repairs();
+      await repairs();
     } catch (e) {
       log("plan.shard_repair_failed", { stage: "pass", reason: String((e as Error)?.message ?? e) });
     }
@@ -36262,16 +36262,16 @@ type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 /** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
 type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
 
-function repairRequestedShard(
+async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined; prState: (prUrl: string) => PrState },
-): ShardRepairOutcome {
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
   let text: string;
   try {
-    text = opts.readOriginBlob(rel);
+    text = await opts.readOriginBlob(rel);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("read", e));
     return { retry: true };
@@ -36293,7 +36293,7 @@ function repairRequestedShard(
     return { done: true };
   }
   if (prior !== undefined) {
-    const prState = opts.prState(prior);
+    const prState = await opts.prState(prior);
     if (prState === "unknown") {
       opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR" });
       return { retry: true, blob };
@@ -36320,7 +36320,7 @@ function repairRequestedShard(
   };
   let prUrl: string | undefined;
   try {
-    prUrl = opts.land(rel, verdict.text, pr);
+    prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
@@ -36354,38 +36354,39 @@ function rescheduleShardRepair(path: string, request: ShardRepairRequest, blob: 
 
 /**
  * Off the loop, inside the plan garden's child: each due request is repaired from origin/main's blob
- * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
+ * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckoutAsync} (its
  * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`, unless that PR was
  * closed unmerged, when one fresh PR is opened (W1-T5618). A request is consumed only at an end state — a PR
  * open or merged, a refusal, a request that cannot be read; a not-landed or failed attempt backs off and is
  * retried on a later pass until {@link SHARD_REPAIR_ATTEMPT_CAP} abandons it.
  */
-export function runShardRepairPass(opts: {
+export async function runShardRepairPass(opts: {
   stateDir: string;
   repoDir: string;
   worktreesRoot: string;
   owner: string;
   repo: string;
   log: ShardRepairLog;
-  readOriginBlob?: (rel: string) => string;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
-  prState?: (prUrl: string) => PrState;
+  readOriginBlob?: (rel: string) => string | Promise<string>;
+  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  prState?: (prUrl: string) => PrState | Promise<PrState>;
+  openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
-}): void {
+}): Promise<void> {
   const readOriginBlob =
-    opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
+    opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
-    ((rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = gardenCheckout({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log });
+    (async (rel: string, text: string, pr: { title: string; body: string }) => {
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
       try {
         writeFileSync(join(checkout.root, rel), text);
-        return checkout.land({ paths: [rel], ...pr });
+        return await checkout.land({ paths: [rel], ...pr });
       } finally {
-        checkout.dispose();
+        await checkout.dispose();
       }
     });
-  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
+  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJsonAsync));
   const now = (opts.clock ?? systemClock).now();
   for (const path of shardRepairRequests(opts.stateDir)) {
     if (!shardRepairRequestDue(path, now)) continue;
@@ -36397,7 +36398,7 @@ export function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
     if ("done" in outcome) rmSync(path, { force: true });
     else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }

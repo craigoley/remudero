@@ -79,6 +79,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
   const fields = new Set<keyof Config>([
     "claudeBin",
     "root",
+    "diskArtifactScanRoots",
     "installRoot",
     "zdotdir",
     "workerShell",

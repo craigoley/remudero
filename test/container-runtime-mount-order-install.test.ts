@@ -426,7 +426,7 @@ interface ScratchFixture extends Fixture {
 /** A host mid-window: /mnt/scratch mounted with the containerd copy on it, the fstab bind already
  * commented out, daemon.json pointed at the scratch root. The systemctl stub additionally answers
  * ExecStartPre/ExecStartPost (every matching row of the unit's fixture drop-ins), a mount unit's
- * What/FragmentPath (from the fixture unit dir) and ActiveState ($RMD_TEST_MOUNT_STATE), and
+ * What (the active device or unit-file source), FragmentPath and ActiveState ($RMD_TEST_MOUNT_STATE), and
  * rmd-scratch.service's Type ($RMD_TEST_SCRATCH_TYPE). */
 function makeScratchFixture(): ScratchFixture {
   const fx = makeFixture();
@@ -463,6 +463,7 @@ function makeScratchFixture(): ScratchFixture {
       '    case "$prop" in',
       '      ActiveState) echo "ActiveState=${RMD_TEST_MOUNT_STATE:-inactive}" ;;',
       '      FragmentPath) if [ -f "$f" ]; then echo "FragmentPath=$f"; else echo "FragmentPath="; fi ;;',
+      '      What) if [ "${RMD_TEST_MOUNT_STATE:-inactive}" = "active" ]; then echo "What=/dev/nvme1n1"; else grep -m1 "^What=" "$f" 2>/dev/null; fi ;;',
       "      *) echo \"$prop=$(grep -m1 \"^$prop=\" \"$f\" 2>/dev/null | cut -d= -f2-)\" ;;",
       "    esac",
       "    exit 0 ;;",
@@ -577,6 +578,22 @@ test("scratch runtime: install refuses a daemon.json not pointed at the scratch 
   assert.notEqual(install.status, 0, install.output);
   assert.ok(install.output.includes(`"data-root": "${fx.scratchRoot}/docker"`), install.output);
   assert.ok(!existsSync(join(fx.unitDir, MOUNT_UNIT)));
+});
+
+test("W1-T6975: check mode reads What= from the unit file, not the active mount device", () => {
+  const fx = makeScratchFixture();
+  const install = runScratch(fx, ["--install"]);
+  assert.equal(install.status, 0, install.output);
+
+  const live = runScratch(fx, [], { RMD_TEST_MOUNT_STATE: "active" });
+  assert.equal(live.status, 0, live.output);
+  assert.match(live.output, /containerd and docker run from/);
+
+  const unitPath = join(fx.unitDir, MOUNT_UNIT);
+  writeFileSync(unitPath, readFileSync(unitPath, "utf8").replace(`What=${fx.scratchRoot}/containerd`, "What=/mnt/rmd/containerd"));
+  const wrongSource = runScratch(fx, [], { RMD_TEST_MOUNT_STATE: "active" });
+  assert.notEqual(wrongSource.status, 0, wrongSource.output);
+  assert.match(wrongSource.output, /MISSING — var-lib-containerd\.mount What=/);
 });
 
 test("scratch runtime: check mode passes only when the bind is live from the scratch device and Docker runs from scratch", () => {

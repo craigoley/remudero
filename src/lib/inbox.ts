@@ -31,7 +31,7 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
+import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
@@ -3261,8 +3261,9 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
       edits.push({ start: scalar.range[0], end, text: `${space}${rendered}\n` });
     } else if (pair && isScalar(pair.key) && pair.key.range) {
       const start = pair.key.range[1] + 1;
-      const end = fragmentYaml.indexOf("\n", start);
-      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + 1, text: ` ${rendered}\n` });
+      const end = isNode(pair.value) && pair.value.range
+        ? pair.value.range[1] : fragmentYaml.indexOf("\n", start);
+      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + (fragmentYaml[end] === "\n" ? 1 : 0), text: ` ${rendered}\n` });
     } else {
       edits.push({ start: node.range[1], end: node.range[1], text: `\n  rationale: ${rendered}\n` });
     }

@@ -136,6 +136,24 @@
   src: "ci-learning:8551:ci-shard (1/8)"
   cited: "2026-10-08"
 
+- id: unwired-gate-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/unwired-gate.yml", scripts/unwired-gate-check.mjs, src/lib/ci-parity.ts]
+  fact: >-
+    Before opening a PR that adds or changes a gate-shaped script, npm check script, or its CI
+    registration, run `npm run --silent unwired-gate:check` on the proposed tree. The check reads
+    parsed workflow steps and package.json script calls; register each gate in an executable
+    workflow or package script, and remove stale allowance rows when wiring lands. This is the
+    local check for the unwired-gate refusal, not a textual mention or a unit test of the checker.
+  evidence: >-
+    The unwired-gate gate refused pull requests #10137, #10215, and #10271, and each was repaired.
+    `scripts/unwired-gate-check.mjs` reports gate-shaped scripts that no workflow or package script
+    invokes, plus stale allowances; `.github/workflows/unwired-gate.yml` runs the checker. The
+    individual refusal logs were not available to establish a narrower shared cause.
+  src: "ci-learning:10137:unwired-gate"
+  cited: "2026-10-09"
+
 - id: ci-shard-seven-eight-refusals-reach-task-authoring-lane
   subsystem: ci
   lifecycle: active
@@ -239,7 +257,8 @@
 
 - id: squash-trailer-gate-task-authoring-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire squash-trailer-gate-task-authoring-lane
+  lifecycle: superseded
   files: ["plan/tasks.d/**", src/run-task.ts, .github/workflows/ci.yml]
   fact: >-
     Before opening a plan-only PR, inspect the commits reachable from its head for

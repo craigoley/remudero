@@ -138,16 +138,25 @@ export interface TickReadAgeBound {
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
+const staleRefusals = new WeakMap<NonNullable<TickReadAgeBound["log"]>, Map<string, number>>();
+
 /** The published generation while it is no older than the bound. An older one answers undefined
- * with one `tick_read.stale_refused` row, which leaves the consumer on its own read. */
+ * with one `tick_read.stale_refused` row per consumer and generation, leaving its own read. */
 export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined, bound: TickReadAgeBound):
   ReadGeneration<T> | undefined {
   if (!published) return undefined;
   const maxAgeMs = bound.maxAgeMs ?? TICK_READ_MAX_AGE_MS;
   const ageMs = (bound.clock ?? systemClock).now() - published.publishedAtMs;
   if (ageMs <= maxAgeMs) return published;
-  bound.log?.("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
-    age_ms: ageMs, max_age_ms: maxAgeMs });
+  if (bound.log) {
+    let latest = staleRefusals.get(bound.log);
+    if (!latest) staleRefusals.set(bound.log, latest = new Map());
+    if (latest.get(bound.consumer) !== published.generation) {
+      latest.set(bound.consumer, published.generation);
+      bound.log("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
+        age_ms: ageMs, max_age_ms: maxAgeMs });
+    }
+  }
   return undefined;
 }
 

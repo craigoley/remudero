@@ -2360,6 +2360,7 @@
     "test/tests-exercise-the-path-they-name.test.ts": 28000,
     "test/the-adoption-scan-reads-every-invoker-surface.test.ts": 1200,
     "test/the-affected-suite-graph-reads-no-comment.test.ts": 260,
+    "test/the-affected-suite-reach-ratchet.test.ts": 5000,
     "test/the-affected-suite-selector-runs-in-shadow.test.ts": 14000,
     "test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts": 5200,
     "test/the-async-arm-path-reads-github-off-the-loop.test.ts": 5300,
