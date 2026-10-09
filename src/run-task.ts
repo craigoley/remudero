@@ -30808,11 +30808,20 @@ export function buildSuccessorAlertHandler(opts: {
   };
 }
 
-export function buildCoverageNightlyDaemonHook(opts: Parameters<typeof readCoverageNightlySummary>[0] & {
+export function buildCoverageNightlyDaemonHook(opts: Omit<Parameters<typeof readCoverageNightlySummary>[0], "cadence"> & {
   next(): GithubPostureFinding[] | Promise<GithubPostureFinding[]>;
 }): () => Promise<GithubPostureFinding[]> {
   return async () => {
-    await readCoverageNightlySummary(opts);
+    await readCoverageNightlySummary({
+      ...opts,
+      cadence: {
+        check: (path, now) => decideMeasurementCadence({
+          policy: { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, escalate: false },
+          marker: readMeasurementCadenceMarker(path), now,
+        }),
+        record: recordMeasurementCadenceFire,
+      },
+    });
     return opts.next();
   };
 }

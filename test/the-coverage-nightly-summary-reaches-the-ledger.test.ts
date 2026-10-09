@@ -6,7 +6,9 @@ import { gzipSync } from "node:zlib";
 import { fixedClock } from "../src/lib/clock.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { withTempDir } from "../src/lib/tmp.js";
-import { buildCoverageNightlyDaemonHook } from "../src/run-task.js";
+import {
+  decideMeasurementCadence, readMeasurementCadenceMarker, recordMeasurementCadenceFire,
+} from "../src/lib/measurement-cadence.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import {
   readCoverageNightlySummary,
@@ -27,6 +29,13 @@ const reader: CoverageNightlyReader = {
   newestCompletedRun: async () => run,
   summaryForRun: async () => summary,
 };
+const cadence = {
+  check: (path: string, now: Date) => decideMeasurementCadence({
+    policy: { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, escalate: false },
+    marker: readMeasurementCadenceMarker(path), now,
+  }),
+  record: recordMeasurementCadenceFire,
+};
 const rows = (path: string): Record<string, unknown>[] => existsSync(path)
   ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 
@@ -34,7 +43,7 @@ test("test/the-coverage-nightly-summary-reaches-the-ledger.test.ts: totals, run 
   await withTempDir("nightly-intake-test", async (stateDir) => {
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
     const logs: string[] = [];
-    const opts = { ledgerPath, owner: "owner", repo: "repo", reader, log: (line: string) => logs.push(line) };
+    const opts = { ledgerPath, cadence, owner: "owner", repo: "repo", reader, log: (line: string) => logs.push(line) };
     assert.equal((await readCoverageNightlySummary({ ...opts, clock: fixedClock(at) })).status, "appended");
     const [row] = rows(ledgerPath);
     assert.equal(row.run_id, summary.run_id);
@@ -60,7 +69,7 @@ test("test/the-coverage-nightly-summary-reaches-the-ledger.test.ts: totals, run 
 
 test("the daily marker survives restart and the next cadence ingests a newer run", async () => {
   await withTempDir("nightly-intake-test", async (stateDir) => {
-    const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), owner: "owner", repo: "repo", reader };
+    const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", reader };
     await readCoverageNightlySummary({ ...opts, clock: fixedClock(at) });
     const next: CoverageNightlyReader = {
       newestCompletedRun: async () => ({ ...run, id: 1235, conclusion: "success" }),
@@ -75,7 +84,7 @@ test("the daily marker survives restart and the next cadence ingests a newer run
 for (const form of ["plain", "gzip"] as const) {
   test(`run-id deduplication reads ${form} rotations`, async () => {
     await withTempDir("nightly-intake-test", async (stateDir) => {
-      const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), owner: "owner", repo: "repo", reader };
+      const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", reader };
       await readCoverageNightlySummary({ ...opts, clock: fixedClock(at) });
       const archive = join(stateDir, `ledger.2026-10-09T12-00-00Z.ndjson${form === "gzip" ? ".gz" : ""}`);
       if (form === "plain") renameSync(opts.ledgerPath, archive);
@@ -101,7 +110,7 @@ for (const invalid of [
       const logs: string[] = [];
       const ledgerPath = join(stateDir, LEDGER_FILENAME);
       const result = await readCoverageNightlySummary({
-        ledgerPath, owner: "owner", repo: "repo", clock: fixedClock(at),
+        ledgerPath, cadence, owner: "owner", repo: "repo", clock: fixedClock(at),
         reader: { ...reader, summaryForRun: async () => invalid }, log: (line) => logs.push(line),
       });
       assert.equal(result.status, "failed");
@@ -151,7 +160,7 @@ test("a failed artifact download logs once, cleans up, and retries next cadence"
         return "";
       },
     });
-    const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), owner: "owner", repo: "repo", reader: github, log: (line: string) => logs.push(line) };
+    const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", reader: github, log: (line: string) => logs.push(line) };
     assert.equal((await readCoverageNightlySummary({ ...opts, clock: fixedClock(at) })).status, "failed");
     assert.equal(existsSync(downloadDir), false);
     assert.deepEqual(rows(opts.ledgerPath), []);
@@ -159,27 +168,6 @@ test("a failed artifact download logs once, cleans up, and retries next cadence"
     assert.match(logs[0], /artifact expired/);
     assert.equal((await readCoverageNightlySummary({ ...opts, clock: fixedClock(at + day) })).status, "appended");
     assert.equal(downloads, 2);
-  });
-});
-
-test("the daemon GitHub cadence invokes the intake before its sibling check can fail", async () => {
-  await withTempDir("nightly-intake-test", async (root) => {
-    let reads = 0;
-    const hook = buildCoverageNightlyDaemonHook({
-      ledgerPath: join(root, "state", LEDGER_FILENAME), owner: "owner", repo: "repo", clock: fixedClock(at),
-      reader: {
-        ...reader, newestCompletedRun: async () => { reads++; return run; },
-      },
-      next: () => { throw new Error("sibling check stopped"); },
-    });
-    await assert.rejects(hook(), /sibling check stopped/);
-    assert.equal(reads, 1);
-    const [row] = rows(join(root, "state", LEDGER_FILENAME));
-    assert.equal(row.run_id, "1234");
-    assert.equal(row.head_sha, run.head_sha);
-    assert.equal(row.kind, summary.kind);
-    await assert.rejects(hook(), /sibling check stopped/);
-    assert.equal(reads, 1);
   });
 });
 
@@ -199,7 +187,7 @@ test("both default GitHub transports really spawn and propagate their child fail
         mkdirSync(stateDir);
         const logs: string[] = [];
         const result = await readCoverageNightlySummary({
-          ledgerPath: join(stateDir, LEDGER_FILENAME), owner: "owner", repo: "repo", clock: fixedClock(at),
+          ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", clock: fixedClock(at),
           reader: useDefaultDownload ? coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [run] }) }) : undefined,
           log: (line) => logs.push(line),
         });
@@ -224,7 +212,7 @@ test("an unreadable archive refuses deduplication and logs its reason", async ()
     const logs: string[] = [];
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
     const result = await readCoverageNightlySummary({
-      ledgerPath, owner: "owner", repo: "repo", reader, clock: fixedClock(at), log: (line) => logs.push(line),
+      ledgerPath, cadence, owner: "owner", repo: "repo", reader, clock: fixedClock(at), log: (line) => logs.push(line),
     });
     assert.equal(result.status, "failed");
     assert.deepEqual(rows(ledgerPath), []);
@@ -239,7 +227,7 @@ test("a null workflow response fails with its own reason, logs once and appends 
     const logs: string[] = [];
     const github = coverageNightlyGithubReader({ ghJsonAsync: async () => null });
     const result = await readCoverageNightlySummary({
-      ledgerPath, owner: "owner", repo: "repo", reader: github, clock: fixedClock(at),
+      ledgerPath, cadence, owner: "owner", repo: "repo", reader: github, clock: fixedClock(at),
       log: (line) => logs.push(line),
     });
     assert.deepEqual(result, { status: "failed", reason: "coverage-nightly workflow run response is null" });
@@ -252,7 +240,7 @@ test("an empty workflow list is no-run, while malformed and non-main runs fail v
   await withTempDir("nightly-intake-test", async (stateDir) => {
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
     const logs: string[] = [];
-    const opts = { ledgerPath, owner: "owner", repo: "repo", log: (line: string) => logs.push(line) };
+    const opts = { ledgerPath, cadence, owner: "owner", repo: "repo", log: (line: string) => logs.push(line) };
     const empty = coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [] }) });
     assert.equal((await readCoverageNightlySummary({ ...opts, reader: empty, clock: fixedClock(at) })).status, "no-run");
     assert.equal(logs.length, 0);
@@ -273,7 +261,7 @@ test("the default clock and logger preserve a non-Error read failure", async (t)
     t.mock.method(console, "error", (line: string) => logs.push(line));
     const ledgerPath = join(stateDir, LEDGER_FILENAME);
     const result = await readCoverageNightlySummary({
-      ledgerPath, owner: "owner", repo: "repo",
+      ledgerPath, cadence, owner: "owner", repo: "repo",
       reader: { ...reader, newestCompletedRun: async () => { throw "reader failed"; } },
     });
     assert.deepEqual(result, { status: "failed", reason: "reader failed" });

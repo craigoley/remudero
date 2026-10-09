@@ -4,9 +4,6 @@ import { systemClock, type Clock } from "./clock.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
 import { openLedgerUnion } from "./ledger-union.js";
-import {
-  decideMeasurementCadence, readMeasurementCadenceMarker, recordMeasurementCadenceFire,
-} from "./measurement-cadence.js";
 import { withTempDir } from "./tmp.js";
 
 export const COVERAGE_NIGHTLY_MEASURED_STEP = "coverage_nightly.measured";
@@ -97,6 +94,10 @@ export async function readCoverageNightlySummary(opts: {
   ledgerPath: string;
   owner: string;
   repo: string;
+  cadence: {
+    check(markerPath: string, now: Date): { fire: boolean; reason: string };
+    record(markerPath: string, at: Date, windowMs: number): unknown;
+  };
   clock?: Clock;
   reader?: CoverageNightlyReader;
   log?(line: string): void;
@@ -106,13 +107,10 @@ export async function readCoverageNightlySummary(opts: {
   const markerPath = join(stateDir, "last-coverage-nightly-intake.json");
   const log = opts.log ?? ((line: string) => console.error(line));
   try {
-    const decision = decideMeasurementCadence({
-      policy: { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, escalate: false },
-      marker: readMeasurementCadenceMarker(markerPath), now: clock.date(),
-    });
+    const decision = opts.cadence.check(markerPath, clock.date());
     if (!decision.fire) return { status: "not-due", reason: decision.reason };
     // Stamp attempts before reading, including failures, so retries wait for the next daily cadence.
-    recordMeasurementCadenceFire(markerPath, clock.date(), DAY_MS);
+    opts.cadence.record(markerPath, clock.date(), DAY_MS);
     const reader = opts.reader ?? coverageNightlyGithubReader();
     const candidate = await reader.newestCompletedRun(opts.owner, opts.repo);
     if (candidate === undefined) return { status: "no-run" };
