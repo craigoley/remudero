@@ -11,6 +11,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { daemonCommand } from "../src/run-task.js";
 import { readMemoryLedger } from "../src/lib/host-memory-ledger.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const PLAN_YAML = `
 - id: A
@@ -22,7 +23,7 @@ const PLAN_YAML = `
 `;
 
 function planFixture(): { dir: string; plan: Plan } {
-  const dir = mkdtempSync(join(tmpdir(), "daemon-memory-tick-plan-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-memory-tick-plan-`));
   const path = join(dir, "tasks.yaml");
   writeFileSync(path, PLAN_YAML);
   return { dir, plan: loadPlan(path) };
@@ -66,8 +67,8 @@ test("W1-T7093 tick: each daemon.alive heartbeat runs the best-effort reservatio
 });
 
 test("W1-T7093 wiring: daemonCommand connects the production tick to the shared reservation ledger", async () => {
-  const home = mkdtempSync(join(tmpdir(), "daemon-memory-tick-home-"));
-  const slot = mkdtempSync(join(tmpdir(), "daemon-memory-tick-slot-"));
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-memory-tick-home-`));
+  const slot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-memory-tick-slot-`));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
