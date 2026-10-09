@@ -25,7 +25,7 @@ import {
   repairRetroAcceptanceBlock,
   runFixRung,
   runGhPrCreate,
-} from "../src/run-task.js";
+} from "./helpers/acceptance-fallback-surface.js";
 import { acceptanceAuthorTimeCheck, execWhitelistedProof, parseAcceptanceBlock, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
 import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
