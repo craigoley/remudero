@@ -431,6 +431,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(claimsCheck) && files.some((f) => claimsCheckEdges.includes(f))) {
     pathReaders.push(claimsCheck);
   }
+  const runTaskGitLeaf = "test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts";
+  const runTaskGitLeafEdges = [
+    "src/run-task.ts",
+    "test/check-proof-grep-cause.test.ts",
+    "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
+  ];
+  if (input.files.has(runTaskGitLeaf) && files.some((f) => runTaskGitLeafEdges.includes(f))) {
+    pathReaders.push(runTaskGitLeaf);
+  }
   const precheckParity = "test/every-ci-census-is-asked-before-the-push.test.ts";
   const precheckParityEdges = ["scripts/affected-reach-baseline.json", "src/lib/affected-suites.ts", "test/the-affected-suite-reach-ratchet.test.ts"];
   if (input.files.has(precheckParity) && files.some((f) => precheckParityEdges.includes(f))) {
