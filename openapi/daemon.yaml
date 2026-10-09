@@ -9277,6 +9277,10 @@ components:
         - plain
         - draftedTasks
       properties:
+        classification:
+          type: string
+          enum: [ASK, RECORD]
+          description: Present on needsYou lane items only.
         proposalId:
           type: string
         summary:
@@ -9303,6 +9307,10 @@ components:
         - plain
         - spawnedAt
       properties:
+        classification:
+          type: string
+          enum: [ASK, RECORD]
+          description: Present on needsYou lane items only.
         proposalId:
           type: string
         summary:
@@ -9324,6 +9332,10 @@ components:
         - plain
         - reasons
       properties:
+        classification:
+          type: string
+          enum: [ASK, RECORD]
+          description: Present on needsYou lane items only.
         proposalId:
           type: string
         summary:
@@ -9368,6 +9380,10 @@ components:
         - plain
         - reason
       properties:
+        classification:
+          type: string
+          enum: [ASK, RECORD]
+          description: Present on needsYou lane items only.
         proposalId:
           type: string
         summary:

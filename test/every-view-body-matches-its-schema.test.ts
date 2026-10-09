@@ -15,6 +15,7 @@ import { analyticsSourceBodies, type AnalyticsViewData } from "../src/lib/analyt
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createHostView, type HostViewData } from "../src/lib/host-view.js";
+import { writePersistedInbox } from "../src/lib/fleet-lane.js";
 import { writeIncidentLifecycleStore } from "../src/lib/incident-lifecycle.js";
 import { createIncidentsView, type IncidentsViewData } from "../src/lib/incidents-view.js";
 import { createInstancesView, type InstancesData } from "../src/lib/instances-view.js";
@@ -277,6 +278,44 @@ test("the strict view validator refuses an undeclared field and a wrong enum in 
   assert.deepEqual(violations(body, schema), []);
   assert.equal(violations({ ...body, data: { ...body.data, surprise: 1 } }, schema).length, 1, "an undeclared data field fails");
   assert.equal(violations({ ...body, data: { ...body.data, projects: [{ ...body.data.projects[0], worst: { ...body.data.projects[0].worst, state: "grim" } }] } }, schema).length, 1);
+});
+
+test("W1-T5739: every GET /v1/inbox lane item validates against its declared schema", async (t) => {
+  const { stateDir, deps } = fixture(t);
+  deps.panelGraph.inboxFromSlowLane = true;
+  writePersistedInbox(stateDir, {
+    complete: true, mergedTaskIds: [], projectionIndeterminate: false, ledgerRows: [],
+    proposals: ["ready", "drafting", "notReady", "declined"].map((lane) => ({ id: `ruling:${lane}`, summary: lane, evidenceAnchors: [] })),
+    classifications: [
+      { proposalId: "ruling:ready", state: "ready", reasons: [] },
+      { proposalId: "ruling:drafting", state: "drafting", reasons: [], draftSpawnedAt: iso(60_000) },
+      { proposalId: "ruling:notReady", state: "not_ready", reasons: [{ predicate: "drafted", detail: "no draft yet" }] },
+      { proposalId: "ruling:declined", state: "declined", reasons: [], declinedReason: "operator declined" },
+    ],
+  }, NOW);
+  const url = await listen(t, buildServeServer(deps));
+  const res = await fetch(`${url}/v1/inbox`, { headers: READ });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { needsYou: Record<string, Array<Record<string, unknown>>> };
+  const responseSchema = declaredBody("/v1/inbox", "GET", 200);
+  const fullBodySchema = resolve((responseSchema.anyOf as Schema[])[0]!);
+  const needsYouSchema = resolve((fullBodySchema.properties as Record<string, Schema>).needsYou!);
+  const lanes = needsYouSchema.properties as Record<string, Schema>;
+  const classifications = { ready: "ASK", drafting: "RECORD", notReady: "ASK", declined: "RECORD" };
+  assert.deepEqual(Object.keys(body.needsYou).sort(), Object.keys(classifications).sort());
+  for (const [lane, classification] of Object.entries(classifications)) {
+    const items = body.needsYou[lane]!;
+    assert.equal(items.length, 1, `${lane} is populated so its schema is exercised`);
+    const item = items[0]!;
+    assert.equal(item.proposalId, `ruling:${lane}`);
+    assert.equal(item.classification, classification);
+    const schema = lanes[lane]!.items as Schema;
+    assert.deepEqual(violations(item, schema), [], `${lane} sent ${JSON.stringify(item)}`);
+    assert.deepEqual(violations({ ...item, classification: "UNKNOWN" }, schema), [
+      '$.classification: "UNKNOWN" is not in enum ["ASK","RECORD"]',
+    ]);
+    assert.deepEqual(violations({ ...item, surprise: true }, schema), ["$.surprise: sent, never declared"]);
+  }
 });
 
 test("a version 2 view body refuses every clock stamp version 1 carried in data", async (t) => {
