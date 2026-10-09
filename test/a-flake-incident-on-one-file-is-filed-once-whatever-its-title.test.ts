@@ -3,7 +3,7 @@
 // test in it filed two tasks for one flake: W1-T7269 (file) and W1-T7270 (title), same three PRs and
 // runs, both fixed by #10452. The duplicate (#10395) then sat stuck on lint-plan. One file, one incident.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,9 @@ function harness() {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flake-one-file-`));
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  // The flaky test is in the filing checkout, as on main: lint-plan's admission reads the file a shard declares.
+  mkdirSync(join(root, FILE, ".."), { recursive: true });
+  writeFileSync(join(root, FILE), "");
   const ledger = join(root, "state", "ledger.ndjson");
   const log = (step: string, extra: Row = {}, ts = NOW) => {
     appendFileSync(ledger, JSON.stringify({ ts: new Date(ts).toISOString(), step, ...extra }) + "\n");

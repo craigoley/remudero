@@ -19,6 +19,9 @@ test("a filed flake incident proves its fix with a test titled by the task id, n
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flake-proof-`));
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  // The flaky test is in the filing checkout, as on main: lint-plan's admission reads the file a shard declares.
+  mkdirSync(join(root, TEST_FILE, ".."), { recursive: true });
+  writeFileSync(join(root, TEST_FILE), "");
   const rows: Array<Record<string, unknown>> = [];
   for (const pr of [10271, 10279, 10287]) {
     rows.push({

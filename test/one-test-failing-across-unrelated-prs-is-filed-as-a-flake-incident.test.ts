@@ -26,6 +26,9 @@ function harness(testSource = "import { x } from \"../src/lib/emergency-status.j
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flake-incident-`));
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  // The flaky test is in the filing checkout, as on main: lint-plan's admission reads the file a shard declares.
+  mkdirSync(join(root, TEST_FILE, ".."), { recursive: true });
+  writeFileSync(join(root, TEST_FILE), "");
   const ledger = join(root, "state", "ledger.ndjson");
   const log = (step: string, extra: Record<string, unknown> = {}) => {
     appendFileSync(ledger, JSON.stringify({ ts: new Date(NOW).toISOString(), step, ...extra }) + "\n");

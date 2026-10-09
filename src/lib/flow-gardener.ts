@@ -17,7 +17,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
@@ -483,6 +483,8 @@ async function landFollowUp(
     const relativePath = join("plan", "tasks.d", `${taskId}-flow-${stat.key.replaceAll(":", "-").replaceAll("_", "-")}.yaml`);
     mkdirSync(join(workspace.root, "plan", "tasks.d"), { recursive: true });
     writeAtomic(join(workspace.root, relativePath), rendered.text);
+    const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
+    if (refused !== undefined) throw new Error(`flow: follow-up record failed lint-plan's machine-filing admission: ${refused}`);
     const prUrl = await workspace.land({
       paths: [relativePath],
       title: `chore(plan): file the ${stat.cls} ${stat.stage} flow regression`,
