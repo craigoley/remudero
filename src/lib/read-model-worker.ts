@@ -236,8 +236,8 @@ export type ReadModelWorkerMessage =
   | { type: "log"; step: string; extra: Record<string, unknown> }
   /** A key the slow lane's view no longer has (a page that emptied): serve forgets its body. */
   | { type: "drop"; view: string; key: string }
-  /** Each non-ledger source's latest reading, posted once per tick when one changed: a body whose data did not move is not re-posted, but its sources still age. */
-  | { type: "sources"; sources: ViewSource[] }
+  /** Each source's latest reading, posted once per tick when one changed (`bodies`: per body, ledger included), so an unmoved body is judged by its last build. */
+  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }> }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
@@ -316,6 +316,25 @@ export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs
   if (behindMs > staleMs) return stale(`projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}`);
   if (state.reason) return stale(state.reason);
   return { ...base, ...lag };
+}
+
+/** Of a body's own source and a later reading of it, the one read last. */
+function newerReading(own: ViewSource, reading: ViewSource | undefined): ViewSource {
+  if (!reading) return own;
+  const at = (source: ViewSource): number => (source.asOf === null ? Number.NEGATIVE_INFINITY : Date.parse(source.asOf));
+  return at(reading) >= at(own) ? reading : own;
+}
+
+/** A body's `ledger:` source by the rows its build read: once the projector holds newer rows it lags by their age, stale past the ledger budget. */
+export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
+  const current = ledgerSource(state, now, staleMs);
+  const builtMs = built.asOf === null ? Number.NaN : Date.parse(built.asOf);
+  const headMs = state.newestTs === null ? Number.NaN : Date.parse(state.newestTs);
+  if (!Number.isFinite(builtMs) || !Number.isFinite(headMs) || headMs <= builtMs) return current;
+  const lagMs = Math.max(0, now - builtMs);
+  const behind = { ...current, asOf: built.asOf, lagMs };
+  if (current.state !== "fresh" || lagMs <= staleMs) return behind;
+  return { ...behind, state: "stale", phase: "behind", reason: `built from the ledger as of ${built.asOf}, ${Math.round(lagMs / 1000)} s old (budget ${Math.round(staleMs / 1000)} s); the projector has newer rows` };
 }
 
 /** The read model's own status, one body per serve: what each projector has applied and who holds it. */
@@ -788,6 +807,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const latest = new Map<string, ViewBody>();
   const clocks = new Map<string, { key: string; source: ViewSource }>();
   let clocksMoved = false;
+  const readings = new Map<string, { key: string; body: { view: string; key: string; sources: ViewSource[] } }>();
+  const movedReadings = new Set<string>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let heldLoggedAt = Number.NEGATIVE_INFINITY;
@@ -1107,9 +1128,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       clocks.set(source.name, { key: reading, source });
       clocksMoved = true;
     }
+    const id = `${name}\u0000${key}`;
+    const read = JSON.stringify(sources.map((source) => ({ ...source, lagMs: undefined })));
+    if (readings.get(id)?.key !== read) {
+      readings.set(id, { key: read, body: { view: name, key, sources } });
+      movedReadings.add(id);
+    }
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = viewEtag(name, version, stale, data);
-    const id = `${name}\u0000${key}`;
     if (lastEtag.get(id) === etag) return;
     const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
     const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
@@ -1327,9 +1353,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const postState = (now: number): void => {
-    if (clocksMoved) {
+    if (clocksMoved || movedReadings.size > 0) {
       clocksMoved = false;
-      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source) });
+      const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
+      movedReadings.clear();
+      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}) });
     }
     if (!viewsOnly) opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
   };
@@ -1886,7 +1914,7 @@ export interface ReadModelWorkerHandle {
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
   body(view: string, key?: string): ReadModelBodyEntry | undefined;
   /** Re-judge persisted sources against the latest worker state. */
-  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  judge(sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[];
   /** The switch file as the main thread last read it. */
   switches(): ReadModelSwitches;
   /** Each `auto` view's effective mode as the switch recheck last resolved it (views.ts's `ViewBodySource.autoMode`). */
@@ -1954,6 +1982,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const bodies = new Map<string, ReadModelBodyEntry>();
   const instances = new Map<string, ReadModelInstanceState>();
   const sourceClocks = new Map<string, ViewSource>();
+  const bodyReadings = new Map<string, ReadonlyMap<string, ViewSource>>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let at: number | undefined;
   const home = opts.instances[0]?.name ?? "core";
@@ -2118,9 +2147,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "drop") bodies.delete(readModelBodyKey(msg.view, msg.key));
-    else if (msg.type === "sources") {
+    else if (msg.type === "drop") {
+      bodies.delete(readModelBodyKey(msg.view, msg.key));
+      bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
+    } else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
+      for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
     } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
     } else if (msg.type === "state") {
@@ -2167,11 +2199,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
-    judge: (sources, now) => sources.map((source) => {
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(sourceClocks.get(source.name) ?? source, now);
+    judge: (sources, now, body) => sources.map((source) => {
+      const read = body ? newerReading(source, bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name)) : undefined;
+      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
       const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
       const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return ledgerSource(state, now);
+      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now) : ledgerSource(state, now);
       const committed = committedAt.get(instance);
       if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
         return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
