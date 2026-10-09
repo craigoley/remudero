@@ -14,10 +14,11 @@ raw: "Prevent console escalation issue flooding. OBSERVED in the live console
   core PR."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
