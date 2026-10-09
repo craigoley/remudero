@@ -21,13 +21,15 @@
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
@@ -374,6 +376,28 @@ export interface MachineJudgePorts {
   clock: Clock;
   limit?: number;
   excludeFamilies?: readonly string[];
+}
+
+/** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
+ *  lives in it) and the operator's releases. A plan that cannot be resolved stamps as unreadable, so it
+ *  differs from any recorded tree and the pass runs and reports the failure. */
+export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
+  let plan: string;
+  try {
+    plan = hostWorktreeGit(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
+  } catch {
+    // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
+    plan = "unreadable";
+  }
+  const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });
+  return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
+}
+
+/** Whether a pass moved anything: a ruling proceeded, escalated, refused or settled, or a PR opened. Waiting
+ *  on a PR, an unavailable judge and a failed landing are not new; the garden's pacing backs off on them. */
+export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
+  return report.prUrl !== undefined ||
+    [report.proceeded, report.escalated, report.refused, report.settled].some((ids) => ids.length > 0);
 }
 
 export interface MachineJudgeReport {

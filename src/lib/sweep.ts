@@ -12085,9 +12085,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
 /** W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING A
  *  NEW HEAD? `prior.fixed` records only that a fix was DISPATCHED, never an outcome, and clears only
  *  on a new head — so a dispatch that ran and ENDED without pushing leaves the key set and every
- *  later pass stands down FOREVER. `fix.resolved` is never counted as stalled. TASK-ID KEYED, safe
- *  because every caller guards on the PR's CURRENT head. W1-T1210 — A TASKID WITH NO `fix.dispatch`
- *  ROW IS THE SAME SHAPE ONE STEP EARLIER, and the ABSENCE of the row is the falsifier. */
+ *  later pass stands down FOREVER; a `fix.stood_down` is such an end. `fix.resolved` is never stalled.
+ *  TASK-ID KEYED (callers guard on the CURRENT head). W1-T1210: no `fix.dispatch` row ⇒ stalled. */
 export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
@@ -12115,6 +12114,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
+    } else if (line.step === "fix.stood_down") {
+      stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
@@ -12843,6 +12844,10 @@ export function readyDraftPullRequest(
 
 /** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
 export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
+
+export function emptyDiffReviewFailure(pr: OpenPrView): boolean {
+  return !isBlockedCi(pr) && pr.changedFiles?.length === 0;
+}
 
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
 const armsInFlight = new Set<string>();
@@ -14486,7 +14491,7 @@ export async function runSweep(
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
         const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
           !metadataRedRuledOut(ledgerLines, pr);
-        alreadyDone = metadataRed
+        alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
@@ -15429,6 +15434,13 @@ export async function runSweep(
                 }
                 reason = `superseded — the stale-proof red leaves nothing in this PR's diff against main (${carried})`;
                 extraDisposedFields = { ...extraDisposedFields, stale_proof_superseded: true };
+                await deps.close(pr, reason);
+                break;
+              }
+              if (emptyDiffReviewFailure(pr) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                staleProofCloses += 1;
+                reason = `superseded — this PR's diff against main is empty, so nothing is left to merge; its failed review cannot be repaired in it (#10265)`;
+                extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
                 await deps.close(pr, reason);
                 break;
               }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
+import { canonicalBuildInfo, publishBuildInfo, seedBuildInfo } from "./typecheck-buildinfo.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -170,7 +171,8 @@ const within = (path: string, root: string): boolean => path === root || path.st
 const realOrUndefined = (path: string): string | undefined => (existsSync(path) ? realpathSync(path) : undefined);
 
 /** Options a tree's tsconfig could use to make the compiler WRITE outside the scratch dir (tsBuildInfoFile, a trace
- *  directory, a cpu profile) are reset by a harness-owned wrapper config that `extends` the tree's; the rest of the
+ *  directory, a cpu profile) are reset by a harness-owned wrapper config that `extends` the tree's — the harness then
+ *  names its own scratch buildinfo on the command line, which wins over any config; the rest of the
  *  tree's config is read as data. `references` is not inherited through `extends`, which `--noEmit -p` never builds.
  *  The wrapper sits at the materialised tree's root so default `typeRoots` resolve from there, as they would in CI. */
 const WRAPPER_CONFIG = "tsconfig.rmd-merged-typecheck.json";
@@ -178,16 +180,30 @@ const WRAPPER_COMPILER_OPTIONS = {
   noEmit: true, incremental: false, composite: false, tsBuildInfoFile: null, generateTrace: null, generateCpuProfile: null,
 };
 
+/** Where one probe's checks keep their incremental state: the canonical checkout's buildinfo (lib/typecheck-buildinfo.ts)
+ *  seeds the first, each check seeds the next, and the first completed check is published back as the canonical seed. */
+export type ProbeBuildInfo = { canonical?: { root: string; buildInfo: string }; tsVersion: string };
+
+/** The argv of one probe check. The buildinfo is the scratch dir's, so the compiler still writes nothing outside it. */
+export function mergedTypecheckArgv(tsc: string, buildInfo: string, config: string): string[] {
+  return [tsc, "--noEmit", "--incremental", "--tsBuildInfoFile", buildInfo, "-p", config];
+}
+
 function harnessTypecheck(
-  tsc: string, scratch: string, spawnChild: TypecheckSpawn,
+  tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo,
 ): (dir: string, nodeModules: string) => Promise<TypecheckRun> {
   let n = 0;
+  let previous = state.canonical;
+  let published = false;
   return (dir) => new Promise((resolveRun) => {
     n += 1;
     const home = join(scratch, `home-${n}`);
     mkdirSync(home);
     const config = join(dir, WRAPPER_CONFIG);
     writeFileSync(config, JSON.stringify({ extends: "./tsconfig.json", compilerOptions: WRAPPER_COMPILER_OPTIONS }));
+    // W1-T5658's check at about half the cold peak memory: tsc reuses only the results whose file hashes still match.
+    const self = { root: dir, buildInfo: join(scratch, `typecheck-${n}.tsbuildinfo`) };
+    if (previous !== undefined) seedBuildInfo(previous, self, state.tsVersion);
     let output = "";
     let timedOut = false;
     let settled = false;
@@ -195,9 +211,16 @@ function harnessTypecheck(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (status !== null && !timedOut) {
+        previous = self;
+        if (!published && state.canonical !== undefined) {
+          published = true;
+          publishBuildInfo(self, state.canonical, state.tsVersion);
+        }
+      }
       resolveRun({ status, output: output + extra, timedOut });
     };
-    const child = spawnChild(process.execPath, [tsc, "--noEmit", "-p", config], {
+    const child = spawnChild(process.execPath, mergedTypecheckArgv(tsc, self.buildInfo, config), {
       cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
     });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
@@ -260,7 +283,9 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     }
     const root = mkdtempSync(join(tmpdir(), "rmd-merged-typecheck-"));
     scratch = root;
-    const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn);
+    const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn, {
+      canonical: canonicalBuildInfo(wt), tsVersion: harness.version,
+    });
     const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
       const tar = join(root, `${name}.tar`);
       const dir = join(root, name);

@@ -1,4 +1,4 @@
-import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, statSync as nodeStatSync } from "node:fs";
+import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, mkdirSync as nodeMkdirSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync, renameSync as nodeRenameSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync, writeFileSync as nodeWriteFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { isMainThread, parentPort, threadId, Worker, workerData, type MessagePort } from "node:worker_threads";
@@ -1503,6 +1503,100 @@ export async function readLedgerUnionRecordsMemoized(
   }
   memo.reportRetention(stateDir);
   return read;
+}
+
+/** What one {@link ledgerRotationDigests} hook did, so a caller can prove a repeat read decompressed nothing. */
+export interface LedgerRotationDigestCounts {
+  /** Rotations answered from a digest written by an earlier read. */
+  hits: number;
+  /** Rotations read, decompressed and parsed here (and digested for the next read). */
+  parsed: number;
+  /** Digests that could not be written; the rows were still returned. */
+  writeFailed: number;
+  /** Digests of rotations that no longer exist, removed. */
+  pruned: number;
+}
+
+/**
+ * A SYNCHRONOUS, DURABLE {@link LedgerRotationHook} for a reader in a short-lived process. A garden pass is a
+ * fresh child process every time (W1-T5114), so an in-memory {@link createLedgerRotationMemo} never hits there,
+ * and each pass gunzipped and parsed every archived rotation again. OBSERVED 2026-10-09 on the fleet host: 423
+ * archives (178 MB gzipped, ~3.8 GB decompressed) per ci-friction pass, every 60 s. A rotation is written once,
+ * so its `reduce`d rows are kept on disk, keyed by the rotation's name, size and mtime, in the same store and
+ * format as the async memo's durable digests (cache/rotation-digests/<holder>/<rotation>.json). A later read
+ * decompresses only a rotation it has not seen; a damaged, foreign or stale digest is re-parsed and replaced.
+ *
+ * The rotation is parsed here in full, never through the union's `parse`, whose `pattern` and replay-skip
+ * would make the digest depend on that one read's options. `reduce` must keep every row the union read's
+ * own filters (`step`, `since`) would keep from that rotation; it may drop the rest. Bump `reducerVersion`
+ * whenever `reduce` changes.
+ */
+export function ledgerRotationDigests(
+  stateDir: string,
+  reduce: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>,
+  opts: { holder: string; reducerVersion: string },
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): { rotationRecords: LedgerRotationHook; counts: () => LedgerRotationDigestCounts } {
+  if (!opts.holder || !opts.reducerVersion) throw new Error("rotation digests require a holder and reducer version");
+  const counts: LedgerRotationDigestCounts = { hits: 0, parsed: 0, writeFailed: 0, pruned: 0 };
+  const directory = join(stateDir, "cache", "rotation-digests", encodeURIComponent(opts.holder).replaceAll(".", "%2E"));
+  const pathOf = (entry: LedgerCorpusEntry): string => join(directory, `${basename(entry.path)}.json`);
+  try {
+    const live = new Set(ledgerRotationEntries(fsDeps.readdirSync(stateDir), stateDir).map((entry) => `${basename(entry.path)}.json`));
+    for (const name of fsDeps.readdirSync(directory)) {
+      if (!name.endsWith(".json") || live.has(name)) continue;
+      nodeUnlinkSync(join(directory, name));
+      counts.pruned += 1;
+    }
+  } catch {
+    // deliberate: no digest directory yet (or an unlistable one) leaves nothing to prune; reads still work.
+  }
+  const cached = (entry: LedgerCorpusEntry, key: string): LedgerRotationRecords | undefined => {
+    let digest: Record<string, unknown>;
+    try {
+      digest = JSON.parse(fsDeps.readFileSync(pathOf(entry)).toString("utf8")) as Record<string, unknown>;
+    } catch {
+      // deliberate: an absent or unparseable digest is a miss, and the rotation itself is read.
+      return undefined;
+    }
+    const read = digest?.read as LedgerRotationRecords | undefined;
+    const valid = digest?.schema === 1 && digest.holder === opts.holder && digest.reducerVersion === opts.reducerVersion &&
+      digest.archive === basename(entry.path) && digest.key === key && read !== undefined && Array.isArray(read.rows) &&
+      read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
+      Number.isSafeInteger(read.torn) && Array.isArray(read.tornLines) && read.tornLines.length === read.torn &&
+      read.tornLines.every((line) => typeof line === "string");
+    return valid ? read : undefined;
+  };
+  const rotationRecords: LedgerRotationHook = (entry) => {
+    const stat = nodeStatSync(entry.path);
+    const key = `${stat.size}:${stat.mtimeMs}`;
+    const hit = cached(entry, key);
+    if (hit) {
+      counts.hits += 1;
+      return hit;
+    }
+    const buf = fsDeps.readFileSync(entry.path);
+    const rows: Array<Record<string, unknown>> = [];
+    const tornLines: string[] = [];
+    const torn = scanLedgerBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, undefined, (row) => rows.push(row), 0,
+      Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
+    const read: LedgerRotationRecords = { rows: reduce(rows), torn, tornLines };
+    counts.parsed += 1;
+    const path = pathOf(entry);
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      nodeMkdirSync(directory, { recursive: true, mode: 0o700 });
+      nodeWriteFileSync(temp, JSON.stringify({ schema: 1, holder: opts.holder, reducerVersion: opts.reducerVersion,
+        archive: basename(entry.path), key, read }), { flag: "wx", mode: 0o600 });
+      nodeRenameSync(temp, path);
+    } catch {
+      // deliberate: an unwritable digest costs the next read a parse, never this read its rows.
+      counts.writeFailed += 1;
+      try { nodeUnlinkSync(temp); } catch { /* deliberate: no temp file was left */ }
+    }
+    return read;
+  };
+  return { rotationRecords, counts: () => ({ ...counts }) };
 }
 
 export function resolveLedgerUnion(
