@@ -31,9 +31,9 @@ test("W1-T5380: a check family named by a generic term locates no owner and esca
   });
   assert.equal(result.next?.decision.kind, "escalate");
   assert.equal(result.ladder[0]?.state, "escalate");
-  assert.deepEqual(calls, [PIN, WORKFLOWS, WORKFLOWS]);
+  assert.deepEqual(calls, [PIN, WORKFLOWS], "a pinned search lists its workflows once, not once per check");
   assert.deepEqual(search.filesContaining("ci"), []);
-  assert.equal(calls.length, 4, "source reads reuse the revision pinned by workflow discovery");
+  assert.equal(calls.length, 3, "source reads reuse the revision pinned by workflow discovery");
 });
 
 test("W1-T5380: a distinctive refusal reason still locates its owning file", () => {

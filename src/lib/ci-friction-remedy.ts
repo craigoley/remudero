@@ -223,6 +223,8 @@ export interface OwnerSearch {
   fileExists: (file: string) => boolean;
   pin?: () => OwnerSearch;
   workflowOwner?: (family: string) => CiFrictionOwner | undefined;
+  /** The checks `workflowOwner` resolved to no owner because a workflow could not be read or told apart, and why. */
+  workflowGaps?: () => Array<{ family: string; reason: string }>;
   evidence?: (key: string, details: readonly string[], owner?: CiFrictionOwner) => CiFrictionOwnershipEvidence;
 }
 

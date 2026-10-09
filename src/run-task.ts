@@ -175,7 +175,7 @@ export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidenc
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
-import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
@@ -183,7 +183,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -5516,6 +5516,8 @@ export async function repairPrMetadata(
   },
   /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
   planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
+  /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
+  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5545,11 +5547,22 @@ export async function repairPrMetadata(
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
     const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
-    const repair = acceptanceGateBodyRepair(
-      live.body,
-      SWEEP_METADATA_ACCEPTANCE_FALLBACK,
-      gateRed ? { planCriteria } : undefined,
-    );
+    // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
+    // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
+    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
+    const headOnly = added.kind === "read" ? added.files.map(sweepMetadataAddedTestCriterion) : [];
+    const gate = acceptanceAuthorTimeCheck(live.body);
+    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
+      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
+      return {
+        repaired: false,
+        noCure: true,
+        reason:
+          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
+          "a generic block would pass at base and fail proof-discrimination",
+      };
+    }
+    const repair = acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -5771,12 +5784,35 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-const SWEEP_METADATA_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
-  {
-    claim: "this PR body carries a judgeable Acceptance block added by the metadata repair sweep",
-    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
-  },
-];
+function sweepMetadataAddedTestCriterion(path: string): AcceptanceCriterion {
+  return { claim: `the suite this PR adds passes (derived from the diff by the metadata repair sweep): ${path}`, proof: `unit test: ${path}` };
+}
+
+/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
+
+/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/*.test.ts` files added since the merge base with
+ *  origin/main. */
+export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
+  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+  try {
+    let base: string;
+    try {
+      base = mergeBase();
+    } catch {
+      // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
+      hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      base = mergeBase();
+    }
+    const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => /^test\/[^/]+\.test\.ts$/.test(p));
+    return { kind: "read", files };
+  } catch (err) {
+    return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
+  }
+}
 
 /** {@link acceptanceGateBodyRepair}'s verdict. */
 export interface AcceptanceGateBodyRepair {
@@ -36646,6 +36682,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
+    pendingSignal: (prUrl: string) => {
+      const open = readOpenBoardSnapshot(config.root, owner, repo);
+      return gardenPendingSignal(prUrl, open.ok ? open.snapshot.rows : undefined, readOriginMainSha(repoRoot));
+    },
     log,
     ...(escalate ? { escalate } : {}),
   });
