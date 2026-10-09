@@ -1,0 +1,36 @@
+- id: W1-T7410
+  title: "FLAKE INCIDENT — 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' failed CI on 7 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/prompt-render.test.ts#test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments"
+  files:
+    - test/prompt-render.test.ts
+  acceptance:
+    - claim: "the cause of 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' (test/prompt-render.test.ts)'s intermittent failure is fixed in test/prompt-render.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7410 pins the cause of the intermittent failure"
+    - claim: "the incident test file declares the new W1-T7410 order-forcing regression"
+      proof: "grep: W1-T7410 pins the cause of the intermittent failure in test/prompt-render.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — released for automatic verification by the pinned low/proceed risk ruling below. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' (test/prompt-render.test.ts)
+    Failed CI on 7 distinct pull requests whose changed files include neither the test file nor a module it imports: #10265, #10362, #10368, #10369, #10370, #10373, #10375.
+    CI runs: 37941672866, 37941954001, 37943053955, 37943097615, 37943185728, 37943838976, 37945403291.
+    Retry outcomes: 0 recovered on retry, 7 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "FIX-worker filing-time risk assessment: the declared work is limited to repairing test/prompt-render.test.ts and adding an order-forcing regression. The changes are reversible and require no privileged access, destructive operation, deployment, or policy change."
+      - "The existing behavioral criterion and declared scope are unchanged; the added grep criterion requires a new regression marker in the same test file so the future implementation can discriminate against its base tree."
+      - "This ruling assesses the filed task, not a completed flake repair. The incident record supplies seven PR and CI run identifiers; those remote runs were not independently re-read here, and the cause remains to be investigated. Live family outcomes were unavailable in this fix round."
+    judged_at: "2026-10-09T20:10:07.000Z"
+    pin: "a985c0b34cbcbbc6ecb4376030469d36b927fced5afa7690972572f6a9a96902"
