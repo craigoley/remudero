@@ -118,6 +118,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
         RMD_SERVE_REPO_DIR: join(root, "code"),
         RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
         RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
+        RMD_MEMINFO_PATH: meminfo(root, HOST_MIB),
         ...env,
       },
     });
@@ -134,7 +135,7 @@ test("W1-T4102: serve is launched with protected memory and a higher cpu weight 
   assert.equal(serve.status, 0, serve.out);
   const line = serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "";
   const serveArgs = line.split(/\s+/);
-  assert.ok(serveArgs.includes("--memory-reservation=5120m"), `serve's memory is protected: ${line}`);
+  assert.ok(serveArgs.includes("--memory-reservation=3949m"), `serve's memory is protected up to its memory.high: ${line}`);
   const build = recycle(HOST_MIB).args;
   assert.ok(shares(serveArgs) > shares(build), `serve ${shares(serveArgs)} must outweigh a build daemon ${shares(build)}`);
 });
@@ -148,20 +149,22 @@ function serveRunArgs(env: Record<string, string> = {}): { args: string[]; out: 
 test("serve's memory ceiling fits an active generation and a booting standby during a handoff", () => {
   // Measured 2026-10-02 (E31): the active generation peaks at 5.28 GB with swap, a booting standby at 1.55 GB, plus
   // 0.15 GB supervisor overhead. Under a 5 GiB ceiling handoffs deferred for memory and fell back to legacy exits.
+  // Since the 2026-10-09 host budget, serve's share of a 15.6 GiB host holds both generations in memory PLUS its swap
+  // allowance — the standby pages rather than anything being killed — not in RAM alone.
   const { args } = serveRunArgs();
   const mib = (flag: string): number => Number(args.find((a) => a.startsWith(`${flag}=`))?.slice(flag.length + 1).replace(/m$/, ""));
   const needMib = (5.28 + 1.55 + 0.15) * 1e9 / 2 ** 20;
-  assert.ok(mib("--memory") >= needMib, `ceiling ${mib("--memory")} MiB holds two generations (${Math.round(needMib)} MiB)`);
-  assert.ok(mib("--memory-reservation") * 2 ** 20 >= 4.95e9, `the reservation covers the active generation's 4.95 GB peak`);
+  assert.ok(mib("--memory-swap") >= needMib, `memory+swap ${mib("--memory-swap")} MiB holds two generations (${Math.round(needMib)} MiB)`);
+  assert.ok(mib("--memory-reservation") < mib("--memory"), "the protected share sits inside the ceiling");
 });
 
 test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
   const { args, out } = serveRunArgs();
-  assert.ok(args.includes("--memory=7680m"), `a 7.5 GiB ceiling: an active generation (5.28 GB with swap) plus a booting standby (1.55 GB) during a handoff: ${args.join(" ")}`);
-  assert.ok(args.includes("--memory-swap=8704m"), "1 GiB of swap before the kernel kills anything");
-  assert.ok(args.includes("--memory-reservation=5120m"), "serve retains a protected 5 GiB share of host memory");
+  assert.ok(args.includes("--memory=4646m"), `serve's 7/21 share of a 13940 MiB budget (15988 MiB host - 2048 MiB reserve): ${args.join(" ")}`);
+  assert.ok(args.includes("--memory-swap=6969m"), "a 2323 MiB swap allowance before the kernel kills anything");
+  assert.ok(args.includes("--memory-reservation=3949m"), "serve's protected share is capped at its memory.high");
   assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
-  assert.match(out, /memory ceiling 7680 MiB \(\+1024 MiB swap\)/);
+  assert.match(out, /memory\.max 4646 MiB, memory\.high 3949 MiB \(85%\), swap 2323 MiB = weight 7\/21/);
 });
 
 test("the serve memory ceiling and a CPU quota are operator knobs without a code change", () => {
@@ -177,17 +180,18 @@ test("the serve memory ceiling and a CPU quota are operator knobs without a code
 
 test("W1-T4102: every build daemon is launched with a memory ceiling that leaves the host reserve free", () => {
   const { args, output } = recycle(HOST_MIB);
-  const ceiling = HOST_MIB - 5120 - 2048;
-  assert.ok(args.includes(`--memory=${ceiling}m`), `ceiling = host - serve reserve - overhead:\n${args.join(" ")}`);
-  assert.ok(args.includes(`--memory-swap=${ceiling + 4096}m`), "swap is bounded, so the container pages its own memory");
+  // The core daemon's 9/21 share of the host budget (15988 MiB - 2048 MiB reserve), not the whole host.
+  assert.ok(args.includes("--memory=5974m"), `ceiling = the core daemon's share of the budget:\n${args.join(" ")}`);
+  assert.ok(args.includes("--memory-swap=8961m"), "swap is a budget share, so the container pages its own memory");
+  assert.ok(args.includes(`--annotation=org.systemd.property.MemoryHigh=uint64 ${5077 * 1024 * 1024}`), "memory.high at 85% of the ceiling");
   assert.ok(args.includes("--cpu-shares=512"));
-  assert.match(output, /resource policy — build: cpu-shares 512; memory ceiling/);
+  assert.match(output, /resource policy — build remudero-daemon: cpu-shares 512; memory\.max 5974 MiB/);
 });
 
 test("W1-T4102: the resource policy derives its ceiling from the host's memory and prints its inputs", () => {
   const small = recycle(32 * 1024);
-  assert.ok(small.args.includes(`--memory=${32 * 1024 - 5120 - 2048}m`), "a bigger host gets a bigger ceiling");
-  assert.match(small.output, /host 32768 MiB - serve reserve 5120 MiB - overhead 2048 MiB/);
+  assert.ok(small.args.includes("--memory=13165m"), "a bigger host gets a bigger ceiling");
+  assert.match(small.output, /of a 30720 MiB budget \(host 32768 MiB - reserve 2048 MiB\)/);
 
   const unreadable = recycle(undefined);
   assert.ok(!unreadable.args.some((a) => a.startsWith("--memory=")), "no guessed ceiling when the host's memory is unknown");
@@ -196,7 +200,7 @@ test("W1-T4102: the resource policy derives its ceiling from the host's memory a
 
   const tiny = recycle(4096);
   assert.ok(!tiny.args.some((a) => a.startsWith("--memory=")), "a host too small for the reserve gets no ceiling rather than a useless one");
-  assert.match(tiny.output, /under the 2048 MiB floor/);
+  assert.match(tiny.output, /under the 4096 MiB floor/);
 });
 
 function healthBody(deps: Partial<Parameters<typeof buildDaemonHealthRoute>[0]>): DaemonHealthSnapshot {

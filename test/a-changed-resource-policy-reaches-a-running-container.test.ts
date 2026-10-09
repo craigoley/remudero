@@ -167,36 +167,39 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
     return `${JSON.stringify(UNLIMITED)}\n`;
   };
   try {
-    // THE SHIPPED READER, on the incident's HostConfig: the build policy's real output (15625 MiB
-    // host - 5120 serve reserve - 2048 overhead = 8457 MiB, +4096 MiB swap, 512 shares).
+    // THE SHIPPED READER, on the incident's HostConfig: the build policy's real output for the core
+    // daemon — its 9/21 share of a 13577 MiB budget (15625 MiB host - 2048 MiB reserve) = 5818 MiB,
+    // +2909 MiB swap, memory.high 4945 MiB, 512 shares.
     const drift = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: undefined, RMD_RESOURCE_POLICY_ROLE: undefined }, () =>
       shippedReader(root, execFile)(),
     );
     assert.deepEqual(drift, [
-      { field: "Memory", expected: 8457 * MIB, actual: 0 },
-      { field: "MemorySwap", expected: 12553 * MIB, actual: 0 },
+      { field: "Memory", expected: 5818 * MIB, actual: 0 },
+      { field: "MemorySwap", expected: 8727 * MIB, actual: 0 },
       { field: "CpuShares", expected: 512, actual: 0 },
+      { field: "MemoryHigh", expected: 4945 * MIB, actual: 0 },
     ]);
     assert.deepEqual(inspected[0], ["inspect", IMAGE_SHA_CONTAINER, "--format", "{{json .HostConfig}}"]);
 
     const d = decideDeployTrigger({ ...tick, resourcePolicyDrift: drift });
     assert.equal(d.deploy, true);
-    assert.match(d.reason, new RegExp(`Memory expected=${8457 * MIB} actual=0`));
-    assert.match(d.reason, new RegExp(`MemorySwap expected=${12553 * MIB} actual=0`));
+    assert.match(d.reason, new RegExp(`Memory expected=${5818 * MIB} actual=0`));
+    assert.match(d.reason, new RegExp(`MemorySwap expected=${8727 * MIB} actual=0`));
     assert.match(d.reason, /CpuShares expected=512 actual=0/);
     assert.doesNotMatch(d.reason, /MemoryReservation/, "a field that matches is not named");
 
-    // The launcher names its own container and role; serve's policy is a reservation and, since the
-    // 2026-10-02 operator ruling, a 7.5 GiB ceiling (two generations during a handoff) with 1 GiB of swap.
+    // The launcher names its own container and role; serve's policy is a reservation (capped at its
+    // memory.high) and its 7/21 share of the same host budget, with a budget-share swap allowance.
     const serve = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: "remudero-core-daemon", RMD_RESOURCE_POLICY_ROLE: "serve" }, () =>
       shippedReader(root, execFile)(),
     );
     assert.equal(inspected[1]![1], "remudero-core-daemon");
     assert.deepEqual(serve, [
-      { field: "Memory", expected: 7680 * MIB, actual: 0 },
-      { field: "MemorySwap", expected: 8704 * MIB, actual: 0 },
+      { field: "Memory", expected: 4525 * MIB, actual: 0 },
+      { field: "MemorySwap", expected: 6787 * MIB, actual: 0 },
       { field: "CpuShares", expected: 4096, actual: 0 },
-      { field: "MemoryReservation", expected: 5120 * MIB, actual: 0 },
+      { field: "MemoryReservation", expected: 3846 * MIB, actual: 0 },
+      { field: "MemoryHigh", expected: 4032823296, actual: 0 },
     ]);
 
     // A container already on the policy reads NO drift (Docker's -1 swap is drift, not unknown).

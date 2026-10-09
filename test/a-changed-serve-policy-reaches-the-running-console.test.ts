@@ -30,13 +30,22 @@ const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 const MIB = 1024 * 1024;
 const TICK = { imageDriftOnly: true };
 
-/** serve as it ran after #8569 merged: the pre-change limits. */
-const OLD_LIMITS = { Memory: 5120 * MIB, MemorySwap: 6144 * MIB, CpuShares: 4096, MemoryReservation: 3072 * MIB };
-const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB };
+/** serve as it ran before the 2026-10-09 host memory budget: #8569's isolated 7.5 GiB ceiling, no memory.high. */
+const OLD_LIMITS = { Memory: 7680 * MIB, MemorySwap: 8704 * MIB, CpuShares: 4096, MemoryReservation: 5120 * MIB, Annotations: null };
+/** serve's share of the fixture's 15625 MiB host budget (deploy/resource-policy.sh). */
+const HIGH = 3846 * MIB;
+const ON_POLICY = {
+  Memory: 4525 * MIB,
+  MemorySwap: 6787 * MIB,
+  CpuShares: 4096,
+  MemoryReservation: HIGH,
+  Annotations: { "org.systemd.property.MemoryHigh": `uint64 ${HIGH}` },
+};
 const DRIFT: ResourcePolicyDrift[] = [
-  { field: "Memory", expected: 7680 * MIB, actual: 5120 * MIB },
-  { field: "MemorySwap", expected: 8704 * MIB, actual: 6144 * MIB },
-  { field: "MemoryReservation", expected: 5120 * MIB, actual: 3072 * MIB },
+  { field: "Memory", expected: 4525 * MIB, actual: 7680 * MIB },
+  { field: "MemorySwap", expected: 6787 * MIB, actual: 8704 * MIB },
+  { field: "MemoryReservation", expected: HIGH, actual: 5120 * MIB },
+  { field: "MemoryHigh", expected: HIGH, actual: 0 },
 ];
 
 interface Harness {
@@ -79,8 +88,8 @@ test("serve on its old limits is replaced once through the launcher naming each 
   const out = runServePolicyCycle(h.deps, TICK);
   assert.equal(out.replaced, true, out.reason);
   assert.equal(h.replaces, 1);
-  assert.match(out.reason, new RegExp(`Memory expected=${7680 * MIB} actual=${5120 * MIB}`));
-  assert.match(out.reason, new RegExp(`MemoryReservation expected=${5120 * MIB} actual=${3072 * MIB}`));
+  assert.match(out.reason, new RegExp(`Memory expected=${4525 * MIB} actual=${7680 * MIB}`));
+  assert.match(out.reason, new RegExp(`MemoryReservation expected=${HIGH} actual=${5120 * MIB}`));
   assert.doesNotMatch(out.reason, /CpuShares/, "a field that matches is not named");
   assert.deepEqual(h.rows.map((r) => r.step), ["deploy.serve_policy_replace", "deploy.serve_policy_replaced"]);
   assert.deepEqual(h.rows[1]!.data?.drift, DRIFT);
@@ -177,11 +186,12 @@ function fixture(primary = true): { root: string; env: NodeJS.ProcessEnv } {
   mkdirSync(join(root, ".remudero"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
+  writeFileSync(join(root, "meminfo"), "MemTotal:       16000000 kB\n"); // serve's share is sized from host RAM
   writeFileSync(
     join(root, ".remudero", "daemon-instances.yaml"),
     `instances:\n  core:\n    repo: remudero\n${primary ? "    primary: true\n" : ""}    container_name: remudero-daemon\n    state_dir: ${root}\n`,
   );
-  return { root, env: { PATH: process.env.PATH } };
+  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo") } };
 }
 
 test("the shipped serve wiring reads the serve role against remudero-serve and replaces through serve-container.sh", () => {
