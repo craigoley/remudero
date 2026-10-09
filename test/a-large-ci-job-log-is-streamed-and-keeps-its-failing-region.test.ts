@@ -11,7 +11,7 @@
  * `echo` would expand one) and gain exactly one trailing newline.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -63,11 +63,12 @@ function scratch(kind: string): string {
 function logRoutes(logFile: string): GhShimRoute[] {
   return [
     { when: `check-runs/${JOB}/annotations`, stdout: "[]" },
-    { when: `actions/jobs/${JOB}/logs`, stdout: `$(cat '${logFile}')` },
+    { when: `actions/jobs/${JOB}/logs`, stdout: readFileSync(logFile, "utf8").replace(/\n+$/, "") },
   ];
 }
 
-/** What the shim really emits for a file: its text, trailing newlines folded to exactly one. */
+/** What the route serves for a file: its text, trailing newlines folded to exactly one (the route
+ *  strips them, and the shim adds the single newline `echo` always printed). */
 function served(text: string): string {
   return `${text.replace(/\n+$/, "")}\n`;
 }

@@ -12412,6 +12412,7 @@ export function fixRoundTally(
     if (round.refusal || round.done?.subtype === "commit_refused") {
       const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
       tally.refusals.push({ reason, round_id: round.id });
+      if (round.dispatch.mode === "ci-log" && reason === "the worker changed nothing") tally.noCommitRounds.push(round.id);
       const count = (reasons.get(reason) ?? 0) + 1;
       reasons.set(reason, count);
       if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
