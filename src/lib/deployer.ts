@@ -115,10 +115,15 @@ export interface TriggerInputs {
 }
 
 export interface ResourcePolicyDrift {
-  field: "Memory" | "MemorySwap" | "CpuShares" | "MemoryReservation";
+  /** MemoryHigh is cgroup memory.high in bytes, carried as the HostConfig annotation
+   *  {@link MEMORY_HIGH_ANNOTATION} (Docker has no memory.high flag; see deploy/resource-policy.sh). */
+  field: "Memory" | "MemorySwap" | "CpuShares" | "MemoryReservation" | "MemoryHigh";
   expected: number;
   actual: number;
 }
+
+/** The OCI annotation runc's systemd driver turns into the scope's MemoryHigh (cgroup memory.high). */
+export const MEMORY_HIGH_ANNOTATION = "org.systemd.property.MemoryHigh";
 
 const POLICY_FIELD_BY_FLAG = {
   memory: "Memory",
@@ -131,10 +136,12 @@ const POLICY_FIELD_BY_FLAG = {
  *  JSON. A flag the policy omits expects Docker's own 0; unparseable JSON or a non-numeric field is
  *  UNKNOWN (`undefined`), never drift. */
 export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: string): ResourcePolicyDrift[] | undefined {
-  const expected: Record<ResourcePolicyDrift["field"], number> = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0 };
+  const expected: Record<ResourcePolicyDrift["field"], number> = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, MemoryHigh: 0 };
+  const highArg = `--annotation=${MEMORY_HIGH_ANNOTATION}=uint64 `;
   for (const arg of expectedArgs.split("\n")) {
     const m = /^--(memory|memory-swap|cpu-shares|memory-reservation)=(\d+)(m?)$/.exec(arg.trim());
     if (m) expected[POLICY_FIELD_BY_FLAG[m[1] as keyof typeof POLICY_FIELD_BY_FLAG]] = Number(m[2]) * (m[3] ? 1024 * 1024 : 1);
+    if (arg.trim().startsWith(highArg) && /^\d+$/.test(arg.trim().slice(highArg.length))) expected.MemoryHigh = Number(arg.trim().slice(highArg.length));
   }
   let hostConfig: Record<string, unknown>;
   try {
@@ -148,6 +155,18 @@ export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: st
     if (typeof actual !== "number") return undefined;
     if (actual !== expected[field]) drift.push({ field, expected: expected[field], actual });
   }
+  // memory.high: Docker reports no annotations as null (a container created before the budget) —
+  // that is a real 0, drift against a policy that sets one. A value in another shape is UNKNOWN.
+  const annotations = hostConfig?.Annotations;
+  if (annotations !== undefined && annotations !== null && typeof annotations !== "object") return undefined;
+  const raw = (annotations as Record<string, unknown> | null | undefined)?.[MEMORY_HIGH_ANNOTATION];
+  let actualHigh = 0;
+  if (raw !== undefined) {
+    const m = typeof raw === "string" ? /^uint64 (\d+)$/.exec(raw) : null;
+    if (!m) return undefined;
+    actualHigh = Number(m[1]);
+  }
+  if (actualHigh !== expected.MemoryHigh) drift.push({ field: "MemoryHigh", expected: expected.MemoryHigh, actual: actualHigh });
   return drift;
 }
 
@@ -163,10 +182,11 @@ export function readResourcePolicyDrift(
     const expectedArgs = exec("bash", [
       "-c",
       'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
-        'else resource_policy_build_args; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
+        'else resource_policy_build_args "$3"; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
       "resource-policy",
       join(installPath, "deploy", "resource-policy.sh"),
       role,
+      container, // the build policy is THIS container's share of the host budget, not a shared ceiling
     ]);
     return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
   } catch {

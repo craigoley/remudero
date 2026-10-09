@@ -290,6 +290,8 @@ export interface ReadModelViewFactory {
   perInstance?: true;
   demand?: true;
   snapshotSourced?: true;
+  /** {@link ReadModelView.readPaced}: the unit is paced by the factory's flag, so a view made cold after a lane move keeps it. */
+  readPaced?: true;
   create(): ReadModelView;
 }
 
@@ -1568,7 +1570,7 @@ export function readModelLaneViews(
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView() },
     readModelStatusView,
-    { name: NOW_VIEW_NAME, perInstance: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
