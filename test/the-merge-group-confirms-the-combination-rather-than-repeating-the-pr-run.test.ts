@@ -174,3 +174,47 @@ test("W1-T5940: tsx loads test-tier-manifest.mjs untransformed, so a deleted fix
     rmSync(covDir, { recursive: true, force: true });
   }
 });
+
+/** Stub modules for writeMergeGroupSelection's `load`: the selector names `pick` and records what it read. */
+function stubLoad(pick: string[], seen: { symbols?: string; changed: string[][] }) {
+  const modules: Record<string, unknown> = {
+    "src/lib/affected-suites.ts": {
+      affectedSelectionOrFull: (changed: string[], read: () => unknown) => { seen.changed.push(changed); return read(); },
+      changedSymbols: (diff: string, read: (p: string) => string) => { seen.symbols = read("src/feature.ts"); return diff.includes("feature") ? ["feature"] : []; },
+      readAffectedSuitesInput: (_root: string, _changed: string[], opts: { symbolSuites: string[] }) =>
+        ({ fullRun: false, suites: pick, narrow: [...pick, ...opts.symbolSuites], reasons: [] }),
+    },
+    "src/lib/ci-parity.ts": { callerReachableSuites: (symbols: string[]) => ({ suites: symbols.length > 0 ? ["test/reached.test.ts"] : [] }) },
+    "src/lib/commit-message.ts": { defaultPreflightSpawn: () => undefined },
+  };
+  return async (p: string) => modules[p];
+}
+
+test("W1-T5940: writeMergeGroupSelection refuses to run without a module importer", async () => {
+  await assert.rejects(() => tierManifest.writeMergeGroupSelection("HEAD", "unused.txt"), /needs a `load` module importer/);
+});
+
+test("W1-T5940: writeMergeGroupSelection writes the group's suites, padded to a full shard set with known suites", async () => {
+  const tests = Object.fromEntries(["a", "b", "c", "d", "e", "f", "g", "h", "i", "reached"].map((n) => [`test/${n}.test.ts`, "// t\n"]));
+  const { cwd, base } = queueBranch([{ ...tests, "src/feature.ts": "export const feature = 1;\n" }, { "src/other.ts": "export const other = 2;\n" }]);
+  const seen: { symbols?: string; changed: string[][] } = { changed: [] };
+  const out = join(cwd, "merge-group-suites.txt");
+  const sel = await tierManifest.writeMergeGroupSelection(base, out, { load: stubLoad(["test/a.test.ts", "test/not-a-file.test.ts"], seen), root: cwd });
+  assert.equal(sel.mode, "affected", sel.reason);
+  const written = readFileSync(out, "utf8").trim().split("\n");
+  assert.deepEqual(written, sel.suites);
+  assert.equal(written.length, 8, "padded to the shard count");
+  assert.ok(written.includes("test/a.test.ts") && written.includes("test/reached.test.ts"), "the selected and symbol-reached suites survive the padding");
+  assert.ok(!written.includes("test/not-a-file.test.ts"), "an unknown suite is dropped, never handed to the candidate lane");
+  assert.equal(seen.symbols, "export const feature = 1;\n", "symbols are read from the group's own tree");
+  assert.equal(seen.changed.length, 3, "the combined diff and each member's diff are selected");
+});
+
+test("W1-T5940: writeMergeGroupSelection falls back to full when the tree has too few suites to shard", async () => {
+  const { cwd, base } = queueBranch([{ "test/a.test.ts": "// t\n", "src/feature.ts": "export const feature = 1;\n" }]);
+  const out = join(cwd, "merge-group-suites.txt");
+  const sel = await tierManifest.writeMergeGroupSelection(base, out, { load: stubLoad(["test/a.test.ts"], { changed: [] }), root: cwd });
+  assert.equal(sel.mode, "full");
+  assert.equal(sel.reason, "too few suites to shard");
+  assert.equal(readFileSync(out, "utf8"), "full\n");
+});
