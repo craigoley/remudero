@@ -290,6 +290,7 @@ export interface ReadModelViewFactory {
   perInstance?: true;
   demand?: true;
   snapshotSourced?: true;
+  readPaced?: true;
   create(): ReadModelView;
 }
 
@@ -1220,7 +1221,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (!isViewFactory(spec)) return spec;
     if (unit.made) return unit.made;
     const made = spec.create();
-    if (made.name !== spec.name || !!made.perInstance !== !!spec.perInstance || !!made.demand !== !!spec.demand || !!made.snapshotSourced !== !!spec.snapshotSourced) {
+    if (made.name !== spec.name || !!made.perInstance !== !!spec.perInstance || !!made.demand !== !!spec.demand || !!made.snapshotSourced !== !!spec.snapshotSourced || !!made.readPaced !== !!spec.readPaced) {
       throw new ReadModelViewFactoryMismatch(spec.name);
     }
     return (unit.made = made);
@@ -1567,7 +1568,7 @@ export function readModelLaneViews(
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView() },
     readModelStatusView,
-    { name: NOW_VIEW_NAME, perInstance: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
