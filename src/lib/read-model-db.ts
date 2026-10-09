@@ -223,10 +223,22 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
       const statement: StatementSync = checked(raw, () => raw.prepare(sql));
       if (opts.bigInts) statement.setReadBigInts(true);
       let readStatement: StatementSync | undefined;
+      let tempSchemaVersion: number | undefined;
+      let readsTemp = false;
       // Transaction reads see their own writes; PRAGMAs describe the writer's configuration.
       const forRead = (): { target: DatabaseSync; statement: StatementSync } => {
-        const target = raw.isTransaction || /^\s*PRAGMA\b/i.test(sql) ? raw : reading();
+        const target = raw.isTransaction || /^\s*(?:PRAGMA|EXPLAIN)\b/i.test(sql) ? raw : reading();
         if (target === raw) return { target, statement };
+        const version = Number(checked(raw, () => raw.prepare("PRAGMA temp.schema_version").get()?.schema_version));
+        if (version !== tempSchemaVersion) {
+          const hasTemp = checked(raw, () => raw.prepare("SELECT 1 FROM temp.sqlite_schema WHERE type IN ('table', 'view') LIMIT 1").get()) !== undefined;
+          // SQLite's plan resolves aliases, views and shadowing; database 1 is connection-local TEMP.
+          const plan = hasTemp ? checked(raw, () => raw.prepare(`EXPLAIN ${sql}`).all()) : [];
+          readsTemp = plan.some((row) => row.opcode === "Transaction" && row.p1 === 1)
+            && !plan.some((row) => row.opcode === "Transaction" && row.p2 !== 0);
+          tempSchemaVersion = version;
+        }
+        if (readsTemp) return { target: raw, statement };
         if (!readStatement) {
           readStatement = checked(target, () => target.prepare(sql));
           if (opts.bigInts) readStatement.setReadBigInts(true);

@@ -19,6 +19,7 @@ test("W1-T5177: a reader connection never reports a lock while the projector wri
     ddl: "CREATE TABLE item(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO item VALUES(1, 10), (2, 20);" });
   const materializer = attachReadModel(projector.path, 1);
   const oracle = attachReadModel(projector.path, 1);
+  materializer.exec("CREATE TEMP TABLE local_item(value INTEGER)");
   t.after(() => { oracle.close(); materializer.close(); projector.close(); });
   const acquired = acquireLease(projector);
   assert.equal(acquired.ok, true);
@@ -47,6 +48,48 @@ test("W1-T5177: a reader connection never reports a lock while the projector wri
   assert.deepEqual(oracle.prepare("SELECT value FROM item ORDER BY id").all().map((row) => row.value), [11, 21]);
   assert.equal(oracle.prepare("PRAGMA busy_timeout").get()?.timeout, READ_MODEL_BUSY_TIMEOUT_MS);
   assert.equal(materializer.prepare("PRAGMA busy_timeout").get()?.timeout, READ_MODEL_BUSY_TIMEOUT_MS);
+});
+
+test("temp tables and views retain their connection-local rows without pinning ordinary reads", (t) => {
+  const stateDir = makeTempDir("read-model-temp-reads");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const db = openReadModel({ stateDir, instance: "core", schemaVersion: 1,
+    ddl: "CREATE TABLE item(value INTEGER); INSERT INTO item VALUES(9007199254740993);" });
+  t.after(() => db.close());
+  db.exec(`CREATE TEMP TABLE wrote(value INTEGER);
+    CREATE TEMP TRIGGER record_update AFTER UPDATE ON item BEGIN INSERT INTO wrote VALUES(new.value); END;
+    CREATE TEMP VIEW write_count AS SELECT count(*) AS n FROM wrote;`);
+  db.prepare("UPDATE item SET value = value").run();
+  assert.deepEqual(db.prepare("SELECT value FROM wrote", { bigInts: true }).all().map((r) => r.value),
+    [9007199254740993n]);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM temp.wrote").get()?.n, 1);
+  assert.ok(db.prepare("EXPLAIN SELECT value FROM wrote").all().length > 0);
+  assert.equal(db.prepare("SELECT n FROM write_count").get()?.n, 1);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM item JOIN wrote").get()?.n, 1);
+  assert.deepEqual([...db.prepare("SELECT value FROM wrote", { bigInts: true }).iterate()].map((r) => r.value),
+    [9007199254740993n]);
+  db.exec("DELETE FROM wrote");
+  assert.equal(db.prepare("SELECT count(*) AS n FROM wrote").get()?.n, 0);
+  assert.throws(() => db.prepare("UPDATE item SET value = 0 RETURNING value").get(),
+    (error: unknown) => (error as { errcode: number }).errcode === 8);
+});
+
+test("cached reads follow temp tables that shadow and then reveal persistent tables", (t) => {
+  const stateDir = makeTempDir("read-model-temp-shadow");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const db = openReadModel({ stateDir, instance: "core", schemaVersion: 1,
+    ddl: "CREATE TABLE item(value INTEGER); INSERT INTO item VALUES(10);" });
+  t.after(() => db.close());
+  const values = db.prepare("SELECT value FROM item");
+  const mainValues = db.prepare("SELECT value FROM main.item");
+  assert.equal(values.get()?.value, 10);
+  db.exec("CREATE TEMP TABLE item(value INTEGER); INSERT INTO temp.item VALUES(20), (30)");
+  assert.equal(values.get()?.value, 20);
+  assert.deepEqual(values.all().map((r) => r.value), [20, 30]);
+  assert.deepEqual([...values.iterate()].map((r) => r.value), [20, 30]);
+  assert.equal(mainValues.get()?.value, 10);
+  db.exec("DROP TABLE temp.item");
+  assert.equal(values.get()?.value, 10);
 });
 
 test("read methods use a read-only connection and cached statements follow write transactions", (t) => {
