@@ -409,7 +409,7 @@ test("W1-T3100 (gate copy): an unreadable held id is a conflict, while a missing
 test("W1-T3100 (gate copy): main reports differing and unreadable reservation holders", (t) => {
   const origin = gitRepo({ bare: true, kind: "holder-main-origin" });
   const repo = gitRepo({ cloneFrom: origin.dir, kind: "holder-main-work" });
-  const gh = ghShim([{ when: "api", stdout: "[]\\n" }], { kind: "holder-main" });
+  const gh = ghShim([{ when: "api", stdout: "[]" }], { kind: "holder-main" });
   const previousPath = process.env.PATH;
   process.env.PATH = `${gh.dir}:${previousPath ?? ""}`;
   t.after(() => {

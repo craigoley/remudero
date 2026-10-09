@@ -29,7 +29,12 @@
     machine-filing judge uses via planRiskJudgeAction / judgeReview — never a new provider path):
       1. Deterministic PRE-SIGNALS, computed from the ledger and fed to the judge, never deciding alone:
          no-op round (no pushed head, or pushed == dispatched head), identical red set before/after a round,
-         identical diff between rounds, oscillation (a red set seen two rounds ago returns).
+         identical diff between rounds, oscillation (a red set seen two rounds ago returns), and REFUSED rounds of
+         any reason. Refusals are never strikes, so a head whose rounds keep being refused for alternating reasons
+         (#10234 at f417641, 2026-10-09: "no anchored COMMIT_MESSAGE line", then "the worker changed nothing")
+         loops "retrying the fix round" with no bound today. A no-op round on a red the worker cannot reproduce
+         is the flake/base-red signal: the judge's options include rerun-failed-jobs and attribute-to-base, not
+         only another round.
       2. The judge input: each prior round's dispatched head, fix_outcome, failing-check set before/after, the
          round's diff stat, the pre-signals, and the current red. Output: {verdict: continue | change-approach |
          escalate, loop?: string naming the loop ("same failing set for N rounds", "oscillating", "no-op rounds"),
@@ -42,9 +47,10 @@
          worker evidence; escalate → the existing deps.escalate with the named loop. fixCeilingInForce and the
          clarify-answer extension become judge inputs (an operator answer is shown to the judge), not ceilings.
       5. Every existing fix stand-down that today waits with no exit (metadata red "awaiting a fresh edited-event
-         verdict", "fix commit refused at this head and red set — incomplete round history", proof-repair refusals
-         past MAX_PROOF_REPAIR_REFUSALS_PER_HEAD) routes into this judge after its own wait, so no parked state is
-         permanent.
+         verdict", "fix commit refused at this head and red set — incomplete round history", "fix rounds refused
+         twice at this head — no further round can add information", a head still red after its one W1-T6353
+         failed-job rerun, proof-repair refusals past MAX_PROOF_REPAIR_REFUSALS_PER_HEAD, a scope amendment that
+         closed unmerged) routes into this judge after its own wait, so no parked state is permanent.
   acceptance:
     - claim: "a round that changed the red set continues past the old strike cap; three no-op rounds escalate with the named loop"
       proof: 'unit test: test/a-progress-judge-decides-the-next-fix-round.test.ts'

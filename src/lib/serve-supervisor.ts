@@ -37,6 +37,41 @@ export const DRAIN_BACKSTOP_MS = 30_000;
 export const SHED_BACKSTOP_MS = 10_000;
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
+/** The shortest gap between two handoffs: serve.ts's SERVE_HANDOFF_COALESCE_MS, the operator's 15-minute window. */
+export const SERVE_HANDOFF_SPACING_BASE_MS = 15 * 60_000;
+/** How fast handoff pressure fades: a handoff an hour ago weighs half of one just done. */
+export const SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS = 60 * 60_000;
+
+/** Handoff pressure: each handoff adds one, and the total halves every `halfLifeMs`. */
+export interface HandoffPressure {
+  value: number;
+  at: number;
+}
+
+export function decayedPressure(pressure: HandoffPressure | undefined, now: number, halfLifeMs: number): number {
+  if (!pressure) return 0;
+  return pressure.value * Math.pow(0.5, Math.max(0, now - pressure.at) / halfLifeMs);
+}
+
+/**
+ * HANDOFF SPACING, A WINDOW THAT GROWS WITH RECENT HANDOFFS AND HEALS WHEN THEY STOP.
+ *
+ * The generation already waits {@link SERVE_HANDOFF_SPACING_BASE_MS} from its boot before it asks
+ * (serve.ts SERVE_HANDOFF_COALESCE_MS), but a fleet that merges code every few minutes fills every
+ * window: 2.8 handoffs an hour, each a fork, a 48 s prewarm and up to 2.27 GB of overlap. Serve
+ * cannot skip them by path: its generation runs src/run-task.ts, whose import closure is 460 of the
+ * 471 source files, and no src/ merge in that span touched only the other 11.
+ *
+ * So the gap after a handoff is `base x (1 + pressure)`, where pressure counts the handoffs done
+ * and halves every {@link SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS}. No cap and no cliff: a busy fleet
+ * settles where the gaps balance the decay (about 1.4 an hour on the measured merges, from 2.8), and
+ * a quiet one returns to the base window on its own. The deferred handoff prepares the newest main
+ * when it finally runs, so every merge meanwhile rides it.
+ */
+export function handoffSpacingMs(pressure: number, baseMs: number): number {
+  return baseMs * (1 + Math.max(0, pressure));
+}
+
 /** One forked generation, as the supervisor sees it. */
 export interface GenerationProcess {
   readonly pid: number | undefined;
@@ -89,6 +124,9 @@ export interface ServeSupervisorOptions {
   /** When memory is short, a handoff waits this long before it asks again. */
   deferMs?: number;
   shedBackstopMs?: number;
+  /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
+  spacingBaseMs?: number;
+  spacingHalfLifeMs?: number;
 }
 
 interface Generation {
@@ -215,6 +253,8 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const drainBackstopMs = opts.drainBackstopMs ?? DRAIN_BACKSTOP_MS;
   const deferMs = opts.deferMs ?? 60_000;
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
+  const spacingBaseMs = opts.spacingBaseMs ?? 0;
+  const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
 
   let next = 0;
   let active: Generation | undefined;
@@ -227,6 +267,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let largestRss = 0;
   let crashes = 0;
   const failed = new Set<string>();
+  let pressure: HandoffPressure | undefined;
+  let lastDoneAt: number | undefined;
+  let spacingPending = false;
 
   const fork = (slot: PreparedSlot): Generation => {
     const id = ++next;
@@ -414,10 +457,29 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     await supervisor.shutdown(reason);
   };
 
+  /** True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile. */
+  const awaitSpacing = (from: Generation): boolean => {
+    if (spacingBaseMs <= 0 || lastDoneAt === undefined) return false;
+    const now = clock.now();
+    const level = decayedPressure(pressure, now, spacingHalfLifeMs);
+    const spacingMs = handoffSpacingMs(level, spacingBaseMs);
+    const waitMs = lastDoneAt + spacingMs - now;
+    if (waitMs <= 0) return false;
+    if (spacingPending) return true;
+    spacingPending = true;
+    opts.log("serve.handoff_deferred", { reason: "spacing", waitMs, spacingMs, pressure: Number(level.toFixed(3)), sinceLastMs: now - lastDoneAt, sha: from.slot.sha });
+    void sleep(waitMs).then(() => {
+      spacingPending = false;
+      return supervisor.requestHandoff();
+    });
+    return true;
+  };
+
   const handoff = async (): Promise<void> => {
     if (!handoffEnabled()) return legacyExit("handoff_off");
     const from = active;
     if (!from) return;
+    if (awaitSpacing(from)) return;
     const startedAt = clock.now();
     let slot: PreparedSlot;
     try {
@@ -456,7 +518,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     activate(up.generation);
     crashes = 0;
     const drainMs = await drainOld(from, "handoff");
-    opts.log("serve.handoff_done", { fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined });
+    lastDoneAt = clock.now();
+    pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
+    opts.log("serve.handoff_done", { fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)) });
   };
 
   /** A promoted generation died on its own: replace it, from the previous slot when it is a different build. */

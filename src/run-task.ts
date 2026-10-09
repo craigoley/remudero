@@ -478,6 +478,7 @@ import {
   validateDeployStateRoot,
 } from "./lib/install-root.js";
 import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
+import { readCoverageNightlySummary } from "./lib/coverage-nightly-intake.js";
 import {
   buildDigest,
   buildMarkerAwareDigest,
@@ -1428,6 +1429,7 @@ import {
   claimReviewDecision,
   reviewDecisionDigest,
   reviewTaskIdEvidenceAsync,
+  bodyReviewContractDigest,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -11111,6 +11113,7 @@ export async function runFixRung(opts: {
   // resolved enough for GitHub to compute the merge ref, so every later
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
+  const consecutiveMergeRefusalReasons: string[] = [];
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -11212,7 +11215,7 @@ export async function runFixRung(opts: {
   // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
   // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
   // timer.
-  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
+  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap && consecutiveMergeRefusalReasons.length < 2) {
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -11271,7 +11274,7 @@ export async function runFixRung(opts: {
       currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
-      deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      deps.captureWorktreeSnapshot && consecutiveMergeRefusalReasons.length === 0 ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
       opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
@@ -12374,6 +12377,7 @@ export async function runFixRung(opts: {
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
       if (!merged.started) {
+        consecutiveMergeRefusalReasons.push(merged.reason ?? "the merge of current main did not start (no reason reported)");
         strikes = attempt;
         deps.log("fix.dispatch", {
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
@@ -12593,6 +12597,8 @@ export async function runFixRung(opts: {
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
     const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
+    if (mergeCommitRefused) consecutiveMergeRefusalReasons.push(MERGE_HEAD_ABSENT_REASON);
+    else consecutiveMergeRefusalReasons.length = 0;
     // W1-T5227: a refusal for leftover conflict markers IS an unresolved conflict. The merge stays pending
     // (nothing was staged), so the next strike is a merge-conflict round on those files; exhaustion then
     // reports the existing merge_conflict_unresolved. No new outcome, no new escalation path.
@@ -13484,9 +13490,10 @@ export async function runFixRung(opts: {
         ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
         : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
       detail: stillConflicted
-        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
+        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) spent ${strikes} bounded strike(s) ` +
           `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
-          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined)
+          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined) +
+          (consecutiveMergeRefusalReasons.length > 0 ? `\n\nConsecutive merge refusals:\n${consecutiveMergeRefusalReasons.map((reason, i) => `${i + 1}. ${reason}`).join("\n")}` : "")
         : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
@@ -30812,6 +30819,24 @@ export function buildSuccessorAlertHandler(opts: {
   };
 }
 
+export function buildCoverageNightlyDaemonHook(opts: Omit<Parameters<typeof readCoverageNightlySummary>[0], "cadence"> & {
+  next(): GithubPostureFinding[] | Promise<GithubPostureFinding[]>;
+}): () => Promise<GithubPostureFinding[]> {
+  return async () => {
+    await readCoverageNightlySummary({
+      ...opts,
+      cadence: {
+        check: (path, now) => decideMeasurementCadence({
+          policy: { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1, escalate: false },
+          marker: readMeasurementCadenceMarker(path), now,
+        }),
+        record: recordMeasurementCadenceFire,
+      },
+    });
+    return opts.next();
+  };
+}
+
 export function buildMeasurementCadenceDaemonHooks(deps: {
   check?: () => MeasurementCadenceDecision;
   run?: () => Promise<MeasurementCadenceRunResult>;
@@ -38456,7 +38481,9 @@ export async function daemonCommand(
         // against the recorded state/github-posture.json baseline, and returns only what
         // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
         // finding and never gates dispatch on it (see that call site's own comment).
-        checkGithubPosture: githubPostureHooks?.checkGithubPosture,
+        checkGithubPosture: githubPostureHooks ? buildCoverageNightlyDaemonHook({
+          ledgerPath, ...self, next: githubPostureHooks.checkGithubPosture,
+        }) : undefined,
         // MEASUREMENT CADENCE RUNG (W1-T1259's design, wired here). Same shape as the auto-triage/
         // github-posture hooks above and gated the same way — SAFE ON in policy data (see
         // plan/policy.yaml's `measurementCadence` row for why this rung, unlike auto-triage,
@@ -41713,10 +41740,20 @@ function* openPrViewSteps(
   const reviewOrphanedPrs = raw
     .filter((pr) => {
       const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-      return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
+      return reviewOrphansFor(ledger, reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(
+    owner, repo, "main", reviewOrphanedPrs, fetch, undefined,
+    (prNumber, reason) => {
+      const pr = raw.find((candidate) => candidate.number === prNumber)!;
+      appendLedger(ledgerPath, {
+        run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
+        step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
+        head_sha: pr.headRefOid, reason,
+      });
+    },
+  );
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
@@ -41795,13 +41832,13 @@ function* openPrViewSteps(
     const ciFailures = ciFailuresByPr.get(pr.number);
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
+    const reviewOrphans = reviewOrphansFor(ledger, reviewLedgerKey, pr.headRefOid, undefined, pr.url);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
+    const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
     const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
@@ -41810,7 +41847,14 @@ function* openPrViewSteps(
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
         })
-      : undefined;
+      : taskRecord
+        ? undefined
+        : bodyReviewContractDigest({
+            reviewLedgerKey, body: pr.body ?? "",
+            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            recordedDigest: priorReviewForReuse?.reviewContractDigest,
+            semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
+          });
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
