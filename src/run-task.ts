@@ -175,7 +175,7 @@ export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidenc
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
-import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
@@ -183,7 +183,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -36645,6 +36645,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
+    pendingSignal: (prUrl: string) => {
+      const open = readOpenBoardSnapshot(config.root, owner, repo);
+      return gardenPendingSignal(prUrl, open.ok ? open.snapshot.rows : undefined, readOriginMainSha(repoRoot));
+    },
     log,
     ...(escalate ? { escalate } : {}),
   });
