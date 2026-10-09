@@ -181,7 +181,8 @@ function fixture(primary = true): { root: string; env: NodeJS.ProcessEnv } {
     join(root, ".remudero", "daemon-instances.yaml"),
     `instances:\n  core:\n    repo: remudero\n${primary ? "    primary: true\n" : ""}    container_name: remudero-daemon\n    state_dir: ${root}\n`,
   );
-  return { root, env: { PATH: process.env.PATH } };
+  // No MemTotal: serve's memory.high (sized from host RAM) stays out of these limits on every runner.
+  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "no-meminfo") } };
 }
 
 test("the shipped serve wiring reads the serve role against remudero-serve and replaces through serve-container.sh", () => {

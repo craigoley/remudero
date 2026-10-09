@@ -533,7 +533,57 @@ export function gardenFilingRetryAt(failures: GardenState<string>["filingFailure
   return Date.parse(failures.lastAt) + wait;
 }
 
-function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
+/**
+ * A pass whose inventory threw, and the cheap inputs it threw over. Without it a failing inventory left
+ * no `lastCheap`, so the garden was due on EVERY poll and re-read its whole corpus to fail the same way.
+ * OBSERVED 2026-10-09 10:52-11:54Z on the fleet host: ci-friction ran 47 passes for 1,505 s of child time,
+ * every one ending `ci-friction.gardener_failed` (workflow ownership ambiguous for ci-gate) after reading
+ * the full ledger union. Kept beside the state file, so a failed pass still leaves the prior receipt intact.
+ */
+export interface GardenInventoryFailure {
+  cheap: string;
+  /** When this streak of failures began; the retry wait grows with it. */
+  firstAt: string;
+  lastAt: string;
+  count: number;
+  reason: string;
+}
+
+export function gardenInventoryFailurePath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-inventory-failure.json`);
+}
+
+/** The first retry over unchanged inputs waits one daemon poll. */
+export const GARDEN_INVENTORY_RETRY_BASE_MS = 60_000;
+/** Each further retry also waits this fraction of the time the streak has been failing: proportional, not capped. */
+export const GARDEN_INVENTORY_RETRY_DIVISOR = 4;
+
+/** The recorded failure; an absent or damaged record is no failure, so the pass runs and reports itself. */
+export function readGardenInventoryFailure(stateDir: string, name: string): GardenInventoryFailure | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(gardenInventoryFailurePath(stateDir, name), "utf8"));
+    if (!isRecord(parsed) || typeof parsed.cheap !== "string" || typeof parsed.reason !== "string" || !isCount(parsed.count) ||
+        !Number.isFinite(Date.parse(String(parsed.firstAt))) || !Number.isFinite(Date.parse(String(parsed.lastAt)))) return undefined;
+    return parsed as unknown as GardenInventoryFailure;
+  } catch {
+    // deliberate: no readable failure record means nothing defers the pass.
+    return undefined;
+  }
+}
+
+/** When a garden whose inventory failed may read it again over the SAME cheap inputs. */
+export function gardenInventoryRetryAt(failure: GardenInventoryFailure): number {
+  const first = Date.parse(failure.firstAt);
+  const last = Date.parse(failure.lastAt);
+  return last + GARDEN_INVENTORY_RETRY_BASE_MS + Math.max(0, last - first) / GARDEN_INVENTORY_RETRY_DIVISOR;
+}
+
+/** A recorded failure defers the pass only while the cheap inputs are the ones it failed over. */
+function inventoryFailureHolds(failure: GardenInventoryFailure | undefined, cheap: string, nowMs: number): boolean {
+  return failure !== undefined && failure.cheap === cheap && nowMs < gardenInventoryRetryAt(failure);
+}
+
+function gardenFilingEscalation(name: string,failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
   return {
     class: "BLOCKED",
     taskId: `${name}-gardener`,
@@ -563,7 +613,9 @@ export function gardenPassDue<C extends string>(
   if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return false;
   if (state.pending) return true;
-  return state.lastCheap !== spec.cheapFingerprint();
+  const cheap = spec.cheapFingerprint();
+  if (inventoryFailureHolds(readGardenInventoryFailure(deps.stateDir, spec.name), cheap, (deps.clock ?? systemClock).now())) return false;
+  return state.lastCheap !== cheap;
 }
 
 /**
@@ -584,6 +636,8 @@ export function gardenNeedsInventory<C extends string>(
   if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
   const clock = deps.clock ?? systemClock;
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > clock.now()) return false;
+  const cheap = spec.cheapFingerprint();
+  if (inventoryFailureHolds(readGardenInventoryFailure(deps.stateDir, spec.name), cheap, clock.now())) return false;
   // A decision-judged merge or a closed PR is judged and, on an unchanged fingerprint, returns unread; neither
   // can be a merged metric-judged pending, so the terminal and release terms below are false for them.
   const metricPending = state.pending && !judgedByDecision(spec, state.pending.actionClass) && prState === "merged" ? state.pending : undefined;
@@ -592,7 +646,7 @@ export function gardenNeedsInventory<C extends string>(
     (!metricPending.mergeSeenAt || clock.now() - Date.parse(metricPending.mergeSeenAt) >= GARDEN_PENDING_RELEASE_MS);
   const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
     state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
-  return state.lastCheap !== spec.cheapFingerprint() || terminalMetric || releaseDue || Boolean(decisionReleaseDue);
+  return state.lastCheap !== cheap || terminalMetric || releaseDue || Boolean(decisionReleaseDue);
 }
 
 /** What one pass did. */
@@ -673,7 +727,22 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
     state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
   if (state.lastCheap === cheap && !terminalMetric && !releaseDue && !decisionReleaseDue) return { ran: false };
-  const inventory = spec.inventory();
+  // An inventory that threw over these same inputs throws again; it is retried on a growing wait, and at
+  // once when an input changes.
+  const failure = readGardenInventoryFailure(deps.stateDir, spec.name);
+  if (inventoryFailureHolds(failure, cheap, clock.now())) return { ran: false };
+  const failurePath = gardenInventoryFailurePath(deps.stateDir, spec.name);
+  let inventory: I;
+  try {
+    inventory = spec.inventory();
+  } catch (e) {
+    const at = clock.iso();
+    const streak: GardenInventoryFailure = { cheap, firstAt: failure?.firstAt ?? at, lastAt: at, count: (failure?.count ?? 0) + 1,
+      reason: String((e as Error)?.message ?? e) };
+    writeAtomic(failurePath, JSON.stringify(streak, null, 2) + "\n");
+    throw e;
+  }
+  if (failure !== undefined) rmSync(failurePath, { force: true });
   const fingerprint = spec.fingerprint(inventory);
   if (state.pending) {
     const held = state.pending;

@@ -5,6 +5,7 @@ import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDep
 import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -813,6 +814,20 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
   // total and stable rather than dependent on readdir order.
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
   return out;
+}
+
+/** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
+ *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
+export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
+  let text: string;
+  try {
+    text = hostWorktreeGit(root, ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 });
+  } catch (error) {
+    // A missing ref/file is an unreadable main status. Preserve security refusals from the leaf.
+    if (error !== null && typeof error === "object" && "status" in error) return undefined;
+    throw error;
+  }
+  return /^status:\s*(\S+)\s*$/m.exec(text)?.[1];
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

@@ -11,7 +11,7 @@ import { gardenLedgerBucket } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
@@ -139,7 +139,50 @@ export const CI_FRICTION_LEDGER_STEPS: readonly string[] = [
   "fix.base_refreshed", "ci-friction.remedy_escalated", "ci-friction.scorecard",
 ];
 
-export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): LedgerRecord[] {
+/** Bump whenever {@link CI_FRICTION_LEDGER_STEPS} or {@link ciFrictionHeadWitnesses} changes: each keys a durable
+ *  per-rotation digest ({@link ledgerRotationDigests}), and a stale one must not answer for the new reduction. */
+export const CI_FRICTION_DIGEST_VERSION = "1";
+
+/** One rotation's head-to-PR witnesses, reduced the way the association recovery below reads them: the first
+ *  row per head sha that names a pull request, as `{ step, head_sha, pr_number }`. */
+export function ciFrictionHeadWitnesses(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const witnesses: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (typeof row.head_sha !== "string" || seen.has(row.head_sha)) continue;
+    const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
+    if (pr === undefined) continue;
+    seen.add(row.head_sha);
+    witnesses.push({ step: row.step, head_sha: row.head_sha, pr_number: pr });
+  }
+  return witnesses;
+}
+
+/** The durable rotation digests the ci-friction history read answers its archives from. */
+export interface CiFrictionRotationDigests {
+  steps: LedgerRotationHook;
+  witnesses: LedgerRotationHook;
+}
+
+export function ciFrictionRotationDigests(stateDir: string, fsDeps?: LedgerGrepFsDeps): CiFrictionRotationDigests {
+  const wanted = new Set(CI_FRICTION_LEDGER_STEPS);
+  return {
+    steps: ledgerRotationDigests(stateDir, (rows) => rows.filter((row) => wanted.has(row.step as string)),
+      { holder: "ci-friction-steps", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+    witnesses: ledgerRotationDigests(stateDir, ciFrictionHeadWitnesses,
+      { holder: "ci-friction-head-witnesses", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+  };
+}
+
+/**
+ * The gardener's whole ledger history. Archived rotations are answered from durable digests, so a pass after
+ * the first decompresses only rotations cut since the last one; the rows are the full union's, unchanged.
+ */
+export function readCiFrictionLedgerRecords(
+  stateDir: string,
+  reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  digests: CiFrictionRotationDigests = ciFrictionRotationDigests(stateDir),
+): LedgerRecord[] {
   const checked = (options: Parameters<typeof readLedgerUnionRecordsSync>[1]): LedgerRecord[] => {
     const read = reader(stateDir, options);
     if (!read.ok) {
@@ -152,7 +195,7 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
     }
     return read.rows as LedgerRecord[];
   };
-  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true });
+  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.steps });
   const byRun = runPrIndex(rows);
   const byHead = headPrIndex(rows);
   const missing = new Set<string>();
@@ -164,7 +207,8 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
   // the retained dispatches need, preserving that attribution without keeping every unrelated row.
   const pattern = new RegExp([...missing].map(head => JSON.stringify(head).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
   const recovered = new Set<string>();
-  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true })) {
+  // The pattern narrows the live file; each archive answers with its witnesses, which the head check below narrows.
+  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.witnesses })) {
     if (typeof row.head_sha !== "string" || !missing.has(row.head_sha) || recovered.has(row.head_sha)) continue;
     const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
     if (pr === undefined) continue;
@@ -606,6 +650,17 @@ export function readCiFrictionPlanState(repoRoot: string, git?: CiFrictionGit): 
   return { tasks, ...(degraded ? { degraded } : {}), ...(unreadable.length > 0 ? { unreadable } : {}) };
 }
 
+/** Whether a job runs on the merge queue's group commit: its workflow declares `merge_group`, and a job
+ *  `if:` that branches on `github.event_name` names it. An `if:` that never reads the event is not a filter. */
+export function runsOnMergeGroup(on: unknown, jobIf: unknown): boolean {
+  const events = typeof on === "string" ? [on]
+    : Array.isArray(on) ? on.filter((event): event is string => typeof event === "string")
+    : on && typeof on === "object" ? Object.keys(on) : [];
+  if (!events.includes("merge_group")) return false;
+  if (typeof jobIf !== "string" || !jobIf.includes("github.event_name")) return true;
+  return /==\s*['"]merge_group['"]/.test(jobIf);
+}
+
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
  *  Missing paths are absence; failed git reads or unsupported identities refuse the pass. */
 export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
@@ -627,7 +682,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       const source = pinned();
       const paths = git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
         .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort();
-      const matches: Array<{ file: string; jobId: string; witness: unknown }> = [];
+      const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean }> = [];
       const unsupported: string[] = [];
       for (const file of paths) {
         const document = parseDocument(git(["show", `${source}:${file}`]));
@@ -637,7 +692,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
           throw new Error(`ci-friction workflow ${file} at ${source}: unsupported jobs input`);
         for (const [jobId, raw] of Object.entries(workflow.jobs)) {
           if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`ci-friction workflow ${file}: unsupported job ${jobId}`);
-          const job = raw as { name?: unknown; strategy?: { matrix?: Record<string, unknown> } };
+          const job = raw as { name?: unknown; if?: unknown; strategy?: { matrix?: Record<string, unknown> } };
           const name = job.name === undefined ? jobId : job.name;
           if (typeof name !== "string") throw new Error(`ci-friction workflow ${file}: unsupported name for ${jobId}`);
           const matrixName = /^(.*?)\s*\(\$\{\{\s*matrix\.([\w-]+)\s*\}\}\/(\d+)\)$/.exec(name);
@@ -652,15 +707,24 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
             declared = matrixName[1]!;
           }
           if (identity(declared) !== identity(family)) continue;
-          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined } });
+          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined },
+            queued: runsOnMergeGroup(workflow.on, job.if) });
         }
       }
       if (unsupported.length > 0) throw new Error(`ci-friction workflow ownership unsupported for ${family} at ${source}: ${unsupported.join(", ")}`);
-      if (matches.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${matches.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
-      const match = matches[0];
+      // Two jobs may report one check name: ci.yml's `ci-gate` produces the required context on every PR
+      // push and on the merge queue's group commit, while ci-gate.yml's `ci-gate` only re-aggregates on a
+      // body `edited` event. The producer the merge queue gates on owns the check; the others are re-run
+      // variants of it. Throwing here instead (2026-10-09) failed every ci-friction inventory.
+      const queued = matches.filter(match => match.queued);
+      const owners = matches.length > 1 && queued.length === 1 ? queued : matches;
+      if (owners.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${owners.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
+      const match = owners[0];
       if (!match) return undefined;
+      const variants = matches.filter(other => other !== match).map(other => `${other.file}:${other.jobId}`);
       workflowWitnesses.set(`${identity(family)}:${match.file}`, match.witness);
-      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`] };
+      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`
+        + (variants.length > 0 ? ` and runs it on merge_group (re-run variant not on the queue: ${variants.join(", ")})` : "")] };
     },
     evidence: (key, details, owner) => {
       const source = pinned();

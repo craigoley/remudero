@@ -220,3 +220,34 @@ test("CI friction workflow ownership uses real pinned git reads and reports nati
   assert.equal(readFileSync(statePath, "utf8"), previous);
   assert.equal(events.includes("ci-friction.scorecard"), false);
 });
+
+test("CI friction resolves ci-gate to the merge-queue producer when ci.yml and ci-gate.yml both declare it", () => {
+  const f = fixture();
+  const real = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const GATE = ".github/workflows/ci-gate.yml";
+  f.put(WORKFLOW, real(WORKFLOW));
+  f.put(GATE, real(GATE));
+  f.commit();
+  const owner = locateCiFrictionOwner("check:ci-gate", [], f.search());
+  assert.deepEqual(owner?.files, [WORKFLOW]);
+  assert.match(owner!.why[0]!, /merge_group.*ci-gate\.yml:ci-gate/);
+  const gateLadder = ciFrictionLadder({
+    priced: [{ cause: { kind: "check", name: "ci-gate" }, minutes: 12, rounds: 3, prs: 2 }],
+    rounds: [], tasks: [], receipts: new Set(), escalated: new Set(["ci-friction:check:ci-gate"]),
+    ownerSearch: f.search(), nowMs: NOW,
+    holds: [{ step: "ci-friction.remedy_escalated", origin: "ci-friction:check:ci-gate", why: "no code in src/ or scripts/ names check:ci-gate, so no remedy can be drafted against it" }],
+  });
+  const decision = gateLadder.next?.decision;
+  if (decision?.kind !== "draft") assert.fail(`expected the ci-gate cause to draft, got ${decision?.kind}`);
+  assert.deepEqual(decision.reconsideration?.owner.files, [WORKFLOW]);
+  // Two producers on the queue is still ambiguity, and so is a job whose `if:` keeps it off the queue.
+  const both = 'on: [pull_request, merge_group]\njobs:\n  ci-gate:\n    runs-on: ubuntu-latest\n';
+  f.put(GATE, both);
+  f.put(WORKFLOW, both);
+  f.commit();
+  assert.throws(() => locateCiFrictionOwner("check:ci-gate", [], f.search()), /ambiguous.*ci-gate/);
+  f.put(WORKFLOW, "on:\n  merge_group:\njobs:\n  ci-gate:\n    if: github.event_name != 'merge_group'\n    runs-on: ubuntu-latest\n");
+  f.put(GATE, "on: pull_request\njobs:\n  ci-gate:\n    runs-on: ubuntu-latest\n");
+  f.commit();
+  assert.throws(() => locateCiFrictionOwner("check:ci-gate", [], f.search()), /ambiguous.*ci-gate/);
+});
