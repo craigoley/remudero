@@ -1,0 +1,2 @@
+- claim: the ci-shard (7/8) refusal lesson reaches the matched worker lane
+  proof: "grep: ci-learning:9979:ci-shard (7/8) in learnings/ci.yaml"
