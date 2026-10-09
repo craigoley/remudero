@@ -10699,6 +10699,23 @@ export async function fixLearnedArmsFor(
   };
 }
 
+/** W1-T7096: the pre-judge fixed bound, for a caller that wires no judge. It announces itself on
+ *  first use, so a production path that ever reaches it is visible in the ledger and on the console. */
+export function formerBoundStandIn(reached: () => boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void, say: (line: string) => void): FixProgressJudge {
+  let announced = false;
+  return async () => {
+    if (!announced) {
+      announced = true;
+      log("fix.progress_judge_stand_in", { judge: "former_bound_stand_in" });
+      say("fix rung: no progress judge wired — using the former fixed bound (W1-T7096 stand-in)");
+    }
+    return reached()
+      ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
+      : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
+  };
+}
+
 export async function runFixRung(opts: {
   /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
   guardRoundHead?: boolean;
@@ -11087,9 +11104,8 @@ export async function runFixRung(opts: {
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
   const progressJudge: FixProgressJudge = deps.fixProgressJudge ?? (opts.useProductionProgressJudge
     ? productionFixProgressJudge({ cwd: opts.worktreePath, settingsFile: opts.settingsFile })
-    : async () => strikes >= opts.strikeCap || retriggers >= (opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP) || consecutiveMergeRefusalReasons.length >= 2
-      ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
-      : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" });
+    : formerBoundStandIn(() => strikes >= opts.strikeCap || retriggers >= (opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP)
+      || consecutiveMergeRefusalReasons.length >= 2, (step, extra) => deps.log(step, extra), deps.say));
   let progressApproach = opts.progressApproach;
   let progressRoundReason: string | undefined;
   const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`].filter(Boolean).join("\n\n") || undefined;
@@ -11508,11 +11524,8 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      // W1-T7096: the judge decides the NEXT round; with no round recorded yet the first one runs unjudged.
-      const decision: Awaited<ReturnType<typeof judgeFixProgress>> = input.rounds.length === 0
-        ? { verdict: "continue", reason: "no fix round has run yet; the judge decides from the first round on" }
-        : await judgeFixProgress(input, progressJudge);
-      if (input.rounds.length > 0) deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+      const decision = await judgeFixProgress(input, progressJudge);
+      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -15443,6 +15456,8 @@ interface ProbeAdmissionOptions {
 }
 
 interface RunTaskBodyOptions extends ProbeAdmissionOptions {
+  /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
+  productionProgressJudge?: boolean;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -15471,6 +15486,8 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
 }
 
 export interface RunTaskContext {
+  /** W1-T7096: a caller-supplied worker spawn (a test seam); a run on the real spawn asks the LLM judge. */
+  spawnInjected?: boolean;
   /**
    * Shared with the one real spawn wrapper.  The preflight runs in runTaskBody, while the wrapper
    * is built in runTask, so a scalar in either scope would silently describe different runs.
@@ -16266,6 +16283,8 @@ async function runTask(
   opts: ProbeAdmissionOptions & {
     planPath?: string;
     config?: Config;
+    /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
+    productionProgressJudge?: boolean;
     /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
     benchmarkStackEvidence?: BenchmarkStackEvidence;
     allowStale?: boolean;
@@ -16829,6 +16848,7 @@ async function runTask(
     harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
   return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
+      spawnInjected: opts.spawn !== undefined,
       cashContainmentBoundary,
       cashContainmentState,
       config,
@@ -17461,6 +17481,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     taskId,
     workerAbandonMs,
     workerStateSensor,
+    spawnInjected = false,
   } = ctx;
   // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
@@ -19504,7 +19525,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (review.state !== "success") {
       const rung = await runFixRung({
         guardRoundHead: true,
-        useProductionProgressJudge: true,
+        // A run on the real worker spawn is a production run: it always asks the LLM judge.
+        useProductionProgressJudge: opts.productionProgressJudge === true || !spawnInjected,
         taskId,
         runId,
         task,
@@ -34878,7 +34900,7 @@ async function drainCommand(
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
-        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
+        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
         readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
@@ -44552,6 +44574,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
 
   const effects = buildSweepEffects({
+    productionProgressJudge: true,
     owner: owner,
     repo: repo,
     config: config,
@@ -45822,6 +45845,7 @@ export function buildSweepHook(
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
       const plan = tickRead?.plan ?? planAccessor?.() ?? bootPlan;
       const effects = buildSweepEffects({
+        productionProgressJudge: true,
         owner: owner,
         repo: repo,
         config: config,
@@ -46177,6 +46201,7 @@ export function buildSweepLightHook(
       });
       const activePlan = planAccessor?.() ?? plan;
       const effects = buildSweepEffects({
+        productionProgressJudge: true,
         owner: owner,
         repo: repo,
         config: config,
@@ -46498,6 +46523,7 @@ export async function fixCommand(
   }
 
   const effects = buildSweepEffects({
+    productionProgressJudge: true,
     owner: owner,
     repo: repo,
     config: config,
@@ -54323,6 +54349,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 6 -- entering a real task run mutates git/PR state; runTask itself is tested through injectable deps */
       const result = await runTask(arg, {
+        productionProgressJudge: true,
         allowStale: rest.includes("--allow-stale"),
         rerun: rest.includes("--rerun"),
       });

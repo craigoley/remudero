@@ -1294,6 +1294,9 @@ export type PlanScopedFixRoundInput = {
 };
 
 export interface BuildSweepEffectsDeps {
+  /** W1-T7096: the daemon and CLI entrypoints ask the production LLM progress judge; a caller that
+   *  sets nothing (a fixture) keeps the former fixed bound as an explicit stand-in. */
+  productionProgressJudge?: boolean;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
   readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
@@ -1914,8 +1917,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const repoRoot = entrypointRepoRoot;
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
-  const effectsProgressJudge = productionFixProgressJudge({ cwd: repoRoot,
-    settingsFile: join(repoRoot, "settings", "worker.json") });
+  const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
+    settingsFile: join(repoRoot, "settings", "worker.json") }) : undefined;
+  log("sweep.progress_judge_wiring", { judge: effectsProgressJudge ? "production" : "former_bound_stand_in" });
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
@@ -12903,9 +12907,15 @@ export function liveHeadShaFrom(
 
 export async function runSweep(
   openPrs: OpenPrView[],
-  deps: SweepDeps,
+  sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
+  const deps: SweepDeps = sweepDeps.fixProgressJudge === undefined ? sweepDeps : {
+    ...sweepDeps,
+    dispatchFix: (pr, evidence, onPhase) => sweepDeps.dispatchFix(pr,
+      { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, onPhase),
+  };
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
@@ -14998,7 +15008,7 @@ export async function runSweep(
                 });
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
-                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision, progressJudge: deps.fixProgressJudge,
+                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
                   detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase)), dedupeKey);
@@ -15550,7 +15560,6 @@ export async function runSweep(
               // dispatch, including one beyond its former strike ceiling, remains judge-gated.
               if (!planShardRepairDue && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
-              fixEvidence.progressJudge = deps.fixProgressJudge;
               if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
