@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -3150,6 +3151,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // Forwarded verbatim, wrapped with the watchdog's observer above when a clock bound is configured. See
             // SpawnWorkerArgs.streamObserver's doc (W1-T942).
             streamObserver,
+            root: config.root,
+            runId: args.runId,
+            taskId: args.taskId,
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -3574,6 +3578,9 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    root?: string;
+    runId?: string;
+    taskId?: string;
     stderrChunks?: string[];
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
@@ -3602,6 +3609,8 @@ export async function collectWorkerResult(
   // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
   // synthetic streams (W1-T477).
   const startedAtMs = Date.now();
+  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
 
@@ -3637,6 +3646,7 @@ export async function collectWorkerResult(
 
   try {
     for await (const raw of messages) {
+      observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -3765,6 +3775,7 @@ export async function collectWorkerResult(
         );
       }
     }
+    lineageEnd = "stream-ended";
   } catch (err) {
     // No result envelope was seen ⇒ this is a real failure (bad binary, network, aborted spawn), not an error-subtype result.
     // Re-raise it.
@@ -3786,6 +3797,8 @@ export async function collectWorkerResult(
         ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }),
       };
     }
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 
   const finalStopReason = envelopeStopReason ?? assistantStopReason;
