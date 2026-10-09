@@ -122,7 +122,7 @@ export const CLI_ONLY = {
       // 2026-09-24 ruling: an operator report over the ledger union on the daemon host; the console
       // reads the same experiment through routing.decision on each worker.assignment row.
       "routing-ab",
-      // W1-T5687: a read-only progress verdict over the ledger union on the daemon host; it recycles nothing.
+      // W1-T5687: a progress verdict over the ledger union on the daemon host; capture-diagnostics writes a bundle under <state>/diagnostics/ (docker ps, docker logs), at most one per 15 min; it recycles nothing.
       "progress-watchdog",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",

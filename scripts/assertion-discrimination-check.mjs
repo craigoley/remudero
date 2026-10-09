@@ -402,12 +402,29 @@ function baselineKey(testFile, target, literal) {
 
 // ── Scan orchestration ───────────────────────────────────────────────────────
 
-function listTestFiles(testDir, suffix) {
+// Walk testDir breadth-first. `mutants-*` directories belong to test/helpers/mutant-module.ts,
+// which creates and removes them while sibling test files run, so they are never listed nor
+// entered; a subdirectory that vanishes between being listed and being read (ENOENT) is skipped.
+// Any other error — and any error on the root itself — still throws. `readdir` is a seam for tests.
+export function listTestFiles(testDir, suffix, readdir = readdirSync) {
   const out = [];
-  for (const entry of readdirSync(testDir, { withFileTypes: true, recursive: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(suffix)) continue;
-    const dir = entry.parentPath ?? entry.path ?? testDir;
-    out.push(join(dir, entry.name));
+  const queue = [testDir];
+  while (queue.length > 0) {
+    const dir = queue.shift();
+    let entries;
+    try {
+      entries = readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (dir !== testDir && err?.code === "ENOENT") continue;
+      throw err;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith("mutants-")) queue.push(join(dir, entry.name));
+      } else if (entry.isFile() && entry.name.endsWith(suffix)) {
+        out.push(join(dir, entry.name));
+      }
+    }
   }
   return out;
 }
