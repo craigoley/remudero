@@ -12848,6 +12848,13 @@ export function emptyDiffReviewFailure(pr: OpenPrView): boolean {
   return !isBlockedCi(pr) && pr.changedFiles?.length === 0;
 }
 
+/** Any held disposition with an observed, empty diff against main; `undefined` changed files is unobserved, never empty.
+ *  A proof-discrimination red keeps W1-T4957's own routes (a stack-parent close, or the ci-log round beside another red). */
+export function emptyDiffSupersedes(pr: OpenPrView, disposition: Disposition): boolean {
+  return pr.changedFiles?.length === 0 && disposition !== "mergeable" && disposition !== "stale" &&
+    !(pr.ciFailures ?? []).some((failure) => failure.name === "proof-discrimination");
+}
+
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
 const armsInFlight = new Set<string>();
 
@@ -14140,6 +14147,13 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    // #10265: an observed empty diff against main outranks every blocker; the plan-scoped round below never reached #10356's close.
+    const emptyDiffSupersession = emptyDiffSupersedes(pr, disposition) && staleProofCloses < MAX_STALE_PROOF_CLOSES_PER_PASS;
+    if (emptyDiffSupersession) {
+      staleProofCloses += 1;
+      reason = `superseded — this PR's diff against main is empty, so nothing is left to merge (was ${derived.blocker}: ${reason})`;
+      disposition = "stale";
+    }
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
@@ -14629,6 +14643,7 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
+    if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
