@@ -24,6 +24,7 @@ import {
   ghPrCreateFillCommand,
   repairRetroAcceptanceBlock,
   runFixRung,
+  runGhPrCreate,
 } from "../src/run-task.js";
 import { acceptanceAuthorTimeCheck, execWhitelistedProof, parseAcceptanceBlock, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
 import { renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
@@ -85,10 +86,10 @@ const deletesTheFile = (dir: string) => rmSync(join(dir, "src", "feature.ts"));
 
 type Logged = Array<{ step: string; extra?: Record<string, unknown> }>;
 
+/** The body the REST create would send. `logged` receives what `runGhPrCreate`, the production executor, ledgers. */
 function openedBody(dir: string, logged: Logged = []): string {
-  const built = withLiveWritesAllowed(() =>
-    ghPrCreateFillCommand(dir, "o", "r", "run-T1-1", "feat(x): a subject", undefined, undefined, (step, extra) => logged.push({ step, extra })),
-  );
+  const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "o", "r", "run-T1-1", "feat(x): a subject"));
+  runGhPrCreate(built, "run-T1-1", (step, extra) => logged.push({ step, extra }), () => {}, () => '{"html_url":"https://github.com/o/r/pull/1","number":1}');
   const at = built.args.findIndex((a) => a.startsWith("body="));
   assert.notEqual(at, -1, "the create argv must carry a body");
   return built.args[at].slice("body=".length);

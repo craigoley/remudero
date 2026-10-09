@@ -4534,12 +4534,10 @@ export function ghPrCreateFillCommand(
   title?: string,
   bodyOverride?: string,
   proofRunner?: OpenPullRequestProofRunner,
-  /** W1-T4263: receives `acceptance.fallback.diff_anchor_unavailable` when the static fallback is the last resort. */
-  log?: (step: string, extra?: Record<string, unknown>) => void,
 ): PrCreateCommand {
-  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride, log);
+  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
   const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
-  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+  return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
 /** W1-T6034: {@link ghPrCreateFillCommand} for the daemon loop — the same draft and argv, with the
@@ -4551,14 +4549,19 @@ export async function ghPrCreateFillCommandAsync(
   branch: string,
   title?: string,
   runProofAsync?: AsyncOpenPullRequestProofRunner,
-  log?: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<PrCreateCommand> {
-  const draft = draftPrCreate(worktreePath, owner, repo, branch, title, undefined, log);
+  const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
   const checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
-  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+  return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
-type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } };
+/** W1-T4263: a ledger row the builder could not write itself, written by {@link runGhPrCreate}, which holds `log`. */
+type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> };
+type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: PrCreateDiagnostic[] };
+
+function withDiagnostics(command: PrCreateCommand, diagnostics: PrCreateDiagnostic[]): PrCreateCommand {
+  return diagnostics.length ? { ...command, diagnostics } : command;
+}
 
 /** The guarded title and unchecked body both PR-create builders share. */
 function draftPrCreate(
@@ -4568,8 +4571,7 @@ function draftPrCreate(
   branch: string,
   title?: string,
   bodyOverride?: string,
-  log?: (step: string, extra?: Record<string, unknown>) => void,
-): { title: string; body: string } {
+): { title: string; body: string; diagnostics: PrCreateDiagnostic[] } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
   // site at once and cannot be bypassed by a new one. The transport moved; the guard
@@ -4593,13 +4595,14 @@ function draftPrCreate(
   // A test the branch ADDS gives a proof that misses at base. The generic block stays only as the last resort, because
   // openPullRequestChecked refuses a body with no block at all, and that would stop the PR opening.
   // W1-T4263: with no added test, a line the diff adds is the anchor; the static grep is ledgered as the last resort.
-  if (filedTaskIdFromRunBranch(branch) || !bodyNeedsAcceptanceRepair(draftedBody)) return { title: resolvedTitle, body: draftedBody };
+  const diagnostics: PrCreateDiagnostic[] = [];
+  if (filedTaskIdFromRunBranch(branch) || !bodyNeedsAcceptanceRepair(draftedBody)) return { title: resolvedTitle, body: draftedBody, diagnostics };
   const added = addedTestFilesAtHead("HEAD", worktreePath);
   const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
   const fallback = headOnly.length
     ? headOnly
-    : diffAnchoredFallback(diffSinceMergeBase(worktreePath), PR_OPEN_TIME_ACCEPTANCE_FALLBACK, "pr-open", log, { branch });
-  return { title: resolvedTitle, body: ensureJudgeableBody(draftedBody, fallback) };
+    : diffAnchoredFallback(diffSinceMergeBase(worktreePath), PR_OPEN_TIME_ACCEPTANCE_FALLBACK, "pr-open", (step, extra = {}) => diagnostics.push({ step, extra }), { branch });
+  return { title: resolvedTitle, body: ensureJudgeableBody(draftedBody, fallback), diagnostics };
 }
 
 function prCreateArgv(
@@ -4717,12 +4720,13 @@ function adoptExistingPrForHead(
  * OTHER 422 (a validation failure unrelated to an existing PR) still rethrows unchanged.
  */
 export function runGhPrCreate(
-  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } },
+  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: readonly PrCreateDiagnostic[] },
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
   exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
 ): { prUrl?: string; prNumber?: number } {
+  for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
   try {
     out = exec(prCreate.command, prCreate.args, prCreate.options);
@@ -19558,7 +19562,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath), undefined, log);
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -32974,7 +32978,7 @@ async function retroCommand(
     }
 
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath), undefined, undefined, log);
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
@@ -48115,7 +48119,7 @@ async function triageCommandLocked(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], undefined, undefined, log);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
@@ -48568,7 +48572,7 @@ export async function planCommand(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, log);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
