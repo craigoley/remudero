@@ -1,5 +1,5 @@
 - id: W1-T7243
-  title: "EVERY FIXED REPAIR BUDGET DEFERS TO THE PROGRESS JUDGE, NOT ONLY STRIKECAP — the capped-repair, plan-repair, retrigger, rebuild and re-arm counts and the refused-twice, rerun-still-red and amendment-closed waits become judge inputs, so no repair path stops on a fixed number"
+  title: "EVERY FIXED REPAIR BUDGET DEFERS TO THE PROGRESS JUDGE, NOT ONLY STRIKECAP — the capped-repair, plan-repair, retrigger, rebuild and re-arm counts and the refused-twice, rerun-still-red and amendment-closed waits become judge inputs, and fix admission reads live occupancy, so no repair path stops on a fixed number"
   repo: remudero
   depends_on: [W1-T7096]
   type: implement
@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — the remaining fixed continue/stop budgets move behind the W1-T7096 judge
   band_meaning: span
   origin: "operator ruling 2026-10-09: 'I don't think 2 fix attempts is enough - an llm judge should determine if more fix attempts should be made or if we're in an endless loop that needs escalated. I hate hard ceilings'"
-  plan_refs: [W1-T7096, W1-T3306, W1-T3390, W1-T6353, W1-T5544, W1-T100]
+  plan_refs: [W1-T7096, W1-T3306, W1-T3390, W1-T6353, W1-T5544, W1-T100, W1-T3202]
   files: [src/lib/fix-progress-judge.ts, src/lib/classify.ts, src/lib/pr-blocker.ts, src/lib/sweep.ts, src/run-task.ts, test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts]
   status: queued
   priority: 1
@@ -28,6 +28,10 @@
       - pr-blocker.ts MAX_SLO_REBUILDS = 2 ("lifetime cap of 2 rebuilds reached"; supersedes the 2026-10-03
         "≤2 auto-rebuilds then digest" ruling for the same reason);
       - sweep.ts MAX_REARMS_AFTER_DISARM_PER_HEAD = 3;
+      - sweep.ts createSweepFixAdmissionController: a fixed hostWorkerBudget (8) per full pass, measured once from
+        the live worker count and never credited back when a round ends. At 2026-10-09 14:54Z it logged "host worker
+        budget 8 exhausted for this full pass (1 active, 0 reserved for review, …)" with ONE worker live, and refused
+        #10344 on nine passes in a row. #10392 only reorders admission (oldest first); it leaves the count fixed;
       - three parked states the amendment named that the build does not route: "fix rounds refused twice at this
         head — no further round can add information" (the same-reason-twice bar), a head still red after its one
         W1-T6353 failed-job rerun, and a scope amendment that closed without merging.
@@ -41,11 +45,21 @@
        bound), so the suite can assert every site is routed and a new fixed budget has a place to be listed.
     3. The three unrouted parked states get the same treatment as W1-T7096's: wait once, then the judge.
     4. Keep each site's existing ledger rows; add parked_reason and former_ceiling to the fix.progress_judged row.
+    5. Fix admission: replace the per-pass fixed budget in createSweepFixAdmissionController with LIVE occupancy plus
+       host pressure (the same signals the host-resource governor reads), re-read at each claim, and credit a slot
+       back when a round writes fix.done or fix.stood_down, so a pass never refuses work while workers sit idle.
+       Ledger the occupancy and pressure each claim read on sweep.fix_capacity.
+    6. INVESTIGATE (report on the PR, fix if it is in these files): during that 14:54Z pass the admitted workers
+       started one after another (14:54:30 -> 14:58:38), which points at a synchronous step in fix dispatch on the
+       sweep loop. Name the step from a CPU profile or the per-dispatch timings, and say whether it serialises
+       starts.
   acceptance:
     - claim: "each listed fixed budget, once reached, asks the progress judge and continues past its former bound when the judge says continue; an escalate verdict uses that site's existing escalation with the named loop"
       proof: 'unit test: test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts'
     - claim: "the capped-repair budget in classify.ts asks the progress judge instead of stopping at MAX_PLAN_REPAIR_STRIKES"
       proof: 'grep: judgeFixProgress( in src/lib/classify.ts'
+    - claim: "fix admission reads live occupancy at each claim and credits a slot back when a fix round ends, so a pass with one worker live admits the queued repair"
+      proof: 'unit test: a pass with one worker live admits the queued repair'
     - claim: "the judge module lists every former fixed-budget site it now governs"
       proof: 'grep: FIX_BUDGET_JUDGE_SITES in src/lib/fix-progress-judge.ts'
   falsifier: |
