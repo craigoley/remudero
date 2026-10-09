@@ -13,7 +13,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { mergedHeadTypechecks, mergedTypecheckArgv, type TypecheckSpawn } from "../src/lib/merge-probe.js";
+import { canonicalOrUndefined, mergedHeadTypechecks, mergedTypecheckArgv, type TypecheckSpawn } from "../src/lib/merge-probe.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   canonicalBuildInfo,
@@ -157,6 +157,13 @@ test("a tree with no git directory runs the plain, non-incremental check", () =>
   writeFileSync(join(dir, ".git"), "gitdir: ./linked\n");
   assert.equal(canonicalBuildInfo(dir), undefined, "an unreadable commondir names no canonical checkout");
   assert.equal(prepareWorktreeTypecheck(dir).seed, "no-seed");
+});
+
+test("a merge probe runs cold when its canonical buildinfo location cannot be read", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}incr-unreadable-canonical-`)));
+  mkdirSync(join(dir, ".git", "commondir"), { recursive: true });
+  assert.throws(() => canonicalBuildInfo(dir), { code: "EISDIR" });
+  assert.equal(canonicalOrUndefined(dir), undefined, "an unreadable canonical location is not a merge verdict");
 });
 
 test("the open-weight typecheck keeps its buildinfo in the worker's home, never the worktree", () => {
