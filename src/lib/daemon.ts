@@ -1045,6 +1045,9 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  categorizedRefusalRejoinFor?: (taskId: string) => {
+    sourceRunId: string; refusedContractRevision: string; contractRevision: string; receiptRecorded: boolean;
+  } | undefined;
   /** W1-T6358: renews the breaker gate's ledger snapshot; forwarded into tick selection and every lane refill. */
   beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
@@ -4654,6 +4657,7 @@ export async function runDaemon(
       },
       onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       isIndependentFailureBlocked: (taskId) => {
+        if (deps.categorizedRefusalRejoinFor?.(taskId)) independentFailureBlocksThisRun.delete(taskId);
         const environmentalAt = environmentalBlocksThisRun.get(taskId);
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
@@ -5227,7 +5231,19 @@ export async function runDaemon(
     const lanes = { inFlight: 0 };
     sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const admittedWork = runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
+    const admittedWork = runLanePool(admitted, (id) => {
+      const rejoin = deps.categorizedRefusalRejoinFor?.(id);
+      if (rejoin && !rejoin.receiptRecorded) log("dispatch.harness_commit_retry", {
+        task_id: id,
+        original_run_id: rejoin.sourceRunId,
+        original_verdict: "no_pr",
+        original_refusal: "categorized_worker_refusal",
+        refused_contract_revision: rejoin.refusedContractRevision,
+        contract_revision: rejoin.contractRevision,
+        reason: "categorized refusal contract changed",
+      });
+      return deps.runOne(id);
+    }, refillLane, lanes);
     scheduleRepositoryMaintenance(true, () => lanes.inFlight);
     const settled = await admittedWork;
     repositoryMaintenanceQueueBusy = false;

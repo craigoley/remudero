@@ -41,6 +41,7 @@ import {
 } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
+import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -205,6 +206,7 @@ export interface StatusProjection {
   needsHuman?: true;
   /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
   independentFailureBlocked?: true;
+  categorizedRefusalRejoin?: CategorizedRefusalRejoin;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
@@ -3438,6 +3440,7 @@ export function latestIndependentFailureBlock(
   taskId: string,
   index?: LedgerIndex,
   nowMs?: number,
+  categorizedRefusalRunId?: string,
 ): boolean {
   let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
   // W1-T4597: the stage each run's verdict named, the current streak of consecutive environmental
@@ -3502,7 +3505,7 @@ export function latestIndependentFailureBlock(
       line.harness_commit_refused === true
     ) {
       const originalRunId = typeof line.original_run_id === "string" ? line.original_run_id : "";
-      if (harnessRefusalRuns.has(originalRunId) && !retrySpent) {
+      if (harnessRefusalRuns.has(originalRunId) && !retrySpent && originalRunId !== categorizedRefusalRunId) {
         retryPending = true;
       }
     }
@@ -3576,9 +3579,15 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const now = deps.now ?? (() => Date.now());
   const projection: StatusProjection = { ...base };
 
-  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now())) {
-    projection.status = "blocked";
-    projection.independentFailureBlocked = true;
+  const taskRows = indexedTaskRows(ledgerLines, task.id, deps.ledgerIndex);
+  const refusalSource = activeCategorizedRefusal(task.id, taskRows);
+  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now(), refusalSource?.runId)) {
+    const rejoin = categorizedRefusalRejoin(dirname(deps.ledgerPath), task, taskRows, refusalSource);
+    if (rejoin) projection.categorizedRefusalRejoin = rejoin;
+    else {
+      projection.status = "blocked";
+      projection.independentFailureBlocked = true;
+    }
   }
 
   // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` — a closed PR is stronger GitHub
