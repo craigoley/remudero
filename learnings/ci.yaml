@@ -190,7 +190,8 @@
 
 - id: lint-plan-refuses-before-pr
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire lint-plan-refuses-before-pr
+  lifecycle: superseded
   files: ["plan/tasks.d/**", src/run-task.ts]
   fact: >-
     Before opening a PR that adds or edits plan tasks, run `rmd lint-plan --base origin/main` on
