@@ -11787,10 +11787,16 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
+    const logNamedPaths = ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath);
+    const logNamedMain = mainOwnedPaths(opts.worktreePath, logNamedPaths.map((file) => file.path));
+    if (logNamedMain.owned.length > 0 || logNamedMain.outcome === "unreadable") {
+      deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
+        ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
+    }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
-      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
+      ...logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path)),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -12911,7 +12917,12 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
-      try {
+      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
+      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else try {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
@@ -43607,6 +43618,28 @@ export function ciLogNamedSourcePaths(
     }
   }
   return [...found].map(([path, job]) => ({ path, job }));
+}
+
+/** Paths main changed since the merge base and this branch did not: a red there is main's, so refresh, never patch (#10369). */
+export function mainOwnedPaths(
+  repoDir: string,
+  paths: readonly string[],
+  runGit: GitRunner = (args) => hostWorktreeGit(repoDir, args),
+): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; reason?: string } {
+  if (paths.length === 0) return { outcome: "compared", owned: [] };
+  try {
+    runGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]);
+  } catch (error) {
+    return { outcome: "no-base", owned: [], reason: String(error) };
+  }
+  try {
+    const base = runGit(["merge-base", "HEAD", "refs/remotes/origin/main"]).trim();
+    const changed = (to: string) => new Set(runGit(["diff", "--name-only", "-z", base, to, "--", ...paths]).split("\0").filter(Boolean));
+    const ours = changed("HEAD");
+    return { outcome: "compared", owned: [...changed("refs/remotes/origin/main")].filter((path) => !ours.has(path)) };
+  } catch (error) {
+    return { outcome: "unreadable", owned: [...paths], reason: String(error) };
+  }
 }
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
