@@ -1,0 +1,72 @@
+- id: W1-T7094
+  title: "NOTHING SAYS WHETHER A WORKER START WOULD HAVE FIT THE HOST — log a counterfactual host-memory admission for every actual worker start, combining the reservation ledger with measured host and container headroom, swap-in and pressure, unreserved activity and daemon growth without counting resident worker memory twice, tagged by serve scenario; SHADOW ONLY: it never delays, rejects or interrupts work, and no enforce mode exists"
+  repo: remudero
+  depends_on: [W1-T7093, W1-T6782]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the counterfactual capacity verdict and its row. High for blast radius: it runs on every worker start
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
+  plan_refs: [W1-T7093, W1-T6782, W1-T5347, W1-T2853, W1-T3209]
+  files: [src/lib/host-memory-shadow.ts, src/lib/worker.ts, src/run-task.ts, plan/policy.yaml, test/a-shadow-memory-verdict-never-delays-a-start.test.ts, test/a-shadow-verdict-never-waits-on-its-ledger.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 via W1-T6782's daemon.alive rows and host readings:
+    - The core main process holds 4.3-4.65 GB 2-4 min after boot, while its main V8 heap is 0.45-0.60 GB.
+    - Its container's memory.events `max` reaches 15,351 within one generation, and up to 4.0 GB of the container sits in
+      swap.
+    - Host MemAvailable swings with worker trees, and serve (5-6 GB steady, up to 7.5 GB in a cold start) could not be
+      restarted without heavy swap-in.
+    Whether a host-wide budget would have protected serve, and how much throughput it would cost, is unknown. A shadow
+    verdict on every real start, kept apart from the start itself, measures both before anyone rules on enforcement.
+  design: |
+    (1) VERDICT, pure (host-memory-shadow.ts), from one snapshot:
+        - ACTUAL headroom: MemAvailable; swap-in rate (pswpin delta per second, /proc/vmstat); memory PSI some/full avg10
+          and avg60; this container's memory.current and memory.max.
+        - UNREALIZED reservations: for each live ledger entry, max(0, estimate - the tree's current rss+swap). Resident
+          worker memory is already inside MemAvailable and memory.current, so it is never subtracted twice.
+        - UNRESERVED activity (gardens, measurement children, read-model threads): not estimated. It is whatever the
+          measured headroom already reflects, and the verdict names the share of container memory no entry accounts for.
+        - DAEMON GROWTH allowance: per instance, the max - current main-process rss+swap over the last hour of daemon.alive
+          rows; with too few rows it is marked "unmeasured" and the verdict says so.
+        - UNCERTAINTY: an estimate from "default-unmeasured", an uncertain or incomplete ledger entry, or a stale reading
+          widens the margin and is named on the row; it never silently narrows it.
+        - SCENARIO: serve-stopped, serve-steady, serve-cold-start (a supervisor start or handoff open in the ledger), or
+          unknown when serve's state cannot be read. In serve-cold-start, serve's cold-start peak is held in reserve.
+        - Result: would_admit true or false, plus every reason that applied (memory-available, swap-in, psi, container
+          ceiling, unrealized-reservations, uncertainty), plus the numbers behind each.
+    (2) ROW: step memory_budget.shadow, separate from every real start or dispatch row. It carries the start's
+        class, instance, scenario, verdict, reasons and inputs, plus memory_budget.shadow_us, its own cost. It states
+        "counterfactual": the work started regardless. Cascades (what would have run later had this start deferred) are
+        not modelled, and the row says so.
+    (3) NEVER IN THE PATH: computed after the start is already committed, synchronously bounded, inside try/catch. A
+        failure logs memory_budget.shadow_error (deduplicated per reason per hour) and the start is unaffected. There is
+        no enforce, block or defer code path, and the mode key in plan/policy.yaml accepts only "off" or "shadow". A later
+        enforcement task must add its own mode with operator approval. Nothing switches modes on a timer or after a window.
+    (3a) UNAVAILABLE STORAGE OR LOCK: the evaluator never waits on a lock. Any lock is try-once and non-blocking, and file
+        reads are bounded. A held lock, EACCES, ENOENT, ENOSPC, EIO, or a ledger state of missing, unreadable or reset
+        (W1-T7093) yields a verdict carrying that state as an uncertainty reason. The reason widens the margin and is never
+        read as zero reservations. The start proceeds unchanged and at once in every case.
+    (4) THRESHOLDS (host reserve, swap-in and PSI cut-offs, cold-start reserve, default estimates) live in plan/policy.yaml
+        under sweep.hostMemoryBudget with origin "proposal". Each is a proposal to be calibrated from shadow rows, not a
+        ruling.
+    (5) DIAGNOSTICS are machine-owned. A summary row on a state change (scenario change, verdict mix change), never per
+        start. This task opens no needs-human issue.
+    (6) VALIDITY BY SCENARIO: every summary carries per-scenario sample counts. A scenario with no samples is reported as
+        "unvalidated", never as passing. Rows taken while serve is stopped say nothing about serve coexisting with the
+        fleet, and the summary must not pool them with serve-steady or serve-cold-start rows.
+  acceptance:
+    - claim: "every real worker start yields one memory_budget.shadow row and starts identically whether the verdict is admit, defer or error; a scenario with no samples is reported unvalidated and serve-stopped rows are never pooled with serve-running ones; resident tree memory is not subtracted twice; an unmeasured estimate, uncertain entry or missing growth history widens the margin and is named; swap-in and PSI each produce their own reason; serve-stopped, serve-steady, serve-cold-start and unknown are distinguished; and the policy mode accepts only off or shadow"
+      proof: "unit test: test/a-shadow-memory-verdict-never-delays-a-start.test.ts"
+    - claim: "with the ledger lock held by another process, or the store missing, unreadable, reset, unwritable or full, the shadow verdict returns at once with that state named as an uncertainty reason, never as zero reservations, and the real start proceeds unchanged"
+      proof: "unit test: test/a-shadow-verdict-never-waits-on-its-ledger.test.ts"
+    - claim: "the worker start calls the shadow evaluator"
+      proof: "grep: recordShadowMemoryVerdict( in src/lib/worker.ts"
+  falsifier: |
+    Await the verdict before the start, or return early on defer: the starts-identically case fails. Subtract a
+    reservation's full estimate while its tree is resident: the double-count case fails. Treat an unmeasured estimate as
+    zero: the uncertainty case fails.

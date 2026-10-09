@@ -1,0 +1,56 @@
+- id: W1-T7095
+  title: "THE SHADOW BUDGET CANNOT SAY WHO WOULD HAVE WAITED — add counterfactual review priority and cross-instance fairness to the shadow verdict: a non-review start would yield only to an ELIGIBLE, QUEUED review that memory alone keeps from starting, never when no review can run; waits age so no class or instance starves permanently; routine deferral stays a deduplicated machine diagnostic. SHADOW ONLY"
+  repo: remudero
+  depends_on: [W1-T7094]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the counterfactual ordering between classes and instances. High for blast radius: it reads every instance's queue state
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
+  plan_refs: [W1-T7094, W1-T7093, W1-T2931, W1-T3202, W1-T2853]
+  files: [src/lib/host-memory-priority.ts, src/lib/host-memory-shadow.ts, src/lib/sweep.ts, test/a-review-outranks-a-build-only-when-it-could-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Today review precedence exists only inside one instance: review selections reserve width before fixes
+    (sweep.ts, W1-T3202), and the review width floor is one lane. Across instances nothing orders work. On a host that
+    measurably fits about one extra worker while serve runs, the question an enforcement decision needs is: which starts
+    would have waited, for how long, and would any class or instance have starved? A rule like "no review started in
+    30 min" is wrong in both directions. It holds back builds when no review can run, for reasons that have nothing to do
+    with memory (no eligible PR, provider refusal, review lanes busy), and it can miss a review that is ready and blocked
+    only by memory.
+  design: |
+    (1) DEMAND: each instance publishes (publishReviewDemand, host-memory-priority.ts, called from sweep.ts) its eligible queued reviews (count and the oldest eligible-since time) to the shared
+        ledger directory from W1-T7093, refreshed on its sweep. Eligible means the instance's own review selection would start
+        it now if a lane and memory allowed. A demand row past its refresh bound is "stale" and stops counting as
+        eligible. It is not deleted.
+    (2) COUNTERFACTUAL YIELD: a non-review start's shadow verdict adds "would-yield-to-review" only when, in that same
+        snapshot, some instance has an eligible queued review AND that review's own shadow verdict would be defer for a
+        memory reason alone AND this start yielding would make it fit. With no eligible review, or a review blocked by
+        something other than memory, implementation is never held.
+    (3) FAIRNESS AND AGING: deferred demand is ordered by class weight times wait time, per instance, so an older
+        implement or fix demand eventually outranks a newer review, and no instance's demand is overtaken indefinitely.
+        The weights and the aging rate are policy proposals (origin "proposal"). The shadow rows report the would-be wait
+        distribution per class and instance; that evidence is what calibrates them. No 30-minute or 2-hour value is
+        hard-coded.
+    (4) DIAGNOSTICS: routine would-be deferrals are machine-owned summary rows, deduplicated per class, instance and
+        reason. They never become human escalations. One human decision is raised, through the existing escalation path
+        and deduplicated per scenario, only when the shadow evidence shows a concrete capacity choice: in some scenario the
+        measured service baselines plus that scenario's serve reserve exceed host memory with ZERO workers, sustained
+        across a proposal-valued number of samples. The issue names the shortfall in GB and the levers (a smaller
+        baseline, less concurrency, more RAM); it never chooses one. Any other output is a report a reader can query, for
+        example the would-be wait distribution.
+    (5) Shadow only, as W1-T7094: no path delays, rejects or reorders a real start.
+  acceptance:
+    - claim: "a build start would yield only to an eligible queued review that memory alone blocks and that the yield would make fit; with no eligible review, a stale demand row, or a review blocked by something else it would not yield; aging lets an older implement demand outrank a newer review; no instance's demand is overtaken indefinitely in a long mixed sequence; routine deferrals collapse to one summary row per class, instance and reason and never escalate; a sustained zero-worker shortfall raises exactly one deduplicated decision per scenario; and no real start is delayed or reordered"
+      proof: "unit test: test/a-review-outranks-a-build-only-when-it-could-run.test.ts"
+    - claim: "the shadow verdict consults the priority rule"
+      proof: "grep: wouldYieldToReview( in src/lib/host-memory-shadow.ts"
+    - claim: "the sweep publishes its eligible review demand"
+      proof: "grep: publishReviewDemand( in src/lib/sweep.ts"
+  falsifier: |
+    Yield whenever any review is queued: the review-blocked-by-something-else case fails. Drop aging: the long-sequence
+    starvation case fails. Emit a row per deferral: the dedup case fails.

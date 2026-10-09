@@ -119,6 +119,7 @@ export interface PrRef {
   url: string;
   /** GitHub PR state: "MERGED" | "OPEN" | "CLOSED". */
   state: string;
+  mergedAt?: string;
   /** The PR's title (W1-T184) — a DECORATION, never a precedence input; omitted ⇒ the bare number and url. */
   title?: string;
   /** The head branch ref (W1-T256), riding the one list fetch so rung (c2) re-asserts ownership with no second
@@ -4448,6 +4449,7 @@ export interface BatchedPr {
   number: number;
   url: string;
   state: string;
+  mergedAt?: string;
   headRefName?: string;
   /** The exact current head commit; see {@link PrRef.headRefOid}. */
   headRefOid?: string;
@@ -5146,6 +5148,7 @@ export function buildBatchedGithub(
     number: p.number,
     url: p.url,
     state: p.state,
+    ...(p.mergedAt === undefined ? {} : { mergedAt: p.mergedAt }),
     title: p.title,
     headRefName: p.headRefName,
     ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
