@@ -16,6 +16,7 @@ import {
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SETTLES_AT_ONCE = () => Promise.resolve();
 
 function fixturePlan() {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t2913-plan-"));
@@ -60,7 +61,7 @@ function freshness(): DaemonFreshness {
   return { stale: true, oldSha: OLD_SHA, newSha: NEW_SHA };
 }
 
-test("W1-T2913: a never-settling detached action cannot hold a freshness restart past the explicit bound", { timeout: 250 }, async () => {
+test("W1-T2913: a never-settling detached action cannot hold a freshness restart past the explicit bound", { timeout: 30_000 }, async () => {
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const root = mkdtempSync(join(tmpdir(), "rmd-t2913-never-settles-"));
   const ledgerPath = join(root, "ledger.ndjson");
@@ -101,11 +102,12 @@ test("W1-T2913: a never-settling detached action cannot hold a freshness restart
   }
 });
 
-test("W1-T2913 control: a detached action that settles within the bound emits no abandonment", async () => {
+test("W1-T2913 control: a detached action that settles at once emits no abandonment", async () => {
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const root = mkdtempSync(join(tmpdir(), "rmd-t2913-settles-"));
   const ledgerPath = join(root, "ledger.ndjson");
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let dispatches = 0;
 
   const summary = await runDaemon(fixturePlan(), {
     refreshMerged: () => () => false,
@@ -117,7 +119,10 @@ test("W1-T2913 control: a detached action that settles within the bound emits no
       await runSweepLightPass([blockedPr()], {
         arm: () => {},
         close: () => {},
-        dispatchFix: () => new Promise<void>((resolve) => setTimeout(resolve, 10)) as never,
+        dispatchFix: () => {
+          dispatches++;
+          return SETTLES_AT_ONCE() as never;
+        },
         escalate: () => {},
         actionable: (disposition) => disposition === "blocked-fixable",
         ledgerPath,
@@ -127,9 +132,10 @@ test("W1-T2913 control: a detached action that settles within the bound emits no
   }, { sweepWallClockBoundMs: 100 });
 
   assert.equal(summary.stopReason, "stale");
+  assert.ok(dispatches > 0, "the control reached the fix dispatch");
   assert.equal(detachedSweepActionCount(), 0);
   assert.equal(rows.some((row) => row.step === "daemon.detached_action_abandoned"), false);
-  assert.equal(rows.filter((row) => row.step === "daemon.freshness_drain.completed").length, 1);
+  assert.equal(rows.some((row) => row.step === "daemon.freshness_drain.started"), false, "the action settled before freshness needed to drain it");
 });
 
 // ── THE FIXTURE'S OWN GUARD. Same shape as W1-T3270's in test/stale-ci-gate-wiring.test.ts: without

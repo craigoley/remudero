@@ -2873,6 +2873,8 @@ import {
 } from "./lib/live-write-guard.js";
 import {
   checkSharedPause,
+  disposeSharedPauseRefresh,
+  prepareSharedPause,
   clearKick,
   consumeDrainNow,
   clearPrAction,
@@ -34833,6 +34835,7 @@ async function drainCommand(
 
   const runDrainFn = deps.runDrain ?? runDrain;
   try {
+    if (!deps.runDrain && !stopDetail(config.root)) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
     const summary = await runDrainFn(
       plan,
       {
@@ -34957,6 +34960,7 @@ async function drainCommand(
     // one-shot — it existed only to halt THIS drain, so the drain it interrupted clears it as
     // it exits. A concurrent/next drain therefore sees a clean slate, never a silent latch.
     // PAUSE is deliberately NOT consumed here (persistent hold, cleared only by `rmd resume`).
+    if (!deps.runDrain) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     consumeStop(config.root);
     drainLock.release();
   }
@@ -37757,6 +37761,7 @@ export async function daemonCommand(
   // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
+  if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
   if (bootHold) {
@@ -38545,6 +38550,7 @@ export async function daemonCommand(
     return daemonExitCodeForSummary(summary);
   } finally {
     await readPlane?.stop();
+    if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     loopTelemetry.stop();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);

@@ -163,10 +163,12 @@ const browserCache = process.platform === "darwin" ? join(homedir(), "Library", 
   : process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
 process.env.PLAYWRIGHT_BROWSERS_PATH ??= join(browserCache, "ms-playwright");
 process.env.NODE_TEST_CONTEXT ??= "test-setup";
+const TEST_HOME_PREFIX = "rmd-test-home-";
 // A worker thread keeps the parent's test HOME: under SHARE_ENV its own would replace the parent's,
 // and its exit would then delete the HOME the parent still reads.
 if (isMainThread) {
-  const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${process.pid}-`));
+  reapDeadOwnerDirs(TEST_HOME_PREFIX);
+  const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${setupDirOwnerTag()}`));
   process.env.HOME = testHome;
   const testConfigDir = join(testHome, ".config", "remudero");
   fs.mkdirSync(testConfigDir, { recursive: true });

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -355,6 +355,8 @@ export interface SharedPauseMintInfo {
 export interface SharedPauseGitDeps {
   /** Runs a git argv against `origin`; returns its exit status and stdout, verbatim. */
   run(args: string[]): { status: number; stdout: string };
+  /** Nonblocking read leaf. Production supplies this; synchronous fixtures retain their seam. */
+  runAsync?(args: string[]): Promise<{ status: number; stdout: string }>;
   /** A payload usable as the ref's target commit. Mirrors {@link TriageClaimReserver.mintAnchor}:
    *  the real implementation mints an orphan commit over the empty tree; a test may return any
    *  fixed string, since a fake remote need not validate real git object shape. W1-T4429: `info`,
@@ -380,12 +382,13 @@ export const SHARED_PAUSE_GIT_TIMEOUT_MS = 10_000;
  * operator already knows to reach for on a stuck triage claim.
  */
 export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
+  const argv = (args: string[]): string[] => ["-C", repoRoot, ...args];
   const run = (args: string[]): { status: number; stdout: string } => {
     // `repoRoot` follows the cwd, so a test driving `rmd pause`/`resume` from a fleet worktree
     // targets the LIVE origin; 2026-09-24 a worker's test run held every daemon for 32 minutes.
     if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
     try {
-      const stdout = execFileSync("git", ["-C", repoRoot, ...args], {
+      const stdout = execFileSync("git", argv(args), {
         encoding: "utf8",
         timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
         killSignal: "SIGTERM",
@@ -401,6 +404,19 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   };
   return {
     run,
+    runAsync: (args) => new Promise((resolve) => {
+      if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
+      execFile("git", argv(args), {
+        encoding: "utf8",
+        timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
+        killSignal: "SIGTERM",
+      }, (error, stdout) => {
+        // Exit failures, timeouts and spawn failures all mean the read was unreachable.
+        resolve(error
+          ? { status: typeof error.code === "number" ? error.code : 1, stdout: "" }
+          : { status: 0, stdout });
+      });
+    }),
     mintAnchor(info?: SharedPauseMintInfo) {
       const tree = run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
       // The FIRST line is the exact legacy shape (`ANCHOR_MESSAGE_RE` below still matches it
@@ -426,7 +442,10 @@ interface SharedPauseLsRemote {
 }
 
 function lsRemoteSharedPause(deps: SharedPauseGitDeps): SharedPauseLsRemote {
-  const res = deps.run(["ls-remote", "origin", sharedPauseRef()]);
+  return parseSharedPauseLsRemote(deps.run(["ls-remote", "origin", sharedPauseRef()]));
+}
+
+function parseSharedPauseLsRemote(res: { status: number; stdout: string }): SharedPauseLsRemote {
   if (res.status !== 0) return { status: res.status };
   const line = res.stdout.trim().split("\n")[0] ?? "";
   const sha = line.split("\t")[0]?.trim();
@@ -487,14 +506,18 @@ export const ANCHOR_EXPIRES_RE = /^expires: (.+)$/m;
 export function readSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
   const res = deps.run(["cat-file", "-p", sha]);
   if (res.status !== 0) return null;
-  const m = ANCHOR_MESSAGE_RE.exec(res.stdout);
+  return parseSharedPauseAnchor(res.stdout);
+}
+
+function parseSharedPauseAnchor(stdout: string): SharedPauseAnchorInfo | null {
+  const m = ANCHOR_MESSAGE_RE.exec(stdout);
   if (!m) return null;
   const info: SharedPauseAnchorInfo = { pid: m[1]!, host: m[2]!, timestamp: m[3]! };
-  const session = ANCHOR_SESSION_RE.exec(res.stdout);
+  const session = ANCHOR_SESSION_RE.exec(stdout);
   if (session) info.sessionId = session[1]!.trim();
-  const reason = ANCHOR_REASON_RE.exec(res.stdout);
+  const reason = ANCHOR_REASON_RE.exec(stdout);
   if (reason) info.reason = reason[1]!.trim();
-  const expires = ANCHOR_EXPIRES_RE.exec(res.stdout);
+  const expires = ANCHOR_EXPIRES_RE.exec(stdout);
   if (expires) {
     const raw = expires[1]!.trim();
     if (raw === "indefinite") {
@@ -543,55 +566,122 @@ const sharedPauseAnchorMemos = new WeakMap<SharedPauseGitDeps, Map<string, Share
  * a hold's anchor sha is immutable once minted, so a verdict for a given sha can never go stale;
  * only a NEW hold (a new sha, from a fresh `writeSharedPause`) is worth reading again.
  */
-function resolveSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
+function sharedPauseAnchorMemo(deps: SharedPauseGitDeps): Map<string, SharedPauseAnchorInfo | null> {
   let memo = sharedPauseAnchorMemos.get(deps);
   if (!memo) {
     memo = new Map();
     sharedPauseAnchorMemos.set(deps, memo);
   }
+  return memo;
+}
+
+function resolveSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
+  const memo = sharedPauseAnchorMemo(deps);
   if (memo.has(sha)) return memo.get(sha)!;
   const info = readSharedPauseAnchor(sha, deps);
   memo.set(sha, info);
   return info;
 }
 
+/** Refresh cadence independent of daemon poll cadence; slow reads never overlap. */
+export const SHARED_PAUSE_REFRESH_MS = 1_000;
+
+interface SharedPauseRefresh {
+  detail: string | undefined;
+  nextReadAt: number;
+  inFlight: boolean;
+  pending?: Promise<void>;
+  timer?: NodeJS.Timeout;
+  stopped?: boolean;
+}
+
+const sharedPauseRefreshes = new WeakMap<SharedPauseGitDeps, SharedPauseRefresh>();
+
+async function refreshSharedPause(deps: SharedPauseGitDeps, state: SharedPauseRefresh): Promise<void> {
+  try {
+    const ls = parseSharedPauseLsRemote(await deps.runAsync!(["ls-remote", "origin", sharedPauseRef()]));
+    let anchor: SharedPauseAnchorInfo | null = null;
+    if (ls.status === 0 && ls.sha) {
+      const memo = sharedPauseAnchorMemo(deps);
+      if (!memo.has(ls.sha)) {
+        try {
+          const res = await deps.runAsync!(["cat-file", "-p", ls.sha]);
+          memo.set(ls.sha, res.status === 0 ? parseSharedPauseAnchor(res.stdout) : null);
+        } catch (error) {
+          // An anchor read failure loses attribution, never the known held verdict.
+          memo.set(ls.sha, null);
+        }
+      }
+      anchor = memo.get(ls.sha)!;
+    }
+    state.detail = sharedPauseReadDetail(ls, anchor);
+  } catch (error) {
+    // A rejected read has no verdict either: hold exactly as for a nonzero git exit.
+    state.detail = sharedPauseReadDetail({ status: 1 }, null);
+  } finally {
+    state.inFlight = false;
+    if (!state.stopped) {
+      state.timer = setTimeout(() => beginSharedPauseRefresh(deps, state),
+        Math.max(0, state.nextReadAt - systemClock.now()));
+      state.timer.unref();
+    }
+  }
+}
+
+function beginSharedPauseRefresh(deps: SharedPauseGitDeps, state: SharedPauseRefresh): void {
+  clearTimeout(state.timer);
+  state.inFlight = true;
+  state.nextReadAt = systemClock.now() + SHARED_PAUSE_REFRESH_MS;
+  state.pending = refreshSharedPause(deps, state);
+}
+
+/** Await the first verdict at command startup without blocking other event-loop work. */
+export async function prepareSharedPause(root: string, deps: SharedPauseGitDeps): Promise<void> {
+  checkSharedPause(root, deps);
+  await sharedPauseRefreshes.get(deps)?.pending;
+}
+
+/** Stop refreshes at command exit, including a read that completes after shutdown. */
+export function disposeSharedPauseRefresh(deps: SharedPauseGitDeps): void {
+  const state = sharedPauseRefreshes.get(deps);
+  if (!state) return;
+  state.stopped = true;
+  clearTimeout(state.timer);
+  sharedPauseRefreshes.delete(deps);
+}
+
 /**
- * THE DAEMON'S PER-TICK SUPPLIER — wired at BOTH `checkPause` call sites in `src/run-task.ts`
- * (the task shard's own note on why the flag and its only reader are declared apart: the flag
- * lives here, its only reader lives there).
- *
- * LOCAL FIRST, NEVER REPLACED (design (i), rationale (3)): `pauseDetail`'s existing host-local
- * read wins outright the moment it finds a flag — no network call, no behaviour change for a host
- * that already knows. Only when the local file is silent does this fall through to the shared
- * ref, so a disconnected host that has paused ITSELF is unaffected by this function existing.
- *
- * UNREACHABLE READS AS HELD (design (ii)): `readSharedPause` returning `"unreachable"` produces a
- * truthy detail string, exactly like a real hold — never `undefined`. A failed read is never
- * scored free. Nothing here compares the anchor's timestamp against the clock, either — a hold
- * never expires on elapsed time alone; `resumeFleet` is the only thing that clears it.
- *
- * NAMES THE SETTER (W1-T2262): a `"held"` read now recovers {@link readSharedPauseAnchor} (via
- * the {@link resolveSharedPauseAnchor} memo, W1-T3622) off the same sha `ls-remote` just returned
- * and, when that recovers, renders WHO set the hold (pid, host, timestamp) instead of the old
- * "(set from another host)" — an anonymous fleet-wide halt is what this closes.
- *
- * UNATTRIBUTABLE IS ITS OWN CONDITION (W1-T3622): an anchor that fails to recover (unreachable,
- * GC'd, minted by something that didn't use the expected message shape) still renders a HELD
- * detail — it degrades the ATTRIBUTION, never the VERDICT — but the detail names itself
- * "UNATTRIBUTABLE" rather than reusing the ordinary "set by pid ..." phrasing, because "someone
- * paused this and I can tell you who" and "something is holding the fleet and nobody can say who"
- * are different operator instructions. The read behind that verdict pays the `cat-file` round
- * trip (and whatever fallback follows a local miss) exactly ONCE per sha, not once per tick — see
- * {@link resolveSharedPauseAnchor}.
+ * Daemon/drain supplier: local operator holds win immediately; a recycle hold still consults
+ * the shared ref. Production answers from its last completed asynchronous read, refreshing
+ * every {@link SHARED_PAUSE_REFRESH_MS}. Startup awaits {@link prepareSharedPause}; a caller
+ * with no completed verdict holds until a read proves absence. Synchronous fixtures retain
+ * their original seam. Held and unreachable verdicts hold dispatch; unreadable anchors hold
+ * as UNATTRIBUTABLE. Attribution is memoized per sha, and elapsed time never clears a hold.
  */
 export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string | undefined {
   const local = pauseDetail(root);
   // W1-T5804: a recycle's own PAUSE lets the daemon arm and merge, so it must never mask an operator's
-  // shared hold. The SAME ref read an unpaused tick pays runs, and a hold (or unreachable) wins over it.
+  // shared hold. A held (or unreachable) shared read wins over the recycle flag.
   if (local && !isRecyclePauseDetail(local)) return local;
+  if (deps.runAsync) {
+    let state = sharedPauseRefreshes.get(deps);
+    if (!state) {
+      // No completed read is not evidence of absence: first-read dispatch stays held.
+      state = { detail: sharedPauseReadDetail({ status: 1 }, null), nextReadAt: 0, inFlight: false };
+      sharedPauseRefreshes.set(deps, state);
+    }
+    const now = systemClock.now();
+    if (!state.inFlight && now >= state.nextReadAt) {
+      beginSharedPauseRefresh(deps, state);
+    }
+    return state.detail ?? local;
+  }
   const ls = lsRemoteSharedPause(deps);
+  return sharedPauseReadDetail(ls, ls.sha ? resolveSharedPauseAnchor(ls.sha, deps) : null) ?? local;
+}
+
+function sharedPauseReadDetail(ls: SharedPauseLsRemote, anchor: SharedPauseAnchorInfo | null): string | undefined {
   if (ls.status === 0 && ls.sha) {
-    const anchor = resolveSharedPauseAnchor(ls.sha, deps);
     if (anchor) {
       // W1-T4429: reason/expiry ride along when the anchor carries them (design (i)) — a bare
       // "set by pid ..." told an operator WHO but never WHY or UNTIL WHEN.
@@ -617,7 +707,7 @@ export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string
       `optimistically (an unreachable remote is never read as clear)`
     );
   }
-  return local;
+  return undefined;
 }
 
 // ── W1-T4429: TIERED, SELF-HEALING ESCALATION (design (ii)) ────────────────────────────────────

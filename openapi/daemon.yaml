@@ -8782,6 +8782,158 @@ components:
         holdout:
           type: boolean
 
+    TaskView:
+      type: object
+      description: >
+        GET /v1/views/task?instance=&id= (src/lib/task-view.ts; W1-T6370): a demand-materialized
+        task page. Missing tasks return 200 with found=false; unavailable inputs carry their
+        evidence in sources and, when the body is thin, data.reason.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [task]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          $ref: "#/components/schemas/TaskViewData"
+
+    TaskViewData:
+      type: object
+      description: The actual TaskViewData from src/lib/task-view.ts, built from at most 400 newest fact rows.
+      required: [instance, id, found, runs, facts, factsTruncated, trace]
+      properties:
+        instance: {type: string}
+        id: {type: string}
+        found:
+          type: boolean
+          description: False when no projection row, plan record or fact names the task.
+        reason: {type: string}
+        task:
+          type: object
+          required: [title, type, risk, status, dependsOn, acceptance]
+          properties:
+            title: {type: string}
+            type: {type: string}
+            risk: {type: string}
+            priority: {type: number}
+            status: {type: string}
+            dependsOn:
+              type: array
+              items: {type: string}
+            rationale: {type: string}
+            acceptance:
+              type: array
+              maxItems: 20
+              items:
+                $ref: "#/components/schemas/AcceptanceCriterion"
+        projection:
+          type: object
+          required: [status, merged, source]
+          properties:
+            status:
+              type: string
+              enum: [queued, recon, prompted, running, review, fixing, diagnosing, blocked, merged, done]
+            merged: {type: boolean}
+            source:
+              type: string
+              enum: [ledger, pr-field, manual-completion, trailer, head-branch, correction, none, throttled]
+            prNumber: {type: number}
+            prUrl: {type: string}
+            prState: {type: string}
+            phase:
+              type: string
+              enum: [recon, implement, review, fix-rung]
+            startedAt: {type: string}
+            workerState:
+              type: string
+              enum: [working, tool-executing, quiet]
+        runs:
+          type: array
+          description: Owned runs within the bounded fact window; only the newest ten get gateway PR details.
+          maxItems: 400
+          items:
+            $ref: "#/components/schemas/TaskViewRun"
+        facts:
+          type: array
+          description: The newest fifty fact rows, newest first.
+          maxItems: 50
+          items:
+            type: object
+            required: [seq, ts, step]
+            properties:
+              seq: {type: number}
+              ts: {type: string}
+              step: {type: string}
+              runId: {type: string}
+        factsTruncated:
+          type: boolean
+          description: True when the fact read reaches its 400-row limit.
+        tail:
+          type: object
+          required: [runId, lines]
+          properties:
+            runId: {type: string}
+            lines:
+              type: array
+              maxItems: 40
+              items:
+                type: string
+                maxLength: 301
+                description: Clipped to 300 characters plus an ellipsis.
+        trace:
+          type: object
+          required: [runs, merged, costUsd]
+          properties:
+            runs: {type: number}
+            merged: {type: boolean}
+            costUsd: {type: number}
+            lastVerdict: {type: string}
+            firstTs: {type: string}
+            lastTs: {type: string}
+
+    TaskViewRun:
+      type: object
+      description: TaskCardRun extended with optional gateway PR evidence (src/lib/task-view.ts).
+      required: [runId]
+      properties:
+        runId: {type: string}
+        verdict: {type: string}
+        costUsd: {type: number}
+        prUrl: {type: string}
+        pr:
+          $ref: "#/components/schemas/TaskViewPr"
+
+    TaskViewPr:
+      type: object
+      required: [url, state]
+      properties:
+        url: {type: string}
+        number: {type: number}
+        state:
+          type: string
+          description: The gateway's state, or unknown with a reason when it cannot resolve the PR.
+        title: {type: string}
+        reason: {type: string}
+
+    TaskViewUnavailable:
+      type: object
+      description: A dark view or a demand miss; a demand miss includes reason and retryMs.
+      required: [error, view]
+      properties:
+        error:
+          type: string
+          enum: [view_disabled, view_shadow, view_not_ready]
+        view: {type: string, enum: [task]}
+        reason:
+          type: string
+          enum: [timeout, saturated, no_worker]
+        retryMs: {type: number}
+
     TaskCardRun:
       type: object
       description: One owned run in a task card's history -- read from the ledger, no GitHub call.
@@ -14658,6 +14810,76 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
+
+  /v1/views/task:
+    get:
+      summary: One task page for one instance, materialized on demand.
+      description: >
+        W1-T6370 publishes src/lib/task-view.ts's version-one response. Both instance and id must
+        be nonempty; they form the view key. Missing tasks answer 200 with data.found=false.
+        DARK until the task switch serves: off answers view_disabled and shadow answers view_shadow.
+        In serve mode a missing key is requested from the worker and awaited for up to 300 ms;
+        a demand miss answers 404 view_not_ready with reason (timeout, saturated or no_worker),
+        retryMs and Retry-After. Served bodies follow the shared view ETag and 304 rules.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: query
+          required: true
+          description: The registry instance name (core's is core).
+          schema: {type: string, minLength: 1}
+        - name: id
+          in: query
+          required: true
+          description: The task id to look up in that instance.
+          schema: {type: string, minLength: 1}
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: The task view, including found=false for an unknown task or instance.
+          headers:
+            ETag:
+              description: The shared weak view ETag over version, stale and data.
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskView"
+        "304":
+          description: If-None-Match matched the view ETag; no body.
+          headers:
+            ETag:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark or its demanded key has no body yet.
+          headers:
+            Retry-After:
+              description: Demand misses only; retryMs rounded up to seconds, with a minimum of one.
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskViewUnavailable"
+        "500":
+          description: The demand wait failed unexpectedly.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/views/agent:
     get:
