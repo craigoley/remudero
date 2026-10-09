@@ -25,9 +25,7 @@
 # own synthetic commit gets the full instrumented suite AND the slow tier, on the exact tree that
 # is about to land, with no separate wiring. `coverage-ratchet`'s few PR-scoped shell guards are
 # widened (never replaced — pull_request keeps every byte of its existing, separately-tested
-# behavior) to also treat `merge_group` as real work; see that job's own comments.
-# W1-T5940 SUPERSEDES the full re-run: a group now runs, in ci-shard, only the suites its combined
-# diff and each member commit affect (falling back to the full run), and coverage-ratchet skips it.
+# behavior) to also treat `merge_group` as real work. W1-T5940 since narrows a group to its affected suites.
 #
 # Why: the measurements, incidents and design arguments compacted out of this file are archived
 # verbatim in docs/forensics/ci-yml.md, per docs/comment-standard.md.
@@ -270,9 +268,7 @@ jobs:
             if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
           fi
       - name: Select the merge group's suites (W1-T5940)
-        # The group re-proves only that its members pass TOGETHER: the suites the combined diff and each
-        # member commit affect (scripts/test-tier-manifest.mjs mergeGroupSelection), or `full`. The base
-        # is a step env, never a run-body token, so this job stays push-safe.
+        # Suites the combined diff and each member commit affect, or `full`; the base is a step env (push-safe).
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
@@ -328,8 +324,6 @@ jobs:
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
           fi
-          # W1-T5940: a merge group runs the suites the step above selected, through the same candidate
-          # lane as AFFECTED below; `full` or no selection leaves CLASS alone, so the full fast tier runs.
           MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
           if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ]; then
             cp merge-group-suites.txt affected-suites-selected.txt
@@ -850,8 +844,6 @@ jobs:
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
-          # W1-T5940: ci-shard's candidate lane runs a merge group's selected suites in every tier, slow
-          # ones included; only a `full` selection leaves the slow tier to this job.
           MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
           if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
             && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
@@ -1406,9 +1398,7 @@ jobs:
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
-          # W1-T5940: a merge group does not repeat the instrumented run. Each member PR already passed
-          # it with its diff coverage; ci-shard re-runs the suites the combination affects, and the
-          # absolute floor reads the nightly lcov. NO_SRC is the aggregator's existing skip class.
+          # W1-T5940: each member already passed this instrumented run; NO_SRC is the existing skip class.
           if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
             echo "W1-T5940: merge group — coverage-ratchet skips; ci-shard confirms the combination."
             : > changed-files.txt
