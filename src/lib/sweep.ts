@@ -4168,7 +4168,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let shardRelPath: string | undefined;
       try {
         shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
-          .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
           .map((f) => join("plan", "tasks.d", f))[0];
       } catch {
         /* the shard directory is unreadable — fall through to the monolith below */
@@ -17221,6 +17221,7 @@ export function windowCostRows(
 export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
  *  BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred

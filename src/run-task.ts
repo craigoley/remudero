@@ -50050,7 +50050,7 @@ export function shardEvidence(task: Task): string | undefined {
  *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
 function shardAgeDays(taskId: string, root: string, nowMs: number): number {
   try {
-    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
+    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
     if (!out) return 0;
     return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
   } catch {
@@ -53327,7 +53327,7 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   const git = (args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   git(["fetch", "--quiet", "origin", "main"]);
   const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
-  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
+  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => isTaskShardName(n, taskId))) return true;
   const mono = git(["show", "origin/main:plan/tasks.yaml"]);
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
@@ -54106,6 +54106,7 @@ function commandSyntax(name: string): string {
 import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
+import { isTaskShardName } from "./lib/task-shard-name.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
