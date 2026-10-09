@@ -397,8 +397,25 @@ export function visibleGitSiteCount(texts: ReadonlyMap<string, string>): number 
   return n;
 }
 
-export function readAll(): Map<string, string> {
-  return new Map(srcFiles().map((file) => [file, readFileSync(join(REPO, file), "utf8")]));
+/**
+ * W1-T7269 — the walk lists src/ and THEN reads each file, so a file that vanishes in between (a
+ * sibling test's scratch `.ts`, a checkout switching) made `readFileSync` throw ENOENT and red this
+ * census on a PR that never touched it. A vanished file is not a site: it is skipped, any other
+ * read error still throws.
+ */
+export function readAll(
+  list: () => string[] = srcFiles,
+  read: (file: string) => string = (file) => readFileSync(join(REPO, file), "utf8"),
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const file of list()) {
+    try {
+      out.set(file, read(file));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  return out;
 }
 
 test("W1-T6106: every converted host git site calls the hardened leaf and spawns no raw git", () => {
@@ -441,4 +458,20 @@ test("W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reaso
   assert.ok(counted >= VISIBLE_GIT_SITE_FLOOR, `positive control: the census must see the src/ git population, saw ${counted}`);
   for (const file of Object.keys(WIDENED_SITE_EXCEPTIONS)) assert.ok(texts.has(file), `widened exception names a missing file: ${file}`);
   assert.deepEqual(widenedLeafSiteViolations(texts), []);
+});
+
+test("W1-T7269: a src file that vanishes between the listing and the read is skipped, not a failure", () => {
+  const texts = readAll(
+    () => ["src/lib/kept.ts", "src/lib/vanished-scratch.ts"],
+    (file) => {
+      if (file === "src/lib/vanished-scratch.ts") throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+      return "export const kept = 1;\n";
+    },
+  );
+  assert.deepEqual([...texts.keys()], ["src/lib/kept.ts"]);
+  assert.throws(
+    () => readAll(() => ["src/lib/x.ts"], () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }),
+    /EACCES/,
+    "only a vanished file is tolerated; any other read error still fails the census",
+  );
 });
