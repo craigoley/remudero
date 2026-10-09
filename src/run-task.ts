@@ -10329,8 +10329,9 @@ export function fixWorkerReceipt(
   }, workerBoundaryStack, work);
   // Tail ONLY: the capped ring and its best-effort write, never the per-event worker.activity rows a
   // build's full sensor appends, so a frequent fix lane adds no ledger volume for this.
-  const tailPath = tail ? join(tail.root, "state", "runs", `${workerRunId}.tail`) : undefined;
-  const tailField = tail ? { worker_tail: join("state", "runs", `${workerRunId}.tail`) } : {};
+  const tailRoot = typeof tail?.root === "string" && tail.root.length > 0 ? tail.root : undefined;
+  const tailPath = tailRoot ? join(tailRoot, "state", "runs", `${workerRunId}.tail`) : undefined;
+  const tailField = tailPath ? { worker_tail: join("state", "runs", `${workerRunId}.tail`) } : {};
   let tailLines: string[] = [];
   const tailObserver: WorkerStreamObserver = (event) => {
     if (!tailPath || !event.text) return;

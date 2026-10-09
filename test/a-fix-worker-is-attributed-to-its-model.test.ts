@@ -291,3 +291,15 @@ test("a fix round keeps its worker's own output as a bounded retained tail named
   assert.match(readFileSync(tailFile, "utf8"), /reading the diff-coverage targets\n\[tool_use: Edit\]/);
   assert.equal(rung.lines.filter((line) => line.step === "worker.activity").length, 0, "tail only: no per-event ledger rows");
 });
+
+test("a fix receipt without a configured root still dispatches and records its worker", async () => {
+  const rung = fixRung({ raw: routedWorker("asg-no-root") });
+  rung.run.config = {} as Config;
+
+  await runFixRung(rung.run);
+
+  assert.equal(rung.spawns.length, 1);
+  const done = rung.lines.find((line) => line.step === "fix.done");
+  assert.equal(done?.selection_assignment_id, "asg-no-root");
+  assert.equal(done?.worker_tail, undefined, "a tail is only advertised when it has a valid root");
+});
