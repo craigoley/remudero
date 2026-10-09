@@ -10,8 +10,10 @@ import { parseTasksFromYaml } from "../src/lib/plan.js";
 import { gitBlobSha, repairDuplicateKeyShard } from "../src/lib/plan-shard-repair.js";
 import { taskRulingPin } from "../src/lib/task-linter.js";
 import { startTestGarden, type TestGardenAction, type TestGardenClass, type TestGardenInventory } from "../src/lib/test-gardener.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runShardRepairPass, shardRepairDir, shardRepairRequester, withShardRepairs } from "../src/run-task.js";
+import { knowledgeGardenWorkspaceAsync, runShardRepairPass, shardRepairDir, shardRepairRequester, withShardRepairs } from "../src/run-task.js";
 
 const proof = "test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts";
 const url = "https://github.com/o/r/pull/9";
@@ -216,3 +218,54 @@ test(`${proof}: the plan garden awaits repairs and continues after an async reje
   assert.deepEqual(events, ["repair", "garden"]);
   assert.deepEqual(rows, [["plan.shard_repair_failed", { stage: "pass", reason: "repair failed" }]]);
 });
+
+function learningsYaml(entries: Array<{ id: string; fact: string; lifecycle?: string }>): string {
+  return entries
+    .map((e) => [`- id: ${e.id}`, "  subsystem: t", `  lifecycle: ${e.lifecycle ?? "active"}`, "  files: [src/x.ts]", "  fact: >-", `    ${e.fact}`, "  src: t", ""].join("\n"))
+    .join("\n");
+}
+
+test("W1-T4095: the real workspace commits, pushes and opens the PR", async () => {
+  const origin = gitRepo({ bare: true, kind: "w1t4095-origin" });
+  const seed = gitRepo({ kind: "w1t4095-seed" });
+  mkdirSync(join(seed.dir, "learnings"));
+  writeFileSync(join(seed.dir, "learnings", "core.yaml"), learningsYaml([{ id: "a", fact: "A fact." }]));
+  mkdirSync(join(seed.dir, "scripts"));
+  writeFileSync(join(seed.dir, "scripts", "learnings-assert-check.mjs"), "// no assertions to run in this fixture\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "-q", "origin", "HEAD:main");
+  const checkout = gitRepo({ cloneFrom: origin.dir, kind: "w1t4095-checkout" });
+  checkout.git("config", "user.email", "g@example.invalid");
+  checkout.git("config", "user.name", "g");
+  const worktrees = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4095-wt-`));
+  const calls: string[][] = [];
+  const ws = await knowledgeGardenWorkspaceAsync({
+    repoDir: checkout.dir,
+    worktreesRoot: worktrees,
+    owner: "acme",
+    repo: "remudero",
+    log: () => {},
+    clock: fixedClock(1790000000000),
+    fetcher: (args) => {
+      calls.push(args);
+      return { html_url: "https://github.com/acme/remudero/pull/42", number: 42 };
+    },
+  });
+  try {
+    assert.ok(existsSync(join(ws.root, "learnings", "core.yaml")), "the workspace is a checkout of main");
+    assert.deepEqual(await ws.refreshAssertions(), [], "nothing drifted");
+    writeFileSync(join(ws.root, "learnings", "core.yaml"), learningsYaml([{ id: "a", fact: "A fact.", lifecycle: "superseded" }]));
+    const url = await withLiveWritesAllowed(() => ws.land({ paths: ["learnings/core.yaml"], title: "chore(knowledge): test pass", body: "body" }));
+    assert.equal(url, "https://github.com/acme/remudero/pull/42");
+    assert.match(origin.git("log", "--oneline", "knowledge-garden-1790000000000"), /chore\(knowledge\): test pass/);
+    assert.ok(calls[0]!.join(" ").includes("pulls"), "the PR is opened over REST");
+  } finally {
+    await ws.dispose();
+    origin.cleanup();
+    seed.cleanup();
+    checkout.cleanup();
+  }
+});
+
