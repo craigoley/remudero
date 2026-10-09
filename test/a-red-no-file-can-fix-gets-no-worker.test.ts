@@ -133,12 +133,12 @@ test("metadata repair writes a live title and body in one PR edit", async () => 
     (_url, fields) => { writes.push(fields); },
     () => ({ title: "Broken title", body: "A short summary." }),
     () => [],
-    () => ["test/a-suite-the-pr-adds.test.ts"],
+    () => ({ kind: "read" as const, files: ["test/a-suite-the-pr-adds.test.ts"] }),
   );
   assert.equal(result.repaired, true);
   const bodyOnly: Array<{ title?: string; body?: string }> = [];
   await repairPrMetadata(subject(), ["commitlint", "acceptance-author-gate"], (_url, fields) => { bodyOnly.push(fields); },
-    () => ({ title: "fix(pr): valid title", body: "A short summary." }), () => [], () => ["test/a-suite-the-pr-adds.test.ts"]);
+    () => ({ title: "fix(pr): valid title", body: "A short summary." }), () => [], () => ({ kind: "read" as const, files: ["test/a-suite-the-pr-adds.test.ts"] }));
   assert.equal(bodyOnly[0].title, undefined, "a title that already passes is left alone while the body is repaired");
   assert.match(bodyOnly[0].body ?? "", /Acceptance:/);
   assert.match(writes[0].title ?? "", /^fix\(pr\): broken title$/);
@@ -256,7 +256,7 @@ test("the metadata repair derives its proof from a test the diff adds, never the
     (_url, fields) => { writes.push(fields); },
     () => ({ title: "fix(pr): valid title", body: "A short summary." }),
     () => [],
-    (headSha) => (headSha === "head-a" ? ["test/the-suite-this-pr-adds.test.ts"] : []),
+    (headSha) => ({ kind: "read" as const, files: headSha === "head-a" ? ["test/the-suite-this-pr-adds.test.ts"] : [] }),
   );
   assert.equal(result.repaired, true);
   assert.match(writes[0].body ?? "", /unit test: test\/the-suite-this-pr-adds\.test\.ts/);
@@ -271,7 +271,7 @@ test("the metadata repair escalates when the diff adds no test instead of writin
     () => { writes++; },
     () => ({ title: "fix(pr): valid title", body: "A short summary." }),
     () => [],
-    () => [],
+    () => ({ kind: "read" as const, files: [] }),
   );
   assert.equal(result.repaired, false);
   assert.equal(result.noCure, true);
@@ -289,6 +289,7 @@ test("added test files at head are read from the real diff against origin/main",
   writeFileSync(join(repo.dir, "src", "code.ts"), "");
   repo.git("add", ".");
   repo.git("commit", "--quiet", "-m", "add a suite");
-  assert.deepEqual(addedTestFilesAtHead(repo.git("rev-parse", "HEAD"), repo.dir), ["test/a-new-suite.test.ts"]);
-  assert.deepEqual(addedTestFilesAtHead("0".repeat(40), repo.dir), [], "an unreadable head yields no proof, never a guess");
+  assert.deepEqual(addedTestFilesAtHead(repo.git("rev-parse", "HEAD"), repo.dir), { kind: "read", files: ["test/a-new-suite.test.ts"] });
+  const unreadable = addedTestFilesAtHead("0".repeat(40), repo.dir);
+  assert.equal(unreadable.kind, "unreadable", "an unreadable head is never reported as a diff that adds no test");
 });

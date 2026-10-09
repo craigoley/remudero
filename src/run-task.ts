@@ -5515,7 +5515,7 @@ export async function repairPrMetadata(
   /** W1-T5544: the task criteria the gate itself resolves for this body at the PR head (`[]` = unreadable or untrailered). */
   planCriteriaAtHead: (body: string, headSha: string) => readonly AcceptanceCriterion[] = planCriteriaAtHeadForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
-  addedTestsAtHead: (headSha: string) => readonly string[] = addedTestFilesAtHead,
+  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5547,15 +5547,17 @@ export async function repairPrMetadata(
     const planCriteria = gateRed && pr.headSha ? planCriteriaAtHead(live.body, pr.headSha) : [];
     // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
     // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
-    const headOnly = pr.headSha ? addedTestsAtHead(pr.headSha).map(sweepMetadataAddedTestCriterion) : [];
+    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
+    const headOnly = added.kind === "read" ? added.files.map(sweepMetadataAddedTestCriterion) : [];
     const gate = acceptanceAuthorTimeCheck(live.body);
     if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
+      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
       return {
         repaired: false,
         noCure: true,
         reason:
-          "the body has no judgeable Acceptance block and the diff adds no test file, so no proof that misses at base " +
-          "is derivable; a generic block would pass at base and fail proof-discrimination",
+          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
+          "a generic block would pass at base and fail proof-discrimination",
       };
     }
     const repair = acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
@@ -5784,22 +5786,29 @@ function sweepMetadataAddedTestCriterion(path: string): AcceptanceCriterion {
   return { claim: `the suite this PR adds passes (derived from the diff by the metadata repair sweep): ${path}`, proof: `unit test: ${path}` };
 }
 
-/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/**.test.ts` files added since the merge base with
- *  origin/main. An unreadable head yields `[]`, which escalates rather than guessing a proof. */
-export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): readonly string[] {
+/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
+
+/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/*.test.ts` files added since the merge base with
+ *  origin/main. */
+export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
+  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
   try {
+    let base: string;
     try {
-      hostWorktreeGitAtTopLevel(cwd, ["cat-file", "-e", `${headSha}^{commit}`]);
+      base = mergeBase();
     } catch {
+      // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
       hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
+      base = mergeBase();
     }
-    const base = hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
-    return hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
+    const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
       .split("\n")
       .map((p) => p.trim())
       .filter((p) => /^test\/[^/]+\.test\.ts$/.test(p));
-  } catch {
-    return [];
+    return { kind: "read", files };
+  } catch (err) {
+    return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
   }
 }
 
