@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -22,3 +22,14 @@
     CI runs: 37865412857, 37880084943, 37885650464.
     Retry outcomes: 3 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Codex fix-round assessment: the task declares only test/the-census-roster-is-named-not-numbered.test.ts, an existing test containing the named failing case. Its proposed test repair is reversible and remains subject to CI and review."
+      - "The task requests no privileged access, destructive operation, merge or deploy policy change, or operator-only decision. Its declared scope and acceptance criterion are unchanged by this release."
+      - "This judgement assesses the filed task, not a completed flake repair. The incident record supplies three PR and CI run identifiers with recovered retries; those remote runs were not independently re-read in this round."
+      - "Live family merge-credit and gardener state were unavailable in this fix round, so the judgement uses the neutral family prior and the current policy confidence threshold without claiming measured family outcomes."
+    judged_at: "2026-10-09T07:12:05.822Z"
+    pin: "672f481c9f69258db5722525ac55d00f63384e0e844d8ab9c452a102fc9c509e"
