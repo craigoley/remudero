@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
@@ -813,6 +814,13 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
   // total and stable rather than dependent on readdir order.
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
   return out;
+}
+
+/** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
+ *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
+export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
+  const res = spawnSync("git", ["-C", root, "show", `origin/main:plan/feedback/${feedbackId}.yaml`], { encoding: "utf8", timeout: 10_000 });
+  return res.status === 0 ? /^status:\s*(\S+)\s*$/m.exec(res.stdout)?.[1] : undefined;
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

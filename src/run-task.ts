@@ -1497,7 +1497,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, feedbackStatusOnMain, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -38551,6 +38551,7 @@ export async function daemonCommand(
         // cached OPEN that has since merged/closed stands the guard down instead of parking a
         // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
         readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readFeedbackStatusOnMain: (feedbackId) => feedbackStatusOnMain(repoRoot, feedbackId),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
