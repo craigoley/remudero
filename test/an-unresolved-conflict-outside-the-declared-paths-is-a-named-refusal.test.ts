@@ -55,7 +55,7 @@ for (const guarded of [false, true]) {
     assert.ok(result!.reason?.startsWith(UNRESOLVED_CONFLICT_REFUSAL_PREFIX), result!.reason);
     assert.ok(result!.reason?.includes(OUTSIDE));
     assert.equal(f.repo.git("rev-parse", "HEAD"), f.branchSha, "nothing was committed");
-    assert.match(f.repo.git("ls-files", "-u", "--", DECLARED), /^\d+ \w+ [123]\t/, "the declared path was not staged either");
+    assert.match(f.repo.git("status", "--porcelain", "--", DECLARED), /^UU /, "the declared path was not staged either");
   });
 
   test(`the refusal counts as a failed strike through the harness commit, with no thrown error (${mode})`, () => {
