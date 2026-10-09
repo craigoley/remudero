@@ -136,6 +136,19 @@ export function installedTypescriptVersion(root: string): string | undefined {
 
 export type SeedOutcome = "kept" | "seeded" | "published" | "no-seed" | "mismatch" | "unwritable";
 
+export function hasUsableTypecheckBuildInfo(buildInfo: string | undefined, tsVersion: string | undefined): boolean {
+  if (buildInfo === undefined || tsVersion === undefined || !existsSync(buildInfo)) return false;
+  try {
+    const info = JSON.parse(readFileSync(buildInfo, "utf8"));
+    return info !== null && typeof info === "object" && info.version === tsVersion &&
+      Array.isArray(info.fileNames) && info.fileNames.length > 0 && info.fileNames.every((name: unknown) => typeof name === "string") &&
+      Array.isArray(info.fileInfos) && info.fileInfos.length === info.fileNames.length;
+  } catch (error) {
+    process.stderr.write(JSON.stringify({ step: "typecheck.buildinfo_unusable", buildInfo, reason: String(error) }) + "\n");
+    return false;
+  }
+}
+
 /**
  * Write `from`'s buildinfo, rebased, at `to.buildInfo` — replacing whatever is there. Via a temp file and rename, so a
  * concurrent check never reads half a buildinfo.

@@ -9,8 +9,8 @@ import { slug } from "./feedback-docket.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghExec } from "./github-transport.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { loadPlanFromYaml } from "./plan.js";
 import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -278,7 +278,7 @@ function draftShard(action: FlowAction, taskId: string, search: OwnerSearch): st
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   return {
-    name: "flow-remedy", classes: ["draft"], review: { draft: "a remedy task is a judgement call for the machine-filing judge or a person" },
+    name: "flow-remedy", landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch?.fileExists), classes: ["draft"], review: { draft: "a remedy task is a judgement call for the machine-filing judge or a person" },
     cheapFingerprint: () => {
       const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 60_000 }).trim();
       const archives = ledgerRotationEntries(readdirSync(deps.stateDir), deps.stateDir).map(e => {
@@ -320,16 +320,14 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
       if (!verdict.ok) throw new Error(`flow gardener: drafted record failed lint (${verdict.reason})`);
       const draftedPlan = loadPlanFromYaml(contents, `flow:${id}`);
       if (draftedPlan.tasks.length !== 1) throw new Error(`flow gardener: drafted shard must contain exactly one task (found ${draftedPlan.tasks.length})`);
-      const task = draftedPlan.tasks[0]!;
-      const admission = machineFilingAdmissionViolations(task, {
-        plan: draftedPlan,
-        releasedIds: new Set(),
-        pathExists: path => existsSync(join(ws.root, path)),
-        pathExistsAtBase: search.fileExists,
-      });
-      if (admission.length > 0) throw new Error(`flow gardener: drafted record failed machine-filing admission (${admission.join("; ")})`);
       const dir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const path = join(dir, `${id}-flow-${slug(action.price.key, 80)}.yaml`);
+      // lint-plan's verdict before the draft reaches disk; the spec's `landingRefusal` re-reads the landing.
+      const refused = machineShardFilingRefusal(contents, relative(ws.root, path), {
+        pathExists: p => existsSync(join(ws.root, p)) || existsSync(join(deps.repoRoot, p)),
+        pathExistsAtBase: search.fileExists
+      });
+      if (refused !== undefined) throw new Error(`flow gardener: drafted record failed machine-filing admission (${refused})`);
       mkdirSync(dir, { recursive: true }); writeFileSync(path, contents);
       const relPath = relative(ws.root, path);
       const originPattern = JSON.stringify(action.origin).slice(1, -1).replace(/[.\[\]*^$\\]/g, "\\$&");

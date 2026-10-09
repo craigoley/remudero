@@ -345,6 +345,7 @@
     "test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts": 3004,
     "test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts": 1200,
     "test/a-missing-commit-line-is-asked-for-not-discarded.test.ts": 2200,
+    "test/a-missing-memory-ledger-never-reads-as-empty.test.ts": 5000,
     "test/a-missing-trailer-is-repairable-from-the-branch.test.ts": 2033,
     "test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts": 498,
     "test/a-model-change-is-noticed.test.ts": 395,

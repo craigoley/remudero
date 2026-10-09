@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import {
+  SELECTOR_SHADOW_MISS_TEST_PATH,
   SELECTOR_SHADOW_SHARDS,
   runSelectorShadowGardener,
   selectorShadowStructuralTestPath,
@@ -28,6 +29,11 @@ function missedRun(id: number, file = TEST_FILE): SelectorShadowRun {
 
 function harness() {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-once-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
