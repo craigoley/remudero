@@ -78,18 +78,16 @@ const NUMERIC_KEYS = [
   "staleReadingMs",
 ] as const satisfies ReadonlyArray<keyof HostMemoryBudgetPolicy>;
 
-export class HostMemoryBudgetPolicyError extends Error {}
-
 function mapping(path: string, raw: unknown): Record<string, unknown> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new HostMemoryBudgetPolicyError(`policy.yaml: '${path}' must be a mapping.`);
+    throw new Error(`policy.yaml: '${path}' must be a mapping.`);
   }
   return raw as Record<string, unknown>;
 }
 
 function proposalOrigin(path: string, row: Record<string, unknown>): void {
   if (row.origin !== HOST_MEMORY_BUDGET_ORIGIN) {
-    throw new HostMemoryBudgetPolicyError(
+    throw new Error(
       `policy.yaml: '${path}.origin' must be "${HOST_MEMORY_BUDGET_ORIGIN}", got ${JSON.stringify(row.origin)}.`,
     );
   }
@@ -102,7 +100,7 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
   const modeRow = mapping(`${base}.mode`, block.mode);
   proposalOrigin(`${base}.mode`, modeRow);
   if (!SHADOW_MODES.includes(modeRow.value as ShadowMode)) {
-    throw new HostMemoryBudgetPolicyError(
+    throw new Error(
       `policy.yaml: '${base}.mode' accepts only "off" or "shadow", got ${JSON.stringify(modeRow.value)}.`,
     );
   }
@@ -114,7 +112,7 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
     const { value, min, max } = row;
     if (typeof value !== "number" || typeof min !== "number" || typeof max !== "number" ||
       ![value, min, max].every(Number.isFinite) || value < min || value > max) {
-      throw new HostMemoryBudgetPolicyError(`policy.yaml: '${path}' must be a finite value inside finite [min, max].`);
+      throw new Error(`policy.yaml: '${path}' must be a finite value inside finite [min, max].`);
     }
     out[key] = value;
   }
@@ -448,7 +446,8 @@ function readMemAvailable(read: ShadowMemoryPorts["readFile"]): ShadowInputs["me
     const kb = /^MemAvailable:\s+(\d+)\s+kB/m.exec(read("/proc/meminfo"))?.[1];
     return kb === undefined ? { unread: "no MemAvailable line" } : { mib: Number(kb) / 1024 };
   } catch (error) {
-    return { unread: reasonOf(error) };
+    const reason = reasonOf(error);
+    return { unread: reason };
   }
 }
 
@@ -459,7 +458,8 @@ function readSwapIn(read: ShadowMemoryPorts["readFile"], now: number, staleMs: n
     if (raw === undefined) return { unmeasured: "no pswpin line" };
     pswpin = Number(raw);
   } catch (error) {
-    return { unmeasured: reasonOf(error) };
+    const reason = reasonOf(error);
+    return { unmeasured: reason };
   }
   const prior = priorSwapIn;
   priorSwapIn = { at: now, pswpin };
@@ -475,7 +475,8 @@ function readPsi(read: ShadowMemoryPorts["readFile"]): ShadowInputs["psi"] {
   try {
     text = read("/proc/pressure/memory");
   } catch (error) {
-    return { unread: reasonOf(error) };
+    const reason = reasonOf(error);
+    return { unread: reason };
   }
   const field = (prefix: string, key: string): number | undefined => {
     const line = text.split("\n").find((l) => l.startsWith(`${prefix} `));
@@ -536,7 +537,8 @@ function treeResident(
       return true;
     });
   } catch (error) {
-    return { unread: reasonOf(error) };
+    const reason = reasonOf(error);
+    return { unread: reason };
   }
   let kb = 0;
   for (const identity of tree) {
@@ -561,7 +563,8 @@ function readTailRows(ports: ShadowMemoryPorts, root: string): { rows: TailRow[]
   try {
     text = ports.readTail(join(root, "state", LEDGER_FILENAME), LEDGER_TAIL_BYTES);
   } catch (error) {
-    return { unread: reasonOf(error) };
+    const reason = reasonOf(error);
+    return { unread: reason };
   }
   const rows: TailRow[] = [];
   for (const line of text.split("\n")) {
@@ -664,7 +667,7 @@ function logShadowError(ports: ShadowMemoryPorts, start: ShadowStart, ledgerPath
     try {
       ports.write?.(ledgerPath, row);
     } catch (error) {
-      ports.stderr(JSON.stringify({ event: SHADOW_ERROR_STEP, reason, write_error: reasonOf(error) }));
+      ports.stderr(JSON.stringify({ event: SHADOW_ERROR_STEP, reason, error: reasonOf(error) }));
     }
   } catch (error) {
     void error; // The diagnostic of a diagnostic: nothing further can be told, and the start must not hear of it.
@@ -714,7 +717,8 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
       });
     } catch (error) {
       written = false;
-      logShadowError(ports, start, ledgerPath, `write:${reasonOf(error)}`);
+      const reason = `write:${reasonOf(error)}`;
+      logShadowError(ports, start, ledgerPath, reason);
     }
     tally[verdict.scenario].samples += 1;
     tally[verdict.scenario][verdict.wouldAdmit ? "admit" : "defer"] += 1;
@@ -731,7 +735,8 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
           pooling: "none: serve-stopped samples say nothing about serve coexisting with the fleet",
         });
       } catch (error) {
-        logShadowError(ports, start, ledgerPath, `summary-write:${reasonOf(error)}`);
+        const reason = `summary-write:${reasonOf(error)}`;
+        logShadowError(ports, start, ledgerPath, reason);
       }
     }
     return { kind: "recorded", verdict, written };
