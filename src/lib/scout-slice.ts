@@ -28,9 +28,9 @@ import { hostWorktreeGit } from "./worktree-git.js";
 export const SCOUT_SLICE_ROOTS: readonly string[] = ["src/lib", "scripts", "docs", "test"];
 /** The most source one pass shows the model. */
 export const SCOUT_SLICE_BYTE_BUDGET = 60_000;
-/** The most findings one pass accepts from the model; the rest of its answer is ignored. */
+/** PRIMARY CONTROL — the most findings one pass accepts from the model; the rest of its answer is ignored. */
 export const SCOUT_SLICE_MAX_FINDINGS = 3;
-/** A finding's claim is one sentence; longer is a paragraph, which cannot be re-verified as one thing. */
+/** BACKSTOP — a finding's claim is one sentence; a longer one is cut in the filed title, never rejected. */
 export const SCOUT_SLICE_MAX_CLAIM_CHARS = 240;
 /** The slice class is judged on the export gardener's revert window, not the ledger class's 7 days. */
 export const SCOUT_SLICE_SURVIVAL_WINDOW_MS = EXPORT_GARDEN_WINDOW_DAYS * 24 * 3_600_000;
@@ -239,6 +239,7 @@ export function parseSliceFindings(text: string): { findings: SliceFinding[]; dr
   try {
     parsed = JSON.parse(text.slice(start, end + 1));
   } catch (error) {
+    // Not repaired and not retried: the pass files nothing from this answer and the ledger carries why.
     return { findings: [], dropped: [`the answer's array is not JSON: ${error instanceof Error ? error.message : String(error)}`] };
   }
   if (!Array.isArray(parsed)) return { findings: [], dropped: ["the answer is not an array"] };
@@ -402,24 +403,30 @@ export function grepProofsHold(proofs: readonly string[], readAtHead: (path: str
   return greps.length > 0 && greps.every((g) => readAtHead(g.file)?.includes(g.needle) === true);
 }
 
-/** Task ids whose change a revert commit undid, inside `sinceIso..`: a revert names the commit it undoes. */
-export function readRevertedTasks(repoRoot: string, sinceIso: string): Set<string> {
+/**
+ * Task ids whose change a revert commit undid, inside `sinceIso..`: a revert names the commit it undoes.
+ * A reverted commit this clone cannot show is unknown, not proof of anything: it is reported in
+ * `unreadable` and credits nothing.
+ */
+export function readRevertedTasks(repoRoot: string, sinceIso: string): { tasks: Set<string>; unreadable: string[] } {
   const git = (args: string[]): string => hostWorktreeGit(repoRoot, args, { maxBuffer: 64 * 1024 * 1024 });
   const out = new Set<string>();
+  const unreadable: string[] = [];
   const log = git(["log", "HEAD", `--since=${sinceIso}`, "-i", "--grep=^revert", "--format=%x01%B"]);
   for (const chunk of log.split("\u0001")) {
-    for (const m of chunk.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) out.add(m[1]!);
+    // `Revert "<the original subject>"` quotes the subject, which names its task; the revert's own trailer is the reverter's.
+    for (const m of (chunk.split("\n")[0] ?? "").matchAll(/\bW\d+-T\d+\b/g)) out.add(m[0]);
     for (const m of chunk.matchAll(/This reverts commit ([0-9a-f]{7,40})/g)) {
       let body: string;
       try {
         body = git(["show", "-s", "--format=%B", m[1]!]);
       } catch (error) {
-        // A reverted commit this clone cannot show is unknown, not proof of anything: it credits nothing.
-        void error;
+        // Reported to the caller (it ledgers the list), never swallowed.
+        unreadable.push(`${m[1]!}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
         continue;
       }
       for (const t of body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) out.add(t[1]!);
     }
   }
-  return out;
+  return { tasks: out, unreadable };
 }

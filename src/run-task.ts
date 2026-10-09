@@ -36595,8 +36595,6 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
-    // W1-T5455: its second class reads one rotating slice of the repository through the SAME model call the
-    // machine-filing judge uses, read before the pass only when the pass is due, so an idle tick spends nothing.
     case "scout": {
       const d = deps("scout");
       const spec = scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log), sliceModel: productionScoutSliceModel({ repoRoot }) });
@@ -49541,8 +49539,6 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
  * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
  */
-/** The scout's slice-reading model call (W1-T5455): the machine-filing judge's own mount and tool-less spawn,
- *  resolved on first use as {@link productionMachineFilingJudgePorts}'s risk judge is. */
 export function productionScoutSliceModel(opts: { repoRoot: string; spawn?: typeof spawnWorker }): SliceModelCall {
   return async (prompt) => {
     const mounts = loadMounts(mountsPath(opts.repoRoot));

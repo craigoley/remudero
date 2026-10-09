@@ -394,7 +394,11 @@ export function scoutGardenSpec(
     pricedSteps: () => new Set(CI_FRICTION_LEDGER_STEPS),
     fileExists: (path) => existsSync(join(deps.repoRoot, path)),
     heldSlice: () => held,
-    sliceReverted: (sinceIso) => readRevertedTasks(deps.repoRoot, sinceIso),
+    sliceReverted: (sinceIso) => {
+      const read = readRevertedTasks(deps.repoRoot, sinceIso);
+      if (read.unreadable.length > 0) deps.log("scout.slice_revert_unreadable", { reverts: read.unreadable });
+      return read.tasks;
+    },
     sliceReadAtHead: sliceSources.readAtHead,
     ...sources,
   };
