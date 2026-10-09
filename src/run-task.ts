@@ -175,7 +175,7 @@ export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidenc
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
-import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
+import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
@@ -183,7 +183,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -565,6 +565,7 @@ import {
 } from "./lib/open-prs-rest.js";
 import {
   buildMainHealthRung,
+  withMainHealthOnLightPass,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairRevertOutcome,
@@ -1497,7 +1498,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, feedbackStatusOnMain, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -36643,6 +36644,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
+    pendingSignal: (prUrl: string) => {
+      const open = readOpenBoardSnapshot(config.root, owner, repo);
+      return gardenPendingSignal(prUrl, open.ok ? open.snapshot.rows : undefined, readOriginMainSha(repoRoot));
+    },
     log,
     ...(escalate ? { escalate } : {}),
   });
@@ -38456,6 +38462,8 @@ export async function daemonCommand(
           resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
+          // A run in flight starves the full sweep, so the light pass also watches main.
+          mainHealthRung,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -38557,6 +38565,7 @@ export async function daemonCommand(
         // cached OPEN that has since merged/closed stands the guard down instead of parking a
         // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
         readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readFeedbackStatusOnMain: (feedbackId) => feedbackStatusOnMain(repoRoot, feedbackId),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
@@ -43546,6 +43555,9 @@ export function ciLogNamedSourcePaths(
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
 
+/** W1-T5868: the reason prefix for a path left unmerged OUTSIDE the staged surface; it names the paths. */
+export const UNRESOLVED_CONFLICT_REFUSAL_PREFIX = "unresolved merge conflict outside the declared paths in";
+
 /**
  * W1-T5227: WHICH OF `paths` STILL HOLD A CONFLICT MARKER. Git's own detector, never a hand-rolled
  * regex: `git diff --check` prints `<path>:<line>: leftover conflict marker` for each one (plus
@@ -43674,6 +43686,15 @@ export function commitWorkerEdits(
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
     regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
+  // W1-T5868: a path still UNMERGED outside what this commit stages cannot be committed — `git commit`
+  // throws on it, and the guarded tree would carry its conflict stages. A merge of current main can
+  // conflict in files the task never declared. REFUSE by name (a strike), before anything is staged.
+  const unresolvedOutside = nulPaths(runGit(["diff", "--name-only", "--diff-filter=U", "-z"]))
+    .filter((path) => !declared.includes(path)).sort();
+  if (unresolvedOutside.length > 0) {
+    return { committed: false, undeclared, conflictMarkerFiles: unresolvedOutside,
+      reason: `${UNRESOLVED_CONFLICT_REFUSAL_PREFIX} ${unresolvedOutside.join(", ")}; nothing was staged` };
+  }
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
@@ -46236,6 +46257,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
+  mainHealthRung?: () => Promise<void>,
 ): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -46247,7 +46269,7 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async (scope) => {
+  return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
@@ -46365,7 +46387,7 @@ export function buildSweepLightHook(
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, mainHealthRung, { log });
 }
 
 /** What `routeFix` did with one PR — mirrors the sweep's per-PR action shape. */

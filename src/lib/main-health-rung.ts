@@ -7,6 +7,7 @@ import {
 } from "./escalate.js";
 import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import {
@@ -1136,5 +1137,41 @@ export function buildMainHealthRung(
       if (inFlight === started) inFlight = undefined;
     });
     return started;
+  };
+}
+
+/** How often a light pass also observes main. A run in flight starves the full sweep (one tick read
+ *  main at 14:01Z and the next at 14:49Z on 2026-10-09 while main sat red), so the light pass does it. */
+export const MAIN_HEALTH_LIGHT_PASS_INTERVAL_MS = 2 * 60_000;
+
+/** Wraps a light-pass hook so it also runs the main-health rung, at most once per interval. A rung
+ *  failure is logged and never stops the light pass. */
+export function withMainHealthOnLightPass<A extends unknown[]>(
+  lightPass: (...args: A) => Promise<void>,
+  rung: (() => Promise<void>) | undefined,
+  options: {
+    readonly intervalMs?: number;
+    readonly clock?: Clock;
+    readonly log?: (step: string, extra?: Record<string, unknown>) => void;
+  } = {},
+): (...args: A) => Promise<void> {
+  if (!rung) return lightPass;
+  const intervalMs = Math.max(0, options.intervalMs ?? MAIN_HEALTH_LIGHT_PASS_INTERVAL_MS);
+  const clock = options.clock ?? systemClock;
+  let lastAtMs: number | undefined;
+  return async (...args: A) => {
+    try {
+      await lightPass(...args);
+    } finally {
+      const atMs = clock.now();
+      if (lastAtMs === undefined || atMs < lastAtMs || atMs - lastAtMs >= intervalMs) {
+        lastAtMs = atMs;
+        try {
+          await rung();
+        } catch (error) {
+          options.log?.("main.health.error", { source: "light_pass", error: String((error as Error)?.message ?? error) });
+        }
+      }
+    }
   };
 }
