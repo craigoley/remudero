@@ -6,7 +6,10 @@ import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
 
-function measure(overrides: Record<string, string> = {}): Record<string, string> {
+function measure(
+  overrides: Record<string, string> = {},
+  opts: { status?: number; inspect?: (dir: string) => void } = {},
+): Record<string, string> {
   const dir = makeTempDir("heartbeat-consumers");
   try {
     const bin = join(dir, "bin");
@@ -26,7 +29,16 @@ function measure(overrides: Record<string, string> = {}): Record<string, string>
     if (overrides.DAEMON_CONFIG === "junk") writeFileSync(config, '{"data-root": "relative"}');
     const stub = (name: string, body: string) =>
       writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
-    stub("git", 'printf "fixture-sha\\n"');
+    stub("git", 'case "$*" in *push*) [ "\${GIT_PUSH_FAIL:-}" = 1 ] && exit 1 ;; esac; printf "fixture-sha\\n"');
+    // A whole filesystem's root reports FSROOT "/"; a bind of a subdirectory reports that subdirectory.
+    stub("findmnt", `
+[ "\${FINDMNT_ABSENT:-}" = 1 ] && exit 127
+case "\${@: -1}" in
+  /mnt/rmd) printf '/\\n' ;;
+  /var/lib/containerd) printf '/containerd\\n' ;;
+  *) exit 1 ;;
+esac`);
+    stub("ionice", 'printf "%s\\n" "$*" >> "$FIXTURE/ionice.log"; shift 2; exec "$@"');
     stub("uname", 'printf "Linux\\n"');
     stub("docker", `
 case "$*" in
@@ -64,7 +76,7 @@ case "$p" in
   "$FIXTURE"/tmp/rmd-c-two) n=200 ;;
   "$FIXTURE"/container-tmp/rmd-c-three) n=300 ;;
   /mnt/rmd/tmp) n=800 ;;
-  /mnt/rmd) n=60000000 ;;
+  /mnt/rmd) [ "\${FINDMNT_ABSENT:-}" = 1 ] || exit 1; n=60000000 ;;
   *) n=10 ;;
 esac
 printf '%s\\t%s\\n' "$n" "$p"`);
@@ -76,7 +88,9 @@ case "$p" in
   "$FIXTURE/docker data"|/var/lib/containerd|/mnt/rmd*) device=/dev/data ;;
   *) device=/dev/root ;;
 esac
-printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 1000 90000000 1%% /\\n' "$device"`);
+used=1000; mounted=/
+[ "$p" = /mnt/rmd ] && { used=61000000; mounted=/mnt/rmd; }
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 %s 90000000 1%% %s\\n' "$device" "$used" "$mounted"`);
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
     const result = spawnSync("bash", [script], {
       encoding: "utf8",
@@ -89,7 +103,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 10
         FIXTURE: dir,
         RMD_ROOT: join(dir, "state-root"),
         RMD_HEARTBEAT_LOCK_HELD: "1",
-        RMD_HEARTBEAT_DRY_RUN: "1",
+        RMD_HEARTBEAT_DRY_RUN: overrides.PUBLISH === "1" ? "" : "1",
         RMD_HEARTBEAT_BRANCH: "heartbeat-consumer-fixture",
         RMD_HEARTBEAT_DOCKER: join(bin, "docker"),
         RMD_DOCKER_DAEMON_JSON: config,
@@ -97,7 +111,9 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 10
         ...overrides,
       },
     });
-    assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
+    assert.equal(result.status, opts.status ?? 0, `${result.error ?? ""}\n${result.stderr}`);
+    opts.inspect?.(dir);
+    if ((opts.status ?? 0) !== 0) return {};
     const beat = Object.fromEntries(result.stdout.split("\n").filter((line) => line.includes("="))
       .map((line) => { const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)]; }));
     assert.equal(beat.install_dir, dir, "dependency probes must stay in the isolated install");
@@ -131,7 +147,7 @@ test("live bind sources, coverage scratch and the persistent disk are measured",
   assert.equal(beat.consumer_coverage_device, "/dev/root,/dev/scratch");
   assert.equal(beat.consumer_rmd_tmp_kb, "800");
   assert.equal(beat.consumer_rmd_tmp_device, "/dev/data");
-  assert.equal(beat.consumer_rmd_kb, "60000000");
+  assert.equal(beat.consumer_rmd_kb, "61000000");
   assert.equal(beat.consumer_rmd_device, "/dev/data");
 });
 
@@ -150,4 +166,31 @@ test("the discovered docker root can be measured by the native du", () => {
   const kb = measure({ REAL_DU: "1" }).consumer_docker_kb;
   assert.match(kb, /^[0-9]+$/);
   assert.ok(Number(kb) >= 8 && Number(kb) < 27000000);
+});
+
+test("the whole-disk consumer reads its used space from statfs and never walks it with du", () => {
+  const beat = measure();
+  assert.equal(beat.consumer_rmd_kb, "61000000", "/mnt/rmd is a filesystem root: df's Used column, no du walk");
+  assert.equal(beat.consumer_rmd_device, "/dev/data");
+  assert.equal(beat.consumer_containerd_kb, "27200000", "a bind of a subdirectory still walks, or it would report the whole disk");
+  assert.equal(measure({ FINDMNT_ABSENT: "1" }).consumer_rmd_kb, "60000000", "without findmnt the walk is the fallback");
+});
+
+test("every remaining du walk runs at idle io priority under ionice", () => {
+  let log = "";
+  measure({}, { inspect: (dir) => { log = readFileSync(join(dir, "ionice.log"), "utf8"); } });
+  const walks = log.split("\n").filter(Boolean);
+  assert.ok(walks.length > 0, "no du ran under ionice");
+  for (const walk of walks) assert.match(walk, /^-c3 -t nice -n 19 du -sk /);
+  assert.ok(walks.some((walk) => walk.endsWith("/var/lib/containerd")));
+  assert.ok(!walks.some((walk) => walk.endsWith(" /mnt/rmd")), "the statfs read needs no walk");
+});
+
+test("a measuring beat whose push fails still advances the consumer pacing counter", () => {
+  let count = "";
+  measure({ PUBLISH: "1", GIT_PUSH_FAIL: "1", BEAT_N: "6" }, {
+    status: 1,
+    inspect: (dir) => { count = readFileSync(join(dir, "state-root/state/heartbeat-count.txt"), "utf8").trim(); },
+  });
+  assert.equal(count, "7", "a failed push must not leave the next beat on a measuring beat");
 });
