@@ -35,7 +35,7 @@ import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 // ── fixtures — mirror test/fix-rung-no-task.test.ts's own W1-T1095 helpers exactly ──────────────
 
@@ -134,8 +134,9 @@ const NEVER_RUN_REVIEW = async (): Promise<never> => {
 
 function baseDeps(overrides: Partial<Parameters<typeof runFixRung>[0]["deps"]> = {}) {
   const { log } = testLog();
+  let prerequisiteBranch: string | undefined;
+  const spawn = overrides.spawn ?? NEVER_SPAWN;
   return {
-    spawn: NEVER_SPAWN,
     waitForCiGreen: NEVER_WAIT_FOR_CI,
     runReview: NEVER_RUN_REVIEW,
     push: () => {},
@@ -145,7 +146,14 @@ function baseDeps(overrides: Partial<Parameters<typeof runFixRung>[0]["deps"]> =
     say: () => {},
     account: (r: WorkerResult) => r,
     ledgerLines: () => [],
+    readLiveHead: () => ({ ok: true as const, headSha: "deadbeef", headRefName: prerequisiteBranch }),
+    fetchPrBody: async () => "## Acceptance\n- standalone instrument change | grep: newField in scripts/coverage-ratchet.mjs",
     ...overrides,
+    spawn: async (args: SpawnWorkerArgs) => {
+      prerequisiteBranch = args.prompt.match(/git switch -c (run-unfiled-\d+) origin\/main/)?.[1];
+      assert.ok(prerequisiteBranch, "the prerequisite worker receives the minted branch");
+      return spawn(args);
+    },
   };
 }
 
@@ -177,6 +185,7 @@ test("renderPrerequisitePrPrompt: hands the worker both the instrument half AND 
   const prompt = renderPrerequisitePrPrompt({
     task: { id: "W1-T2436FIX", title: "some task" },
     branch: "run-W1-T2436FIX-1",
+    prerequisiteBranch: "run-unfiled-1730000000000",
     prUrl: "https://github.com/acme/remudero/pull/4242",
     instrumentPaths: [".github/workflows/ci-gate.yml", "scripts/coverage-ratchet.mjs"],
     srcPaths: ["src/run-task.ts", "src/lib/foo.ts"],
@@ -195,6 +204,7 @@ test("buildPrerequisitePrDispatchArgs: runs in the same worktree/mount/budget, a
   const args = buildPrerequisitePrDispatchArgs({
     task: { id: "W1-T2436FIX", title: "some task" },
     branch: "run-W1-T2436FIX-1",
+    prerequisiteBranch: "run-unfiled-1730000000000",
     prUrl: "https://github.com/acme/remudero/pull/4242",
     worktreePath: "/tmp/rmd-w1-t2436-wt",
     mount: TEST_MOUNT,

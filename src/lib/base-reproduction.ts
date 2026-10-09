@@ -103,6 +103,19 @@ export function mainFailingTestFiles(lines: readonly Row[]): Set<string> {
   return files;
 }
 
+/** Test files a probe found failing at a main sha whose own CI main health then judged green: the probe's
+ *  environment failed, not main, so CI wins and the file never stands a PR down as base red. */
+export function ciContradictedProbeFiles(lines: readonly Row[]): Set<string> {
+  const greenShas = new Set<unknown>(lines.filter((line) => line.step === "main.health.observed" && line.state === "green")
+    .map((line) => line.decided_by_sha ?? line.sha));
+  const files = new Set<string>();
+  for (const line of lines) {
+    if (line.step !== "sweep.base_reproduction" || !greenShas.has(line.main_sha) || !Array.isArray(line.files)) continue;
+    for (const probe of line.files) if (probe?.outcome === "fails" && typeof probe.file === "string") files.add(probe.file);
+  }
+  return files;
+}
+
 export function refundedStrikeKeys(lines: readonly Row[]): Set<string> {
   return new Set(lines.filter((line) => line.step === "fix.strike_refunded" &&
     typeof line.task_id === "string" && typeof line.head_sha === "string" && typeof line.strike === "number")

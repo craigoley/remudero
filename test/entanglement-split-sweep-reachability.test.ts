@@ -228,6 +228,7 @@ test("cold reconstruction preserves the exact structured Rule-25 evidence", () =
 test("the full #4559 cold path opens and parks on a prerequisite without an ordinary strike", async () => {
   const { view, cleanup } = boardView([reviewRow()]);
   const events: string[] = [];
+  let prerequisiteBranch = "";
   const sweepDir = mkdtempSync(join(tmpdir(), "rmd-w1-t3172-sweep-"));
   try {
     const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
@@ -251,7 +252,18 @@ test("the full #4559 cold path opens and parks on a prerequisite without an ordi
           events.push("prerequisite.spawn");
           assert.match(args.prompt, /scripts\/coverage-ratchet\.mjs/);
           assert.match(args.prompt, /src\/lib\/worker-provider\.ts/);
+          const mintedBranch = args.prompt.match(/run-unfiled-\d+/)?.[0];
+          assert.ok(mintedBranch, "the prerequisite worker receives its minted branch");
+          prerequisiteBranch = mintedBranch;
           return workerResult(`REPORT\nPR_URL: https://github.com/${OWNER}/${REPO}/pull/9001`);
+        },
+        readLiveHead: () => {
+          events.push("prerequisite.head");
+          return { ok: true, headSha: "prerequisite-head", headRefName: prerequisiteBranch };
+        },
+        fetchPrBody: async () => {
+          events.push("prerequisite.body");
+          return "## Acceptance\n- the instrument reads the new field | grep: newField in scripts/coverage-ratchet.mjs";
         },
         waitForCiGreen: async () => {
           events.push("prerequisite.ci-green");
@@ -272,6 +284,9 @@ test("the full #4559 cold path opens and parks on a prerequisite without an ordi
     assert.equal(outcome.outcome, "parked");
     assert.equal(outcome.strikes, 0);
     assert.equal(events.filter((event) => event === "prerequisite.spawn").length, 1);
+    assert.deepEqual(events.filter((event) => event.startsWith("prerequisite.")), [
+      "prerequisite.spawn", "prerequisite.head", "prerequisite.body", "prerequisite.ci-green",
+    ]);
     assert.equal(events.includes("fix.dispatch"), false, "no ordinary strike was recorded");
   } finally {
     rmSync(sweepDir, { recursive: true, force: true });

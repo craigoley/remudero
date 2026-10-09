@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
 
 export interface GhShimRoute {
@@ -29,6 +29,10 @@ export interface GhShimRoute {
   stdout?: string;
   /** stderr to print — e.g. simulating a `gh` failure message. Omitted ⇒ no stderr. */
   stderr?: string;
+  /** Print the value of this environment variable the shim process received (plus a newline) —
+   *  the one deliberate, named way for a route to answer with live env instead of fixed text, e.g.
+   *  proving which `GH_TOKEN` a child was spawned with. Printed after `stdout`, if both are set. */
+  stdoutEnv?: string;
   /** Exit code. Default 0. */
   exit?: number;
   /** Hold the child open while a caller proves its event loop remains responsive. */
@@ -59,18 +63,35 @@ export interface GhShimEvent {
   args: string[];
 }
 
+/** Single-quote text for /bin/sh: nothing inside can expand. */
+function shQuote(text: string): string {
+  return `'${text.replaceAll("'", "'\"'\"'")}'`;
+}
+
+/** Write `text` to `file` and return the shell step that prints it byte for byte, then the one
+ *  trailing newline `echo` always printed. The text never passes through shell quoting. */
+function verbatim(file: string, text: string, redirect: string): string {
+  writeFileSync(file, text);
+  return `cat ${shQuote(file)}${redirect}; printf '\\n'${redirect}`;
+}
+
 function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: string): string {
+  const dir = dirname(callsPath);
   const cases = routes
-    .map((r) => {
+    .map((r, i) => {
       if (r.delaySeconds !== undefined && (!Number.isFinite(r.delaySeconds) || r.delaySeconds < 0)) {
         throw new Error("gh shim route delay must be a non-negative finite number");
+      }
+      if (r.stdoutEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(r.stdoutEnv)) {
+        throw new Error("gh shim route stdoutEnv must be an environment variable name");
       }
       const doneFile = r.doneFile?.replaceAll("'", "'\"'\"'");
       const body = [
         r.delaySeconds !== undefined ? `sleep ${r.delaySeconds}` : "",
         doneFile !== undefined ? `: > '${doneFile}'` : "",
-        r.stderr !== undefined ? `echo ${JSON.stringify(r.stderr)} 1>&2` : "",
-        r.stdout !== undefined ? `echo ${JSON.stringify(r.stdout)}` : "",
+        r.stderr !== undefined ? verbatim(join(dir, `route-${i}.err`), r.stderr, " 1>&2") : "",
+        r.stdout !== undefined ? verbatim(join(dir, `route-${i}.out`), r.stdout, "") : "",
+        r.stdoutEnv !== undefined ? `printf '%s\\n' "\${${r.stdoutEnv}}"` : "",
         `exit ${r.exit ?? 0}`,
       ]
         .filter((part) => part.length > 0)

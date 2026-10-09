@@ -1,5 +1,5 @@
 - id: W1-T7092
-  title: "THE DAEMON'S 4 GB IS OUTSIDE ITS MAIN HEAP AND NO ROW SAYS WHERE — W1-T6782 shows the core main process at 4.3-4.65 GB rss within 2-4 min of boot while its main V8 heap is 0.45-0.60 GB; the process runs four worker_threads whose isolates process.memoryUsage() does not count; add each live worker thread's heap, by spawn site, to daemon.alive using the existing worker-heaps registry, so the remainder that is native memory is named, not guessed"
+  title: "THE DAEMON'S 4 GB IS OUTSIDE ITS MAIN HEAP AND NO ROW SAYS WHERE — W1-T6782 shows the core main process at 4.3-4.65 GB rss within 2-4 min of boot while its main V8 heap is 0.45-0.60 GB; the process runs four worker_threads whose isolates process.memoryUsage() does not count; report every worker thread by creation site, role, thread id and daemon generation, with its used and committed heap, external memory and sample freshness, beside process rss and swap, so what remains is an explicitly UNATTRIBUTED residual, not a guess"
   repo: remudero
   depends_on: [W1-T6782]
   type: implement
@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-09: targeting the daemon baseline from W1-T6782's production rows before any replay"
   plan_refs: [W1-T6782, W1-T5355, W1-T5480, W1-T3335, W1-T147]
-  files: [src/lib/daemon-memory-telemetry.ts, src/lib/daemon.ts, src/run-task.ts, test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts]
+  files: [src/lib/daemon-memory-telemetry.ts, src/lib/worker-heaps.ts, src/lib/daemon.ts, src/run-task.ts, test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -26,31 +26,45 @@
     - Each worker thread is its own V8 isolate. process.memoryUsage() reports only the main one, and the process-wide
       --max-old-space-size=8192 bounds each thread spawned without resourceLimits.
     - W1-T6782's sampler cost: p50 497 us, p99 2.1 ms; it adds about 574 bytes to each row.
-    The candidates are the worker isolates' heaps or native allocations (allocator arenas, addon memory), and the next
-    reduction depends on which. serve already measures its threads this way (worker-heaps.ts, W1-T5355/W1-T5480); the
+    The memory is either in worker isolates' heaps or outside every V8 heap; until measured it is unattributed, and the
+    next reduction depends on which.
+    - Code trace (origin/main e3988577e, INFERRED sizes): the daemon's long-lived threads are the read plane
+      (startReadPlane, read-plane.ts; no resourceLimits; it loads run-task.ts and holds a board snapshot cache of up to
+      100k rows / 128 MB per channel, a changed-files cache, a closedRows copy and a closedAt Map that only grows), the
+      ledger rotation digest codec (ledger-union.ts; never terminated), and the git credential socket thread. A
+      board-prewarm walk and the codex probe are per-call threads. Which of these holds the memory is unmeasured. serve already measures its threads this way (worker-heaps.ts, W1-T5355/W1-T5480); the
     daemon does not. This settles it from production at heartbeat cost, before any large isolated replay.
     W1-T147 (the overnight chaos drill) shares src/lib/daemon.ts and src/run-task.ts only because both are the daemon's
     wiring files. Neither task supersedes the other.
   design: |
-    (1) Register the daemon's threads with worker-heaps.ts's spawn-site tracking (the worker_threads diagnostics channel)
-        at daemon startup, exactly as serve does.
-    (2) On each daemon.alive tick, start the thread heap read (worker.getHeapStatistics, bounded by WORKER_HEAP_TIMEOUT_MS)
-        AFTER the row is written. The next row carries the completed reading:
-        - worker_heaps: per spawn site, its thread count and total and used heap bytes. Cardinality is bounded by spawn
-          sites.
-        - worker_heap_total_bytes;
-        - worker_heap_age_ms: the reading's age;
-        - native_remainder_bytes: rss + vm_swap - heap_total - external - worker_heap_total, labelled as an inferred
-          remainder.
-        A thread that did not answer is named unsized, and the remainder is then marked a lower bound. The heartbeat never
-        awaits the read.
-    (3) Payload-free and passive: sizes and spawn sites only. No heap snapshot, inspector session, gc call, resourceLimits
-        or heap-flag change.
+    (1) Track the daemon's threads with worker-heaps.ts's spawn-site tracking (the worker_threads diagnostics channel) from
+        daemon startup, as serve does. Extend that registry, without changing serve's row, so each tracked thread also
+        records its threadId, its spawn time, and its exit time and code when it exits.
+    (2) Per thread, the row reports:
+        - identity: creation site (`<module>:<function>`), role, threadId and the daemon generation (run_id). The role is a
+          fixed map from known daemon spawn sites (read-plane, ledger-digest-codec, git-credential-socket, board-prewarm,
+          codex-probe); an unmapped site's role is "unmapped", never guessed.
+        - heap, from worker.getHeapStatistics(): used_heap_size, total_heap_size (committed), total_physical_size,
+          external_memory, malloced_memory and heap_size_limit.
+        - freshness: the reading's age in ms and a state. "fresh"; "stale" (an older reading than this tick's, with its age);
+          "unanswered" (the read timed out, WORKER_HEAP_TIMEOUT_MS); or "exited" (with exit time and code, reported once
+          and then dropped). None of these is ever reported as zero bytes.
+        The main isolate gets the same heap fields from v8.getHeapStatistics(), so every isolate is reported the same way.
+    (3) Process figures stay as W1-T6782 reports them: rss_bytes and vm_swap_bytes, separately. No field adds swap to rss,
+        and no field presents heap sizes as a partition of either. Heap sizes are committed sizes whose residency is
+        unknown: a committed page may be resident or swapped.
+    (4) One residual, unattributed_bytes_approx = rss_bytes - (sum of total_physical_size over every reported isolate) -
+        external_bytes. It is documented as an approximation that may be negative, never called native memory, and
+        omitted (with the reason named) when any thread is unanswered or stale.
+    (5) The read runs after each daemon.alive row is written. The next row carries the completed reading and the heartbeat
+        never awaits it.
+    (6) Payload-free and passive: sizes, sites, roles and ids only. No heap snapshot, inspector session, gc call,
+        resourceLimits or heap-flag change, and no worker is terminated or restarted to obtain a reading.
   acceptance:
-    - claim: "daemon.alive carries per-spawn-site worker heap totals from the previous tick's read, an unanswered thread is named unsized and makes the remainder a lower bound, the heartbeat is written without awaiting the read, and the sampler module references no heap snapshot, inspector or gc entry point"
+    - claim: "daemon.alive reports every tracked thread with creation site, role, threadId and run_id plus used, committed, physical, external and malloced heap bytes and its reading age; an unanswered thread is unanswered, a stale reading stale and an exited thread exited, never zero; an unmapped site's role is unmapped; rss and swap stay separate with no summed field; unattributed_bytes_approx is omitted with a reason when any thread is unanswered or stale; serve's serve.memory row is unchanged; the heartbeat is written without awaiting the read; and the module references no heap snapshot, inspector or gc entry point"
       proof: "unit test: test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts"
     - claim: "the daemon wires the worker heap reading into its telemetry"
       proof: "grep: workerHeapReadings( in src/lib/daemon-memory-telemetry.ts"
   falsifier: |
-    Await the thread read inside the tick: the heartbeat-not-awaited case fails. Treat an unanswered thread as 0 bytes:
-    the lower-bound case fails.
+    Await the thread read inside the tick: the heartbeat-not-awaited case fails. Report an unanswered or exited thread as
+    0 bytes: the explicit-state cases fail. Sum vm_swap into the residual: the separate-figures case fails.

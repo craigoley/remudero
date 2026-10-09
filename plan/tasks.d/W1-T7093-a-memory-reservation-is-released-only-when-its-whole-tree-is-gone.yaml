@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
   plan_refs: [W1-T6782, W1-T6090, W1-T6597, W1-T2931, W1-T3209, W1-T5347]
-  files: [src/lib/host-memory-ledger.ts, src/lib/worker.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts]
+  files: [src/lib/host-memory-ledger.ts, src/lib/worker.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -50,9 +50,24 @@
     (5) READ: a pure reader returns the live entries plus counts of uncertain, incomplete-walk and local-scope entries, for
         W1-T7094. Every ledger operation is best-effort: a write or walk failure is logged as a deduplicated diagnostic and
         never fails, delays or alters the worker start or the heartbeat.
+    (6) MISSING IS NEVER EMPTY. Storage facts verified 2026-10-09:
+        - The directory lives on /mnt/scratch, an ephemeral Azure local NVMe disk that is wiped when the VM is deallocated.
+        - The local fallback /tmp/rmd-test-slots is swept by the host janitor's TMP_ROOTS (idle 6 h) and by tmpfiles (30 d).
+        - test-slot.ts reclaims only slot-<n>.json.
+        - The janitor protects /mnt/scratch/rmd by name and does not descend into it.
+        So the ledger can vanish, and an empty read must not be mistaken for "nothing reserved":
+        - The ledger directory carries a sentinel file with a random creation id, written once when the directory is made.
+        - The reader returns one state: "present" (sentinel read; entries may be zero), "missing" (no directory or no
+          sentinel), "unreadable" (an I/O error, named) or "reset" (the sentinel id differs from the one this process last
+          read, so earlier entries may have been erased).
+        - Each owner keeps an in-memory copy of its own open reservations. A file it wrote that has gone is reported as
+          own-entry-missing and rewritten. It is never treated as a release.
+        - The test-slot code never deletes, renames or globs anything under host-memory/.
   acceptance:
     - claim: "a reservation survives its root's exit while a recorded descendant lives, and is released once every recorded (pid, start time) is gone; a reused pid with a new start time does not hold it; a crashed worker whose tree is gone is released by its owner; a new container generation releases the previous generation's entries; a start that fails before spawning releases on occupancy release; two overlapping starts get two distinct entries; a missed heartbeat or old mtime never releases; another instance reports an unverifiable entry as uncertain and leaves it in place; and a throwing ledger write leaves the worker start unchanged"
       proof: "unit test: test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts"
+    - claim: "a deleted ledger directory reads as missing and a replaced sentinel as reset, never as an empty ledger; an owner whose own entry file vanished reports own-entry-missing and rewrites it without releasing; a full test-slot acquire, release and stale reclaim cycle leaves every host-memory entry intact; and an unwritable or full store leaves the worker start unchanged"
+      proof: "unit test: test/a-missing-memory-ledger-never-reads-as-empty.test.ts"
     - claim: "worker occupancy opens a ledger reservation"
       proof: "grep: openMemoryReservation( in src/lib/worker.ts"
   falsifier: |

@@ -1,13 +1,48 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildPlanReconcileCadenceInput, planReconcileCadence } from "../src/lib/measurement-cadence.js";
-import { buildPlanReconcileProductionInput, defaultCreditedMergedIds, buildCreditCandidates } from "../src/run-task.js";
+import { buildPlanReconcileProductionInput, defaultCreditedMergedIds, buildCreditCandidates, buildCoverageNightlyDaemonHook } from "../src/run-task.js";
+import { fixedClock } from "../src/lib/clock.js";
+import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
+import { withTempDir } from "../src/lib/tmp.js";
 import type { Config } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+
+test("the daemon GitHub cadence invokes the intake before its sibling check can fail", async () => {
+  await withTempDir("nightly-intake-test", async (root) => {
+    const at = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const run = { id: 1234, head_sha: "abc123", head_branch: "main", status: "completed", conclusion: "failure" };
+    const summary = {
+      kind: "coverage_nightly.measured", sha: run.head_sha, ref: "refs/heads/main",
+      run_id: String(run.id), measured_at: new Date(at).toISOString(),
+      lines_pct: 93, branches_pct: 88, lf: 100, lh: 93, brf: 100, brh: 88,
+      skipped_records: 0, tier: "improve", shard_test_exits: { "1": 1, "2": 0 },
+    };
+    const ledgerPath = join(root, "state", LEDGER_FILENAME);
+    let reads = 0;
+    const hook = buildCoverageNightlyDaemonHook({
+      ledgerPath, owner: "owner", repo: "repo", clock: fixedClock(at),
+      reader: {
+        newestCompletedRun: async () => { reads++; return run; },
+        summaryForRun: async () => summary,
+      },
+      next: () => { throw new Error("sibling check stopped"); },
+    });
+    await assert.rejects(hook(), /sibling check stopped/);
+    assert.equal(reads, 1);
+    const [row] = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(row.run_id, "1234");
+    assert.equal(row.head_sha, run.head_sha);
+    assert.equal(row.kind, summary.kind);
+    await assert.rejects(hook(), /sibling check stopped/);
+    assert.equal(reads, 1);
+    assert.equal(readFileSync(ledgerPath, "utf8").trim().split("\n").length, 1);
+  });
+});
 
 test("W1-T3970: production measurement cadence supplies plan reconciliation inputs", () => {
   const landed: Array<Array<{ relPath: string; content: string }>> = [];
