@@ -26,6 +26,16 @@
     Nothing watched any of this: flow-remedy-gardener (src/lib/flow-remedy-gardener.ts) prices only sweep.disposed
     blocker-hours, and W1-T5535 / W1-T6360 tune which model the fix lane routes to, not whether the lane's own
     harness works. Each hand fix was the only signal, and it was carried in an operator's head.
+    MORE CLASSES FOUND AFTER FILING, ALL ON 2026-10-09:
+    BRANCH MOVED MID-ROUND: the sweep's own refresh against main moved #10470's branch while a fix round ran, so
+    a correct FIXED commit was refused ("branch moved during fix round", 21:18Z); the fix was discarded and redone.
+    WEAK ROUNDS: two diff-coverage rounds on #10339 were 35-64 s low-effort sessions that ended "the worker changed
+    nothing" on a deterministic red, a routing and model-effort signal rather than a flake.
+    MISLEADING DISPOSITION: the sweep reported #10339 as "arming auto-merge" while an operator merge hold refused
+    every arm (fixed by #10483); a disposition that disagrees with the ledgered arm outcome is itself a defect.
+    REPEATED FLAKE ANSWERS: #10392's coverage-shard reds were answered FLAKE three times on a different shard set
+    each time (2,3 then 4,5,8 then 1,2,6), so the lane spent three requeues while the cause was fleet-wide.
+    HEAD-IDENTITY REDS (#10450, a codex/ head) are routed to W1-T7448, which re-homes them.
   design: |
     1. src/lib/fix-lane-gardener.ts registers a "fix-lane" garden (garden-registry.ts) that once per UTC day reads
        the ledger union (readLedgerUnionRecordsSync, requireArchives) for: fix.dispatch, fix.done (fix_outcome,
@@ -40,8 +50,13 @@
        refusal and stand-down reasons; FIXED outcome whose next CI on the pushed head is still red; a fix commit
        touching files outside the task's declared files; the same red set across consecutive rounds; RED WITH NO
        ACTIONABLE FAILING TEST (required checks red while no test failure is extractable from the CI log, e.g. a
-       coverage shard that wrote no lcov); PRs blocked past their SLO. Each class is priced by blocked hours plus a
-       weight per operator intervention attributed to it.
+       coverage shard that wrote no lcov); PRs blocked past their SLO; a fix commit refused because a refresh moved
+       the branch during the round; a round that ends with no change on a deterministic red (diff-coverage, typecheck,
+       lint) together with its provider, model, effort and duration; a sweep disposition that disagrees with the
+       ledgered arm outcome (for example "arming" beside automerge.arm_skipped); FLAKE answered again for the same PR
+       on a changing set of failing checks. Each class is priced by blocked hours plus a weight per operator
+       intervention attributed to it. Where fix.done names a worker_tail (state/runs/<workerRunId>.tail, #10484), the
+       class evidence cites it so a drafted remedy can quote what the worker actually saw.
     4. REUSE, DO NOT FORK, THE FLOW-REMEDY LADDER: export from flow-remedy-gardener.ts the draft -> measure effect ->
        escalate machinery and drive it with fix-lane classes (origin "fix-lane:<class>"), so one remedy per class is
        drafted through renderMachineShard and the machine-filing judge, never a second while one is open, its effect
