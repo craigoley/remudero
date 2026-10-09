@@ -3396,13 +3396,9 @@ export function fileCiLearningShards(
   return { filed, skipped, refused };
 }
 
-// ── W1-T5723: the cadence runs in a child process ───────────────────────────────────────────
-// In-process, its synchronous work froze the daemon loop (one 365.7 s block, 2026-10-08) and a
-// restart killed it. The daemon only starts the child and reads its result row from the state file.
+// ── W1-T5723: the cadence runs in a child (in-process it froze the loop; a restart killed it) ──
 
-/** The child's V8 heap: the SAME budget the daemon's own process has, so moving the cadence out of process never
- *  shrinks what it may use. A fixed 2048 MB cap (W1-T5723's first cut) was a quarter of the daemon's 8192 MB: every
- *  child died mid-run with no result from 2026-10-08 on, and no adoption scan ran for over a day. */
+/** The child's V8 heap is the daemon's own: a fixed 2048 MB (a quarter of it) killed every child from 2026-10-08. */
 export function measurementCadenceChildHeapLimitMb(parentHeapLimitBytes: number = getHeapStatistics().heap_size_limit): number {
   return Math.max(1, Math.round(parentHeapLimitBytes / (1024 * 1024)));
 }
@@ -3412,11 +3408,9 @@ const MEASUREMENT_CADENCE_CHILD_NICENESS = 10;
 /** The child entry's first argument; without it the entry module does nothing on import. */
 export const MEASUREMENT_CADENCE_CHILD_FLAG = "--measurement-cadence-child";
 const MEASUREMENT_CADENCE_CHILD_POLL_MS = 5_000;
-/** How much of a dead child's stderr its failure row carries: enough for V8's fatal-error banner and a short stack. */
 const MEASUREMENT_CADENCE_CHILD_STDERR_TAIL_BYTES = 2_000;
 
-/** Where the detached child's stderr lands, beside its state file. A death the child cannot record itself (a V8 heap
- *  abort, a signal) is only visible here, so the daemon reads this file's tail into the row that names the death. */
+/** The child's stderr: the only account of a death it cannot record itself (a V8 heap abort, a signal). */
 export function measurementCadenceChildLogPath(statePath: string): string {
   return `${statePath.replace(/\.json$/, "")}.stderr.log`;
 }
@@ -3428,7 +3422,7 @@ export function measurementCadenceChildDeathDetail(statePath: string): string {
     const tail = bytes.subarray(Math.max(0, bytes.length - MEASUREMENT_CADENCE_CHILD_STDERR_TAIL_BYTES)).toString("utf8").trim();
     return tail === "" ? "the child wrote nothing to stderr" : tail;
   } catch (e) {
-    return `no stderr log: ${String((e as Error)?.message ?? e)}`;
+    return `no stderr log: ${String((e as Error)?.message ?? e)}`; // the row says why there is no account
   }
 }
 
@@ -3442,7 +3436,6 @@ export interface MeasurementCadenceChildState {
   error?: string;
 }
 
-/** Start one child for `runId`; returns its pid. */
 export type MeasurementCadenceChildSpawn = (runId: string, statePath: string) => number;
 
 export type MeasurementCadenceChildOutcome =
@@ -3493,8 +3486,7 @@ export function measurementCadenceChildAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    // ESRCH is no such process; EPERM is a live process under another uid.
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // ESRCH: no such process; EPERM: alive under another uid
   }
 }
 
@@ -3552,7 +3544,6 @@ export function measurementCadenceChildRunner(opts: {
       if (isAlive(state.pid)) {
         return { kind: "adopted", runId: state.runId, pid: state.pid, attempt: state.attempt, settled: settle(state.runId, state.pid) };
       }
-      // Read before a relaunch truncates the log: the dead child's stderr is the only account of its death.
       const detail = measurementCadenceChildDeathDetail(opts.statePath);
       if (state.attempt < MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS) {
         const attempt = state.attempt + 1;
@@ -3617,9 +3608,7 @@ export function measurementCadenceChildRun(
   return async () => build(namedMeasurementCadenceChildConfig(env)).runMeasurementCadence();
 }
 
-/** The production spawn: `<entry> --measurement-cadence-child <statePath> <runId>` on this node and loader, detached so a
- *  daemon restart leaves it running, niced like a garden child, on the daemon's own heap budget, its stderr kept in
- *  {@link measurementCadenceChildLogPath} with its exit code and signal appended when this process sees it exit. */
+/** The production spawn: detached (a restart leaves it running), niced, stderr and exit kept in the child log. */
 export function childMeasurementCadenceSpawn(opts: {
   entry: string;
   execPath?: string;
@@ -3628,7 +3617,6 @@ export function childMeasurementCadenceSpawn(opts: {
   env?: NodeJS.ProcessEnv;
   config?: Config;
   heapLimitMb?: number;
-  /** The daemon's own V8 heap limit, in bytes; production reads `v8.getHeapStatistics()`. */
   parentHeapLimitBytes?: () => number;
   spawnChild?: typeof spawn;
   setPriority?: (pid: number, priority: number) => void;
@@ -3641,7 +3629,7 @@ export function childMeasurementCadenceSpawn(opts: {
     try {
       stderrFd = openSync(logPath, "w");
     } catch {
-      // An unwritable log costs the death's account, never the run: the runner's row then says "no stderr log".
+      // An unwritable log costs the account, never the run.
     }
     let child: ReturnType<typeof spawn>;
     try {
