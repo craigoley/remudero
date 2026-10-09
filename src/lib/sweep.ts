@@ -13932,6 +13932,10 @@ export async function runSweep(
         blockerReadFailure = { reason: String(error) };
       }
     }
+    // A green, reviewed PR under an operator merge hold is waiting on a person: name the hold, never "arming".
+    const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
+    const shownReason = mergeHold === undefined ? reason
+      : `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`;
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
@@ -13943,6 +13947,7 @@ export async function runSweep(
         (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
       ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+      operatorHold: mergeHold !== undefined,
     });
     const planRepairCapable =
       (metadataWait && typeof deps.repairMetadata === "function") ||
@@ -13970,7 +13975,7 @@ export async function runSweep(
       prUrl: pr.prUrl,
       taskId: pr.taskId,
       disposition,
-      reason,
+      reason: shownReason,
       acted,
       question,
       ...(actionError ? { actionError } : {}),
@@ -13984,7 +13989,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         deduped,
         ...(actionError ? { action_error: actionError } : {}),
         dry_run: true,
@@ -14013,7 +14018,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         head_sha: pr.headSha,
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
