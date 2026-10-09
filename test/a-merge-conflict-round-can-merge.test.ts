@@ -37,7 +37,7 @@ import {
   commitWorkerEdits,
   runFixRung,
   startShellLessMergeConflictMerge,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../src/lib/fix-fence.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";

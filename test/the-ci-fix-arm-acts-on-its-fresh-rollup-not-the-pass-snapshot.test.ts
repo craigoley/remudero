@@ -10,7 +10,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const NOW = Date.parse("2026-10-04T16:57:27.376Z");

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runSweep, handedOffHeadJudgmentPool, riskJudgeHandedOffHead, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, handedOffHeadJudgmentPool, riskJudgeHandedOffHead, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { realRiskJudge } from "../src/lib/risk-judge.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import type { Mount } from "../src/lib/mounts.js";

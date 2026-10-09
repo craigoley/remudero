@@ -6,7 +6,7 @@ import { parse } from "yaml";
 import { requestScopeAmendment } from "../src/lib/proof-amendment.js";
 import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import { runFixRung } from "../src/run-task.js";
+import { runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";

@@ -27,7 +27,7 @@ import {
   type RollupCheckEntry,
 } from "../src/lib/sweep.js";
 import type { WorkerResult } from "../src/lib/worker.js";
-import { priorStrikesFor, runFixRung } from "../src/run-task.js";
+import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildStaleGateWorkflowsByPr, updatedForWorkflowFromLedger } from "../src/run-task.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
+import type { OpenPrView } from "./helpers/sweep-test.js";
 
 // ── W1-T1212: the READ HALF's real wiring ───────────────────────────────────────────────────
 //

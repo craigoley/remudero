@@ -15,7 +15,7 @@ import {
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { realLedgerFs } from "../src/lib/ledger-union.js";
 import { parseLedger } from "../src/lib/retro.js";
-import { runSweep, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type SweepDeps } from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T4702 — a running-long run was reported on every sweep, not once. `rotateLedger` archives every

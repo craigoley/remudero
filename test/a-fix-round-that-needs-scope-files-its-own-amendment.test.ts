@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { parse } from "yaml";
 import * as amendments from "../src/lib/proof-amendment.js";
 import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { runFixRung } from "../src/run-task.js";
+import { runFixRung } from "./helpers/run-task-test.js";
 import { fixRoundTally } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";

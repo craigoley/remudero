@@ -38,7 +38,7 @@ import {
   runBenchmarkCohortPass,
   taskShapeStratumValue,
 } from "../src/lib/benchmark-cohort.js";
-import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, harnessCommitForShellLessWorker, runFixRung, runTask } from "../src/run-task.js";
+import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, harnessCommitForShellLessWorker, runFixRung, runTask } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";

@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import { fixArmEvidence } from "../src/lib/fix-routing-learner.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";

@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, reportSubstituteStandDownReason } from "../src/run-task.js";
+import { runFixRung, reportSubstituteStandDownReason } from "./helpers/run-task-test.js";
 import { judgeCriterion, judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict, ReportSubstituteCause } from "../src/lib/review.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";

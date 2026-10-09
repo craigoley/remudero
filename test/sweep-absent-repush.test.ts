@@ -13,7 +13,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { gitPushEmptyCommit } from "../src/lib/git-push.js";
 import { buildOpenPrViews, buildSweepEffects } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";

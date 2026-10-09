@@ -9,7 +9,7 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 // W1-T2981 — the retro is DETACHED now, so `runDaemon` returns while it is still in flight.
 // These tests assert on what the retro did, so each must drain that action before asserting; the
 // assertions themselves are unchanged.
-import { drainDetachedSweepActions } from "../src/lib/sweep.js";
+import { drainDetachedSweepActions } from "./helpers/sweep-test.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { waitForCiGreen, pollToGate, ciGateState } from "../src/run-task.js";
 

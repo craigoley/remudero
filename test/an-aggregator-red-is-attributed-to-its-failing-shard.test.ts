@@ -13,7 +13,7 @@ import {
   withoutDownstreamGateFailure,
   type CiFailure,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildOpenPrViews, fetchCiFailures } from "../src/run-task.js";
 
 // coverage-ratchet is ci.yml's AGGREGATOR over eight coverage shards. When a shard's test fails,

@@ -31,7 +31,7 @@ import {
   deriveChangesetClaimUpdate,
   fetchPrDiffFilesViaGh,
   updatePrBodyViaGh,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

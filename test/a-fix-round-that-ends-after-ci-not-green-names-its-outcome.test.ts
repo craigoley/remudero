@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, type CiGateOutcome, type WorktreeSnapshot } from "../src/run-task.js";
+import { runFixRung, type CiGateOutcome, type WorktreeSnapshot } from "./helpers/run-task-test.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";

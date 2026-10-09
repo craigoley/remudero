@@ -9,7 +9,7 @@ import {
   runSweep,
   type MissingTaskTrailerRepair,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
   return {

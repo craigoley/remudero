@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { runDaemon, resolveFleetControlHold, type DaemonDeps } from "../src/lib/daemon.js";
 import { checkSharedPause, isRecyclePauseDetail, pauseDetail, requestPause, requestStop, stopDetail, type SharedPauseGitDeps } from "../src/lib/fleet-control.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 

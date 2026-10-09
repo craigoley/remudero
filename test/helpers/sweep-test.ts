@@ -1,0 +1,25 @@
+import { runSweep as runSweepProduction } from "../../src/lib/sweep.js";
+import type { FixProgressJudge } from "../../src/lib/fix-progress-judge.js";
+
+export * from "../../src/lib/sweep.js";
+
+/** Existing sweep fixtures model the former cap as an explicit judge-selected handoff. */
+export async function runSweep(...args: Parameters<typeof runSweepProduction>) {
+  const [openPrs, deps, policy] = args;
+  const fixtureProgressJudge: FixProgressJudge = async input => {
+    const pr = openPrs.find(candidate => candidate.prNumber === input.prNumber || candidate.taskId === input.taskId);
+    if (input.formerCeiling !== undefined &&
+        (input.rounds.length >= input.formerCeiling || (pr?.priorStrikes ?? 0) >= input.formerCeiling)) {
+      return {
+        verdict: "escalate",
+        loop: `fix strikes exhausted at former ceiling ${input.formerCeiling}`,
+        reason: "legacy fixture explicitly models a human handoff at its former bound",
+      };
+    }
+    return { verdict: "continue", reason: "legacy fixture explicitly permits the next test round" };
+  };
+  return runSweepProduction(openPrs, {
+    ...deps,
+    fixProgressJudge: deps.fixProgressJudge ?? fixtureProgressJudge,
+  }, policy);
+}

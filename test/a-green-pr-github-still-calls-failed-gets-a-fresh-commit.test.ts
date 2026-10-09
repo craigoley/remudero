@@ -9,7 +9,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 import {
   buildSweepEffects, refreshStaleRollupAfterRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const HEAD = "6404640464046404640464046404640464046404";

@@ -32,7 +32,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import {
   armAutoMergeAtOpen,

@@ -10,9 +10,9 @@ import {
   drainInFlightReviews, trackInFlightReview,
   runSweepLightPass, type DetachedActionKind, type DetachedFixPhase,
   buildSweepEffects,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { runFixRung } from "../src/run-task.js";
+import type { runFixRung } from "./helpers/run-task-test.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 

@@ -11,7 +11,7 @@ import {
 } from "../src/lib/state-reconciler.js";
 import { parseWorkflowPushTrigger } from "../src/lib/main-run-gaps.js";
 import { deployMarkerPath } from "../src/lib/deployer.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep, type BuildSweepEffectsDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep, type BuildSweepEffectsDeps } from "./helpers/sweep-test.js";
 
 test("W1-T4840: a gap between desired and observed state is repaired once and recorded", async () => {
   const ledger: Record<string, unknown>[] = [];

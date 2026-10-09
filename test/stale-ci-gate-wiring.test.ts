@@ -35,7 +35,7 @@ import {
   runSweep,
   staleCiGateTransition,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { checkRunsRestArgs, combinedStatusRestArgs } from "../src/lib/open-prs-rest.js";
 import { buildSweepEffects } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";

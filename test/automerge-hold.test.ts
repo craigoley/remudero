@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { automergeHoldFromLedger } from "../src/lib/review.js";
 import { armAutoMergeAtOpen, armOutcomeReason, buildSweepEffects, realArmDeps } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";

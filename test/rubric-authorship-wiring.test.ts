@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReview, isDispatchedRunBranch, type ArmOutcome } from "../src/run-task.js";
+import { runReview, isDispatchedRunBranch, type ArmOutcome } from "./helpers/run-task-test.js";
 import { checkSatisfiedByGuard } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";

@@ -25,7 +25,7 @@ import {
   RUN_BRANCH_UNFILED_RE,
   renderPrerequisitePrPrompt,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { acceptanceAuthorTimeCheck, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

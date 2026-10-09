@@ -8,7 +8,7 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { appendOperatorNote, loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { capStrikeLadderNote, decideStrikeLadderRung, hasUnspentLadderRefresh, latestStrikeLadderAttempt, strikeCauseKey } from "../src/lib/strike-ladder.js";
 

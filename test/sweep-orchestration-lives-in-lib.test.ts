@@ -15,7 +15,7 @@ import {
   sweepArmAttemptOutcome,
   type BuildSweepEffectsDeps,
 } from "../src/lib/sweep.js";
-import { buildSweepEffects as buildEntrypointSweepEffects } from "../src/run-task.js";
+import { buildSweepEffects as buildEntrypointSweepEffects } from "./helpers/run-task-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T3654: this suite used to carry its OWN `EFFECT_KEYS` constant, independently ordered from

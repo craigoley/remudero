@@ -39,7 +39,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-05T20:50:00Z");

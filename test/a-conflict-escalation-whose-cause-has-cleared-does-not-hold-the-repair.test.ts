@@ -37,13 +37,13 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import {
   buildFixRungDispatchArgs,
   openEscalationStandDownReason,
   resolveClearedEscalation,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
 import type { Mount } from "../src/lib/mounts.js";

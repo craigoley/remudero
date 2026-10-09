@@ -16,7 +16,7 @@ import {
   buildFixRungDispatchArgs,
   buildOpenPrViews,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -24,7 +24,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { reviewInputDigest } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";

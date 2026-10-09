@@ -9,7 +9,7 @@ import {
   runSweep,
   type OpenPrView,
   type RedBaseRefreshFacts,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00Z");
 const MAIN_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

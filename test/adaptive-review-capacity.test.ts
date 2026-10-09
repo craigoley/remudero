@@ -27,7 +27,7 @@ import {
   validateReviewCapacityPolicy,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 import { buildSweepEffects } from "../src/run-task.js";
 

@@ -23,7 +23,7 @@ import { runDaemon, DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS, type DaemonDeps } from ".
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import type { MergedSet } from "../src/lib/drain.js";
-import { reclaimAbandonedWorker, runFixRung, runTask, type FixRungOutcome } from "../src/run-task.js";
+import { reclaimAbandonedWorker, runFixRung, runTask, type FixRungOutcome } from "./helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";

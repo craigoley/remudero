@@ -23,7 +23,7 @@ import {
   priorStrikesFor,
   runFixRung,
   startShellLessMergeConflictMerge,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";

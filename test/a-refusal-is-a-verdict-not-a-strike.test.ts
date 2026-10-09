@@ -17,7 +17,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /** W1-T3837 — DERIVED FROM THE CLOCK, NEVER A CONSTANT, because one caller in this file does not
  *  take an injected one. `deriveDisposition` is handed `NOW` explicitly at every call site below,

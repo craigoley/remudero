@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commitWorkerEdits, FixRoundPushError, harnessCommitForShellLessWorker, pushFixRound, runFixRung } from "../src/run-task.js";
+import { commitWorkerEdits, FixRoundPushError, harnessCommitForShellLessWorker, pushFixRound, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";

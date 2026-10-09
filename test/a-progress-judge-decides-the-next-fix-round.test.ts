@@ -3,8 +3,8 @@ import { describe, test } from "node:test";
 import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
   productionFixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { runFixRung, buildFixRungDispatchArgs, readFixRoundCommitsViaGit } from "../src/run-task.js";
-import type { ReviewRunResult } from "../src/run-task.js";
+import { runFixRung, buildFixRungDispatchArgs, readFixRoundCommitsViaGit } from "./helpers/run-task-test.js";
+import type { ReviewRunResult } from "./helpers/run-task-test.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";

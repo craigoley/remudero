@@ -13,7 +13,7 @@ import {
   realArmDeps,
   runTask,
   type ArmDeps,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";

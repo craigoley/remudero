@@ -19,7 +19,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 

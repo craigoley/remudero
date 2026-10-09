@@ -8498,8 +8498,13 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
  * refused-head post-review row before the first-sighting one.
  */
 export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
-  return (pr.reviewState === "failure" || isBlockedCi(pr)) &&
-    (pr.priorStrikes >= policy.strikeCap || pr.repeatedFixRefusal !== undefined);
+  const fixableReview = pr.reviewState === "failure" && (
+    pr.unmetCriteria.length > 0 ||
+    (pr.actionableGateFailures?.length ?? 0) > 0 ||
+    (pr.instrumentEntangled === true && usableInstrumentEntanglementPaths(pr.instrumentEntanglementPaths))
+  );
+  return (fixableReview || isBlockedCi(pr)) &&
+    (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined);
 }
 
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
@@ -8720,6 +8725,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `#${pr.prNumber} to restore authoritative evidence in structured form; one exact-input post refusal stops retries`,
   },
   {
+    // W1-T196 + W1-T7096: an unattributable plan filing has no task-bound code-fix decision for
+    // the progress judge to make. Preserve its existing stand-down at the former ceiling instead
+    // of letting the newly judge-routed fixable row claim it first.
+    disposition: "blocked-ambiguous",
+    blocker: "escalated",
+    when: (pr, policy) =>
+      pr.isPlanFiling === true && pr.taskId === undefined &&
+      (pr.reviewState === "failure" || isBlockedCi(pr)) &&
+      (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined),
+    reason: (pr) =>
+      `task id unresolved for PR #${pr.prNumber} — a plan-filing PR carries no Remudero-Task trailer by design (W1-T136 criterion 5) — standing down`,
+  },
+  {
     // W1-T7096: reaching the former cap or repeating a refusal routes to judgment, never stops a round.
     disposition: "blocked-fixable",
     when: isFixStrikeExhausted,
@@ -8764,19 +8782,6 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       }
       return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
     },
-  },
-  {
-    // W1-T1269 — AN EARLIER STOP, NEVER A LONGER LEASH. Ordered after row 4 (a PR at the cap
-    // keeps that row's own reason) and after row 5 (checks-red still gets ci-log first), but
-    // strictly before row 6, so a dispatch that would only reproduce a strike already proven to
-    // add nothing is preempted the first time it recurs. `fixRungRepeatsIdenticalFailure` fails
-    // CLOSED until a producer populates `StrikeAttempt.unmetClaims`, so this row is inert today.
-    disposition: "blocked-fixable",
-    when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr),
-    blocker: "review-failed",
-    reason: (pr, policy) =>
-      `fix strike repeated the identical unmet criteria (strike ${pr.priorStrikes}/${policy.strikeCap}) — ` +
-      `progress judge must decide whether another approach can add information`,
   },
   {
     // W1-T3172 — Rule 25's refusal is structurally fixable only through W1-T2436's prerequisite
@@ -11992,7 +11997,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // strike, re-earned by a new head sha" shape as blocked-fixable —
       // dedup off the SAME set, never a second, independently-tracked one.
       case "conflicted":
-        fixed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        // W1-T7096: a progress-judge escalation is an acted-on disposition, but it did NOT dispatch
+        // a fixer. Keep its own `progress_escalated_key` dedup and do not let `acted:true` seed the
+        // fix-dispatch set, or the next pass would report "already dispatched" instead of reading
+        // the judgment receipt.
+        if (typeof line.progress_escalated_key !== "string") {
+          fixed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        }
         break;
       case "stale":
         closed.add(pr);

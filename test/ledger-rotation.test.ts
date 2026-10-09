@@ -26,7 +26,7 @@ import {
   rotateLedger,
 } from "../src/lib/ledger.js";
 import { dispatchesWithoutNewOwnedPr, isDispatchBreakerTripped, readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
 import { escalateCircuitBreak, deriveStrikeHistory } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

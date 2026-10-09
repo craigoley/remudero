@@ -37,7 +37,7 @@ import {
   type OpenPrView,
   type ReviewReuseInputs,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";

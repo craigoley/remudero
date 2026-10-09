@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps, type SweepSummary } from "../src/lib/sweep.js";
+import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps, type SweepSummary } from "./helpers/sweep-test.js";
 // Read off the module namespaces, never named imports: at a base without this task the suite must
 // still LOAD and fail subtest by subtest, which is what makes the proof discriminate.
-import * as sweepModule from "../src/lib/sweep.js";
+import * as sweepModule from "./helpers/sweep-test.js";
 import * as runTaskModule from "../src/run-task.js";
 import type { RiskJudgeChangeView, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import type { WorkerResult } from "../src/lib/worker.js";

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T2427 ──────────────────────────────────────────────────────────────────────────────────

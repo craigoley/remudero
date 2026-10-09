@@ -21,7 +21,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 // run-task.ts re-exports the classifier from src/lib/fix-rung-classify.ts (W1-T2891).
 import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";

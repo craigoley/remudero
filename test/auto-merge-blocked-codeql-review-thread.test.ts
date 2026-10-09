@@ -32,7 +32,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /*
  * W1-T3980 — core PR #7495 (2026-09-27): every required context green, `mergeable: true`, auto-merge

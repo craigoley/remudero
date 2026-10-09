@@ -20,7 +20,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { readLedgerLines } from "../src/lib/status.js";
 

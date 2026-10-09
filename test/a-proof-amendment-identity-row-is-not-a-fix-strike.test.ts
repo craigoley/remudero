@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_SWEEP_POLICY, fixLedgerRowsForHead, isProofAmendmentIdentityRow, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, fixLedgerRowsForHead, isProofAmendmentIdentityRow, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config-schema.js";

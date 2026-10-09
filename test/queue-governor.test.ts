@@ -13,7 +13,7 @@ import {
   type QueueGovernorResult,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";

@@ -14,7 +14,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T5909 — LIVE 2026-10-05, #9392: the sweep armed it, the merge queue ejected it (a cancelled

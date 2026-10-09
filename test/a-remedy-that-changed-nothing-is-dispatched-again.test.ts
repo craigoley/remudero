@@ -12,14 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "../src/run-task.js";
+import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "./helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";

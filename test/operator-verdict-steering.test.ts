@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, operatorVerdictEvidence, type OpenPrView } from "../src/lib/sweep.js";
-import { buildFixRungDispatchArgs } from "../src/run-task.js";
+import { buildFixRungDispatchArgs } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 

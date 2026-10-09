@@ -17,7 +17,7 @@ import {
   type ReviewVerdict,
 } from "../src/lib/review.js";
 import { reviewLedgerLegibilityFields } from "../src/lib/review.js";
-import { runFixRung } from "../src/run-task.js";
+import { runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

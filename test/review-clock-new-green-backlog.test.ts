@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { startInterphaseReviewClock, type DaemonDeps } from "../src/lib/daemon.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweepLightPass, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-28T22:00:00Z");
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));

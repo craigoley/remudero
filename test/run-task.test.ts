@@ -89,7 +89,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   runTask,
   buildOpenPrViews,
   STALL_WINDOW, resolveAlreadySatisfiedWithRetry, ALREADY_SATISFIED_VERIFY_ATTEMPTS, type AlreadySatisfiedClaim, type AlreadySatisfiedResolution,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { DAEMON_DRAFT_BATCH_CAP, draftAttemptKey, resolvedInboxDraftLane } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
@@ -127,7 +127,7 @@ import {
   type MergeConflictEvidence,
   type OpenPrView,
   type RepairFilingCapture,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 import { loadMounts, mountsPath, type Mount } from "../src/lib/mounts.js";
 import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";

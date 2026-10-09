@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 import { buildSweepEffects } from "../src/run-task.js";
 

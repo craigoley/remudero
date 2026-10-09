@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { priorStrikesFor, strikeRegimeForDispatch } from "../src/run-task.js";
+import { priorStrikesFor, strikeRegimeForDispatch } from "./helpers/run-task-test.js";
 
 const HEAD = "0f476be47c0de1a2b3c4d5e6f708192a3b4c5d6e";
 

@@ -13,7 +13,7 @@ import {
   planCommand,
   realArmDeps,
   triageCommand,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";

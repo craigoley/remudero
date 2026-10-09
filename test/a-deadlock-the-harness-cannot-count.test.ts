@@ -16,7 +16,7 @@ import {
   countGateRemedyScopeDeadlockLedgerMembers,
   fixRungScopeStandDownReason,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { remedyFilesForFailingChecks } from "../src/lib/ci-parity.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Config } from "../src/lib/config.js";

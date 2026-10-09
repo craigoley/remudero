@@ -41,7 +41,7 @@ import { test } from "node:test";
 
 import { DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS, installPolicyPath, loadPolicy } from "../src/lib/policy.js";
 import { DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS } from "../src/lib/daemon.js";
-import { runFixRung, type FixRungOutcome } from "../src/run-task.js";
+import { runFixRung, type FixRungOutcome } from "./helpers/run-task-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

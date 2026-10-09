@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { runFixRung, acceptanceGateBodyRepair } from "../src/run-task.js";
+import { runFixRung, acceptanceGateBodyRepair } from "./helpers/run-task-test.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";

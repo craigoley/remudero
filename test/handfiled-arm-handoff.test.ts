@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideSweepArm, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { decideSweepArm, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { decideAutoMergeArm } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 

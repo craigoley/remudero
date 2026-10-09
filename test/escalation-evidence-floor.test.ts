@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
+import { runFixRung } from "./helpers/run-task-test.js";
 import type { CiFailure, MergeConflictEvidence } from "../src/lib/sweep.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";

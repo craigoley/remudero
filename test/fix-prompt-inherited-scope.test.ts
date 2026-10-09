@@ -29,7 +29,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderFixPrompt, fixRungScopeStandDownReason, outOfDeclaredScopeFiles } from "../src/run-task.js";
+import { renderFixPrompt, fixRungScopeStandDownReason, outOfDeclaredScopeFiles } from "./helpers/run-task-test.js";
 
 const TASK = { id: "W1-T2607X", title: "fix the flaky check", files: ["src/foo.ts", "test/foo.test.ts"] };
 const EVIDENCE = { ciFailures: [{ name: "build", logTail: "boom" }] };

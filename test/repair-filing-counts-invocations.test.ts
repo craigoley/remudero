@@ -17,7 +17,7 @@ import {
   type RepairFilingCapture,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /**
  * W1-T2231 — `acted: true` proves only that the `blocked-fixable`/`conflicted` lane was

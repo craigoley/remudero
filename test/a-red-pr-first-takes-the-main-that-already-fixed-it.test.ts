@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { priorStrikesFor } from "../src/run-task.js";
 
 // W1-T6405 — OBSERVED 2026-10-08: #10058, #10084 and #10089 were red on failures main had already

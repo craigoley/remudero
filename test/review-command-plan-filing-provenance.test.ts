@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "./helpers/sweep-test.js";
 import { buildSweepEffects, reviewCommand, runReview } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 

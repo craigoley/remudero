@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { worktreeAdd } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
-import * as runTask from "../src/run-task.js";
+import * as runTask from "./helpers/run-task-test.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 const SOURCE = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));

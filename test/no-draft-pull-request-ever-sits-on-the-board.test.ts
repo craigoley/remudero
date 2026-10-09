@@ -10,7 +10,7 @@ import { test } from "node:test";
 import * as census from "../scripts/no-draft-pull-request-census.mjs";
 import { readyDraftViaGh } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 type DraftHit = { path: string; line: number; pattern: string; text: string };
 const findDraftPullRequestCreators = census.findDraftPullRequestCreators as (

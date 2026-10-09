@@ -24,7 +24,7 @@ import {
   type RepairFilingRecurrence,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /**
  * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half).

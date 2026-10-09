@@ -26,7 +26,7 @@ import {
   type RollupCheckEntry,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // The #9388 evidence, verbatim in shape: the gate's own error line, then its not-ready list.
 const TIMEOUT_LINE =

@@ -26,7 +26,7 @@ import {
   renderImplementPrompt as compatRenderImplementPrompt,
   renderPrerequisitePrPrompt as compatRenderPrerequisitePrPrompt,
   renderReconPrompt as compatRenderReconPrompt,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 
 const TASK: Task = {
   id: "W1-T2886X",

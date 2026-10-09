@@ -15,7 +15,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T5911 — LIVE 2026-10-05, #9391 (head d931064b): the W1-T5403 risk judge escalated the head
