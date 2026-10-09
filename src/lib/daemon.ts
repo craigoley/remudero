@@ -1333,6 +1333,8 @@ export interface DaemonDeps {
    *  `readLiveState`'s contract, so a merged-or-closed-but-cached PR can never park a feedback entry
    *  forever. An unreadable result fails open, same as the task lane (W1-T300). */
   readFeedbackLiveState?: (feedbackId: string, prNumber: number) => string | undefined;
+  /** The entry's `status:` on origin/main, read only once its triage PR reads MERGED; `undefined` fails open (#10265). */
+  readFeedbackStatusOnMain?: (feedbackId: string) => string | undefined;
   /** The restricted light-sweep ticker. Dispatch is unbounded and the full reconciler only runs between
    *  iterations, so a PR that went green-but-review-absent sat invisible for the dispatch's whole
    *  remaining duration — #707 swept at 13:12 and never swept the new head again (W1-T254). Trap: the
@@ -4772,11 +4774,16 @@ export async function runDaemon(
         const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
           triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
         let inFlight = openPrNumber !== undefined;
+        let inFlightReason = "an open triage PR already carries this feedback id's provenance";
         if (inFlight && openPrNumber !== undefined) {
           // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
           // stands the guard down rather than parking the entry forever on yesterday's snapshot (W1-T177).
           const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
-          if (liveState !== undefined && liveState !== "OPEN") {
+          // #10265: a MERGED triage already moved the entry on main; this checkout is just behind.
+          const mainStatus = liveState === "MERGED" ? deps.readFeedbackStatusOnMain?.(decision.feedbackId) : undefined;
+          if (mainStatus !== undefined && mainStatus !== "new") {
+            inFlightReason = `its triage PR merged and origin/main holds the entry at status: ${mainStatus} — this checkout is behind`;
+          } else if (liveState !== undefined && liveState !== "OPEN") {
             inFlight = false;
             log("auto_triage.stood_down", {
               feedback: decision.feedbackId,
@@ -4792,7 +4799,7 @@ export async function runDaemon(
           log("auto_triage.skipped_inflight", {
             feedback: decision.feedbackId,
             pr_number: openPrNumber,
-            reason: "an open triage PR already carries this feedback id's provenance",
+            reason: inFlightReason,
           });
         } else {
           const hold = holdWorkerAdmission("auto-triage");
