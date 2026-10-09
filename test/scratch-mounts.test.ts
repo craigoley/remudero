@@ -175,7 +175,7 @@ test("an empty scratch disk after a deallocate is re-created at docker start and
   assert.doesNotMatch(off.dockerRun, /\/home\/node\/rmd-scratch|RMD_READ_MODEL_DB_DIR/, "switched off, the revival is today's launch");
 });
 
-test("docker starts after the scratch disk is provisioned and re-creates its dirs first", (t) => {
+test("docker mount ordering uses the fixture mountinfo and re-creates scratch dirs first", (t) => {
   const h = host(t);
   const fixture = join(h.root, "units");
   const stubs = join(fixture, "bin");
@@ -187,6 +187,9 @@ test("docker starts after the scratch disk is provisioned and re-creates its dir
   writeFileSync(join(stubs, "systemctl"), '#!/usr/bin/env bash\n[ "$1" = show ] && echo "RequiresMountsFor=/mnt/rmd/docker /var/lib/containerd /mnt/rmd ' + h.state + '"\nexit 0\n');
   for (const s of ["id", "docker", "systemctl"]) chmodSync(join(stubs, s), 0o755);
   writeFileSync(join(fixture, "mounts"), `/dev/sdb1 /mnt/rmd ext4 rw 0 0\n/mnt/rmd/containerd /var/lib/containerd none rw,bind 0 0\nnone ${h.state} ext4 rw 0 0\n`);
+  // mountinfo, not mounts, retains a bind's filesystem root. Never mix this fake
+  // host with /proc/self/mountinfo from the runner (whose backing mount may differ).
+  writeFileSync(join(fixture, "mountinfo"), "25 1 8:1 / /mnt/rmd rw - ext4 /dev/sdb1 rw\n26 25 8:1 /containerd /var/lib/containerd rw - ext4 /dev/sdb1 rw\n");
   const r = spawnSync("bash", [join(REPO_ROOT, "deploy", "install-container-runtime-mount-order.sh"), "--install"], {
     encoding: "utf8",
     env: {
@@ -198,9 +201,12 @@ test("docker starts after the scratch disk is provisioned and re-creates its dir
       RMD_DOCKER_DROPIN_DIR: join(fixture, "docker.service.d"),
       RMD_CONTAINERD_DROPIN_DIR: join(fixture, "containerd.service.d"),
       RMD_PROC_MOUNTS_FILE: join(fixture, "mounts"),
+      RMD_PROC_MOUNTINFO_FILE: join(fixture, "mountinfo"),
     },
   });
   assert.equal(r.status, 0, r.stdout + r.stderr);
+  const containerdDropin = readFileSync(join(fixture, "containerd.service.d", "20-remudero-mount-order.conf"), "utf8");
+  assert.match(containerdDropin, /^RequiresMountsFor=\/mnt\/rmd \/var\/lib\/containerd$/m, "the private mountinfo owns the bind backing, not the live host");
   const dropin = readFileSync(join(fixture, "docker.service.d", "20-remudero-mount-order.conf"), "utf8");
   assert.match(dropin, /^After=rmd-scratch\.service$/m);
   assert.match(dropin, /^Wants=rmd-scratch\.service$/m);
