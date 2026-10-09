@@ -25775,9 +25775,9 @@ export function checkProofCommand(
       ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
         .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
       : [grepTargetPath];
-    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => execFileSync(
-      "git", ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", path],
-      { cwd, encoding: "utf8", stdio: "pipe" },
+    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => hostWorktreeGitAtTopLevel(
+      cwd, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", resolve(cwd, path)],
+      { log: () => {} },
     ));
     for (const path of new Set(proofPaths)) {
       let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
@@ -26351,9 +26351,9 @@ export function gitRunAdapter(
 }
 
 export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
-  const log = (step: string, extra: Record<string, unknown>) => {
+  const log = opts.log ?? ((step: string, extra: Record<string, unknown>) => {
     if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
-  };
+  });
   for (let at = resolve(dir); ; at = dirname(at)) {
     try {
       return hostWorktreeGit(at, args, { ...opts, log });

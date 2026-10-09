@@ -79,6 +79,10 @@ test("check-proof uses real git status for an untracked proof target and a clean
     assert.equal(dirty.code, CHECK_PROOF_EXIT.pass);
     assert.equal(dirty.stderr.length, 1);
     assert.ok(dirty.stderr[0].includes(path));
+    const nested = run(dir, ["grep:", NEEDLE, "in", "marker.txt"]);
+    assert.equal(nested.code, CHECK_PROOF_EXIT.pass);
+    assert.equal(nested.stderr.length, 1);
+    assert.match(nested.stderr[0], /marker\.txt.*pushed head may answer differently/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -92,6 +96,8 @@ test("check-proof preserves its verdict when real git status cannot read a repos
     const result = run(dir, proof);
     assert.equal(result.code, CHECK_PROOF_EXIT.pass);
     assert.deepEqual(result.stderr, []);
+    writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "missing-gitdir")}\n`);
+    assert.deepEqual(run(dir, proof), result);
   });
 });
 
