@@ -565,6 +565,7 @@ import {
 } from "./lib/open-prs-rest.js";
 import {
   buildMainHealthRung,
+  withMainHealthOnLightPass,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairRevertOutcome,
@@ -38456,6 +38457,8 @@ export async function daemonCommand(
           resequenceMergedResolver(() => lastProj),
           undefined,
           () => activePlanRef.current,
+          // A run in flight starves the full sweep, so the light pass also watches main.
+          mainHealthRung,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -46236,6 +46239,7 @@ export function buildSweepLightHook(
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
   planAccessor?: () => Plan,
+  mainHealthRung?: () => Promise<void>,
 ): (scope?: LightPassScope) => Promise<void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -46247,7 +46251,7 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  return async (scope) => {
+  return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
@@ -46365,7 +46369,7 @@ export function buildSweepLightHook(
     } catch (e) {
       log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, mainHealthRung, { log });
 }
 
 /** What `routeFix` did with one PR — mirrors the sweep's per-PR action shape. */
