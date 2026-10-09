@@ -26,7 +26,7 @@
   "hooks/mkdtemp-allowlist.txt": 0,
   "scripts/acceptance-author-gate.mjs": 500,
   "scripts/assertion-discrimination-baseline.json": 0,
-  "scripts/assertion-discrimination-check.mjs": 58,
+  "scripts/assertion-discrimination-check.mjs": 62,
   "scripts/bound-kind-baseline.json": 0,
   "scripts/citation-anchor-census.mjs": 50,
   "scripts/claims-check.mjs": 71,

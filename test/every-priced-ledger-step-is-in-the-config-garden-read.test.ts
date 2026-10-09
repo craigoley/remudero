@@ -78,6 +78,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.red_base_refresh.error": A_LANE_RUN_ID,
   "sweep.review_admitted": A_LANE_RUN_ID,
   "sweep.review_eligible": A_LANE_RUN_ID,
+  "sweep.review_reuse_unreadable": A_LANE_RUN_ID, // the hydration receipt's own sweep-review-reuse- run id has no run.start
   "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids
   "sweep.stale_red_redrive.attempted": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.local_route": A_LANE_RUN_ID,
@@ -260,6 +261,11 @@ test("sweep review telemetry does not change the config gardener's gathered runs
   ].map(step => ({
     run_id: "SWEEP-1", task_id: "T-1", step, pr_url: "https://github.com/fixture/repo/pull/2",
   }));
+  telemetry.unshift({
+    run_id: "sweep-review-reuse-1", task_id: "SWEEP", lane: "sweep",
+    step: "sweep.review_reuse_unreadable", pr_number: 2,
+    pr_url: "https://github.com/fixture/repo/pull/2", head_sha: "head", reason: "compare denied",
+  });
   const rows = [...worker, ...telemetry];
   const filtered = rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)));
   assert.equal(filtered.length, worker.length, "sweep receipts stay outside the worker pricing read");
@@ -269,7 +275,7 @@ test("sweep review telemetry does not change the config gardener's gathered runs
   assert.equal(unfilteredRuns[0]!.costUsd, 2);
   assert.deepEqual(gatherRuns(filtered), unfilteredRuns);
   assert.equal(gatherRuns([
-    { run_id: "SWEEP-1", task_id: "T-1", step: "run.start" }, ...telemetry,
+    { run_id: telemetry[0]!.run_id, task_id: "SWEEP", step: "run.start" }, ...telemetry,
   ])[0]!.prUrl, telemetry[0]!.pr_url, "a lane with run.start would make the exemption unsafe");
 });
 
