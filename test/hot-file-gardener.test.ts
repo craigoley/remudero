@@ -151,6 +151,10 @@ function fixture(kind: string, ledger: LedgerRecord[], land: GardenCheckout["lan
     log: (step, extra) => { events.push({ step, extra }); },
     clock: clockFromMillisFn(() => nowMs),
     seed: 3,
+    // lint-plan refuses today's hot-file draft (verify: human outside every parked machine shape, and
+    // docs/hot-file-remedies.md is absent), so the real landing guard records a filing failure. These
+    // cases test what follows a landing, so the guard stands down here; the refusal is its own defect.
+    landingRefusal: () => undefined,
   };
   const sources: HotFileGardenSources = {
     ledgerRecords: () => ledger,

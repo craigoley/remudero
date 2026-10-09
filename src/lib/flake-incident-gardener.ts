@@ -20,7 +20,7 @@ import { fixedClock, systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { selectorShadowPlanTasksAsync, type SelectorShadowTaskIdMinter } from "./selector-shadow-gardener.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
@@ -298,6 +298,8 @@ async function fileIncident(
     if (rendered.refused !== undefined) throw new Error(`flake-incident: task failed lint: ${rendered.refused}`);
     const relativePath = join("plan", "tasks.d", `${taskId.toLowerCase()}-flake-incident.yaml`);
     writeAtomic(join(workspace.root, relativePath), rendered.text);
+    const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
+    if (refused !== undefined) throw new Error(`flake-incident: task failed lint-plan's machine-filing admission: ${refused}`);
     const stem = (title === "" ? file.split("/").at(-1)! : title).slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const prUrl = await workspace.land({
       paths: [relativePath],
