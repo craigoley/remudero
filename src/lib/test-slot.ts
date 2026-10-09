@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleepAsync } from "node:timers/promises";
 
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -319,8 +320,31 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
  * Never throws and never refuses: every outcome runs the suite, at the concurrency it names.
  */
 export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): TestSlotLease {
+  const acquisition = testSlotAcquisition(label, opts);
+  let next = acquisition.next();
+  while (!next.done) {
+    try {
+      (opts.sleep ?? sleepSync)(next.value);
+      next = acquisition.next();
+    } catch (error) {
+      next = acquisition.throw(error);
+    }
+  }
+  return next.value;
+}
+
+export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOptions, "sleep"> = {}): Promise<TestSlotLease> {
+  const acquisition = testSlotAcquisition(label, opts);
+  let next = acquisition.next();
+  while (!next.done) {
+    await sleepAsync(next.value);
+    next = acquisition.next();
+  }
+  return next.value;
+}
+
+function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<number, TestSlotLease> {
   const clock = opts.clock ?? systemClock;
-  const sleep = opts.sleep ?? sleepSync;
   const host = opts.hostname ?? hostname;
   const bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
@@ -357,14 +381,14 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
   });
   let announced = false;
   try {
-    return waitForSlot();
+    return yield* waitForSlot();
   } catch (error) {
     // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
     const concurrency = testRunConcurrency(load(), slots);
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
   }
-  function waitForSlot(): TestSlotLease {
+  function* waitForSlot(): Generator<number, TestSlotLease> {
     for (;;) {
       const holders: string[] = [];
       for (let i = 1; i <= slots; i += 1) {
@@ -429,7 +453,7 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
         announced = true;
         log(JSON.stringify({ step: "test_slot.waiting", label, dir, holders }));
       }
-      sleep(pollMs);
+      yield Math.min(pollMs, Math.max(0, waitBoundMs - waitedMs));
     }
   }
 }

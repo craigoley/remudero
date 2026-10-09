@@ -41,7 +41,8 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
-import { seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
+import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
+import { acquireTestSlotAsync } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -3978,6 +3979,9 @@ async function executeOpenWeightTool(
         suites = plan.suites.length;
       }
       const scoped = suites === null ? {} : { suites };
+      const slot = args.check === "typecheck" &&
+        !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
+        ? await acquireTestSlotAsync("typecheck:bwrap") : undefined;
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -3995,6 +3999,8 @@ async function executeOpenWeightTool(
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
         ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true });
         return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
+      } finally {
+        slot?.release();
       }
     }
     case "grep_files": {

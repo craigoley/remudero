@@ -1013,6 +1013,15 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # revival path below, after this very return, so a host that recovered stopped reviving and never
   # reached it. This is the one place the script observes the daemon HEALTHY.
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  # 2026-10-09 -- A SELF-TUNING memory.high. deploy/memory-high-tuner.sh grows this container's
+  # memory.high while it is throttled and refaulting its page cache with host headroom, and gives it
+  # back under host pressure, never below the policy. BEFORE the unchanged-tick exit: memory pressure
+  # moves while the code does not. Bounded, and never fatal to the tick.
+  if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
+    MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+      --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+  fi
   if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
   rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
   WATCHDOG_UNCHANGED_TICKS=0

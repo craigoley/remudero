@@ -118,6 +118,11 @@ function harness(rows: Row[], opts: { clockMs?: number; plan?: () => Array<{ id:
       dispose: () => {},
     }),
     log: (step: string, extra: Record<string, unknown> = {}) => { events.push({ step, extra }); },
+    // lint-plan refuses today's flow follow-up (verify: human outside every parked machine shape, a new
+    // test file admission does not allow, and a sizing span its shard name does not own), so the real
+    // landing guard records a filing failure. These cases test what follows a landing, so the guard
+    // stands down here; the refusal is its own defect.
+    landingRefusal: () => undefined,
   };
   let minted = 0;
   const ciReads: string[] = [];
@@ -139,6 +144,16 @@ function harness(rows: Row[], opts: { clockMs?: number; plan?: () => Array<{ id:
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("the flow gardener's real landing guard records a follow-up lint-plan refuses as a filing failure, never a PR", async (t) => {
+  const h = harness(corpus());
+  t.after(h.cleanup);
+  const { landingRefusal: _standDown, ...guarded } = h.deps;
+  await runFlowGardener(guarded, h.sources);
+  assert.equal(h.landed.length, 0, "a refused follow-up never opens its PR");
+  assert.match(String(h.steps("flow.filing_failed")[0]?.extra.error), /machine-filing admission/);
+  void _standDown;
+});
 
 test("over a fixture ledger the flow gardener reports per-class stage p50/p90 and baselines and files one follow-up for a doubled plan ready-to-merged stage naming its three slowest PRs", async (t) => {
   const h = harness(corpus());

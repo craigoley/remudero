@@ -36,8 +36,8 @@ test("W1-T5537: every disposition row declares a blocker from the closed set", (
     }
   };
   census(DISPOSITION_RULES);
-  assert.equal(PR_BLOCKERS.length, 14);
-  assert.equal(new Set(PR_BLOCKERS).size, 14);
+  assert.equal(PR_BLOCKERS.length, 15);
+  assert.equal(new Set(PR_BLOCKERS).size, 15);
   assert.deepEqual(Object.keys(PR_BLOCKER_OWNERS).sort(), [...PR_BLOCKERS].sort());
   assert.throws(() => census([{ disposition: "wait" }]), /row 0 \(wait\).*undefined/);
   assert.throws(() => census([{ disposition: "wait", blocker: "invented" }]), /invented/);

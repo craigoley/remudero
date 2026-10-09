@@ -15,7 +15,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { gardenLedgerBucket } from "./gardener.js";
 import { ledgerLivePath, ledgerRotationEntries } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
 
@@ -336,6 +336,7 @@ export function hotFileGardenSpec(
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "hot-file",
+    landingRefusal: machineShardLandingGuard(deps),
     classes: HOT_FILE_REMEDIES,
     cheapFingerprint: () => {
       const head = spawnSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();

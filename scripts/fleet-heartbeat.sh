@@ -623,7 +623,9 @@ mount_root_used_kb() {
   [ "$(findmnt -n -o FSROOT -M "$1" 2>/dev/null)" = "/" ] || return 1
   df_field "$1" 3
 }
-# Every remaining walk runs at idle I/O priority, so it yields to the daemon on a busy disk.
+# ionice -c3 is kept for hosts whose block scheduler is BFQ. It is a NO-OP under `none` and
+# `mq-deadline` (the Azure host's nvme0n1 reads `[none] mq-deadline`), so it never protects that disk:
+# the adaptive schedule below is what keeps the walk off a busy data disk.
 du_idle() {
   if command -v ionice >/dev/null 2>&1; then ionice -c3 -t nice -n 19 du -sk "$1"; else nice -n 19 du -sk "$1"; fi
 }
@@ -668,7 +670,47 @@ live_consumer_path() {
   source="$(printf '%s\n' "$CONSUMER_MOUNTS" | awk -F '\t' -v p="$path" -v d="$destination" '$2==p || $2==d {print $1; exit}')"
   case "$source" in /*) printf '%s' "$source" ;; *) printf '%s' "$path" ;; esac
 }
+# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct
+# filesystems (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat
+# noise, which decays by a quarter each scheduled beat so a one-off swing does not suppress walks for
+# long. A falling disk drifts every beat and keeps walking; a quiet one stops paying a multi-minute
+# metadata walk at the data disk's IOPS cap (2026-10-09: 94% util ~470 r/s for ~1 min per walk).
+# No state, an unreadable signature or a walk older than the backstop always walks.
+CONSUMER_STATE_FILE="${RMD_ROOT}/state/consumer-probe.state"
+CONSUMER_BACKSTOP_S="${RMD_CONSUMER_BACKSTOP_S:-21600}"
+case "$CONSUMER_BACKSTOP_S" in ''|*[!0-9]*) CONSUMER_BACKSTOP_S=21600 ;; esac
+consumer_state() { awk -F= -v k="$1" '$1==k {print $2; exit}' "$CONSUMER_STATE_FILE" 2>/dev/null; }
+consumer_signature_kb() {
+  local root line device used seen="" total=0 any=0
+  for root in "$RMD_ROOT" "$HOME" "${TMPDIR:-/tmp}" /mnt/rmd /var/lib/containerd /var/lib/docker; do
+    line="$(df -Pk "$root" 2>/dev/null | awk 'NR==2 {print $1, $3}')" || continue
+    device="${line%% *}"; used="${line##* }"
+    [ -n "$device" ] && [[ "$used" =~ ^[0-9]+$ ]] || continue
+    case " $seen " in *" $device "*) continue ;; esac
+    seen="$seen $device"; total=$((total + used)); any=1
+  done
+  [ "$any" = 1 ] && printf '%s' "$total"
+}
+CONSUMER_PROBE=""
 if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
+  CONSUMER_NOW_S="$(date +%s)"
+  CONSUMER_USED_KB="$(consumer_signature_kb)"
+  WALK_USED_KB="$(consumer_state walk_used_kb)"; WALK_EPOCH="$(consumer_state walk_epoch)"
+  PREV_USED_KB="$(consumer_state prev_used_kb)"; NOISE_KB="$(consumer_state noise_kb)"
+  CONSUMER_PROBE="walked"
+  if [[ "$CONSUMER_USED_KB" =~ ^[0-9]+$ ]] && [[ "$WALK_USED_KB" =~ ^[0-9]+$ ]] && [[ "$WALK_EPOCH" =~ ^[0-9]+$ ]] \
+    && [[ "$PREV_USED_KB" =~ ^[0-9]+$ ]] && [[ "$NOISE_KB" =~ ^[0-9]+$ ]]; then
+    step=$((CONSUMER_USED_KB - PREV_USED_KB)); step=${step#-}
+    decayed=$((NOISE_KB * 3 / 4)); NOISE_KB=$(( step > decayed ? step : decayed ))
+    drift=$((CONSUMER_USED_KB - WALK_USED_KB)); drift=${drift#-}
+    if [ "$drift" -le $((2 * NOISE_KB)) ] && [ $((CONSUMER_NOW_S - WALK_EPOCH)) -lt "$CONSUMER_BACKSTOP_S" ]; then
+      CONSUMER_PROBE="unchanged"
+    fi
+  else
+    NOISE_KB=0
+  fi
+fi
+if [ "$CONSUMER_PROBE" = "walked" ]; then
   CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
   CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
     --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
@@ -695,6 +737,16 @@ if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
     "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
+  WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
+fi
+if [ -n "$CONSUMER_PROBE" ]; then
+  CONSUMER_LINES="${CONSUMER_LINES}
+consumer_walk_state=${CONSUMER_PROBE}
+consumer_walk_signature=${CONSUMER_USED_KB:-unknown}"
+  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_CONSUMER_STATE_WRITE:-}" = "1" ]; then
+    mkdir -p "$(dirname "$CONSUMER_STATE_FILE")" 2>/dev/null && printf 'walk_used_kb=%s\nwalk_epoch=%s\nprev_used_kb=%s\nnoise_kb=%s\n' \
+      "${WALK_USED_KB:-}" "${WALK_EPOCH:-}" "${CONSUMER_USED_KB:-}" "${NOISE_KB:-0}" > "$CONSUMER_STATE_FILE" 2>/dev/null
+  fi
 fi
 # The pacing counter advances on every real beat, published or not: advanced only after a confirmed
 # push, a failing push left it on a measuring beat and every 5-minute beat re-walked the disks.

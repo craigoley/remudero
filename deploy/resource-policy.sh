@@ -77,7 +77,7 @@ resource_policy_lookup() {
 # MemTotal is unreadable) and RP_HIGH_NOTE naming the arithmetic.
 resource_policy_memory_high() {
   local container="$1" max="$2" total budget weight sum=0 entry share floor
-  RP_HIGH="" RP_HIGH_NOTE=""
+  RP_HIGH="" RP_HIGH_NOTE="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RP_HIGH_NOTE="NO memory.high — host MemTotal unreadable"
     return 0
@@ -100,7 +100,43 @@ resource_policy_memory_high() {
     RP_HIGH_NOTE="${RP_HIGH_NOTE}, held at ${RMD_MEMORY_HIGH_MAX_PCT}% of memory.max = ${RP_HIGH} MiB"
   fi
   if [ "${RP_HIGH}" -le 0 ]; then RP_HIGH="" RP_HIGH_NOTE="NO memory.high — ${RP_HIGH_NOTE}"; fi
+  # The policy's own value, before any learned one: the tuner never goes below it, and the drift check
+  # treats anything between it and the learned value as current.
+  RP_HIGH_POLICY="${RP_HIGH}" RP_HIGH_LEARNED=""
+  local tuned
+  [ -n "${RP_HIGH}" ] && tuned="$(resource_policy_tuned_high "${container}")" && RP_HIGH_LEARNED="${tuned}"
+  if [ -n "${RP_HIGH_LEARNED}" ] && [ "${tuned}" -gt "${RP_HIGH}" ]; then
+    if [ -n "${max}" ] && [ "${tuned}" -gt $((max * RMD_MEMORY_HIGH_MAX_PCT / 100)) ]; then
+      tuned=$((max * RMD_MEMORY_HIGH_MAX_PCT / 100))
+    fi
+    RP_HIGH_NOTE="${RP_HIGH_NOTE}; started at the learned ${tuned} MiB (deploy/memory-high-tuner.sh) over the policy's ${RP_HIGH} MiB"
+    RP_HIGH="${tuned}"
+  fi
   return 0
+}
+
+# ── the learned memory.high (deploy/memory-high-tuner.sh, 2026-10-09) ─────────────────────────────
+# The watchdog tick raises a container's memory.high at runtime while it is throttled and refaulting
+# its page cache with host headroom, and lowers it toward the policy value under host pressure. It
+# records the value in <state>/memory-high-tuned-<container>.json, so a recycle starts from the
+# learned value instead of throwing it away. The value only ever RAISES the policy's: a learned value
+# below the policy (a policy that grew since) is ignored here.
+resource_policy_tuned_file() {
+  local dir="${RMD_MEMORY_HIGH_TUNED_DIR:-}"
+  [ -n "${dir}" ] || { [ -n "${STATE_DIR:-}" ] && dir="${STATE_DIR}/state"; }
+  [ -n "${dir}" ] || return 1
+  printf '%s/memory-high-tuned-%s.json' "${dir}" "$1"
+}
+
+# The learned memory.high of container $1 in MiB; status 1 when none is recorded or it is unreadable.
+resource_policy_tuned_high() {
+  local file value
+  file="$(resource_policy_tuned_file "$1")" || return 1
+  [ -r "${file}" ] || return 1
+  grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
+  value="$(sed -n 's/.*"high_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
+  [ -n "${value}" ] && [ "${value}" -gt 0 ] || return 1
+  printf '%s' "${value}"
 }
 
 # The docker run argument that sets memory.high to $1 MiB.
@@ -165,7 +201,8 @@ resource_policy_serve_args() {
 resource_policy_build_args() {
   RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}")
   local total ceiling container="${1:-remudero-daemon}"
-  RP_HIGH=""
+  # shellcheck disable=SC2034 # RP_HIGH_POLICY is read by the tuner and the drift check
+  RP_HIGH="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 0
