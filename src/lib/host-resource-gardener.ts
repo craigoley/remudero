@@ -82,6 +82,25 @@ export interface HostSample {
   consumerDevices?: Record<string, string>;
   janitorTs?: string;
   janitorFreedKb?: number;
+  /** Per whole disk: busy %, await and tps averaged over the beat interval; only devices read. */
+  io?: Record<string, IoReading>;
+}
+
+/** One block device over one beat interval, as the heartbeat published it. */
+export interface IoReading {
+  utilPct?: number;
+  awaitMs?: number;
+  tps?: number;
+  /** What the disk backs: root, state, scratch, daemon (a daemon container's bind mount). */
+  roles?: string[];
+  /** The cgroups that read the most from this disk over the interval, most first. */
+  readers?: IoReader[];
+}
+
+export interface IoReader {
+  cgroup: string;
+  readBytesPerS: number;
+  readIops: number;
 }
 
 /** `key=value` lines of a published heartbeat. */
@@ -132,6 +151,7 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   }
   const janitorTs = payload["janitor_last_ts"];
   const freed = parseSizeKb(payload["janitor_last_freed"]);
+  const io = ioFromPayload(payload);
   return {
     host,
     beatTs: fixedClock(tsMs).iso(),
@@ -142,7 +162,36 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
     consumerDevices,
     ...(janitorTs && Number.isFinite(Date.parse(janitorTs)) ? { janitorTs } : {}),
     ...(freed !== undefined ? { janitorFreedKb: freed } : {}),
+    ...(io ? { io } : {}),
   };
+}
+
+const decimal = (v: string | undefined): number | undefined => (v !== undefined && /^\d+(?:\.\d+)?$/.test(v) ? Number(v) : undefined);
+
+/** The `io_<device>_*` keys of one beat; undefined when the beat measured no device. */
+export function ioFromPayload(payload: Record<string, string>): Record<string, IoReading> | undefined {
+  const devices = (payload["io_devices"] ?? "").split(",").filter((d) => /^[A-Za-z0-9._-]+$/.test(d));
+  const out: Record<string, IoReading> = {};
+  for (const device of devices) {
+    const reading: IoReading = {};
+    const utilPct = digits(payload[`io_${device}_util_pct`]);
+    const awaitMs = decimal(payload[`io_${device}_await_ms`]);
+    const tps = decimal(payload[`io_${device}_tps`]);
+    if (utilPct !== undefined) reading.utilPct = Math.min(100, utilPct);
+    if (awaitMs !== undefined) reading.awaitMs = awaitMs;
+    if (tps !== undefined) reading.tps = tps;
+    const roles = (payload[`io_${device}_roles`] ?? "").split(",").filter(Boolean);
+    if (roles.length) reading.roles = roles;
+    const readers = (payload[`io_${device}_readers`] ?? "").split(",").flatMap((entry) => {
+      const [cgroup, bps, iops] = entry.split(":");
+      const readBytesPerS = digits(bps);
+      const readIops = decimal(iops);
+      return cgroup && readBytesPerS !== undefined && readIops !== undefined ? [{ cgroup, readBytesPerS, readIops }] : [];
+    });
+    if (readers.length) reading.readers = readers;
+    if (Object.keys(reading).length) out[device] = reading;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 export function samplesPath(stateDir: string): string {
@@ -404,6 +453,127 @@ export function evaluateHost(host: string, allSamples: readonly HostSample[], no
     });
   }
   return out;
+}
+
+// ── block-device pressure ───────────────────────────────────────────────────────────────────
+
+/**
+ * The tiers a SUSTAINED busy fraction earns. Busy fraction ρ is the device's util over a beat. In
+ * queueing terms a request waits about ρ/(1-ρ) times its own service time: at ρ 0.5 it waits as long
+ * as it is served, at 0.75 three times as long, at 0.9 nine times. The tier rises with both how busy
+ * the disk is and how long it stays that busy. A brief burst earns nothing, and a disk that is merely
+ * busy for an hour is only recorded. The response backs off on its own: once the median falls, the
+ * tier drops, and the episode ends when no window earns a tier.
+ */
+export const IO_TIERS: ReadonlyArray<{ tier: Tier; windowHours: number; busy: number }> = [
+  { tier: "escalate", windowHours: 1, busy: 0.9 },
+  { tier: "escalate", windowHours: 3, busy: 0.75 },
+  { tier: "projected", windowHours: 1, busy: 0.75 },
+  { tier: "projected", windowHours: 3, busy: 0.5 },
+  { tier: "record", windowHours: 1, busy: 0.5 },
+];
+/** A window counts only when its samples cover most of it, so a sustained reading is never a burst. */
+const IO_MIN_COVERAGE = 0.75;
+const TIER_RANK: Record<Tier, number> = { record: 0, projected: 1, escalate: 2 };
+
+export interface IoFinding {
+  host: string;
+  device: string;
+  tier: Tier;
+  /** The window that earned the tier, and the median busy fraction across it. */
+  windowHours: number;
+  busy: number;
+  points: number;
+  awaitMs?: number;
+  tps?: number;
+  roles: string[];
+  /** Mean read rate per cgroup across the window, most first. */
+  readers: IoReader[];
+}
+
+/** Every device of one host whose busy fraction stays high across a tier's window; idle or brief bursts are silent. */
+export function evaluateIo(host: string, allSamples: readonly HostSample[], nowMs: number): IoFinding[] {
+  const samples = allSamples.filter((s) => s.host === host).sort((a, b) => a.tsMs - b.tsMs);
+  const last = samples[samples.length - 1];
+  // A silent heartbeat is the disk-fill tiers' signal; stale pressure readings describe the past.
+  if (!last || heartbeatStale(samples, nowMs)) return [];
+  const devices = [...new Set(samples.flatMap((s) => Object.keys(s.io ?? {})))].sort();
+  const out: IoFinding[] = [];
+  for (const device of devices) {
+    let best: IoFinding | undefined;
+    for (const rule of IO_TIERS) {
+      const from = last.tsMs - rule.windowHours * HOUR_MS;
+      const inWindow = samples.filter((s) => s.tsMs > from && s.io?.[device]?.utilPct !== undefined);
+      if (inWindow.length < MIN_POINTS) continue;
+      const span = inWindow[inWindow.length - 1]!.tsMs - inWindow[0]!.tsMs;
+      if (span < IO_MIN_COVERAGE * rule.windowHours * HOUR_MS) continue;
+      const busy = median(inWindow.map((s) => s.io![device]!.utilPct! / 100));
+      if (busy < rule.busy) continue;
+      if (best && TIER_RANK[best.tier] >= TIER_RANK[rule.tier]) continue;
+      const awaits = inWindow.flatMap((s) => (s.io![device]!.awaitMs === undefined ? [] : [s.io![device]!.awaitMs!]));
+      const tps = inWindow.flatMap((s) => (s.io![device]!.tps === undefined ? [] : [s.io![device]!.tps!]));
+      const sums = new Map<string, { bytes: number; iops: number }>();
+      for (const s of inWindow) {
+        for (const r of s.io![device]!.readers ?? []) {
+          const acc = sums.get(r.cgroup) ?? { bytes: 0, iops: 0 };
+          acc.bytes += r.readBytesPerS;
+          acc.iops += r.readIops;
+          sums.set(r.cgroup, acc);
+        }
+      }
+      const readers = [...sums.entries()]
+        .map(([cgroup, acc]) => ({ cgroup, readBytesPerS: acc.bytes / inWindow.length, readIops: acc.iops / inWindow.length }))
+        .sort((a, b) => b.readBytesPerS - a.readBytesPerS || a.cgroup.localeCompare(b.cgroup))
+        .slice(0, 5);
+      best = {
+        host,
+        device,
+        tier: rule.tier,
+        windowHours: rule.windowHours,
+        busy,
+        points: inWindow.length,
+        ...(awaits.length ? { awaitMs: median(awaits) } : {}),
+        ...(tps.length ? { tps: median(tps) } : {}),
+        roles: last.io?.[device]?.roles ?? [],
+        readers,
+      };
+    }
+    if (best) out.push(best);
+  }
+  return out;
+}
+
+/** `incident#<sha256 of host-io:<host>:<device>>`, distinct from the disk-fill incidents. */
+export function ioIncidentOrigin(host: string, device: string): string {
+  return `incident#${createHash("sha256").update(`host-io:${host}:${device}`).digest("hex")}`;
+}
+
+const fmtRate = (bytesPerS: number): string => (bytesPerS >= 1024 ** 2 ? `${(bytesPerS / 1024 ** 2).toFixed(1)} MB/s` : `${Math.round(bytesPerS / 1024)} KB/s`);
+
+function ioEvidenceText(f: IoFinding): string {
+  const roles = f.roles.length ? ` (backs ${f.roles.join(", ")})` : "";
+  return [
+    `Host ${f.host}, disk ${f.device}${roles}: busy ${Math.round(f.busy * 100)}% (median of ${f.points} beats across the last ${f.windowHours} h)` +
+      `${f.awaitMs === undefined ? "" : `, await ${f.awaitMs.toFixed(0)} ms`}${f.tps === undefined ? "" : `, ${f.tps.toFixed(0)} tps`}.`,
+    f.readers.length
+      ? `Top readers: ${f.readers.map((r) => `${r.cgroup} ${fmtRate(r.readBytesPerS)} (${r.readIops.toFixed(0)} r/s)`).join("; ")}.`
+      : "Top readers: none measured (cgroup io.stat unreadable on that host).",
+  ].join("\n");
+}
+
+export function hostIoEscalation(f: IoFinding): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `host-io-${f.host}-${f.device}`,
+    summary: `host ${f.host} disk ${f.device} has stayed saturated for ${f.windowHours} h`,
+    detail: ioEvidenceText(f),
+    options: [
+      { label: "remove-io", detail: "move or stop the top reader's I/O on that disk (the disk itself is not upgraded)" },
+      { label: "switch-off", detail: "touch state/HOST_RESOURCE_OFF to stop the gardener" },
+    ],
+    recommendation: "remove-io",
+    headDedup: "independent",
+  };
 }
 
 // ── the pass ─────────────────────────────────────────────────────────────────────────────────
@@ -724,10 +894,37 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
       }
     }
   }
+  for (const f of [...new Set(all.map((s) => s.host))].sort().flatMap((host) => evaluateIo(host, all, nowMs))) {
+    const key = `${f.host}:io:${f.device}`;
+    live.add(key);
+    const prior = state.episodes[key];
+    const episode = (state.episodes[key] ??= { tier: f.tier });
+    const row = { host: f.host, device: f.device, tier: f.tier, busy_pct: Math.round(f.busy * 100), window_hours: f.windowHours, await_ms: f.awaitMs === undefined ? null : Math.round(f.awaitMs), roles: f.roles, top_readers: f.readers.map((r) => r.cgroup) };
+    if (!prior || prior.tier !== f.tier) ports.log(`${HOST_RESOURCE}.io_pressure`, row);
+    episode.tier = f.tier;
+    if (f.tier !== "record" && !episode.handedOff && ports.handoff) {
+      const origin = ioIncidentOrigin(f.host, f.device);
+      if (!(ports.openIncidentOrigins?.() ?? new Set<string>()).has(origin)) {
+        ports.handoff({ origin, id: `host-io-${origin.slice("incident#".length, "incident#".length + 16)}`, raw: `host-io:${f.host}:${f.device}\n\n${ioEvidenceText(f)}` });
+      }
+      episode.handedOff = clock.iso();
+    }
+    if (f.tier === "escalate" && !episode.escalatedAt && ports.escalate) {
+      const issueUrl = ports.escalate(hostIoEscalation(f));
+      episode.escalatedAt = clock.iso();
+      ports.log(`${HOST_RESOURCE}.io_escalated`, { ...row, issue_url: issueUrl });
+    }
+  }
   for (const key of Object.keys(state.episodes)) {
     const episode = state.episodes[key]!;
     const isJanitor = key.endsWith(":janitor");
-    if (live.has(key) && (isJanitor || episode.tier !== "record")) continue;
+    const isIo = key.includes(":io:");
+    if (live.has(key) && (isJanitor || isIo || episode.tier !== "record")) continue;
+    if (isIo) {
+      ports.log(`${HOST_RESOURCE}.io_recovered`, { key });
+      delete state.episodes[key];
+      continue;
+    }
     if (!isJanitor && (episode.handedOff || episode.escalatedAt)) ports.log(`${HOST_RESOURCE}.recovered`, { key });
     delete state.episodes[key];
   }
