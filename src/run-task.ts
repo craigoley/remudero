@@ -191,6 +191,7 @@ import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gard
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { scoutGardenSpec } from "./lib/scout-gardener.js";
+import type { SliceModelCall } from "./lib/scout-slice.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
@@ -1300,6 +1301,7 @@ import {
   DEFAULT_RISK_POLICY,
   readRiskPolicy,
   realRiskJudge,
+  RISK_JUDGE_TOOLS,
   resolveRiskJudgeMount,
   riskJudgeSpendCollector,
   runRiskJudge,
@@ -36593,9 +36595,20 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
+    // W1-T5455: its second class reads one rotating slice of the repository through the SAME model call the
+    // machine-filing judge uses, read before the pass only when the pass is due, so an idle tick spends nothing.
     case "scout": {
       const d = deps("scout");
-      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+      const spec = scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log), sliceModel: productionScoutSliceModel({ repoRoot }) });
+      const pass = gardenPass(spec, d);
+      return withDue(async () => {
+        try {
+          if (gardenPassDue(spec, d)) await spec.prepareSlice();
+        } catch (e) {
+          log("scout.slice_failed", { error: String((e as Error)?.message ?? e) });
+        }
+        await pass();
+      }, () => gardenPassDue(spec, d));
     }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
@@ -49528,6 +49541,21 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * TOUCHES NO PLAN FILE. It reads the plan, writes ledger rows and stages proposals. `--dry-run`
  * judges nothing and spends nothing; it reports which shards a real pass WOULD ask about.
  */
+/** The scout's slice-reading model call (W1-T5455): the machine-filing judge's own mount and tool-less spawn,
+ *  resolved on first use as {@link productionMachineFilingJudgePorts}'s risk judge is. */
+export function productionScoutSliceModel(opts: { repoRoot: string; spawn?: typeof spawnWorker }): SliceModelCall {
+  return async (prompt) => {
+    const mounts = loadMounts(mountsPath(opts.repoRoot));
+    const mount = mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts);
+    const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("scout-slice");
+    const result = await spawn({
+      cwd: opts.repoRoot, permissionMode: "bypassPermissions", settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+      prompt, model: mount.model, effort: mount.effort, maxTurns: mount.maxTurns, tools: RISK_JUDGE_TOOLS,
+    });
+    return result.text;
+  };
+}
+
 /** The daemon's machine-filing judge (operator ruling 2026-09-29) over this checkout's plan, mounts
  *  and policy. The risk judge is built on first use, as {@link productionVerifyHumanRelease}'s is. */
 export function productionMachineFilingJudgePorts(opts: {
