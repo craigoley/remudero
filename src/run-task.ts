@@ -41674,10 +41674,20 @@ function* openPrViewSteps(
   const reviewOrphanedPrs = raw
     .filter((pr) => {
       const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-      return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
+      return reviewOrphansFor(ledger, reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(
+    owner, repo, "main", reviewOrphanedPrs, fetch, undefined,
+    (prNumber, reason) => {
+      const pr = raw.find((candidate) => candidate.number === prNumber)!;
+      appendLedger(ledgerPath, {
+        run_id: `sweep-review-reuse-${Date.now()}`, task_id: "SWEEP", lane: "sweep",
+        step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
+        head_sha: pr.headRefOid, reason,
+      });
+    },
+  );
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
@@ -41756,14 +41766,15 @@ function* openPrViewSteps(
     const ciFailures = ciFailuresByPr.get(pr.number);
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
+    const reviewOrphans = reviewOrphansFor(ledger, reviewLedgerKey, pr.headRefOid, undefined, pr.url);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
-    const currentContractDigest = taskRecord?.acceptance?.length
+    const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
+    const bodyAcceptance = taskRecord ? [] : parseAcceptanceBlock(pr.body ?? "");
+    let currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
           acceptance: taskRecord.acceptance,
@@ -41771,7 +41782,18 @@ function* openPrViewSteps(
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
         })
-      : undefined;
+      : bodyAcceptance.length
+        ? reviewContractDigest({ taskId: reviewLedgerKey, acceptance: bodyAcceptance })
+        : undefined;
+    // Unfiled semantic reviews include these defaults; deterministic reviews omit them.
+    // Recompute both known contracts from the current body, retaining the recorded mode only on equality.
+    if (bodyAcceptance.length && (taskId === undefined || taskId === UNFILED_RUN_SENTINEL)) {
+      const semanticContractDigest = reviewContractDigest({
+        taskId: reviewLedgerKey, acceptance: bodyAcceptance,
+        risk: DEFAULT_RISK, budgetUsd: UNTASKED_REVIEW_BUDGET_USD,
+      });
+      if (semanticContractDigest === priorReviewForReuse?.reviewContractDigest) currentContractDigest = semanticContractDigest;
+    }
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
