@@ -172,7 +172,8 @@ export interface ViewBodyEntry {
 /** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */
 export interface ViewBodySource {
   body(view: string, key?: string): ViewBodyEntry | undefined;
-  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  /** Judges `sources` at `now`; given the `body` they came from, by that body's own last build rather than any newer reading of the same source. */
+  judge(sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[];
   switches(): { views: Record<string, ViewSwitchMode> };
   /** Posts `want{view, key}` to the worker (view-demand.ts); false when there is no worker to ask. */
   want?(view: string, key: string): boolean;
@@ -259,7 +260,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
   const requiredParams: Record<string, readonly string[]> = { [TASK_VIEW_NAME]: ["instance", "id"], ...opts.requiredParams };
   const flippedEtags = new WeakMap<ViewBodyEntry, string>();
   const judged = (readModel: ViewBodySource, entry: ViewBodyEntry): { body: ViewBody; etag: string } => {
-    const sources = readModel.judge(entry.body.sources, clock.now());
+    const sources = readModel.judge(entry.body.sources, clock.now(), entry);
     const stale = sources.some((source) => source.state !== "fresh");
     let etag = entry.etag;
     if (stale !== entry.body.stale) {
