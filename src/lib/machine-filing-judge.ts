@@ -376,6 +376,13 @@ export interface MachineJudgePorts {
   excludeFamilies?: readonly string[];
 }
 
+/** Whether a pass moved anything: a ruling proceeded, escalated, refused or settled, or a PR opened. Waiting
+ *  on a PR, an unavailable judge and a failed landing are not new; the garden's pacing backs off on them. */
+export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
+  return report.prUrl !== undefined ||
+    [report.proceeded, report.escalated, report.refused, report.settled].some((ids) => ids.length > 0);
+}
+
 export interface MachineJudgeReport {
   proceeded: string[];
   escalated: string[];

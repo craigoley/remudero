@@ -184,7 +184,7 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
@@ -198,8 +198,8 @@ import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
-import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
+import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, OPERATOR_RELEASES_FILE, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
@@ -36784,13 +36784,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow":
       return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     case "evidence-coverage":
-      return () => {
+      return withDue(() => {
         try {
           runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log }));
         } catch (e) {
           log("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again", error: String((e as Error)?.message ?? e) });
         }
-      };
+      }, () => evidenceCoveragePassDue(stateDir));
     // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
     // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
     case "overseer":
@@ -36816,15 +36816,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work. W1-T5361 moved it off
     // the daemon loop; a pass that throws is still ledgered as machine_judge.failed.
+    // Paced (gardenPacingDue): a pass that judged nothing new widens the wait, and a changed plan tree or
+    // operator release is due at once.
     case "machine-judge": {
       const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
-      return async () => {
+      const inputs = () => machineJudgeInputs(repoRoot, stateDir);
+      return withDue(async () => {
+        const seen = inputs();
+        let found = false;
         try {
-          await runMachineFilingJudge(ports);
+          found = machineJudgeFoundWork(await runMachineFilingJudge(ports));
         } catch (error) {
           log("machine_judge.failed", { error: String((error as Error)?.message ?? error) });
         }
-      };
+        recordGardenPacing(stateDir, "machine-judge", found, { inputs: seen });
+      }, () => gardenPacingDue(stateDir, "machine-judge", { inputs }));
     }
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
@@ -36849,6 +36855,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+/** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
+ *  lives in it) and the operator's releases. A plan that cannot be resolved stamps as unreadable, so it
+ *  differs from any recorded tree and the pass runs and reports the failure. */
+export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
+  let plan: string;
+  try {
+    plan = execFileSync("git", ["-C", repoRoot, "rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
+    plan = "unreadable";
+  }
+  const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });
+  return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
 }
 
 /** The daemon's garden pass spawn (W1-T5475): a child pass logs through the daemon's ledger `log`, not stderr. */
