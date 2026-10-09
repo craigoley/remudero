@@ -52,7 +52,7 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -478,6 +478,8 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, 0);
   }
 
+  if (coverageFirstPass) reportUnparseableCoverage(first, rawCoverageDir);
+
   if (process.env.TEST_RETRY === "0") {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
@@ -516,6 +518,41 @@ export async function main(argv) {
     appendFlakeLedger(parseFailingTestEntries(second.output), "retry ALSO failed");
   }
   return reportTrackedTreeDirt(treeBefore, second.code);
+}
+
+/**
+ * W1-T5767: pass 1 failed with zero test failures and node warned it "Could not report code
+ * coverage" -- a raw V8 file was unparseable (e.g. cut at 64 KiB). Names each such file (name,
+ * bytes, pid) on stdout and $GITHUB_STEP_SUMMARY. Reports only: the exit code is untouched and
+ * nothing is retried.
+ */
+function reportUnparseableCoverage(first, rawDir) {
+  if (!/Could not report code coverage/.test(first.output)) return;
+  if (Number(first.output.match(/^# fail (\d+)$/m)?.[1]) !== 0) return;
+  let names;
+  try {
+    names = readdirSync(rawDir);
+  } catch {
+    return;
+  }
+  for (const name of names.sort()) {
+    const m = name.match(/^coverage-(\d+)-.*\.json$/);
+    if (!m) continue;
+    const path = join(rawDir, name);
+    try {
+      JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      let bytes = -1;
+      try {
+        bytes = statSync(path).size;
+      } catch {
+        /* vanished between read and stat */
+      }
+      const line = `COVERAGE-REPORT-FAILED: ${name} bytes=${bytes} pid=${m[1]} (${err instanceof Error ? err.message : String(err)})`;
+      console.log(line);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
+    }
+  }
 }
 
 /** W1-T4398 — the coverage lane's pass two. Pass one's code stands when nothing can be retried. */
