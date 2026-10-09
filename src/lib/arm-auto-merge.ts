@@ -545,9 +545,9 @@ export interface ArmDeps<A extends boolean = false> {
    *  {@link attemptArm} requires fresh merge facts before every direct-merge fallback and uses
    *  this existing REST update-branch write once when the PR is behind. */
   updateBranch?: (prUrl: string) => MaybeAsync<{ ok: boolean; error?: string }, A>;
-  /** W1-T5472 — OPTIONAL. Whether the PR's changed files reach `plan/`. Absent keeps W1-T3694's
-   *  behind-but-mergeable direct merge for every PR. */
-  readPlanTouch?: (prUrl: string) => MaybeAsync<PlanTouch, A>;
+  /** W1-T5472 — OPTIONAL. Whether changed files reach `plan/`, cached per known head SHA.
+   *  Absent keeps W1-T3694's behind-but-mergeable direct merge for every PR. */
+  readPlanTouch?: (prUrl: string, headSha?: string) => MaybeAsync<PlanTouch, A>;
   /** W1-T5748 — OPTIONAL. What `decidePlanPrMergeSafety` rules on for a behind plan PR GitHub would
    *  merge as-is. Absent: refreshed, as W1-T5472 did. */
   readPlanMergeSafety?: (prUrl: string) => MaybeAsync<PlanMergeSafetyReadings, A>;
@@ -618,10 +618,7 @@ export function realArmDeps(
       if (!target) return { ok: false, error: `cannot resolve update-branch target from ${prUrl}` };
       return ghUpdateBranch(target.owner, target.repo, target.prNumber);
     },
-    readPlanTouch: (prUrl) => {
-      const target = mergeTargetFromPrUrl(prUrl);
-      return target ? planTouchFromRest(target.owner, target.repo, target.prNumber) : "unreadable";
-    },
+    readPlanTouch: (prUrl, headSha) => runStepsSync(cachedPlanTouchSteps(prUrl, headSha, ghJson)),
     readPlanMergeSafety: (prUrl) => runStepsSync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJson, planSafetyGitSync)),
     sleepSync: (ms) => {
       if (ms <= 0) return;
@@ -659,10 +656,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
       if (!target) return { ok: false, error: `cannot resolve update-branch target from ${prUrl}` };
       return runStepsAsync(updateBranchSteps(target.owner, target.repo, target.prNumber, ghTextAsync));
     },
-    readPlanTouch: async (prUrl) => {
-      const target = mergeTargetFromPrUrl(prUrl);
-      return target ? runStepsAsync(planTouchSteps(target.owner, target.repo, target.prNumber, ghJsonAsync)) : "unreadable";
-    },
+    readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
     sleep: async (ms) => { if (ms > 0) await delay(ms); },
     armAuto: async (prUrl) => {
@@ -722,6 +716,21 @@ function* cachedMergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean
   if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
   const value = yield* mergeQueueSteps(prUrl, fetch);
   mergeQueueReads.set(prUrl, { at: now, value });
+  return value;
+}
+
+const planTouchReads = new Map<string, { at: number; value: PlanTouch }>();
+export const PLAN_TOUCH_READ_TTL_MS = 10 * 60_000;
+
+function* cachedPlanTouchSteps(prUrl: string, headSha: string | undefined, fetch: RestReader): Steps<PlanTouch> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return "unreadable";
+  const key = headSha ? `${prUrl}@${headSha}` : undefined;
+  const now = systemClock.now();
+  const hit = key ? planTouchReads.get(key) : undefined;
+  if (hit && now - hit.at < PLAN_TOUCH_READ_TTL_MS) return hit.value;
+  const value = yield* planTouchSteps(target.owner, target.repo, target.prNumber, fetch);
+  if (key && value !== "unreadable") planTouchReads.set(key, { at: now, value });
   return value;
 }
 
@@ -1081,7 +1090,7 @@ function* directMergePreflightSteps(
   // 2026-10-03 #8871 merged two commits behind, git joined its `priority:` line to #8872's in
   // one shard, and the duplicate key refused the whole plan on main. An "unreadable" file list
   // counts as plan-touching.
-  const planTouch = behindBlocksThisMerge ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps);
+  const planTouch = behindBlocksThisMerge ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps, observedHead);
   if (!behindBlocksThisMerge && (planTouch === undefined || planTouch === "untouched")) {
     return {
       proceed: true,
@@ -1155,10 +1164,10 @@ function* directMergePreflightSteps(
 }
 
 /** W1-T5472 — `undefined` only when no reader is wired; a reader that throws reads "unreadable". */
-function* readPlanTouchOrUnreadable(prUrl: string, deps: DirectMergePreflightDeps): Steps<PlanTouch | undefined> {
+function* readPlanTouchOrUnreadable(prUrl: string, deps: DirectMergePreflightDeps, headSha?: string): Steps<PlanTouch | undefined> {
   if (!deps.readPlanTouch) return undefined;
   try {
-    return yield* step(() => deps.readPlanTouch!(prUrl));
+    return yield* step(() => deps.readPlanTouch!(prUrl, headSha));
   } catch (e) {
     // recorded via deps.say, and the value is "unreadable", which takes the update path.
     deps.say(`automerge.plan_touch_unreadable (W1-T5472): ${String((e as Error)?.message ?? e)} — treated as plan-touching: ${prUrl}`);
@@ -1278,7 +1287,7 @@ function* attemptArmSteps(
   // #8997 were armed 3 ms apart from one base, and the second merged behind the first with a
   // duplicate key. It takes the direct path, which updates a behind plan PR first (W1-T5472).
   // An arm GitHub already holds drains under the old rule.
-  const planTouch = deps.armStanding ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps);
+  const planTouch = deps.armStanding ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps, priorHeadSha);
   if (planTouch === "touched" || planTouch === "unreadable") return yield* attemptPlanPrMergeSteps(prUrl, deps, planTouch, priorHeadSha);
   try {
     yield* step(() => deps.armAuto(prUrl));
@@ -1423,7 +1432,7 @@ function planPrUnknownElapsedMs(rows: Array<Record<string, unknown>>, prUrl: str
 
 /**
  * W1-T5615 — a plan-touching (or unreadable) PR, never armed. GitHub's `mergeable_state` reads
- * `clean` or `behind` only once the required checks pass: then the direct path merges a current
+ * `clean`, `behind`, `unstable` or `has_hooks` once required checks pass: the direct path merges a current
  * head or updates a behind one. A caller that observed checks green and review success
  * (`checksGreenReviewed`, W1-T6595) also takes it on a mergeable `blocked` head. Any other state, unreadable facts, or a missing seam holds it
  * unarmed, and the sweep's next `mergeable` pass tries again.
@@ -1456,7 +1465,8 @@ function* attemptPlanPrMergeSteps(
   // W1-T6595: the sweep reached here having SEEN checks green and review success, so `blocked` on a
   // mergeable head is not "checks pending". #10141 sat ~45 min on it while a review merged it at once.
   const greenBlocked = deps.checksGreenReviewed === true && facts.mergeable === "MERGEABLE" && facts.mergeableState === "blocked";
-  if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" || greenBlocked)) {
+  if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" ||
+    facts.mergeableState === "unstable" || facts.mergeableState === "has_hooks" || greenBlocked)) {
     const fresh = facts;
     const preflight = yield* directMergePreflightSteps(
       prUrl,
