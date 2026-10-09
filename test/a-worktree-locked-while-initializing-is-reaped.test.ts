@@ -1,29 +1,17 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
 import { reapStaleWorktrees } from "../src/lib/worker.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-initializing-")));
-  const repo = join(root, "repo");
+  const { dir, git } = gitRepo({ kind: "reap-initializing" });
+  const root = realpathSync(dir);
+  const repo = root;
   const worktrees = join(root, "worktrees");
-  mkdirSync(repo);
   mkdirSync(worktrees);
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "test",
-    GIT_AUTHOR_EMAIL: "test@example.com",
-    GIT_COMMITTER_NAME: "test",
-    GIT_COMMITTER_EMAIL: "test@example.com",
-  };
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env, stdio: "pipe" });
-  git("init", "-b", "main");
-  git("commit", "--allow-empty", "-m", "seed");
   const add = (name: string, reason?: string) => {
     const path = join(worktrees, name);
     git("worktree", "add", "--detach", path);
