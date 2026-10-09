@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   priority: 2.5
   risk: low
   status: queued
@@ -17,3 +17,14 @@
       proof: "grep: test/every-message-names-one-declared-sender\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/every-message-names-one-declared-sender.test.ts for each recorded edge"
       proof: "grep: test/every-message-names-one-declared-sender\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed plan limits the remedy to a named test-selection edge and regression coverage in two corresponding files."
+      - "The supplied scope describes no sensitive access, destructive action, irreversible operation, or merge, deploy, infrastructure, or review policy change."
+      - "The selector-shadow-miss family has 8 merged and 0 declined tasks; the filing-time gates show no concerning condition."
+      - "No diff or actual-change view is supplied; this verdict assesses the proposed scope, not implementation correctness or completed verification."
+    judged_at: "2026-10-09T23:03:49.388Z"
+    pin: "06c39be948410d97e18daf50ba720a38a7c00a98cf05387a01df56c3f1002399"

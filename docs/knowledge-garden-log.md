@@ -119,3 +119,9 @@ Learnings used when offered: 24%. Dangling Why pointers: 1.
 - retire squash-trailer-gate-task-authoring-lane: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 25%. Dangling Why pointers: 1.
+
+## Pass 2026-10-09T23:05:22.282Z
+
+- retire ci-shard-one-eight-refuses-conflict-markers: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 26%. Dangling Why pointers: 1.

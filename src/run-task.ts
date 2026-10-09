@@ -29,6 +29,7 @@ import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeRea
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
+import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
@@ -17635,6 +17636,7 @@ export async function pushFixRoundPrechecked(
   ports: CoveragePrecheckPorts = {},
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
   priorHeadSha?: string,
+  reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
 ): Promise<void> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
@@ -17652,7 +17654,17 @@ export async function pushFixRoundPrechecked(
   }
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  await push(wt, branch, expectedHeadSha, priorHeadSha);
+  try {
+    await push(wt, branch, expectedHeadSha, priorHeadSha);
+  } catch (error) {
+    // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
+    if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
+      priorHeadSha === undefined || expectedHeadSha === undefined) throw error;
+    const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
+      reapply.ports ?? realFixRoundReapplyPorts, log);
+    if (!result.reapplied) throw error;
+    await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+  }
 }
 
 export type CensusPushRungOutcome =
