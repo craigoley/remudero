@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   priority: 2.5
   risk: low
   status: queued
@@ -17,3 +17,13 @@
       proof: "grep: test/a-wall-clock-bound-declares-itself\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/a-wall-clock-bound-declares-itself.test.ts for each recorded edge"
       proof: "grep: test/a-wall-clock-bound-declares-itself\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan specifies a narrow selector repair and regression coverage, with both declared files matching those objectives."
+      - "The supplied scope describes no secrets, permissions, deletion, irreversible action, or merge, deploy, infrastructure, or review policy change."
+      - "This is a filing-time assessment with verify: auto; no failed gates are reported. The family has no recorded outcomes, so its history supplies neither reassurance nor evidence of repeated failure."
+    judged_at: "2026-10-09T23:03:34.761Z"
+    pin: "12f7503121b9bd73b7d6e306489280640f956ce785e6ebc15d022bb331b68474"
