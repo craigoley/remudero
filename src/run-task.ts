@@ -1624,7 +1624,6 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
-  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -45837,7 +45836,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
-          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+          readLiveStateAtAct: effects.readLiveState,
           ledgerPath,
           runId,
           log,
@@ -46201,7 +46200,7 @@ export function buildSweepLightHook(
             // sees one consistent answer.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
-            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            readLiveStateAtAct: effects.readLiveState,
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently

@@ -11000,9 +11000,10 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
-  /** W1-T5749 — a fresh read of ONE PR's live head sha, consulted immediately before ANY acting
-   *  disposition fires. A head that differs from the snapshot's stands the act down as
-   *  `sweep.head_moved`. Omitted, or `undefined` (unreadable): the act proceeds as before. */
+  /** Full act-time guard read, shared with fix arms; stale-red release still reads again. */
+  readLiveStateAtAct?: SweepDeps["readLiveState"];
+  /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
+   *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
@@ -14622,10 +14623,13 @@ export async function runSweep(
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
           // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
-          const liveHead = deps.repairAdmissionSurface === "light" && disposition !== "mergeable"
-            ? undefined : await deps.readLiveHeadSha?.(pr);
+          const guardHead = deps.repairAdmissionSurface !== "light" || disposition === "mergeable";
+          const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
+          const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
+            ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
             acted = false;
+            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead };
             standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
               "since this pass's snapshot — not acting; the next pass re-derives from the live head";
             appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
@@ -14833,7 +14837,7 @@ export async function runSweep(
               // FRESH, right before a strike is spent, never the snapshot this pass started from.
               // Omitted or indeterminate behaves exactly as before — dispatch proceeds, failing
               // OPEN rather than closed to a stand-down.
-              const live = await deps.readLiveState?.(pr);
+              const live = liveAtAct ?? await deps.readLiveState?.(pr);
               let terminal: string | undefined;
               if (live) {
                 if (live.ok) {
@@ -15517,7 +15521,7 @@ export async function runSweep(
             case "conflicted": {
               // W1-T106: the SAME terminal-state pre-flight (W1-T177) as blocked-fixable — never
               // spend a merge-conflict fix strike on a PR that went terminal since the snapshot.
-              const live = await deps.readLiveState?.(pr);
+              const live = liveAtAct ?? await deps.readLiveState?.(pr);
               let terminal: string | undefined;
               if (live) {
                 if (live.ok) {
