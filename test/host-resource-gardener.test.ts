@@ -64,12 +64,15 @@ function history(over: { host?: string; count?: number; stepMin?: number; freeAt
     const tsMs = NOW - (over.endAgoMs ?? 0) - (n - 1 - i) * step;
     const passEvery = (over.janitorEveryH ?? 6) * HOUR;
     const janitorTs = new Date(Math.floor(tsMs / passEvery) * passEvery).toISOString();
+    const consumers = over.consumers?.(i) ?? {};
     return {
       host: over.host ?? "azure",
       beatTs: new Date(tsMs).toISOString(),
       tsMs,
       values: { root_free_kb: over.freeAt(i, n) },
-      consumers: over.consumers?.(i) ?? {},
+      consumers,
+      devices: { root: "/dev/root" },
+      consumerDevices: Object.fromEntries(Object.keys(consumers).map((k) => [k, "/dev/root"])),
       janitorTs,
       janitorFreedKb: over.freed ?? 4 * 1024,
     };
