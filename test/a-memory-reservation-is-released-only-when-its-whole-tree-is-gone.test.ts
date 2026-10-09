@@ -21,10 +21,11 @@ import {
   sweepMemoryReservations,
   UNVERIFIED_AFTER_MS,
   type ContainerGeneration,
-  type HostMemoryLedgerDeps,
+  type HostMemoryLedgerOptions,
   type LedgerInstance,
 } from "../src/lib/host-memory-ledger.js";
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 const OWNER = 100;
 
@@ -33,7 +34,7 @@ function world() {
   const procs = new Map<number, { start: string; parent: number }>([[OWNER, { start: "proc:10", parent: 1 }]]);
   const clock = { now: Date.parse("2026-10-09T00:00:00Z") };
   const logs: Array<Record<string, unknown>> = [];
-  const deps = (over: Partial<HostMemoryLedgerDeps> & { gen?: ContainerGeneration; inst?: LedgerInstance } = {}): HostMemoryLedgerDeps => ({
+  const deps = (over: HostMemoryLedgerOptions & { gen?: ContainerGeneration; inst?: LedgerInstance } = {}): HostMemoryLedgerOptions => ({
     location: () => ({ dir: "/ledger", scope: "host" }),
     instance: () => over.inst ?? { name: "core", hostUnique: true },
     generation: () => over.gen ?? { containerId: "c1", initStart: "proc:1" },
@@ -50,13 +51,59 @@ function world() {
     },
     list: (dir) => [...files.keys()].filter((key) => key.startsWith(`${dir}/`)).map((key) => key.slice(dir.length + 1)),
     remove: (path) => void files.delete(path),
-    now: () => clock.now,
+    clock: {
+      now: () => clock.now,
+      date: () => new Date(clock.now),
+      iso: () => new Date(clock.now).toISOString(),
+    },
     log: (event) => void logs.push(event),
     ownerPid: OWNER,
     ...over,
   });
   return { files, procs, clock, logs, deps };
 }
+
+test("reservation timestamps and foreign-entry ages follow the injected Clock", () => {
+  const w = world();
+  const openedAt = Date.parse("2026-10-10T00:00:00Z");
+  const deps = w.deps({ clock: fixedClock(openedAt) });
+  const handle = openMemoryReservation({ workerClass: "review" }, deps);
+  assert.equal(JSON.parse([...w.files.values()][0]!).openedAt, "2026-10-10T00:00:00.000Z");
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+  assert.equal(JSON.parse([...w.files.values()][0]!).occupancyReleasedAt, "2026-10-10T00:00:00.000Z");
+
+  const verifiedAt = openedAt + 1_000;
+  sweepMemoryReservations(w.deps({ clock: fixedClock(verifiedAt) }));
+  const entry = JSON.parse([...w.files.values()][0]!);
+  assert.equal(entry.verifiedAt, "2026-10-10T00:00:01.000Z");
+  assert.equal(entry.walk.at, entry.verifiedAt);
+  const foreign = w.deps({
+    clock: fixedClock(verifiedAt + UNVERIFIED_AFTER_MS + 1),
+    gen: { containerId: "c2", initStart: "proc:1" },
+    inst: { name: "site", hostUnique: true },
+  });
+  const reading = readMemoryLedger(foreign)?.entries[0];
+  assert.equal(reading?.ageMs, 1_000 + UNVERIFIED_AFTER_MS + 1);
+  assert.equal(reading?.sinceVerifiedMs, UNVERIFIED_AFTER_MS + 1);
+  assert.equal(reading?.status, "uncertain");
+  assert.equal(w.files.size, 1);
+});
+
+test("the real process walk uses the injected Clock for its deadline", { skip: !existsSync("/proc/self/stat") }, () => {
+  let reads = 0;
+  const clock = { ...fixedClock(0), now: () => reads++ * 1_001 };
+  assert.deepEqual(defaultListProcesses({ maxEntries: 100_000, maxMs: 1_000 }, clock), {
+    rows: [], complete: false, reason: "time bound 1000ms",
+  });
+  const w = world();
+  reads = 0;
+  const deps = w.deps({ clock, listProcesses: undefined, limits: { maxEntries: 100_000, maxMs: 1_000 } });
+  openMemoryReservation({ workerClass: "review" }, deps);
+  assert.equal(sweepMemoryReservations(deps)?.reading.counts.incompleteWalk, 1);
+  assert.equal(JSON.parse([...w.files.values()][0]!).walk.reason, "time bound 1000ms");
+});
 
 test("a reservation survives its root's exit while a recorded descendant lives, and is released once every recorded (pid, start time) is gone", () => {
   const w = world();
@@ -230,7 +277,7 @@ test("a throwing ledger write leaves the worker start unchanged", async () => {
 test("the real /proc seams bind a live child and release only after it exits", { skip: !existsSync("/proc/self/stat") }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-host-memory-"));
   try {
-    const deps: HostMemoryLedgerDeps = { location: () => ({ dir, scope: "local" }), root: "/nonexistent/Remudero", log: () => undefined };
+    const deps: HostMemoryLedgerOptions = { location: () => ({ dir, scope: "local" }), root: "/nonexistent/Remudero", log: () => undefined };
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const exited = new Promise((resolve) => child.once("exit", resolve));
     const handle = openMemoryReservation({ workerClass: "review" }, deps);

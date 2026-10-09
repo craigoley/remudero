@@ -28,6 +28,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join } from "node:path";
 
+import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveTestSlotDir, testSlotProcessFacts } from "./test-slot.js";
 
@@ -89,24 +90,18 @@ export interface ProcessListing {
   reason?: string;
 }
 
-export interface HostMemoryLedgerDeps {
+export type HostMemoryLedgerOptions = Partial<Pick<Context,
+  "clock" | "probe" | "listProcesses" | "write" | "read" | "list" | "remove" | "limits"
+>> & {
   /** The ledger directory and whether it is host-wide. Default: `<test slot dir>/host-memory`. */
   location?: () => { dir: string; scope: "host" | "local" };
   instance?: (root: string) => LedgerInstance;
   generation?: () => ContainerGeneration;
-  probe?: (pid: number) => ProbeResult;
-  listProcesses?: (limits: WalkLimits) => ProcessListing;
-  write?: (path: string, content: string) => void;
-  read?: (path: string) => string;
-  list?: (dir: string) => string[];
-  remove?: (path: string) => void;
-  now?: () => number;
   log?: (event: Record<string, unknown>) => void;
   ownerPid?: number;
   /** The state root whose name is the instance. Default `~/Remudero`, the config default. */
   root?: string;
-  limits?: WalkLimits;
-}
+};
 
 export interface WalkLimits {
   maxEntries: number;
@@ -170,7 +165,7 @@ export interface SweepResult {
 
 const seenDiagnostics = new Set<string>();
 
-function recordError(deps: HostMemoryLedgerDeps, op: string, error: unknown): void {
+function recordError(deps: HostMemoryLedgerOptions, op: string, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
   const key = `${op}:${reason}`;
   if (seenDiagnostics.has(key)) return;
@@ -227,8 +222,8 @@ function procMounted(): boolean {
 }
 
 /** The real bounded /proc listing. Hitting either bound, or an unreadable /proc, is INCOMPLETE — never empty. */
-export function defaultListProcesses(limits: WalkLimits): ProcessListing {
-  const startedAt = Date.now();
+export function defaultListProcesses(limits: WalkLimits, clock: Clock = systemClock): ProcessListing {
+  const startedAt = clock.now();
   let names: string[];
   try {
     names = readdirSync("/proc").filter((name) => /^[0-9]+$/.test(name));
@@ -238,7 +233,7 @@ export function defaultListProcesses(limits: WalkLimits): ProcessListing {
   const rows: ProcessRow[] = [];
   for (const [index, name] of names.entries()) {
     if (index >= limits.maxEntries) return { rows, complete: false, reason: `entry bound ${limits.maxEntries}` };
-    if (Date.now() - startedAt > limits.maxMs) return { rows, complete: false, reason: `time bound ${limits.maxMs}ms` };
+    if (clock.now() - startedAt > limits.maxMs) return { rows, complete: false, reason: `time bound ${limits.maxMs}ms` };
     try {
       const stat = parseProcStat(readFileSync(`/proc/${name}/stat`, "utf8"));
       if (stat && !stat.zombie) rows.push({ pid: Number(name), parent: stat.parent, start: stat.start });
@@ -282,7 +277,7 @@ interface Context {
   scope: "host" | "local";
   instance: LedgerInstance;
   generation: ContainerGeneration;
-  now: () => number;
+  clock: Clock;
   probe: (pid: number) => ProbeResult;
   write: (path: string, content: string) => void;
   read: (path: string) => string;
@@ -292,13 +287,14 @@ interface Context {
   limits: WalkLimits;
 }
 
-function contextOf(deps: HostMemoryLedgerDeps): Context {
+function contextOf(deps: HostMemoryLedgerOptions): Context {
   const location = (deps.location ?? defaultLocation)();
+  const clock = deps.clock ?? systemClock;
   return {
     ...location,
     instance: (deps.instance ?? defaultInstance)(deps.root ?? join(homedir(), "Remudero")),
     generation: (deps.generation ?? defaultGeneration)(),
-    now: deps.now ?? Date.now,
+    clock,
     probe: deps.probe ?? defaultProbe,
     write: deps.write ?? ((path, content) => {
       mkdirSync(location.dir, { recursive: true });
@@ -307,7 +303,7 @@ function contextOf(deps: HostMemoryLedgerDeps): Context {
     read: deps.read ?? ((path) => readFileSync(path, "utf8")),
     list: deps.list ?? ((dir) => readdirSync(dir)),
     remove: deps.remove ?? ((path) => rmSync(path, { force: true })),
-    listProcesses: deps.listProcesses ?? defaultListProcesses,
+    listProcesses: deps.listProcesses ?? ((limits) => defaultListProcesses(limits, clock)),
     limits: deps.limits ?? DEFAULT_WALK_LIMITS,
   };
 }
@@ -371,15 +367,15 @@ const NOOP_HANDLE: MemoryReservationHandle = { id: undefined, bindRoot: () => un
  * Open one reservation at worker-claim time. NEVER throws: on any failure it logs a diagnostic and
  * returns a handle whose methods are no-ops, so the worker start is unchanged.
  */
-export function openMemoryReservation(input: OpenReservationInput, deps: HostMemoryLedgerDeps = {}): MemoryReservationHandle {
+export function openMemoryReservation(input: OpenReservationInput, deps: HostMemoryLedgerOptions = {}): MemoryReservationHandle {
   let ctx: Context;
   let entry: MemoryReservationEntry;
-  const merged: HostMemoryLedgerDeps = { ...deps, root: input.root ?? deps.root };
+  const merged: HostMemoryLedgerOptions = { ...deps, root: input.root ?? deps.root };
   try {
     ctx = contextOf(merged);
     const ownerPid = deps.ownerPid ?? process.pid;
     const owner = ctx.probe(ownerPid);
-    const nowIso = new Date(ctx.now()).toISOString();
+    const nowIso = ctx.clock.iso();
     entry = {
       schema: 1,
       id: `${ctx.instance.name.replace(/[^A-Za-z0-9_.-]/g, "_")}-${ownerPid}-${randomUUID()}`,
@@ -420,7 +416,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
     },
     releaseOccupancy(): void {
       try {
-        entry = { ...entry, occupancyReleasedAt: new Date(ctx.now()).toISOString() };
+        entry = { ...entry, occupancyReleasedAt: ctx.clock.iso() };
         mergeAndPersist(ctx, entry);
         sweepWith(ctx, deps);
       } catch (error) {
@@ -454,7 +450,7 @@ function walkDescendants(entry: MemoryReservationEntry, listing: ProcessListing)
 type Verdict = { release: SweepResult["released"][number]["rule"] } | { keep: MemoryReservationEntry };
 
 function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: ProcessListing): Verdict {
-  const nowIso = new Date(ctx.now()).toISOString();
+  const nowIso = ctx.clock.iso();
   const tree = union(entry.tree, walkDescendants(entry, listing));
   const walked: MemoryReservationEntry = {
     ...entry,
@@ -480,7 +476,7 @@ function generationEnded(ctx: Context, entry: MemoryReservationEntry): boolean {
 }
 
 function readingOf(ctx: Context, live: Array<{ entry: MemoryReservationEntry; path: string }>, unreadable: number): HostMemoryReading {
-  const now = ctx.now();
+  const now = ctx.clock.now();
   const entries = live.map(({ entry, path }): ReadingEntry => {
     const owned = sameGeneration(entry.generation, ctx.generation);
     const sinceVerifiedMs = Math.max(0, now - Date.parse(entry.verifiedAt));
@@ -539,7 +535,7 @@ function listEntries(ctx: Context): { live: Array<{ entry: MemoryReservationEntr
   return { live, unreadable };
 }
 
-function sweepWith(ctx: Context, deps: HostMemoryLedgerDeps): SweepResult {
+function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
   const { live, unreadable } = listEntries(ctx);
   const owned = live.filter(({ entry }) => sameGeneration(entry.generation, ctx.generation));
   const listing = owned.length > 0 ? ctx.listProcesses(ctx.limits) : { rows: [], complete: true };
@@ -577,7 +573,7 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerDeps): SweepResult {
  * The owner's pass: walk descendants of its own entries and release only what is verified gone.
  * Intended for each `daemon.alive` tick. NEVER throws; a failure returns undefined after a diagnostic.
  */
-export function sweepMemoryReservations(deps: HostMemoryLedgerDeps = {}): SweepResult | undefined {
+export function sweepMemoryReservations(deps: HostMemoryLedgerOptions = {}): SweepResult | undefined {
   try {
     return sweepWith(contextOf(deps), deps);
   } catch (error) {
@@ -587,7 +583,7 @@ export function sweepMemoryReservations(deps: HostMemoryLedgerDeps = {}): SweepR
 }
 
 /** The pure reader for W1-T7094: live entries plus uncertain, incomplete-walk and local-scope counts. Writes nothing. */
-export function readMemoryLedger(deps: HostMemoryLedgerDeps = {}): HostMemoryReading | undefined {
+export function readMemoryLedger(deps: HostMemoryLedgerOptions = {}): HostMemoryReading | undefined {
   try {
     const ctx = contextOf(deps);
     const { live, unreadable } = listEntries(ctx);
