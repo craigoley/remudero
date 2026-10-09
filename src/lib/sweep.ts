@@ -12115,6 +12115,10 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = true;
     } else if (line.step === "fix.review") {
       stalled = line.state !== "success";
+    } else if (line.step === "fix.stood_down") {
+      // A stand-down ENDS the rung without a commit, so the next pass re-derives the remedy rather
+      // than deduping this head forever. Only a hand-off to the sweep (it now owns the wait) is live.
+      stalled = line.outcome !== "handed_off";
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
