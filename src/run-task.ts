@@ -1608,6 +1608,7 @@ import {
   operatorVerdictEvidence,
   renderClarificationQuestion,
   renderSweepSummary,
+  type SweepSummary,
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   runCreditBackfill,
@@ -1704,6 +1705,9 @@ import {
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
   riskJudgeHandedOffHead,
+  handedOffHeadJudgmentPool,
+  type HandedOffHeadJudgmentPool,
+  awaitHandedOffHeadJudgments,
   riskJudgeCodeScanning,
   codeScanningHeadSettled,
   reviewInputLoopFacts,
@@ -44446,6 +44450,18 @@ export function captureRepairFeedbackWithPriorVerdict(
   captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
 }
 
+/** The one-shot boundary owns and drains its judgment pool before returning a summary. */
+export async function runOneShotSweep(
+  run: (pool: HandedOffHeadJudgmentPool) => Promise<SweepSummary>,
+  pool = handedOffHeadJudgmentPool(),
+): Promise<SweepSummary> {
+  try {
+    return await run(pool);
+  } finally {
+    await awaitHandedOffHeadJudgments(pool);
+  }
+}
+
 /**
  * `rmd sweep [--repo <name>] [--dry-run]` — run ONE level-triggered reconciliation
  * pass over every open PR (W1-T77, ratifies P22 core). FAIL LOUD on junk args
@@ -44530,7 +44546,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
   // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
-  const summary = await runSweep(
+  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweep(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     withFullSweepRepairAdmission({
       ...effects,
@@ -44544,10 +44560,11 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
     DEFAULT_SWEEP_POLICY,
-  );
+  ));
 
   // W1-T150 — the credit-backfill rung (ratifies P30): level-triggered, like
   // the open-PR reconciliation above, but over every task's OWNED merge state
