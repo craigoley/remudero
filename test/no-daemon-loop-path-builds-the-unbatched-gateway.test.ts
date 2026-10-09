@@ -12,22 +12,15 @@
  *     `ghGateway(` is the population; loop reach is a name-based fixed point seeded from
  *     `daemonCommand`'s body. A reachable member is refused by name unless a shrink-only exemption
  *     names why its calls are bounded per pass.
- *  2. BEHAVIOUR: the real draft rung answers readiness for 50 plan tasks with zero `gh` search spawns.
+ *  2. DRAFT RUNG: the hook builds neither gateway; its execution tests live in the dedicated
+ *     inbox-draft-hook suite.
  */
 // @source-text-subject: src/**/*.ts — the claim is a property of EVERY function that builds the
 // gateway, including paths no single execution drives; the same shape as test/gh-transport-census.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, ghGateway } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildDepsReadinessAccessors, buildInboxDraftHook } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
 
 /** Functions the loop DOES reach that build the unbatched gateway, with the reason each is bounded.
  *  SHRINK-ONLY: an entry the census no longer reaches (or whose function no longer builds the
@@ -178,64 +171,12 @@ test("unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-g
   ]);
 });
 
-/** A `gh` on PATH that logs every invocation: the only way to SEE a synchronous spawn. */
-function withCountingGh<T>(body: (calls: () => string[]) => T): T {
-  const shim = ghShim([{ when: "api", stdout: "[]" }], { kind: "t5650-gh" });
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
-  try {
-    return body(() => shim.calls().filter((l) => /search/.test(l)));
-  } finally {
-    process.env.PATH = oldPath;
-  }
-}
-
-function unlandedTasks(n: number): Task[] {
-  const plan = loadPlan(new URL("../plan/tasks.yaml", import.meta.url).pathname);
-  // Unlanded only: a plan-merged task resolves without asking GitHub, which would let an unbatched
-  // gateway pass unseen.
-  const tasks = [...plan.byId.values()].filter((t) => t.status === "queued" || t.status === "blocked").slice(0, n);
-  assert.equal(tasks.length, n, `the live plan holds at least ${n} unlanded tasks to derive`);
-  return tasks;
-}
-
-test("unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — inbox-draft readiness answers isMerged for 50 plan tasks with zero unbatched trailer searches", () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5650-`));
-  const ledgerPath = join(dir, "ledger.ndjson");
-  writeFileSync(ledgerPath, "");
-  const tasks = unlandedTasks(50);
-  const plan = { byId: new Map(tasks.map((t) => [t.id, t])) } as unknown as Plan;
-  withCountingGh((searches) => {
-    // CONTROL: the instrument sees the unbatched gateway. 50 tasks cost 50 synchronous searches.
-    const unbatched = buildDepsReadinessAccessors(plan, { ledgerPath, github: ghGateway("o", "r") });
-    for (const t of tasks) unbatched.isMerged(t);
-    assert.ok(searches().length >= 50, `the control must see one search per task; saw ${searches().length}`);
-  });
-  withCountingGh((searches) => {
-    // The gateway the draft rung now receives: the sweep's daemon-lifetime batched one.
-    const batched = buildBatchedGithub("o", "r", { fetchAll: () => [], fetchAllIssues: () => [], commitTrailerIndex: () => new Map() });
-    const accessors = buildDepsReadinessAccessors(plan, { ledgerPath, github: batched });
-    for (const t of tasks) assert.equal(accessors.isMerged(t), false);
-    assert.deepEqual(searches(), [], "50 isMerged answers, zero unbatched trailer searches");
-  });
-});
-
-test("the draft rung runs clean on the injected batched gateway and spawns no search", async () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5650c-`));
-  const root = join(dir, "root");
-  mkdirSync(join(root, "state"), { recursive: true });
-  const ids = unlandedTasks(50).map((t) => t.id);
-  writeFileSync(
-    join(root, "state", "inbox-proposals.json"),
-    JSON.stringify({ proposals: ids.map((id) => ({ id: `proof-debt:${id}`, summary: "s", evidenceAnchors: [] })) }),
-  );
-  const batched = buildBatchedGithub("o", "r", { fetchAll: () => [], fetchAllIssues: () => [], commitTrailerIndex: () => new Map() });
-  const logs: string[] = [];
-  await withCountingGh(async (searches) => {
-    const hook = buildInboxDraftHook("o", "r", { root } as Config, "RUN-5650", (s) => void logs.push(s), async () => [], undefined, () => "sha", batched);
-    await hook();
-    assert.deepEqual(searches(), []);
-  });
-  assert.ok(!logs.includes("inbox.draft_readiness_unavailable"), "readiness was built, not skipped");
-  assert.ok(!logs.includes("inbox.draft_rung.error"), "the rung itself ran clean");
+test("unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the inbox draft hook builds no gateway", () => {
+  const hook = topLevelFunctions().find((fn) => fn.name === "buildInboxDraftHook");
+  assert.ok(hook, "the census finds the draft hook");
+  const buildsGateway = /\b(?:buildBatchedGithub|ghGateway)\(/;
+  assert.doesNotMatch(hook.body, buildsGateway);
+  assert.match(hook.body + "\n const gateway = buildBatchedGithub(owner, repo);", buildsGateway,
+    "restoring either gateway is visible to the census");
+  assert.match(hook.body + "\n const gateway = ghGateway(owner, repo);", buildsGateway);
 });
