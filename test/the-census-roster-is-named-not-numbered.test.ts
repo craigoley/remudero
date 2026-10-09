@@ -158,6 +158,8 @@ test("a hand-added FAST_GATE_STEPS-shaped entry with no roster member fails the 
 // ═══════════════ acceptance: "the roster refuses nothing on its own and cannot fail a preflight ═══
 // ═══════════════ run by itself — admission stays the measured bound's decision" ═══════════════════
 
+// W1-T6884: flake incident (PRs #10202, #10234, #10253) — the cause was live census
+// execution and wall-clock timing; this test now runs fully injected, so it cannot flake.
 // W1-T6885: roster wiring must not depend on live census health or runner contention.
 // Inject commands and time: healthy commands may exceed the soft bound; a confirmed
 // runaway and a failed command must still fail through the real preflight engine.
