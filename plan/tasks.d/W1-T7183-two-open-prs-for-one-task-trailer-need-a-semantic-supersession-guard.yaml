@@ -11,7 +11,9 @@
   origin: feedback#fb-1789935292646-eff0ac
   plan_refs: [W1-T2794, W1-T5520, W1-T920, W1-T3219, W1-T3535]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/supersession-pair.ts, test/open-pr-pair-semantic-supersession.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=4535eb1aefe8c28e
   attempts: 0
   rationale: |
     GROUNDING. Neighbouring work does NOT cover this. W1-T2794 closes an open PR once its task has MERGED.
