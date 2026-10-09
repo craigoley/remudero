@@ -1,30 +1,20 @@
 /**
- * THE FLEET'S FULL TYPE-CHECK IS INCREMENTAL, PER WORKTREE, AND STARTS WARM.
+ * THE FLEET'S FULL TYPE-CHECK IS INCREMENTAL, PER WORKTREE, AND STARTS WARM. A cold check of src plus ~3,000 test files
+ * peaked at 3.0–3.7 GB RSS in the daemon container (2026-10-09); against its own buildinfo it peaks at about half that
+ * and reports the identical diagnostics — tsc keys every cached result by file hash and dependency graph. Measurements:
+ * the PR that added this module.
  *
- * OBSERVED 2026-10-09 on the fleet host: a cold `tsc -p tsconfig.json --noEmit` (src plus ~3,000 test files) peaks at
- * 3.0–3.7 GB RSS inside the core daemon container, beside a 3–4.5 GB daemon, and validation containers with a 4 GiB
- * limit OOM-killed it 7 times in 3 days. MEASURED 2026-10-09 on a clone at 372b7f501 (TS 7.0.2): a cold check peaks at
- * 2.7–3.0 GB and ~12 CPU-seconds; the same check against its own `.tsbuildinfo` peaks at ~1.35 GB and ~2.5 CPU-seconds,
- * and reports the identical diagnostics (an edit that breaks a dependent file is still reported — tsc keys every cached
- * result by file content hash and dependency graph).
+ * WHERE THE BUILDINFO LIVES. In the checkout's own git directory (`.git/`, or `.git/worktrees/<name>/` for a linked
+ * worktree): per worktree, invisible to `git status` and every `git ls-files` census, never committable, gone with the
+ * worktree. A tree with no git directory runs the plain check.
  *
- * WHERE THE BUILDINFO LIVES. In the checkout's own git directory — `.git/` for the canonical checkout, the private
- * `.git/worktrees/<name>/` for a linked worktree — so it is per worktree, invisible to `git status` and every
- * `git ls-files` census, never committable, and gone when the worktree is removed. A tree with no git directory gets
- * no buildinfo and runs the plain check.
+ * WHY A SEED NEEDS REBASING. tsc writes every buildinfo path relative to the buildinfo, resolving `node_modules` through
+ * its symlink. A fleet worktree at `worktrees/<id>` links the canonical checkout's `node_modules`, so a verbatim seed's
+ * `./node_modules/...` names nothing and the first check runs cold. Tree files keep their tree-relative path; anything
+ * outside the tree (its `node_modules` and git directory included) keeps its absolute location.
  *
- * WHY A SEED NEEDS REBASING. tsc writes every path in the buildinfo relative to the buildinfo itself, and resolves
- * `node_modules` through its symlink. On the fleet a worktree at `worktrees/<id>` links `node_modules` to the canonical
- * checkout's, so the canonical buildinfo's `./node_modules/...` reads as `../../remudero/node_modules/...` from the
- * worktree. A seed copied verbatim misses every declaration file and the first check runs cold (MEASURED: 3.9 s and
- * 2.6 GB verbatim at a different depth, 1.4 s and 1.4 GB rebased). The tree's own files keep their tree-relative path;
- * everything outside the tree (its `node_modules` and git directory included) keeps its absolute location.
- *
- * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT. tsc re-hashes every file it reads and discards any cached entry whose
- * hash, options or version differ, so a stale, foreign or unparseable seed degrades to a cold check. The version guard
- * below only skips work tsc would throw away.
- *
- * This module imports node builtins only, so `scripts/check.mjs` loads it directly under Node's type stripping.
+ * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
+ * Node builtins only, so `scripts/check.mjs` loads this directly under Node's type stripping.
  */
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
