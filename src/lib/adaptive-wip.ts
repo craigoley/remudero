@@ -112,6 +112,7 @@ export function assembleAdaptiveQueueFlow(inputs: AdaptiveQueueFlowInputs): Adap
   try {
     headroomFraction = inputs.readHeadroom();
   } catch (error) {
+    // Unread, never "plenty": the bound stays unscaled and the reason rides the ledger row.
     headroomError = error instanceof Error ? error.message : String(error);
   }
   const stuckOwnedCount = inputs.ownedPrNumbers === undefined
