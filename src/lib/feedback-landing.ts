@@ -16,8 +16,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import { ghExec, ghTextAsync } from "./github-transport.js";
 import {
   existsSync,
   mkdirSync,
@@ -113,6 +114,8 @@ const LANDING_AUTHOR_EMAIL = "318611788+remudero-fleet[bot]@users.noreply.github
 
 type GitExec = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 type GhExec = (args: string[]) => string;
+type GitExecAsync = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => Promise<string>;
+type GhExecAsync = (args: string[]) => Promise<string>;
 export type LandingReviewRequest = (prUrl: string) => void | Promise<void>;
 
 export interface LandingRepository {
@@ -202,20 +205,66 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-type PreflightSteps<R> = Generator<PlanPrPreflightAsk, R, PlanPrPreflightResult>;
+/** W1-T5672: a network call the landing generator hands its driver. The sync driver runs `run` on the
+ *  thread; the async driver awaits `runAsync`, so the loop turns while the child process lives. */
+type NetAsk = { run: () => string; runAsync: () => Promise<string> };
+type LandingAsk = PlanPrPreflightAsk | NetAsk;
+type AskReply = PlanPrPreflightResult | string;
+type PreflightSteps<R> = Generator<LandingAsk, R, AskReply>;
 type LandingSteps = PreflightSteps<LandFeedbackResult>;
+type NetSteps = Generator<LandingAsk, string, AskReply>;
+
+const isNetAsk = (ask: LandingAsk): ask is NetAsk => "runAsync" in ask;
+
+/** The landing's network seam (W1-T5672): the verbs that leave the machine — fetch, ls-remote, push and
+ *  every `gh` call — as yieldable asks. Local plumbing (hash-object, rev-parse, …) stays on the sync `git`. */
+interface LandingNet {
+  git(args: string[], opts?: { env?: NodeJS.ProcessEnv }): NetSteps;
+  gh(args: string[]): NetSteps;
+}
+
+function landingNet(git: GitExec, gh: GhExec, seam: { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync } = {}): LandingNet {
+  return {
+    *git(args, opts) {
+      return (yield {
+        run: () => git(args, opts),
+        runAsync: () => (seam.gitAsync ? seam.gitAsync(args, opts) : Promise.resolve().then(() => git(args, opts))),
+      }) as string;
+    },
+    *gh(args) {
+      return (yield {
+        run: () => gh(args),
+        runAsync: () => (seam.ghAsync ? seam.ghAsync(args) : Promise.resolve().then(() => gh(args))),
+      }) as string;
+    },
+  };
+}
+
+/** The async seam for a per-poll sweep: an explicit one wins, an injected sync `git`/`gh` is resolved as-is
+ *  (an offline test seam), and only an un-injected one spawns a real, awaited child process. */
+function asyncSeamsOf(
+  root: string,
+  opts: { git?: GitExec; gh?: GhExec; gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
+): { gitAsync: GitExecAsync; ghAsync: GhExecAsync } {
+  const { git, gh } = opts;
+  return {
+    gitAsync: opts.gitAsync ?? (git ? async (args, o) => git(args, o) : defaultGitAsync(root)),
+    ghAsync: opts.ghAsync ?? (gh ? async (args) => gh(args) : defaultGhAsync()),
+  };
+}
 
 function driveLanding<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightFn): R {
   let step = steps.next();
   while (!step.done) {
-    let verdict: PlanPrPreflightResult;
+    let reply: AskReply;
     try {
-      verdict = preflight(step.value.commitSha, step.value.pr);
+      const ask = step.value;
+      reply = isNetAsk(ask) ? ask.run() : preflight(ask.commitSha, ask.pr);
     } catch (e) {
       step = steps.throw(e);
       continue;
     }
-    step = steps.next(verdict);
+    step = steps.next(reply);
   }
   return step.value;
 }
@@ -223,14 +272,15 @@ function driveLanding<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightFn)
 async function driveLandingAsync<R>(steps: PreflightSteps<R>, preflight: PlanPrPreflightAsyncFn): Promise<R> {
   let step = steps.next();
   while (!step.done) {
-    let verdict: PlanPrPreflightResult;
+    let reply: AskReply;
     try {
-      verdict = await preflight(step.value.commitSha, step.value.pr);
+      const ask = step.value;
+      reply = isNetAsk(ask) ? await ask.runAsync() : await preflight(ask.commitSha, ask.pr);
     } catch (e) {
       step = steps.throw(e);
       continue;
     }
-    step = steps.next(verdict);
+    step = steps.next(reply);
   }
   return step.value;
 }
@@ -249,6 +299,19 @@ function defaultGit(root: string): GitExec {
 
 function defaultGh(): GhExec {
   return (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+const execFileAsync = promisify(execFile);
+
+/** {@link defaultGit} as an awaited child process (W1-T5672): the per-poll sweep's network verbs run here. */
+function defaultGitAsync(root: string): GitExecAsync {
+  return async (args, opts) =>
+    (await execFileAsync("git", ["-C", root, ...args], { encoding: "utf8", env: opts?.env ?? process.env })).stdout;
+}
+
+/** {@link defaultGh} through the paced, timeout-bound async transport (W1-T5672). */
+function defaultGhAsync(): GhExecAsync {
+  return (args) => ghTextAsync(args);
 }
 
 /** Remove only redundant untracked queue copies whose exact bytes are already readable from
@@ -616,10 +679,10 @@ function landingRepoArgs(identity: Pick<LandingIdentity, "targetRepository">): s
  * hand repair this task's rationale describes. Touches exactly this ONE ref, never the falsifier's
  * forbidden broad sweep. A throw here propagates, never "assume absent".
  */
-function refreshLandingRef(git: GitExec, branch: string): boolean {
-  const advertised = git(["ls-remote", "--heads", "origin", `refs/heads/${branch}`]).trim();
+function* refreshLandingRef(git: GitExec, net: LandingNet, branch: string): Generator<LandingAsk, boolean, AskReply> {
+  const advertised = (yield* net.git(["ls-remote", "--heads", "origin", `refs/heads/${branch}`])).trim();
   if (advertised.length > 0) {
-    git(["fetch", "origin", "--quiet", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    yield* net.git(["fetch", "origin", "--quiet", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     return true;
   }
   let staleSha: string | undefined;
@@ -712,13 +775,14 @@ function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string
  * inline fallback-to-empty in {@link landContent} could not distinguish from "nothing pending".
  * Why: docs/forensics/feedback-landing.md#readbranchpending.
  */
-function readBranchPending(
+function* readBranchPending(
   git: GitExec,
+  net: LandingNet,
   kind: LandingKind,
-): { ok: true; tipSha: string | undefined; files: string[] } | { ok: false; reason: string } {
+): Generator<LandingAsk, { ok: true; tipSha: string | undefined; files: string[] } | { ok: false; reason: string }, AskReply> {
   let remoteHasBranch: boolean;
   try {
-    remoteHasBranch = refreshLandingRef(git, kind.branch); // W1-T3888: the ACTUAL remote state
+    remoteHasBranch = yield* refreshLandingRef(git, net, kind.branch); // W1-T3888: the ACTUAL remote state
   } catch (e) {
     return { ok: false, reason: `cannot refresh ${kind.branch}'s remote ref: ${String((e as Error)?.message ?? e)}` };
   }
@@ -794,14 +858,14 @@ function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | 
  * operator ran `rmd review` by hand (#5317/W1-T3990). Keeping the bridge at "open or reuse" also
  * makes a failed review retryable without a duplicate merge arm.
  */
-function ensurePrOpen(
+function* ensurePrOpen(
   kind: LandingKind,
-  gh: GhExec,
+  net: LandingNet,
   body: string,
   requestReview?: LandingReviewRequest,
   refreshBody = false,
-): { prUrl?: string; error?: string } {
-  const existing = findPendingLandingPr({ gh, identity: kind });
+): Generator<LandingAsk, { prUrl?: string; error?: string }, AskReply> {
+  const existing = yield* findPendingLandingPrSteps(net, kind);
   if (existing) {
     let refreshError: string | undefined;
     if (refreshBody) {
@@ -809,7 +873,7 @@ function ensurePrOpen(
         const target = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(existing);
         if (!target) throw new Error(`cannot resolve owner/repo/number from ${existing}`);
         assertLiveWriteAllowed("gh-pr-create", `refreshing the landing PR body of ${existing}`);
-        gh(["api", "-X", "PATCH", `repos/${target[1]}/${target[2]}/pulls/${target[3]}`, "-f", `body=${body}`]);
+        yield* net.gh(["api", "-X", "PATCH", `repos/${target[1]}/${target[2]}/pulls/${target[3]}`, "-f", `body=${body}`]);
       } catch (e) {
         refreshError = `refreshing the body of ${existing} failed: ${String((e as Error)?.message ?? e)}`;
       }
@@ -829,7 +893,7 @@ function ensurePrOpen(
   let prUrl: string | undefined;
   try {
     assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
-    const out = gh([
+    const out = yield* net.gh([
       "pr",
       "create",
       "--base",
@@ -881,9 +945,9 @@ function ensurePrOpen(
 function* finishLanding(
   kind: LandingKind,
   git: GitExec,
-  gh: GhExec,
+  net: LandingNet,
   build: LandingTreeBuild,
-  rebuild: () => LandingTreeBuild,
+  rebuild: () => Generator<LandingAsk, LandingTreeBuild, AskReply>,
   env: NodeJS.ProcessEnv,
   opts: LandFeedbackOpts,
 ): LandingSteps {
@@ -899,11 +963,11 @@ function* finishLanding(
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   const bodyOf = (b: LandingTreeBuild): string => kind.prBody(b.unlanded, landingTreeContent(git, b));
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(build), requestReview);
+    const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(build), requestReview);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
-  const pushOnce = function* (b: LandingTreeBuild): Generator<PlanPrPreflightAsk, void, PlanPrPreflightResult> {
+  const pushOnce = function* (b: LandingTreeBuild): Generator<LandingAsk, void, AskReply> {
     const message = kind.commitMessage(b.unlanded);
     const commitSha = git(
       [
@@ -927,13 +991,15 @@ function* finishLanding(
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
     const lane = `${kind.family}-landing`;
-    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? (yield { commitSha, pr: { title: kind.prTitle, body: bodyOf(b) } });
+    const verdict =
+      refusedPlanPrTrees.get(b.treeSha) ??
+      ((yield { commitSha, pr: { title: kind.prTitle, body: bodyOf(b) } }) as PlanPrPreflightResult);
     if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
     refuseRedPlanPr(verdict, { lane, branch: kind.branch, log: opts.log });
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
       : `--force-with-lease=refs/heads/${kind.branch}:`;
-    git(["push", lease, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
+    yield* net.git(["push", lease, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
   };
 
   try {
@@ -945,12 +1011,12 @@ function* finishLanding(
     // fixes (W1-T3560 design (i)).
     let retried: LandingTreeBuild;
     try {
-      retried = rebuild();
+      retried = yield* rebuild();
     } catch (e) {
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
-      const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(retried), requestReview);
+      const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(retried), requestReview);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
@@ -975,7 +1041,7 @@ function* finishLanding(
     build = retried;
   }
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(build), requestReview, true);
+  const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(build), requestReview, true);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return withRefused(
@@ -992,6 +1058,9 @@ interface LandPendingOpts extends LandFeedbackOpts {
   reportAcknowledgement?: boolean;
   /** Only the named sweep drains the `stateRoot` queue, into the SAME tree and preflight. */
   drainQueue?: boolean;
+  /** W1-T5672: awaited forms of the network verbs, used only when an async driver runs the steps. */
+  gitAsync?: GitExecAsync;
+  ghAsync?: GhExecAsync;
 }
 
 function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
@@ -1007,9 +1076,20 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     acknowledgement && opts.reportAcknowledgement ? { ...result, acknowledgement } : result;
 
   const queueRoot = opts.drainQueue ? opts.stateRoot : undefined;
+  const net = landingNet(git, gh, opts);
 
   try {
-    git(["fetch", "origin", "--quiet"]);
+    // W1-T5672: with no dirty file under the owned dir and nothing queued, there is nothing to acknowledge,
+    // stage or land, so the poll pays no network fetch. An unreadable scan is not "idle" — it takes the full path.
+    let idle = false;
+    try {
+      idle = listDirtyRelFiles(root, kind.ownedDir, git).length === 0 && queuedFeedbackSources(queueRoot).length === 0;
+    } catch {
+      idle = false; // deliberate: an unreadable scan is not "idle", so the full path below reports it
+    }
+    if (idle) return withAcknowledgement({ landed: false, files: [] });
+
+    yield* net.git(["fetch", "origin", "--quiet"]);
     acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
     if (queueRoot) acknowledgeLandedFeedbackQueue(queueRoot, git);
 
@@ -1069,8 +1149,8 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     // path never did this before; {@link landContent} always has), THEN overlay this root's own
     // local disk. `mainSha` is re-read every build so a retry after a lost lease sees a moved
     // origin/main too, not just a moved branch tip.
-    const buildTree = (mainSha: string): LandingTreeBuild => {
-      const pending = readBranchPending(git, kind);
+    const buildTree = function* (mainSha: string): Generator<LandingAsk, LandingTreeBuild, AskReply> {
+      const pending = yield* readBranchPending(git, net, kind);
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
@@ -1084,13 +1164,13 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     };
 
     const initialMainSha = git(["rev-parse", "origin/main"]).trim();
-    const initialBuild = buildTree(initialMainSha);
-    const rebuild = (): LandingTreeBuild => {
-      git(["fetch", "origin", "--quiet"]);
-      return buildTree(git(["rev-parse", "origin/main"]).trim());
+    const initialBuild = yield* buildTree(initialMainSha);
+    const rebuild = function* (): Generator<LandingAsk, LandingTreeBuild, AskReply> {
+      yield* net.git(["fetch", "origin", "--quiet"]);
+      return yield* buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(yield* finishLanding(kind, git, gh, initialBuild, rebuild, env, opts));
+    return withAcknowledgement(yield* finishLanding(kind, git, net, initialBuild, rebuild, env, opts));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1131,15 +1211,26 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
 
 export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
+  /** W1-T5672: the awaited form of `git` for the network verbs (fetch, ls-remote, push); defaults to an injected `git`, else a real child process. */
+  gitAsync?: GitExecAsync;
+  /** W1-T5672: the awaited form of `gh`; defaults to an injected `gh`, else the paced async transport. */
+  ghAsync?: GhExecAsync;
 }
 
-/** {@link sweepFeedbackLanding} for the daemon's per-poll rung, its plan-PR preflight awaited off the loop (W1-T5620). */
+/**
+ * {@link sweepFeedbackLanding} for the daemon's per-poll rung: the plan-PR preflight (W1-T5620) and the
+ * network git/gh calls — fetch, ls-remote, push, PR list/create/refresh — are awaited off the loop (W1-T5672).
+ */
 export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbackLandingAsyncOpts = {}): Promise<LandFeedbackResult> {
   const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr));
-  return logLandingSweep(opts.log, await driveLandingAsync(sweepLandingSteps(root, opts), preflight));
+  const steps = sweepLandingSteps(root, { ...opts, ...asyncSeamsOf(root, opts) });
+  return logLandingSweep(opts.log, await driveLandingAsync(steps, preflight));
 }
 
-function sweepLandingSteps(root: string, opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">): LandingSteps {
+function sweepLandingSteps(
+  root: string,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
+): LandingSteps {
   const { log, ...landOpts } = { ...opts, planPrPreflight: undefined };
   const git = landOpts.git ?? defaultGit(root);
   return landPendingSteps(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
@@ -1220,18 +1311,18 @@ function* landContentSteps(
   root: string,
   kind: LandingKind,
   inputs: LandContentInput[],
-  opts: LandFeedbackOpts,
+  opts: LandFeedbackOpts & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
 ): LandingSteps {
   const git = opts.git ?? defaultGit(root);
-  const gh = opts.gh ?? defaultGh();
+  const net = landingNet(git, opts.gh ?? defaultGh(), opts);
   let scratchDir: string | undefined;
 
   try {
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
 
-    const buildTree = (mainSha: string): LandingTreeBuild => {
-      const pending = readBranchPending(git, kind);
+    const buildTree = function* (mainSha: string): Generator<LandingAsk, LandingTreeBuild, AskReply> {
+      const pending = yield* readBranchPending(git, net, kind);
       if (!pending.ok) throw new Error(pending.reason);
 
       // Always start from fresh origin/main, never a possibly-stale pending branch — unrelated
@@ -1280,20 +1371,20 @@ function* landContentSteps(
       return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
     };
 
-    git(["fetch", "origin", "--quiet"]);
-    const initialBuild = buildTree(git(["rev-parse", "origin/main"]).trim());
+    yield* net.git(["fetch", "origin", "--quiet"]);
+    const initialBuild = yield* buildTree(git(["rev-parse", "origin/main"]).trim());
     if (initialBuild.unlanded.length === 0) {
       return initialBuild.refused.length > 0
         ? { landed: false, files: [], refused: initialBuild.refused }
         : { landed: false, files: [] };
     }
 
-    const rebuild = (): LandingTreeBuild => {
-      git(["fetch", "origin", "--quiet"]);
-      return buildTree(git(["rev-parse", "origin/main"]).trim());
+    const rebuild = function* (): Generator<LandingAsk, LandingTreeBuild, AskReply> {
+      yield* net.git(["fetch", "origin", "--quiet"]);
+      return yield* buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return yield* finishLanding(kind, git, gh, initialBuild, rebuild, env, opts);
+    return yield* finishLanding(kind, git, net, initialBuild, rebuild, env, opts);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
@@ -1728,11 +1819,31 @@ export function findPendingLandingPr(
   const branch = opts.branch ?? identity.prHead;
   const repoArgs = landingRepoArgs(opts.targetRepository ? { targetRepository: opts.targetRepository } : identity);
   try {
-    const existing = JSON.parse(
-      gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url", ...repoArgs]),
-    ) as Array<{ url: string }>;
-    return existing[0]?.url;
+    return pendingLandingPrOf(gh(pendingLandingPrArgs(branch, repoArgs)));
   } catch {
+    return undefined;
+  }
+}
+
+const pendingLandingPrArgs = (branch: string, repoArgs: string[]): string[] => [
+  "pr",
+  "list",
+  "--head",
+  branch,
+  "--state",
+  "open",
+  "--json",
+  "url",
+  ...repoArgs,
+];
+const pendingLandingPrOf = (listing: string): string | undefined => (JSON.parse(listing) as Array<{ url: string }>)[0]?.url;
+
+/** {@link findPendingLandingPr}'s lookup for the landing generator: the same listing, yielded as a network ask. */
+function* findPendingLandingPrSteps(net: LandingNet, identity: LandingIdentity): Generator<LandingAsk, string | undefined, AskReply> {
+  try {
+    return pendingLandingPrOf(yield* net.gh(pendingLandingPrArgs(identity.prHead, landingRepoArgs(identity))));
+  } catch {
+    // Deliberate, as in findPendingLandingPr: an unreadable listing reads as "no PR yet", and the caller opens one.
     return undefined;
   }
 }
