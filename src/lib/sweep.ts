@@ -12818,6 +12818,10 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
   });
 }
 
+export function sweepWalkOrder(prs: readonly Pick<OpenPrView, "createdAt" | "prNumber">[]): number[] {
+  return orderPendingReviews(prs.map((pr, index) => ({ pr, index }))).map((job) => job.index);
+}
+
 function effectiveReviewWidth(
   deps: SweepDeps,
   policy: SweepPolicy,
@@ -14079,7 +14083,7 @@ export async function runSweep(
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
-  for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
+  for (const prIndex of sweepWalkOrder(openPrs)) {
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
