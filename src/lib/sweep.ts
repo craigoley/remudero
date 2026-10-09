@@ -53,7 +53,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { MAX_PLAN_REPAIR_STRIKES } from "./classify.js";
+import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import {
   blockerFields, decideSloRung, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -14202,12 +14202,33 @@ export async function runSweep(
       cappedRouteReadsDisposition(pr, disposition) && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
-    // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
-    // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
+    // W1-T3390 — a capped-green review has no red code check to fix. Preserve its separate
+    // plan-shard rung; W1-T7096's progress judge governs ordinary code-fix rounds, not this
+    // plan-only correction. The plan-repair ceiling remains its own follow-up concern (W1-T7243).
+    let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       planProofBlockedPrs.add(pr.prNumber);
-      disposition = "blocked-fixable";
-      reason = "capped review has non-discriminating proofs — the progress judge decides the next repair round";
+      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+      const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+      const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
+      const action = planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
+        planRepairCapable,
+      });
+      if (action.kind === "give_up") {
+        disposition = "blocked-ambiguous";
+        reason = planRepairCapable
+          ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
+            `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+          : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
+      } else {
+        disposition = "blocked-fixable";
+        planShardRepairDue = action.kind === "repair_plan_shard";
+        reason = planShardRepairDue
+          ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
+            `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
+            `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+          : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+      }
     }
     // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read
     // as `repeatedFixRefusal`, which `isFixStrikeExhausted` turns into the strike ladder's blocked-ambiguous. For a
@@ -15500,7 +15521,9 @@ export async function runSweep(
                 standDownReason = declineHold.reason;
                 break;
               }
-              if (!await askProgress()) break;
+              // The plan-shard correction is not another code-fix round. Every ordinary body-fix
+              // dispatch, including one beyond its former strike ceiling, remains judge-gated.
+              if (!planShardRepairDue && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
               if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
@@ -15525,7 +15548,7 @@ export async function runSweep(
               }
               // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
               // decision above found the body budget spent and a plan-shard repair still owed.
-              const planRepairEvidence = proofRepairActive ? undefined : staleProofs;
+              const planRepairEvidence = proofRepairActive ? undefined : planShardRepairDue ? proofDiscrimination : staleProofs;
               if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (deps.detachFixWait) {
