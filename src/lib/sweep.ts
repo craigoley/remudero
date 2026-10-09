@@ -9063,7 +9063,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // weakens no floor, grants no override. `blocked-ambiguous` dedups per `pr@sha`, so a new head
     // re-earns its question and an override stops this row matching — `mergeable` then arms it.
     disposition: "blocked-ambiguous",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    when: (pr) => isCappedArmEscalation(pr),
     blocker: "plan-proof-unrunnable",
     reason: () =>
       "every required check is green and remudero-review reports success, but the verdict ledgered " +
@@ -10416,6 +10416,17 @@ export interface CappedRoutingDiagnosis {
   detail: string;
 }
 
+export function isCappedArmEscalation(pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">): boolean {
+  return pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true;
+}
+
+export function cappedRouteReadsDisposition(
+  pr: Pick<OpenPrView, "checksState" | "reviewState" | "armRefusalIsTerminal">,
+  disposition: Disposition,
+): boolean {
+  return disposition === "mergeable" || (disposition === "blocked-ambiguous" && isCappedArmEscalation(pr));
+}
+
 /**
  * W1-T3669 — LEGIBILITY FOR A ROUTE THAT SHIPPED SILENT. `runSweep`'s capped-routing block (W1-T3306)
  * has four preconditions and, until this task, standing down on any of them looked identical to
@@ -10431,7 +10442,7 @@ export function diagnoseCappedRoutingBlock(
   disposition: Disposition,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): CappedRoutingDiagnosis {
-  if (disposition !== "mergeable") {
+  if (!cappedRouteReadsDisposition(pr, disposition)) {
     return {
       blocked: true,
       precondition: "not-mergeable",
@@ -14203,12 +14214,12 @@ export async function runSweep(
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
     }
-    // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
-    // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
-    // its claim re-read and shared strike cap remain the sole spending boundary. An operator
-    // override keeps `arm` true and therefore retains the ordinary mergeable arm route.
+    // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
+    // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,
+    // which claims every capped head first; that escalation now stands only with nothing to repair.
+    // An operator override keeps `arm` true and therefore retains the ordinary mergeable arm route.
     const proofDiscrimination =
-      disposition === "mergeable" && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
+      cappedRouteReadsDisposition(pr, disposition) && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
