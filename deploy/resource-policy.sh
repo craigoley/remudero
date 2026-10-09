@@ -77,7 +77,7 @@ resource_policy_lookup() {
 # MemTotal is unreadable) and RP_HIGH_NOTE naming the arithmetic.
 resource_policy_memory_high() {
   local container="$1" max="$2" total budget weight sum=0 entry share floor
-  RP_HIGH="" RP_HIGH_NOTE=""
+  RP_HIGH="" RP_HIGH_NOTE="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RP_HIGH_NOTE="NO memory.high — host MemTotal unreadable"
     return 0
@@ -100,7 +100,43 @@ resource_policy_memory_high() {
     RP_HIGH_NOTE="${RP_HIGH_NOTE}, held at ${RMD_MEMORY_HIGH_MAX_PCT}% of memory.max = ${RP_HIGH} MiB"
   fi
   if [ "${RP_HIGH}" -le 0 ]; then RP_HIGH="" RP_HIGH_NOTE="NO memory.high — ${RP_HIGH_NOTE}"; fi
+  # The policy's own value, before any learned one: the tuner never goes below it, and the drift check
+  # treats anything between it and the learned value as current.
+  RP_HIGH_POLICY="${RP_HIGH}" RP_HIGH_LEARNED=""
+  local tuned
+  [ -n "${RP_HIGH}" ] && tuned="$(resource_policy_tuned_high "${container}")" && RP_HIGH_LEARNED="${tuned}"
+  if [ -n "${RP_HIGH_LEARNED}" ] && [ "${tuned}" -gt "${RP_HIGH}" ]; then
+    if [ -n "${max}" ] && [ "${tuned}" -gt $((max * RMD_MEMORY_HIGH_MAX_PCT / 100)) ]; then
+      tuned=$((max * RMD_MEMORY_HIGH_MAX_PCT / 100))
+    fi
+    RP_HIGH_NOTE="${RP_HIGH_NOTE}; started at the learned ${tuned} MiB (deploy/memory-high-tuner.sh) over the policy's ${RP_HIGH} MiB"
+    RP_HIGH="${tuned}"
+  fi
   return 0
+}
+
+# ── the learned memory.high (deploy/memory-high-tuner.sh, 2026-10-09) ─────────────────────────────
+# The watchdog tick raises a container's memory.high at runtime while it is throttled and refaulting
+# its page cache with host headroom, and lowers it toward the policy value under host pressure. It
+# records the value in <state>/memory-high-tuned-<container>.json, so a recycle starts from the
+# learned value instead of throwing it away. The value only ever RAISES the policy's: a learned value
+# below the policy (a policy that grew since) is ignored here.
+resource_policy_tuned_file() {
+  local dir="${RMD_MEMORY_HIGH_TUNED_DIR:-}"
+  [ -n "${dir}" ] || { [ -n "${STATE_DIR:-}" ] && dir="${STATE_DIR}/state"; }
+  [ -n "${dir}" ] || return 1
+  printf '%s/memory-high-tuned-%s.json' "${dir}" "$1"
+}
+
+# The learned memory.high of container $1 in MiB; status 1 when none is recorded or it is unreadable.
+resource_policy_tuned_high() {
+  local file value
+  file="$(resource_policy_tuned_file "$1")" || return 1
+  [ -r "${file}" ] || return 1
+  grep -q "\"container\":\"$1\"" "${file}" 2>/dev/null || return 1
+  value="$(sed -n 's/.*"high_mib":\([0-9][0-9]*\).*/\1/p' "${file}" 2>/dev/null | head -n 1)"
+  [ -n "${value}" ] && [ "${value}" -gt 0 ] || return 1
+  printf '%s' "${value}"
 }
 
 # The docker run argument that sets memory.high to $1 MiB.
@@ -165,7 +201,8 @@ resource_policy_serve_args() {
 resource_policy_build_args() {
   RESOURCE_POLICY_BUILD_ARGS=("--cpu-shares=${RMD_BUILD_CPU_SHARES}")
   local total ceiling container="${1:-remudero-daemon}"
-  RP_HIGH=""
+  # shellcheck disable=SC2034 # RP_HIGH_POLICY is read by the tuner and the drift check
+  RP_HIGH="" RP_HIGH_POLICY="" RP_HIGH_LEARNED=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
     RESOURCE_POLICY_NOTE="build: cpu-shares ${RMD_BUILD_CPU_SHARES}; NO memory ceiling — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
     return 0
@@ -180,4 +217,54 @@ resource_policy_build_args() {
   resource_policy_memory_high "${container}" "${ceiling}"
   [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_BUILD_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
   RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}; ${container} ${RP_HIGH_NOTE}"
+}
+
+# ── the host's own agent sessions: user-<uid>.slice (2026-10-09) ──────────────────────────────────
+# OBSERVED 2026-10-09: user-1000.slice holds the operator's host agent sessions and the rmd-author-*
+# work they start. It had no cap, peaked at 11.9 GiB on the 15.6 GiB host and, at CPUWeight 100,
+# outranked every build daemon (59). The operator capped it by hand (CPUWeight=30, MemoryHigh=6G).
+# A rebuilt host would lose that hand fix, so deploy/install-host-units.sh now renders it.
+#
+# SOFT ONLY: MemoryHigh, NEVER MemoryMax. At memory.high the kernel throttles and reclaims the
+# slice's own pages. It never kills, so a session only slows down. The slice is one more weighted
+# claimant on the same budget as the containers above: RMD_SESSION_MEMORY_WEIGHT against
+# RMD_MEMORY_WEIGHTS. It is rounded to RMD_SESSION_HIGH_STEP_MIB so a MemTotal that moves by a few
+# MiB across kernels never rewrites the file. The container shares are left as they are: memory.high
+# is soft, and on this host their working-set floors already exceed the budget. CPUWeight 30 is about
+# half a build daemon's measured 59, so a session yields to the fleet when both want the CPU.
+RMD_SESSION_MEMORY_WEIGHT="${RMD_SESSION_MEMORY_WEIGHT:-24}"
+RMD_SESSION_CPU_WEIGHT="${RMD_SESSION_CPU_WEIGHT:-30}"
+RMD_SESSION_HIGH_STEP_MIB="${RMD_SESSION_HIGH_STEP_MIB:-256}"
+
+# Sets RP_SESSION_HIGH_MIB (empty when MemTotal is unreadable) and RP_SESSION_NOTE.
+resource_policy_session_slice() {
+  local total budget sum=0 entry share step="${RMD_SESSION_HIGH_STEP_MIB}"
+  RP_SESSION_HIGH_MIB="" RP_SESSION_NOTE=""
+  if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
+    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
+    return 0
+  fi
+  budget=$((total - RMD_HOST_RESERVE_MIB))
+  for entry in ${RMD_MEMORY_WEIGHTS}; do sum=$((sum + ${entry#*=})); done
+  sum=$((sum + RMD_SESSION_MEMORY_WEIGHT))
+  share=$((budget * RMD_SESSION_MEMORY_WEIGHT / sum))
+  [ "${step}" -gt 0 ] 2>/dev/null || step=1
+  share=$(((share + step / 2) / step * step))
+  if [ "${share}" -le 0 ]; then
+    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing"
+    return 0
+  fi
+  RP_SESSION_HIGH_MIB="${share}"
+  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT}"
+}
+
+# The systemd drop-in for user-<uid>.slice, or nothing when no cap can be sized.
+resource_policy_session_slice_dropin() {
+  resource_policy_session_slice
+  [ -n "${RP_SESSION_HIGH_MIB}" ] || return 0
+  local high="${RP_SESSION_HIGH_MIB}M"
+  [ $((RP_SESSION_HIGH_MIB % 1024)) -eq 0 ] && high="$((RP_SESSION_HIGH_MIB / 1024))G"
+  printf '# Rendered by deploy/install-host-units.sh from deploy/resource-policy.sh; edits are converged away.\n'
+  printf '# %s\n' "${RP_SESSION_NOTE}"
+  printf '[Slice]\nCPUWeight=%s\nMemoryHigh=%s\n' "${RMD_SESSION_CPU_WEIGHT}" "${high}"
 }

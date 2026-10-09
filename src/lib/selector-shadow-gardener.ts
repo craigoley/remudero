@@ -13,10 +13,9 @@ import type { GardenCheckout, GardenCheckoutAsync, GardenerDeps } from "./garden
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
-import { loadPlan, loadPlanFromYaml } from "./plan.js";
+import { loadPlan, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { lintTask } from "./task-linter.js";
-import { machineShardHeaderLines } from "./machine-filing.js";
+import { machineShardHeaderLines, machineShardLandingGuard } from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
@@ -1090,11 +1089,16 @@ export function selectorShadowCauseOf(origin: string | undefined): string | unde
   return /^selector-shadow:[^:]+:(?:floor|narrow):(.+)$/.exec(origin)?.[1];
 }
 
+/** Where a narrow edge repair's regression test lives; plan.ts owns it so admission parks the same shape. */
+export { SELECTOR_SHADOW_MISS_TEST_PATH };
+
 /** A parked plan task names the missed suite and the first observed changed paths into it, without
  *  guessing imports. */
 export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string, changedPaths: readonly string[] = []): string {
   const origin = selectorShadowCauseOrigin(miss.file);
   const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
+  const pattern = miss.file.replaceAll(".", "\\.");
+  const files = ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH];
   const q = JSON.stringify;
   return [
     `- id: ${taskId}`,
@@ -1102,13 +1106,15 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...machineShardHeaderLines(["src/lib/affected-suites.ts"]),
+    ...machineShardHeaderLines(files),
     `  origin: ${q(origin)}`,
-    "  files: [src/lib/affected-suites.ts]",
-    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again.`)}`,
+    `  files: [${files.join(", ")}]`,
+    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in ${SELECTOR_SHADOW_MISS_TEST_PATH} that selects ${miss.file} for each edge: diff-coverage blocks an edge no test exercises.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes ${miss.file} when this edge is exercised`)}`,
-    `      proof: ${q(`grep: ${miss.file.replaceAll(".", "\\.")} in src/lib/affected-suites.ts`)}`,
+    `      proof: ${q(`grep: ${pattern} in src/lib/affected-suites.ts`)}`,
+    `    - claim: ${q(`a regression test selects ${miss.file} for each recorded edge`)}`,
+    `      proof: ${q(`grep: ${pattern} in ${SELECTOR_SHADOW_MISS_TEST_PATH}`)}`,
     "",
   ].join("\n");
 }
@@ -1372,10 +1378,9 @@ export async function runSelectorShadowGardener(
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
       const made = build(taskId);
-      const task = loadPlanFromYaml(made.contents, name).tasks[0];
-      const lint = lintTask(task);
-      if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
       writeAtomic(join(workspace.root, relativePath), made.contents);
+      const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
+      if (refused !== undefined) throw new Error(`selector shadow: missed-edge task failed lint-plan's machine-filing admission: ${refused}`);
       const prUrl = await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
       return { taskId, prUrl };

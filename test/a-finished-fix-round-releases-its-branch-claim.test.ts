@@ -43,6 +43,7 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { commitInsideFixture } from "./helpers/fixture-commit.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const TASK = "W1-T500";
@@ -501,9 +502,7 @@ test("a real sweep round's push frees the claim for its CI wait, and the round r
   const seen: Array<[string, string | undefined]> = [];
   try {
     await withSweep(f, async (args) => {
-      writeFileSync(join(args.cwd, "fix.txt"), "fixed\n");
-      git(args.cwd, "add", "-A");
-      git(args.cwd, "commit", "--no-verify", "--quiet", "-m", "fix(ci): repair the check");
+      commitInsideFixture(f.root, args.cwd, "fix.txt", "fix(ci): repair the check");
       return worker("REPORT\nfixed\nCOMMIT_MESSAGE: fix(ci): repair the check");
     }, async (dispatch, logs) => {
       await dispatch();

@@ -71,7 +71,7 @@ import {
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
-import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import {
@@ -4168,7 +4168,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let shardRelPath: string | undefined;
       try {
         shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
-          .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
           .map((f) => join("plan", "tasks.d", f))[0];
       } catch {
         /* the shard directory is unreadable — fall through to the monolith below */
@@ -7755,7 +7755,13 @@ export interface PlanRepairFacts {
 export type PlanRepairDecision =
   | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
   | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
-  | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" };
+  | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" | "inherited" };
+
+export function inheritedPlanRedChecks(names: readonly string[]): string[] | undefined {
+  const inheritable = /^(?:ci-shard|coverage-shard|test-slow-shard|test-slow|typecheck|ci|coverage-ratchet|mutation-ratchet)(?: \(\d+\/\d+\))?$/;
+  const own = names.filter((name) => name !== "ci-gate");
+  return own.length > 0 && own.every((name) => inheritable.test(name)) ? own : undefined;
+}
 
 export interface PlanRepairOutcome {
   outcome: string;
@@ -7831,10 +7837,13 @@ export function decidePlanRepair(
   facts: PlanRepairFacts,
   main: MainLatestRun | undefined,
   history: ReadonlySet<string>,
+  behindMain?: number,
 ): PlanRepairDecision | undefined {
-  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) return undefined;
   const failures = pr.ciFailures ?? [];
   const head = `${pr.prNumber}@${pr.headSha}`;
+  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) {
+    return inheritedRedRefresh(pr, failures.map((f) => f.name), main, history, behindMain);
+  }
   const heldIds = heldTaskIdsFromCiFailures(failures);
   if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
     return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
@@ -7857,7 +7866,17 @@ export function decidePlanRepair(
     pr.currentMergeBaseSha !== undefined &&
     pr.currentMergeBaseSha !== main.sha &&
     !history.has(`${pr.prNumber}@stale-base`);
-  return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" } : undefined;
+  return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" }
+    : inheritedRedRefresh(pr, names, main, history, behindMain);
+}
+
+function inheritedRedRefresh(
+  pr: OpenPrView, names: readonly string[], main: MainLatestRun | undefined, history: ReadonlySet<string>, behindMain?: number,
+): PlanRepairDecision | undefined {
+  const inherited = inheritedPlanRedChecks(names);
+  const behind = (behindMain ?? 0) > 0 || (pr.currentMergeBaseSha !== undefined && pr.currentMergeBaseSha !== main?.sha);
+  if (!inherited || main?.state !== "green" || !behind || history.has(`${pr.prNumber}@${pr.headSha}@base-red`)) return undefined;
+  return { signature: "base-red", action: "refresh", check: inherited.join(", "), cause: "inherited" };
 }
 
 /** Signature (a)'s cure on the lane's OWN branch: each held id the PR's ADDED plan files declare
@@ -13274,17 +13293,19 @@ export async function runSweep(
   const planRoundFacts = new Map<number, PlanRepairFacts>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
-    if (!isMachineLanePlanHead(pr.headRefName) || !deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
+    if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
-    let facts: PlanRepairFacts;
-    try {
-      facts = await deps.readPlanRepairFacts(pr);
-      planRoundFacts.set(pr.prNumber, facts);
-    } catch (e) {
-      appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
-      return notRepaired;
+    let facts: PlanRepairFacts = {};
+    if (isMachineLanePlanHead(pr.headRefName)) {
+      try {
+        facts = await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+      } catch (e) {
+        appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
+        return notRepaired;
+      }
     }
-    const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory);
+    const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory, deps.behindMainByPr?.get(pr.prNumber));
     if (decision === undefined) return notRepaired;
     if (decision.signature === "base-red") baseRedStandDownPrs.add(pr.prNumber);
     const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
@@ -13915,6 +13936,10 @@ export async function runSweep(
         blockerReadFailure = { reason: String(error) };
       }
     }
+    // A green, reviewed PR under an operator merge hold is waiting on a person: name the hold, never "arming".
+    const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
+    const shownReason = mergeHold === undefined ? reason
+      : `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`;
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
@@ -13926,6 +13951,7 @@ export async function runSweep(
         (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
       ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+      operatorHold: mergeHold !== undefined,
     });
     const planRepairCapable =
       (metadataWait && typeof deps.repairMetadata === "function") ||
@@ -13953,7 +13979,7 @@ export async function runSweep(
       prUrl: pr.prUrl,
       taskId: pr.taskId,
       disposition,
-      reason,
+      reason: shownReason,
       acted,
       question,
       ...(actionError ? { actionError } : {}),
@@ -13967,7 +13993,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         deduped,
         ...(actionError ? { action_error: actionError } : {}),
         dry_run: true,
@@ -13996,7 +14022,7 @@ export async function runSweep(
         disposition,
         ...blockerRow,
         acted,
-        reason,
+        reason: shownReason,
         head_sha: pr.headSha,
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
@@ -17118,10 +17144,7 @@ export function deriveQueueGovernorTrailingFlow(
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
     if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
-    // Most merges are ledgered only as a sweep `pr.terminal` row, never as `verdict.merged`.
-    const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
-      || (line.step === "pr.terminal" && line.state === "merged");
-    if (!merged) continue;
+    if (!isMergedLedgerRow(line)) continue;
     const key = typeof line.pr_number === "number" ? `#${line.pr_number}` : typeof line.pr_url === "string" ? line.pr_url : undefined;
     if (key === undefined) unkeyedMerges++;
     else mergedPrs.add(key);
@@ -17204,6 +17227,7 @@ export function windowCostRows(
 export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
  *  BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred

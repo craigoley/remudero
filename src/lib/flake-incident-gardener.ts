@@ -20,7 +20,7 @@ import { fixedClock, systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { selectorShadowPlanTasksAsync, type SelectorShadowTaskIdMinter } from "./selector-shadow-gardener.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
@@ -115,6 +115,13 @@ function observationsOf(rows: readonly Record<string, unknown>[]): FlakeObservat
 
 export function flakeIncidentOrigin(file: string, title: string): string {
   return `flake-incident:${file}${title === "" ? "" : `#${title}`}`;
+}
+
+/** The test file an origin names. A file-level incident and a per-title incident on the same file are
+ *  one incident: the same CI runs fail both, and one repair of the file answers both (W1-T7269/W1-T7270). */
+export function flakeIncidentOriginFile(origin: string): string | undefined {
+  if (!origin.startsWith("flake-incident:")) return undefined;
+  return origin.slice("flake-incident:".length).split("#")[0];
 }
 
 /** The repo paths a test file's own relative imports name — the source its failure could come from. */
@@ -221,9 +228,12 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
    *  recently enough that its PR may not have landed. */
   const openTaskFor = async (origin: string): Promise<string | undefined> => {
     const tasks = await planTasks();
-    const open = tasks.find((t) => t.origin === origin && !closed.has(t.status ?? "") && t.retirement === undefined);
+    const file = flakeIncidentOriginFile(origin);
+    const sameFile = (o: unknown) => typeof o === "string" && (o === origin || (file !== undefined && flakeIncidentOriginFile(o) === file));
+    const open = tasks.find((t) => sameFile(t.origin) && !closed.has(t.status ?? "") && t.retirement === undefined);
     if (open) return open.id;
-    const filed = byStep("flake_incident.filed").filter((r) => r.origin === origin && typeof r.task_id === "string")
+    if (file !== undefined && filedThisPass.has(file)) return filedThisPass.get(file);
+    const filed = byStep("flake_incident.filed").filter((r) => sameFile(r.origin) && typeof r.task_id === "string")
       .sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
     if (filed && !tasks.some((t) => t.id === filed.task_id) && nowMs - Date.parse(String(filed.ts)) < policy.pendingFilingHoldMs) {
       return filed.task_id as string;
@@ -231,7 +241,9 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     return undefined;
   };
   const lastFiledMs = (origin: string): number => Math.max(0, ...byStep("flake_incident.filed")
-    .filter((r) => r.origin === origin).map((r) => Date.parse(String(r.ts))).filter(Number.isFinite));
+    .filter((r) => r.origin === origin || (typeof r.origin === "string" && flakeIncidentOriginFile(r.origin) === flakeIncidentOriginFile(origin)))
+    .map((r) => Date.parse(String(r.ts))).filter(Number.isFinite));
+  const filedThisPass = new Map<string, string>();
 
   let filed = 0;
   for (const group of candidates) {
@@ -256,7 +268,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
       const since = lastFiledMs(origin);
       const fresh = evidence.prs.filter((pr) => (evidence.latestMs.get(pr) ?? 0) > since);
       if (fresh.length < policy.filePrs || filed >= policy.filingsPerPass) continue;
-      await fileIncident(deps, sources, { origin, file, title, evidence, prs: evidence.prs });
+      filedThisPass.set(file, await fileIncident(deps, sources, { origin, file, title, evidence, prs: evidence.prs }));
       filed++;
     } catch (error) {
       deps.log("flake_incident.filing_failed", { origin, error: String((error as Error)?.message ?? error) });
@@ -267,7 +279,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
 async function fileIncident(
   deps: GardenerDeps, sources: FlakeIncidentSources,
   incident: { origin: string; file: string; title: string; evidence: Evidence; prs: number[] },
-): Promise<void> {
+): Promise<string> {
   const { origin, file, title, evidence, prs } = incident;
   const workspace = await deps.openWorkspace();
   try {
@@ -298,6 +310,8 @@ async function fileIncident(
     if (rendered.refused !== undefined) throw new Error(`flake-incident: task failed lint: ${rendered.refused}`);
     const relativePath = join("plan", "tasks.d", `${taskId.toLowerCase()}-flake-incident.yaml`);
     writeAtomic(join(workspace.root, relativePath), rendered.text);
+    const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
+    if (refused !== undefined) throw new Error(`flake-incident: task failed lint-plan's machine-filing admission: ${refused}`);
     const stem = (title === "" ? file.split("/").at(-1)! : title).slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const prUrl = await workspace.land({
       paths: [relativePath],
@@ -309,6 +323,7 @@ async function fileIncident(
       origin, task_id: taskId, pr_url: prUrl, file, title, prs, run_ids: runs,
       recovered: evidence.recovered, also_failed: evidence.alsoFailed,
     });
+    return taskId;
   } finally {
     await workspace.dispose();
   }

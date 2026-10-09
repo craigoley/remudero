@@ -12,7 +12,7 @@
   author_class: machine
   origin: "ci-friction:check:coverage-shard (1/8)"
   files:
-    - src/lib/ci-friction-gardener.ts
+    - .github/workflows/ci.yml
     - test/check-coverage-shard-1-8.test.ts
   acceptance:
     - claim: "the harness no longer spends a fix round on check:coverage-shard (1/8)"
@@ -33,8 +33,8 @@
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.86
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The filed record names aggregate CI cost but supplies no root cause or prevention mechanism, so the proposed remedy cannot be verified from what is shown; the escalation rule explicitly includes unverifiable findings.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not require executing that test to establish that coverage-shard failures are prevented."
-    judged_at: "2026-10-09T19:14:42.080Z"
-    pin: "75a0faf0fefc47b0abed0bbf4099fa377c5f72968380c09ba97e085affa2aeeb"
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-09T21:24:23.597Z"
+    pin: "f4d0cb0122fbba1c917b1335a79312df913e6a8216c4a353f49e715ea5da1cb2"

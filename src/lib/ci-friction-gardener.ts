@@ -15,7 +15,7 @@ import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedge
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
@@ -1155,6 +1155,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "ci-friction",
+    landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch.fileExists),
     classes: CI_FRICTION_GARDEN_CLASSES,
     review: { draft: "filing a new task from priced friction is a judgement call — the machine-filing judge or a person decides the remedy." },
     cheapFingerprint: () => {
@@ -1261,6 +1262,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
       const relPath = relative(ws.root, shardPath);
+      // lint-plan's verdict before the draft reaches disk (#10446); the spec's `landingRefusal` re-reads the landing.
+      const refused = machineShardFilingRefusal(contents, relPath, {
+        pathExists: (path) => existsSync(join(ws.root, path)), pathExistsAtBase: sources.ownerSearch.fileExists,
+      });
+      if (refused !== undefined) throw new Error(`ci-friction gardener: drafted record failed machine-filing admission (${refused})`);
       mkdirSync(shardDir, { recursive: true });
       writeFileSync(shardPath, contents);
 

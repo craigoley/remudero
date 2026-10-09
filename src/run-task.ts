@@ -2815,6 +2815,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -4536,7 +4537,7 @@ export function ghPrCreateFillCommand(
 ): PrCreateCommand {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
   const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
-  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+  return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
 /** W1-T6034: {@link ghPrCreateFillCommand} for the daemon loop — the same draft and argv, with the
@@ -4551,10 +4552,16 @@ export async function ghPrCreateFillCommandAsync(
 ): Promise<PrCreateCommand> {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
   const checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
-  return prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody);
+  return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
-type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } };
+/** W1-T4263: a ledger row the builder could not write itself, written by {@link runGhPrCreate}, which holds `log`. */
+type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> };
+type PrCreateCommand = { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: PrCreateDiagnostic[] };
+
+function withDiagnostics(command: PrCreateCommand, diagnostics: PrCreateDiagnostic[]): PrCreateCommand {
+  return diagnostics.length ? { ...command, diagnostics } : command;
+}
 
 /** The guarded title and unchecked body both PR-create builders share. */
 function draftPrCreate(
@@ -4564,7 +4571,7 @@ function draftPrCreate(
   branch: string,
   title?: string,
   bodyOverride?: string,
-): { title: string; body: string } {
+): { title: string; body: string; diagnostics: PrCreateDiagnostic[] } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
   // site at once and cannot be bypassed by a new one. The transport moved; the guard
@@ -4587,12 +4594,15 @@ function draftPrCreate(
   // Other lanes retain the open-time fallback that predates the task-aware check.
   // A test the branch ADDS gives a proof that misses at base. The generic block stays only as the last resort, because
   // openPullRequestChecked refuses a body with no block at all, and that would stop the PR opening.
-  const added = filedTaskIdFromRunBranch(branch) ? undefined : addedTestFilesAtHead("HEAD", worktreePath);
-  const headOnly = added?.kind === "read" ? added.files.map(addedTestCriterion) : [];
-  const body = filedTaskIdFromRunBranch(branch)
-    ? draftedBody
-    : ensureJudgeableBody(draftedBody, headOnly.length ? headOnly : PR_OPEN_TIME_ACCEPTANCE_FALLBACK);
-  return { title: resolvedTitle, body };
+  // W1-T4263: with no added test, a line the diff adds is the anchor; the static grep is ledgered as the last resort.
+  const diagnostics: PrCreateDiagnostic[] = [];
+  if (filedTaskIdFromRunBranch(branch) || !bodyNeedsAcceptanceRepair(draftedBody)) return { title: resolvedTitle, body: draftedBody, diagnostics };
+  const added = addedTestFilesAtHead("HEAD", worktreePath);
+  const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+  const fallback = headOnly.length
+    ? headOnly
+    : diffAnchoredFallback(diffSinceMergeBase(worktreePath), PR_OPEN_TIME_ACCEPTANCE_FALLBACK, "pr-open", (step, extra = {}) => diagnostics.push({ step, extra }), { branch });
+  return { title: resolvedTitle, body: ensureJudgeableBody(draftedBody, fallback), diagnostics };
 }
 
 function prCreateArgv(
@@ -4710,12 +4720,13 @@ function adoptExistingPrForHead(
  * OTHER 422 (a validation failure unrelated to an existing PR) still rethrows unchanged.
  */
 export function runGhPrCreate(
-  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } },
+  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" }; diagnostics?: readonly PrCreateDiagnostic[] },
   branch: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   say: (msg: string) => void,
   exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
 ): { prUrl?: string; prNumber?: number } {
+  for (const { step, extra } of prCreate.diagnostics ?? []) log(step, extra);
   let out: string;
   try {
     out = exec(prCreate.command, prCreate.args, prCreate.options);
@@ -5766,6 +5777,9 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
  * this same generic block, just later. And it is INERT wherever criteria really resolve — a body
  * carrying a `Remudero-Task:` trailer whose shard is on main is judged from the shard, and
  * `bodyNeedsAcceptanceRepair` leaves a healthy block untouched.
+ *
+ * W1-T4263: both constants are now the LAST RESORT. Their proof passes at every merge base, so a site uses them only
+ * when {@link diffAnchor} finds no added line to grep, and it ledgers that case.
  */
 const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
   {
@@ -5789,6 +5803,119 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
 
 function addedTestCriterion(path: string): AcceptanceCriterion {
   return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
+}
+
+/**
+ * W1-T4263 — THE FALLBACK GREPS A LINE THIS PR'S OWN DIFF ADDS. The two static constants above grep
+ * `acceptanceAuthorTimeCheck`, a function main already has, so `proof-discrimination` reads them as passing at the
+ * merge base on every PR that reaches them. A line the diff ADDS is absent there by construction. The constants stay
+ * as the LAST RESORT, used only when no added line clears the safety bar, and every site ledgers that case
+ * as {@link DIFF_ANCHOR_UNAVAILABLE_STEP} so it stays observable.
+ */
+export const DIFF_ANCHOR_UNAVAILABLE_STEP = "acceptance.fallback.diff_anchor_unavailable";
+export type DiffAnchorUnavailableReason = "no-diff" | "unparseable" | "no-safe-candidate";
+export type DiffAnchor = { kind: "anchored"; path: string; line: string; proof: string } | { kind: "unavailable"; reason: DiffAnchorUnavailableReason };
+const DIFF_ANCHOR_MIN_LENGTH = 8;
+const DIFF_ANCHOR_CLAIM_SUFFIX = "; its proof greps a line this PR's own diff adds, not a fixed pre-existing symbol";
+
+function escapeGrepLiteral(line: string): string {
+  let escaped = "";
+  for (const ch of line) {
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === "?") escaped += "[?]";
+    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
+    else escaped += ch;
+  }
+  return escaped;
+}
+
+/** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
+ *  and that cannot already match at the merge base. A line the same diff also REMOVES is a move, so it is skipped. */
+export function diffAnchor(diffText: string | undefined): DiffAnchor {
+  if (diffText === undefined || diffText.trim() === "") return { kind: "unavailable", reason: "no-diff" };
+  const added: Array<{ path: string; line: string }> = [];
+  const removed = new Set<string>();
+  let file: string | undefined;
+  let sawHeader = false;
+  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
+    if (raw.startsWith("diff --git ")) {
+      file = undefined;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      sawHeader = true;
+      const path = raw.slice(4).replace(/^b\//, "").trim();
+      file = path === "/dev/null" ? undefined : path;
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
+    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
+  }
+  if (!sawHeader) return { kind: "unavailable", reason: "unparseable" };
+  for (const { path, line } of added) {
+    if (line.length < DIFF_ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) continue;
+    if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) continue;
+    const pattern = escapeGrepLiteral(line);
+    const proof = `grep: ${pattern} in ${path}`;
+    if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) continue;
+    if (wrappedGrepPattern(proof) !== undefined) continue;
+    // The proof must survive the block it is written into, verbatim.
+    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
+    if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) continue;
+    return { kind: "anchored", path, line, proof };
+  }
+  return { kind: "unavailable", reason: "no-safe-candidate" };
+}
+
+/** W1-T4263's shared helper: a criterion whose proof greps the first safe line `diffText` adds, or `undefined`. */
+export function diffAnchoredAcceptanceCriterion(
+  diffText: string,
+  claim: string = PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].claim,
+): AcceptanceCriterion | undefined {
+  const anchor = diffAnchor(diffText);
+  return anchor.kind === "anchored" ? { claim: `${claim}${DIFF_ANCHOR_CLAIM_SUFFIX}`, proof: anchor.proof } : undefined;
+}
+
+/** The diff-anchored criterion, or `staticFallback` with the diagnostic ledgered — the one decision all three
+ *  sites make. */
+export function diffAnchoredFallback(
+  diffText: string | undefined,
+  staticFallback: AcceptanceCriterion[],
+  site: "pr-open" | "body-repair" | "retro-repair",
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  context: Record<string, unknown> = {},
+): AcceptanceCriterion[] {
+  const anchor = diffAnchor(diffText);
+  if (anchor.kind === "anchored") return [{ claim: `${staticFallback[0].claim}${DIFF_ANCHOR_CLAIM_SUFFIX}`, proof: anchor.proof }];
+  log?.(DIFF_ANCHOR_UNAVAILABLE_STEP, { ...context, site, reason: anchor.reason });
+  return staticFallback;
+}
+
+/** W1-T4263: the fix rung's fallback for {@link acceptanceGateBodyRepair}. An added test wins; otherwise, and only
+ *  when the body takes the fallback at all, a line the checkout's diff adds; the static grep last, ledgered. */
+export function bodyRepairFallback(
+  body: string,
+  headOnly: AcceptanceCriterion[],
+  readDiff: () => string | undefined,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  context: Record<string, unknown> = {},
+): AcceptanceCriterion[] {
+  if (headOnly.length) return headOnly;
+  const check = acceptanceAuthorTimeCheck(body);
+  if (check.ok || (check.defect !== "no-header" && check.defect !== "empty-proofs")) return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK;
+  return diffAnchoredFallback(readDiff(), ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK, "body-repair", log, context);
+}
+
+/** The checkout's own diff since its merge base with origin/main, `undefined` when git cannot read it. Three dots,
+ *  so a main that moved since the branch point never shows main's own changes as this branch's additions. */
+export function diffSinceMergeBase(cwd: string, head = "HEAD"): string | undefined {
+  try {
+    return hostWorktreeGitAtTopLevel(cwd, ["diff", "--no-color", "--no-ext-diff", "-U0", `origin/main...${head}`], { maxBuffer: 1 << 26 });
+  } catch (e) {
+    void e; // an unreadable diff is the `no-diff` reason the caller ledgers
+    return undefined;
+  }
 }
 
 /** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
@@ -10904,6 +11031,8 @@ export async function runFixRung(opts: {
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
     /** The test files the PR head adds: the proofs a body repair prefers. Default: the real diff in the worktree. */
     addedTestsAtHead?: (headSha: string) => AddedTestsAtHead;
+    /** W1-T4263: the PR head's diff since its merge base, the anchor a body repair falls back to. Default: the worktree's. */
+    diffAtHead?: (headSha: string) => string | undefined;
     /**
      * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
      * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
@@ -11531,7 +11660,11 @@ export async function runFixRung(opts: {
       // A proof from a test the PR adds misses at base; the generic default does not, so it is the last resort only.
       const added = (deps.addedTestsAtHead ?? ((sha: string) => addedTestFilesAtHead(sha, opts.worktreePath)))(review.headSha);
       const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
-      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody, headOnly.length ? headOnly : undefined) : undefined;
+      const readDiff = () => (deps.diffAtHead ?? ((sha: string) => diffSinceMergeBase(opts.worktreePath, sha)))(review.headSha);
+      const repair =
+        liveBody !== undefined
+          ? acceptanceGateBodyRepair(liveBody, bodyRepairFallback(liveBody, headOnly, readDiff, deps.log, { pr_url: opts.prUrl }))
+          : undefined;
       // W1-T3506 — THE WRITE-BOUNDARY CALL W1-T3389's HELPER WAS SHIPPED WITHOUT. `repair` above is
       // PURE and never inspects whether its own authored `grep:` proofs actually run — that is
       // exactly the asymmetry `repairedProofsAreSafeToPush` (lib/body-repair.ts) exists to close,
@@ -11787,10 +11920,16 @@ export async function runFixRung(opts: {
     // global) so the coupling is visible at this call site and the scope gate stays PURE — this
     // is the ONLY caller-side state it needs. Reused, unchanged, by the prompt render below so the
     // gate and the instruction it dispatches can never name a different set (design note iii).
+    const logNamedPaths = ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath);
+    const logNamedMain = mainOwnedPaths(opts.worktreePath, logNamedPaths.map((file) => file.path));
+    if (logNamedMain.owned.length > 0 || logNamedMain.outcome === "unreadable") {
+      deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
+        ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
+    }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
-      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
+      ...logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path)),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -12911,7 +13050,12 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
       let amendment: ScopeAmendmentOutcome;
-      try {
+      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
+      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      } else try {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
         amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
@@ -20858,7 +21002,7 @@ export async function withMaterializedWorktree<T>(
  * so `check-proof --base` reads it `executed_stale` on every retro that takes this path — measured
  * live on #5769, which failed the REQUIRED `proof-discrimination` check for exactly this proof.
  * `bodyNeedsAcceptanceRepair` alone does not see this: the fallback parses fine and its proof is
- * non-empty, so it calls the body "healthy" — the retro's own non-dialect fallback below never gets
+ * non-empty, so it calls the body "healthy" — the retro's diff-anchored repair below never gets
  * a chance to replace it. This predicate closes that gap by recognising the ONE known-stale generic
  * shape and routing it back into repair, without touching `bodyNeedsAcceptanceRepair` itself (which
  * other callers, e.g. `acceptanceGateBodyRepair`, still need to read this same body as healthy).
@@ -20867,35 +21011,6 @@ export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
   const criteria = parseAcceptanceBlock(body);
   if (criteria.length !== 1) return false;
   return criteria[0].proof?.trim() === PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof;
-}
-
-function escapeRetroGrepPattern(line: string): string {
-  let escaped = "";
-  for (const ch of line) {
-    if (ch === "\\") escaped += "\\\\";
-    else if (ch === "?") escaped += "[?]";
-    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
-    else escaped += ch;
-  }
-  return escaped;
-}
-
-function retroAcceptanceProofFromDiff(diff: string): string | undefined {
-  let file: string | undefined;
-  for (const raw of diff.split("\n")) {
-    if (raw.startsWith("+++ ")) {
-      const path = raw.slice(4).replace(/^b\//, "").replace(/\r$/, "").trim();
-      file = path === "/dev/null" ? undefined : path;
-      continue;
-    }
-    if (!file || !raw.startsWith("+") || raw.startsWith("+++ ")) continue;
-    const line = raw.slice(1).replace(/\r$/, "").trim();
-    if (!line || !/\.[^/]+$/.test(file)) continue;
-    const pattern = escapeRetroGrepPattern(line);
-    const proof = `grep: ${pattern} in ${file}`;
-    if (parseWhitelistedProof(proof) !== null && breMetacharsIn(pattern).blocking.length === 0) return proof;
-  }
-  return undefined;
 }
 
 /**
@@ -20918,12 +21033,16 @@ export function repairRetroAcceptanceBlock(
   deps: {
     fetchBody?: (url: string) => string;
     editBody?: (url: string, body: string) => void;
+    /** The PR's diff, already read by the caller. When absent, `diffText` reads it. */
     diff?: string;
+    /** W1-T4263: reads the PR's unified diff. Default: the PR's diff read through gh. */
+    diffText?: (url: string) => string;
   } = {},
 ): "repaired" | "healthy" | "unrepresentable" | "error" {
-  const { fetchBody, editBody } = {
+  const { fetchBody, editBody, diffText } = {
     fetchBody: defaultRetroFetchBody,
     editBody: defaultRetroEditBody,
+    diffText: defaultRetroDiffText,
     ...deps,
   };
   try {
@@ -20936,17 +21055,26 @@ export function repairRetroAcceptanceBlock(
     // (see bodyCarriesGenericAcceptanceFallback), so `proof-discrimination` REFUSES the retro
     // otherwise, even though `bodyNeedsAcceptanceRepair` alone calls it healthy.
     if (!bodyNeedsAcceptanceRepair(body) && !bodyCarriesGenericAcceptanceFallback(body)) return "healthy";
-    const proof = Object.hasOwn(deps, "diff") ? retroAcceptanceProofFromDiff(deps.diff ?? "") : undefined;
-    if (Object.hasOwn(deps, "diff") && proof === undefined) {
+    // W1-T4263: the proof greps a line this PR adds, and a missing anchor is ledgered. Only an UNREADABLE diff falls
+    // back to the static grep. A diff that was read but has no safe line stays W1-T3819's honest refusal, and so
+    // does a body that already carries the static grep, since rewriting it would change nothing.
+    let diff: string | undefined = deps.diff;
+    if (!Object.hasOwn(deps, "diff")) {
+      try {
+        diff = diffText(prUrl);
+      } catch (e) {
+        void e; // an unreadable diff is the `no-diff` reason ledgered below
+      }
+    }
+    const staticFallback: AcceptanceCriterion[] = [
+      { claim: "the retro's plan-only sync PR is gate-compliant", proof: PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof },
+    ];
+    const fallback = diffAnchoredFallback(diff, staticFallback, "retro-repair", log, { pr_url: prUrl });
+    const unreadable = (diff ?? "").trim() === "";
+    if (fallback === staticFallback && (!unreadable || !bodyNeedsAcceptanceRepair(body))) {
       log("acceptance.repair.unrepresentable", { pr_url: prUrl, reason: "no safe added diff line" });
       return "unrepresentable";
     }
-    const fallback: AcceptanceCriterion[] = [
-      {
-        claim: "the retro's plan-only sync PR is gate-compliant",
-        proof: proof ?? PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof,
-      },
-    ];
     // `ensureJudgeableBody` re-checks `bodyNeedsAcceptanceRepair` internally and no-ops when it reads
     // healthy — exactly the generic-fallback case this function exists to catch. Use the unconditional
     // half directly whenever THIS repair fired for a reason that predicate cannot see.
@@ -21018,6 +21146,11 @@ function defaultRetroFetchBody(url: string): string {
  *  trailer stamp — one transport, one place to fix. */
 function defaultRetroEditBody(url: string, body: string): void {
   writePrBodyRest(url, body);
+}
+
+/** W1-T4263: {@link repairRetroAcceptanceBlock}'s diff read, the full-text sibling of {@link defaultRetroChangedFiles}. */
+function defaultRetroDiffText(url: string): string {
+  return ghExec(["pr", "diff", url], { encoding: "utf8", maxBuffer: 1 << 26 });
 }
 
 /**
@@ -38298,6 +38431,22 @@ export async function daemonCommand(
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),
+        // W1-T7093: maintain the worker-tree ledger on the same recurring heartbeat the reader
+        // consumes. This is report-only bookkeeping; a failure never alters dispatch or workers.
+        sweepHostMemoryReservations: () => {
+          const swept = sweepMemoryReservations({ root: config.root, log: (event) => log(String(event.event ?? "host_memory_ledger.diagnostic"), event) });
+          if (swept) {
+            log("daemon.host_memory_reservations.swept", {
+              state: swept.reading.state,
+              scope: swept.reading.scope,
+              live: swept.reading.entries.length,
+              released: swept.released.length,
+              uncertain: swept.reading.counts.uncertain,
+              incomplete_walk: swept.reading.counts.incompleteWalk,
+              reserved_mib: swept.reading.reservedMib,
+            });
+          }
+        },
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
@@ -40681,6 +40830,9 @@ const CI_STEP_GROUP_LINE = /^##\[(?:end)?group\]/;
 const CI_TAP_FAILURE_LINE = /^\s*not ok \d+ - /;
 const CI_TAP_BLOCK_END_LINE = /^\s*\.\.\.\s*$/;
 const CI_FLAKE_RETRY_LINE = /FLAKE-RETRY(?:-RECOVERED)?\s*:/;
+/** A run whose every test passed but whose coverage report died names the cause only here, far
+ *  above the step's `##[error]`; without it the region reads as an unnamed flake (#10400). */
+const CI_COVERAGE_REPORT_FAILED_LINE = /Could not report code coverage|COVERAGE-REPORT-FAILED:/;
 const CI_FAILING_TESTS_LINE = /(?:✖|✕|✗|x)\s+failing tests:/i;
 const CI_TEST_SUMMARY_LINE = /^\s*(?:#|ℹ)\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/;
 
@@ -40701,6 +40853,8 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
   const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
   const isRetryLine = (line: string) => CI_FLAKE_RETRY_LINE.test(line);
+  const isCoverageReportLine = (line: string) => CI_COVERAGE_REPORT_FAILED_LINE.test(line);
+  const coverageReport: number[] = [];
   let inTapFailure = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -40708,17 +40862,20 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     if (inTapFailure) kept.add(index);
     if (inTapFailure && CI_TAP_BLOCK_END_LINE.test(line)) inTapFailure = false;
     if (isRetryLine(line)) kept.add(index);
+    if (isCoverageReportLine(line)) coverageReport.push(index);
   }
   const stepErrors = stepErrorContext(lines);
-  // One copy of each retry line: a shard repeats the same one dozens of times.
+  // One copy of each retry or coverage-report line: a shard repeats the same one dozens of times,
+  // and node prints its coverage warning once per reporter (`ℹ Warning` and `# Warning`).
   const region = (indexes: Iterable<number>) => {
-    const retrySeen = new Set<string>();
+    const repeatSeen = new Set<string>();
     return [...new Set(indexes)]
       .sort((a, b) => a - b)
       .filter((index) => {
-        if (!isRetryLine(lines[index])) return true;
-        const seen = retrySeen.has(lines[index].trim());
-        retrySeen.add(lines[index].trim());
+        if (!isRetryLine(lines[index]) && !isCoverageReportLine(lines[index])) return true;
+        const key = lines[index].trim().replace(/^(?:ℹ|#)\s+/, "");
+        const seen = repeatSeen.has(key);
+        repeatSeen.add(key);
         return !seen;
       })
       .slice(-Math.max(1, tailLines))
@@ -40726,7 +40883,7 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
       .join("\n")
       .trim();
   };
-  if (kept.size > 0) return region([...kept, ...stepErrors]);
+  if (kept.size > 0) return region([...kept, ...stepErrors, ...coverageReport]);
   const failingTestsAt = lines.findIndex((line) => CI_FAILING_TESTS_LINE.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
@@ -40736,7 +40893,7 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     const end = summaryAt >= 0 ? summaryAt : failingTestsAt + tailLines;
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
   }
-  if (stepErrors.length > 0) return region(stepErrors);
+  if (stepErrors.length > 0) return region([...stepErrors, ...coverageReport]);
   return lines.slice(-tailLines).join("\n").trim();
 }
 
@@ -43607,6 +43764,28 @@ export function ciLogNamedSourcePaths(
     }
   }
   return [...found].map(([path, job]) => ({ path, job }));
+}
+
+/** Paths main changed since the merge base and this branch did not: a red there is main's, so refresh, never patch (#10369). */
+export function mainOwnedPaths(
+  repoDir: string,
+  paths: readonly string[],
+  runGit: GitRunner = (args) => hostWorktreeGit(repoDir, args),
+): { outcome: "compared" | "no-base" | "unreadable"; owned: string[]; reason?: string } {
+  if (paths.length === 0) return { outcome: "compared", owned: [] };
+  try {
+    runGit(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]);
+  } catch (error) {
+    return { outcome: "no-base", owned: [], reason: String(error) };
+  }
+  try {
+    const base = runGit(["merge-base", "HEAD", "refs/remotes/origin/main"]).trim();
+    const changed = (to: string) => new Set(runGit(["diff", "--name-only", "-z", base, to, "--", ...paths]).split("\0").filter(Boolean));
+    const ours = changed("HEAD");
+    return { outcome: "compared", owned: [...changed("refs/remotes/origin/main")].filter((path) => !ours.has(path)) };
+  } catch (error) {
+    return { outcome: "unreadable", owned: [...paths], reason: String(error) };
+  }
 }
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
@@ -50017,7 +50196,7 @@ export function shardEvidence(task: Task): string | undefined {
  *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
 function shardAgeDays(taskId: string, root: string, nowMs: number): number {
   try {
-    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
+    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
     if (!out) return 0;
     return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
   } catch {
@@ -53294,7 +53473,7 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   const git = (args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   git(["fetch", "--quiet", "origin", "main"]);
   const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
-  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
+  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => isTaskShardName(n, taskId))) return true;
   const mono = git(["show", "origin/main:plan/tasks.yaml"]);
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
@@ -54073,6 +54252,7 @@ function commandSyntax(name: string): string {
 import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
+import { isTaskShardName } from "./lib/task-shard-name.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

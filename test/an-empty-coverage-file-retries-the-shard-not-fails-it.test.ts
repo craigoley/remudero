@@ -111,13 +111,16 @@ test("W1-T6592: every empty raw file is dropped and non-coverage files are retai
 });
 
 for (const mode of ["corrupt", "mixed"]) {
-  test(`W1-T6592: a non-empty corrupt report still fails (${mode})`, (t) => {
+  // 2026-10-09: a non-empty truncated report (a child killed mid-write) is now set aside and lcov rebuilt,
+  // like an empty one, instead of failing an all-pass shard (see the truncated-report suite).
+  test(`W1-T6592: a non-empty corrupt report is set aside, not failed (${mode})`, (t) => {
     const dir = fixture(t, mode);
     const result = run(dir);
-    assert.equal(result.code, 1, result.output);
+    assert.equal(result.code, 0, result.output);
     assert.equal(readFileSync(join(dir, "attempts"), "utf8"), "1");
-    assert.doesNotMatch(result.output, /FLAKE-RETRY-RECOVERED|retrying the coverage shard/);
-    assert.equal(readFileSync(join(dir, "raw", "coverage-999999-1791500613083-2.json"), "utf8"), "{broken");
+    assert.equal(existsSync(join(dir, "raw", "coverage-999999-1791500613083-2.json")), false);
+    assert.equal(readFileSync(join(dir, "raw-unparseable", "coverage-999999-1791500613083-2.json"), "utf8"), "{broken");
+    assert.match(result.output, /FLAKE-RETRY-RECOVERED:.*coverage-999999-1791500613083-2\.json \(truncated/);
   });
 }
 
@@ -177,6 +180,6 @@ test("W1-T6592: an unreadable raw directory preserves failure and names the caus
     env: { ...process.env, NODE_V8_COVERAGE: "", TEST_RETRY: "1", TEST_RETRY_BUDGET_SECONDS: "" } });
   assert.ifError(result.error);
   assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stderr, /could not drop empty coverage files:.*ENOTDIR/);
+  assert.match(result.stderr, /could not drop empty or truncated coverage files:.*ENOTDIR/);
   assert.doesNotMatch(result.stdout, /FLAKE-RETRY-RECOVERED/);
 });

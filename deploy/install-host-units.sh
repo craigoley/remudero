@@ -1013,6 +1013,15 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # revival path below, after this very return, so a host that recovered stopped reviving and never
   # reached it. This is the one place the script observes the daemon HEALTHY.
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  # 2026-10-09 -- A SELF-TUNING memory.high. deploy/memory-high-tuner.sh grows this container's
+  # memory.high while it is throttled and refaulting its page cache with host headroom, and gives it
+  # back under host pressure, never below the policy. BEFORE the unchanged-tick exit: memory pressure
+  # moves while the code does not. Bounded, and never fatal to the tick.
+  if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
+    MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+      --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+  fi
   if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
   rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
   WATCHDOG_UNCHANGED_TICKS=0
@@ -1593,6 +1602,52 @@ if [ -n "$CLEANUP_PATH" ]; then
   fi
 fi
 
+# The session slice cap (2026-10-09). The operator capped user-<uid>.slice by hand, and a rebuilt host
+# would come up without it. deploy/resource-policy.sh sizes the cap from this host's RAM; see the
+# note there. MemoryHigh only, never MemoryMax, so a session is throttled and never killed. It is
+# WRITTEN ONLY WHEN ITS DIRECTIVES DIFFER: a current file, even the hand-written one, is left
+# untouched. It is managed in the default/core layout only, and only when the service user's uid
+# resolves. An unresolvable uid or MemTotal is reported and skipped; it is never guessed.
+SESSION_SLICE_DROPIN=""
+SESSION_SLICE_WANT=""
+SESSION_SLICE_WRITTEN=0
+if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+  # shellcheck source=deploy/resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  SESSION_UID="${RMD_SERVICE_UID:-$(id -u "$SERVICE_USER" 2>/dev/null || true)}"
+  case "$SESSION_UID" in
+    ''|*[!0-9]*) echo "install-host-units: skipped session slice cap -- no uid for service user '${SERVICE_USER}'" ;;
+    *)
+      SESSION_SLICE_DROPIN="${UNIT_DIR}/user-${SESSION_UID}.slice.d/50-rmd-cap.conf"
+      resource_policy_session_slice # sets RP_SESSION_* here; the render below runs in a subshell
+      SESSION_SLICE_WANT="$(resource_policy_session_slice_dropin)"
+      if [ -z "$SESSION_SLICE_WANT" ]; then
+        echo "install-host-units: skipped session slice cap -- ${RP_SESSION_NOTE}"
+        SESSION_SLICE_DROPIN=""
+      fi ;;
+  esac
+fi
+if [ -n "$SESSION_SLICE_DROPIN" ]; then
+  if [ -e "$SESSION_SLICE_DROPIN" ] && [ "$(effective_directives "$SESSION_SLICE_WANT")" = "$(effective_directives "$(cat "$SESSION_SLICE_DROPIN" 2>/dev/null)")" ]; then
+    echo "install-host-units: ok      $SESSION_SLICE_DROPIN"
+  elif [ "$MODE" = "check" ]; then
+    if [ -e "$SESSION_SLICE_DROPIN" ]; then
+      echo "install-host-units: DRIFTED $SESSION_SLICE_DROPIN (want: $(effective_directives "$SESSION_SLICE_WANT" | grep -v '^\[' | paste -sd' ' -))"
+    else
+      echo "install-host-units: MISSING $SESSION_SLICE_DROPIN"
+    fi
+    drift=$(( drift + 1 ))
+  else
+    mkdir -p "$(dirname "$SESSION_SLICE_DROPIN")"
+    tmp="${SESSION_SLICE_DROPIN}.tmp.$$"
+    printf '%s\n' "$SESSION_SLICE_WANT" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$SESSION_SLICE_DROPIN"
+    SESSION_SLICE_WRITTEN=1
+    echo "install-host-units: wrote   $SESSION_SLICE_DROPIN (${RP_SESSION_NOTE})"
+  fi
+fi
+
 # W1-T5518 — the retired host-only user janitor (in no repo; 569 false EMERGENCY runs) is drift while
 # its unit files remain. Report only; a real home is read only in the real host layout or via override.
 LEGACY_JANITOR_TIMER="azure-remudero-janitor.timer"
@@ -1642,4 +1697,19 @@ if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>
     echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}"
   fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
+fi
+
+# A rewritten slice drop-in takes effect at the daemon-reload above. Confirm it from what systemd
+# holds. If systemd still holds the old value, apply the same values at runtime so the cap is live
+# now and not only after the next reboot.
+if [ "$SESSION_SLICE_WRITTEN" = 1 ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
+  session_slice="user-${SESSION_UID}.slice"
+  live_high="$(systemctl show "$session_slice" -p MemoryHigh --value 2>/dev/null || true)"
+  if [ "$live_high" = "$((RP_SESSION_HIGH_MIB * 1024 * 1024))" ]; then
+    echo "install-host-units: ${session_slice} MemoryHigh confirmed live at ${RP_SESSION_HIGH_MIB} MiB"
+  elif systemctl set-property --runtime "$session_slice" "MemoryHigh=${RP_SESSION_HIGH_MIB}M" "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
+    echo "install-host-units: ${session_slice} read MemoryHigh=${live_high:-unknown} after the reload; applied ${RP_SESSION_HIGH_MIB} MiB at runtime"
+  else
+    echo "install-host-units: WARNING ${session_slice} MemoryHigh reads ${live_high:-unknown}, not ${RP_SESSION_HIGH_MIB} MiB; the file takes effect at the next boot" >&2
+  fi
 fi

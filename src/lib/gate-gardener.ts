@@ -9,7 +9,7 @@ import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from ".
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
 import { loadPolicy } from "./policy.js";
 
@@ -407,6 +407,7 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
   const clock = deps.clock ?? systemClock;
   return {
     name: "gate",
+    landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
     classes: GATE_GARDEN_CLASSES,
     review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
     decision: ["defuse"],
