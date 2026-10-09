@@ -7755,7 +7755,13 @@ export interface PlanRepairFacts {
 export type PlanRepairDecision =
   | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
   | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
-  | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" };
+  | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" | "inherited" };
+
+export function inheritedPlanRedChecks(names: readonly string[]): string[] | undefined {
+  const inheritable = /^(?:ci-shard|coverage-shard|test-slow-shard|test-slow|typecheck|ci|coverage-ratchet|mutation-ratchet)(?: \(\d+\/\d+\))?$/;
+  const own = names.filter((name) => name !== "ci-gate");
+  return own.length > 0 && own.every((name) => inheritable.test(name)) ? own : undefined;
+}
 
 export interface PlanRepairOutcome {
   outcome: string;
@@ -7831,10 +7837,13 @@ export function decidePlanRepair(
   facts: PlanRepairFacts,
   main: MainLatestRun | undefined,
   history: ReadonlySet<string>,
+  behindMain?: number,
 ): PlanRepairDecision | undefined {
-  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) return undefined;
   const failures = pr.ciFailures ?? [];
   const head = `${pr.prNumber}@${pr.headSha}`;
+  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) {
+    return inheritedRedRefresh(pr, failures.map((f) => f.name), main, history, behindMain);
+  }
   const heldIds = heldTaskIdsFromCiFailures(failures);
   if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
     return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
@@ -7857,7 +7866,17 @@ export function decidePlanRepair(
     pr.currentMergeBaseSha !== undefined &&
     pr.currentMergeBaseSha !== main.sha &&
     !history.has(`${pr.prNumber}@stale-base`);
-  return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" } : undefined;
+  return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" }
+    : inheritedRedRefresh(pr, names, main, history, behindMain);
+}
+
+function inheritedRedRefresh(
+  pr: OpenPrView, names: readonly string[], main: MainLatestRun | undefined, history: ReadonlySet<string>, behindMain?: number,
+): PlanRepairDecision | undefined {
+  const inherited = inheritedPlanRedChecks(names);
+  const behind = (behindMain ?? 0) > 0 || (pr.currentMergeBaseSha !== undefined && pr.currentMergeBaseSha !== main?.sha);
+  if (!inherited || main?.state !== "green" || !behind || history.has(`${pr.prNumber}@${pr.headSha}@base-red`)) return undefined;
+  return { signature: "base-red", action: "refresh", check: inherited.join(", "), cause: "inherited" };
 }
 
 /** Signature (a)'s cure on the lane's OWN branch: each held id the PR's ADDED plan files declare
@@ -13270,17 +13289,19 @@ export async function runSweep(
   const planRoundFacts = new Map<number, PlanRepairFacts>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
-    if (!isMachineLanePlanHead(pr.headRefName) || !deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
+    if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
-    let facts: PlanRepairFacts;
-    try {
-      facts = await deps.readPlanRepairFacts(pr);
-      planRoundFacts.set(pr.prNumber, facts);
-    } catch (e) {
-      appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
-      return notRepaired;
+    let facts: PlanRepairFacts = {};
+    if (isMachineLanePlanHead(pr.headRefName)) {
+      try {
+        facts = await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+      } catch (e) {
+        appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
+        return notRepaired;
+      }
     }
-    const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory);
+    const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory, deps.behindMainByPr?.get(pr.prNumber));
     if (decision === undefined) return notRepaired;
     if (decision.signature === "base-red") baseRedStandDownPrs.add(pr.prNumber);
     const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
