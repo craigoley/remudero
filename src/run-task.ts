@@ -1474,6 +1474,7 @@ import {
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
@@ -26008,6 +26009,16 @@ export function checkProofCommand(
     try {
       baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
+      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      const missingExport =
+        w!.kind === "test" && typeof loadOutput === "string"
+          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
+          : undefined;
+      if (missingExport !== undefined) {
+        console.log(`base:       COULD NOT LINK — ${missingExport}`);
+        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
+        return headExit;
+      }
       console.log(
         `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",
