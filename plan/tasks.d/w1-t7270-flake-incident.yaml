@@ -1,0 +1,24 @@
+- id: W1-T7270
+  title: "FLAKE INCIDENT — 'W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts#W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception"
+  files:
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+  acceptance:
+    - claim: "the cause of 'W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception' (test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts)'s intermittent failure is fixed in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7270 pins the cause of the intermittent failure"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception' (test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10203, #10310, #10377.
+    CI runs: 37865724208, 37919851949, 37946372738.
+    Retry outcomes: 0 recovered on retry, 6 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
