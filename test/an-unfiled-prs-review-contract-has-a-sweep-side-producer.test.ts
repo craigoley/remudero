@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hydrateReviewReuseFacts, ownDiffDigestFromCompareFiles } from "../src/lib/open-prs-rest.js";
 import { DEFAULT_RISK } from "../src/lib/plan.js";
-import { bodyReviewContractDigest, parseAcceptanceBlock, reviewContractDigest } from "../src/lib/review.js";
+import * as review from "../src/lib/review.js";
+import { parseAcceptanceBlock, reviewContractDigest } from "../src/lib/review.js";
 
 // The sweep integration proofs live in a-run-unfiled-prs-review-verdict-is-its-own.test.ts.
 const FILES = [{ filename: "src/example.ts", status: "modified", sha: "blob1" }];
@@ -50,7 +51,8 @@ test("an unfiled PR's body acceptance yields the contract digest its review reco
   const acceptance = parseAcceptanceBlock(body);
   const deterministic = reviewContractDigest({ taskId: "PR-5718", acceptance });
   const semantic = reviewContractDigest({ taskId: "PR-5718", acceptance, risk: DEFAULT_RISK, budgetUsd: 15 });
-  const digest = (recordedDigest: string | undefined, unfiled = true, text = body) => bodyReviewContractDigest({
+  // A namespace read, so a tree without the producer fails THIS test rather than the module load.
+  const digest = (recordedDigest: string | undefined, unfiled = true, text = body) => review.bodyReviewContractDigest({
     reviewLedgerKey: "PR-5718", body: text, unfiled, recordedDigest, semanticRisk: DEFAULT_RISK, semanticBudgetUsd: 15,
   });
   assert.equal(digest(deterministic), deterministic);
