@@ -32,6 +32,8 @@ import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "../s
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
 import { createActionsView, type ActionsData } from "../src/lib/actions-view.js";
+import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-view.js";
+import { createDemandBook, TASK_VIEW_NAME } from "../src/lib/view-demand.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
 
@@ -75,10 +77,10 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
   writeFileSync(daemonInstanceRegistryPath(root), "instances:\n  core:\n    github_repo: craigoley/remudero\n    project: remudero\n");
   writeFileSync(join(root, "plan", "tasks.yaml"), PLAN_YAML);
   const rows: Array<Record<string, unknown>> = [
-    { ts: iso(6 * 3_600_000), step: "run.start", run_id: "r1", task_id: "W1-T1", repo: "craigoley/remudero", run_type: "implement" },
-    { ts: iso(5 * 3_600_000), step: "pr.opened", run_id: "r1", task_id: "W1-T1", pr_url: "https://github.com/craigoley/remudero/pull/1" },
-    { ts: iso(4 * 3_600_000), step: "verdict", run_id: "r1", task_id: "W1-T1", verdict: "merged", pr_url: "https://github.com/craigoley/remudero/pull/1" },
-    { ts: iso(3 * 3_600_000), step: "implement.done", run_id: "r1", billing_mode: "api", total_cost_usd: 1.5, served_model: "claude-opus-5-5", tokens: { input: 10, output: 5 } },
+    { ts: iso(6 * 3_600_000), step: "run.start", run_id: "W1-T1-1", task_id: "W1-T1", repo: "craigoley/remudero", run_type: "implement" },
+    { ts: iso(5 * 3_600_000), step: "pr.opened", run_id: "W1-T1-1", task_id: "W1-T1", pr_url: "https://github.com/craigoley/remudero/pull/1" },
+    { ts: iso(4 * 3_600_000), step: "verdict", run_id: "W1-T1-1", task_id: "W1-T1", verdict: "merged", pr_url: "https://github.com/craigoley/remudero/pull/1" },
+    { ts: iso(3 * 3_600_000), step: "implement.done", run_id: "W1-T1-1", billing_mode: "api", total_cost_usd: 1.5, served_model: "claude-opus-5-5", tokens: { input: 10, output: 5 } },
     { ts: iso(2 * 3_600_000), step: "run.start", run_id: "r2", task_id: "W1-T2", repo: "craigoley/remudero", run_type: "implement" },
     { ts: iso(90 * 60_000), step: "escalation.issue_opened", task_id: "W1-T3", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" },
     { ts: iso(60_000), step: "daemon.tick" },
@@ -90,7 +92,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
       idempotencyKey: "key-1", reconciliationState: "applied", retryPath: { kind: "none", allowed: false, reason: "applied" },
       evidenceReference: `sha256:${"0".repeat(64)}`, safeToComplete: true } },
   ];
-  writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
+  writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ ...r, host: "h1" })}\n`).join(""));
   // One open decision of each store-backed kind, so `decisions` items are validated, not an empty array.
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), `id: fb-1\nts: "${iso(3_600_000)}"\nraw: "which page first?"\nattachments: []\norigin: cli\nstatus: grilling\nproposal_pr: null\n`);
@@ -121,7 +123,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
   // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
   appendFileSync(join(stateDir, "ledger.ndjson"), [
     { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
@@ -154,7 +156,10 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   // W1-T5054: one incident record in core's lifecycle store, so the incidents view's store items are validated.
   writeIncidentLifecycleStore(stateDir, { fp1: { fingerprint: "fp1", title: "t", source: "daemon", kind: "invariant", status: "filed", firstSeenMs: NOW - 60_000, lastSeenMs: NOW, count24h: 2, feedbackId: null, pr: null } });
   const incidents = createIncidentsView({ instances: [{ name: "core", ledgerDir: stateDir }], ledgerSource });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents], clock, holder: "schema-test", post: () => {} });
+  const demand = createDemandBook({ clock });
+  demand.want(TASK_VIEW_NAME, taskViewKey("core", "W1-T1"));
+  const task = createTaskView({ instances: [{ name: "core", ledgerDir: stateDir, planPath: deps.panelGraph.planPath, repo: "craigoley/remudero" }], ledgerSource, demand, clock });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task], demand, clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -179,7 +184,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -221,6 +226,10 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
   const actions = bodies.get("actions")!.data as ActionsData;
   assert.deepEqual(actions.instances.map((i) => [i.instance, i.results.state, i.results.results?.length]), [["core", "verified", 1]], JSON.stringify(actions));
+  const task = bodies.get(TASK_VIEW_NAME)!.data as TaskViewData;
+  assert.deepEqual([task.instance, task.id, task.found, task.task?.title], ["core", "W1-T1", true, "task W1-T1"]);
+  assert.deepEqual(task.runs.map((run) => [run.runId, run.verdict, run.pr?.url]), [["W1-T1-1", "merged", "https://github.com/craigoley/remudero/pull/1"]]);
+  assert.ok(task.facts.length >= 3 && task.facts.every((fact) => fact.ts) && task.trace.runs === 1 && task.trace.lastVerdict === "merged", JSON.stringify(task));
   // W1-T5051: every agent part, not only the one read above, validates against the one AgentView schema.
   const parts = new Map<string, AgentViewData>();
   for (const part of Object.keys(AGENT_VIEW_PARTS)) {
