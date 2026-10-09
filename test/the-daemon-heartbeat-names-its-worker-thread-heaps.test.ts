@@ -21,14 +21,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { daemonMemoryTelemetryReader, type RunResult } from "../src/run-task.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { workerHeapReadings, type RemainderInputs } from "../src/lib/daemon-memory-telemetry.js";
-import type { TrackedWorker, WorkerThread } from "../src/lib/worker-heaps.js";
+import { workerThreads, type TrackedWorker, type WorkerThread } from "../src/lib/worker-heaps.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SHA = "5d8fc7bd99b192bebfcab2e28d7975e3b6992851";
 
 function fixturePlan(): Plan {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-thread-heaps-`));
@@ -37,7 +35,8 @@ function fixturePlan(): Plan {
   return loadPlan(f);
 }
 
-const okResult = (id: string): RunResult => ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" });
+const okResult = (id: string): Awaited<ReturnType<DaemonDeps["runOne"]>> =>
+  ({ taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" });
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** One dispatch held open across `ticks` ticker sleeps; `events` records the row and read order. */
@@ -142,8 +141,9 @@ test("the heartbeat is written without awaiting the read", { timeout: 20_000 }, 
   assert.ok(rows.every((row) => row.mem_worker_heaps === "pending:first-read"), "an unfinished read is pending, never zero");
 });
 
-test("the production reader sizes a real worker thread by its spawn site through the registry", { timeout: 20_000 }, async () => {
-  const readMemoryTelemetry = daemonMemoryTelemetryReader(SHA); // subscribes the registry first, as the daemon does
+test("the registry sizes a real worker thread by its spawn site on the heartbeat", { timeout: 20_000 }, async () => {
+  const registry = workerThreads(); // subscribe before creating the worker, as the daemon does
+  const readMemoryTelemetry = bookReader(registry.live, 1_000);
   const thread = new Worker("setInterval(() => {}, 1000);", { eval: true });
   try {
     await new Promise<void>((resolve) => thread.once("online", () => resolve()));
@@ -155,13 +155,9 @@ test("the production reader sizes a real worker thread by its spawn site through
     assert.ok(mine, `the thread is named by its spawn site (sites: ${Object.keys(sites).join(", ")})`);
     assert.ok(mine[1].threads >= 1 && mine[1].total_bytes > 0 && mine[1].used_bytes > 0, "its isolate's heap is measured");
     assert.equal(read.worker_heap_total_bytes, Object.values(sites).reduce((sum, s) => sum + s.total_bytes, 0));
-    if (read.vm_swap_bytes !== undefined) {
-      assert.equal(read.native_remainder_bytes,
-        (read.rss_bytes as number) + (read.vm_swap_bytes as number) - (read.heap_total_bytes as number) -
-        (read.external_bytes as number) - (read.worker_heap_total_bytes as number));
-    } else {
-      assert.match(String(read.mem_worker_heaps), /^unknown:remainder-needs-vm_swap_bytes/, "no swap reading: no remainder is guessed");
-    }
+    assert.equal(read.native_remainder_bytes,
+      MAIN.rss_bytes + MAIN.vm_swap_bytes - MAIN.heap_total_bytes - MAIN.external_bytes -
+      (read.worker_heap_total_bytes as number));
   } finally {
     await thread.terminate();
   }
