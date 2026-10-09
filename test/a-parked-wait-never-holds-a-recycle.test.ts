@@ -17,6 +17,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import { commitInsideFixture } from "./helpers/fixture-commit.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -266,9 +267,7 @@ test("W1-T5140: a run task's fix round waiting on CI hands its PR off and releas
     if (spawns === 1) return worker({ text: "RECON REPORT\nOBSERVED: fixture\n" });
     if (!String(args.prompt).startsWith("You are a FIX worker")) return worker({ text: `REPORT\nPR_URL: ${prUrl}\n` });
     fixes++;
-    writeFileSync(join(args.cwd!, "fix.txt"), "fixed\n");
-    execFileSync("git", ["-C", args.cwd!, "add", "-A"]);
-    execFileSync("git", ["-C", args.cwd!, "commit", "-q", "-m", "fix: answer the review"]);
+    commitInsideFixture(root, args.cwd, "fix.txt", "fix: answer the review");
     // The fix round's push leaves CI pending, and the recycle engages while the round waits on it.
     gh.addRoute({ when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "in_progress" }] }) });
     recycling = true;

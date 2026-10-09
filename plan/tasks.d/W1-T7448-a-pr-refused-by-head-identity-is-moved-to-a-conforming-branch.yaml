@@ -23,11 +23,16 @@
     and only an operator could push the same head to a conforming branch, open a replacement and close the
     original. Codex sessions name heads codex/<slug> by default; .github/workflows/unwired-gate.yml records the
     same shape reaching review on #3704. This task owns the remedy; W1-T7421 (the fix-lane gardener) owns the class.
+    NARROWED AFTER #10450 MERGED: #10450 itself landed an identity-gate exemption in scripts/worker-branch-shape.mjs
+    (inspectDeclaredTaskIds, AD_HOC_PR_ID_RE): a head that is not a run- branch now passes when it carries a
+    PR-<n> trailer whose id is proven absent from the plan. Such a head is ALREADY conforming and must never be
+    re-homed. This task covers only a head with neither a conforming run- name nor a valid PR-<n> identity.
   design: |
     1. src/lib/head-rehome.ts exports headRehomePlan(pr, deps): given a PR whose failing required checks are ONLY
        head-identity-gate (ci-gate counted as its aggregate), it returns the conforming head name —
        run-<taskId>-<epochMs> when a Remudero-Task trailer or a single task id is derivable from the head commits,
-       else run-unfiled-<epochMs> — or a named refusal (other reds present, diff unreadable, head moved).
+       else run-unfiled-<epochMs> — or a named refusal (other reds present, diff unreadable, head moved, or the head
+       already carries a valid PR-<n> identity per worker-branch-shape.mjs, which is conforming and is left alone).
     2. The sweep (src/lib/sweep.ts) routes a head-identity-only red to that plan instead of a ci-log fix round:
        push the SAME head sha to the new branch, open the replacement PR with the original body plus a backlink
        line, close the original with a comment naming the replacement, and ledger a pr.rehomed row
@@ -41,7 +46,7 @@
        unwired-gate.yml comment and the image's codex requirements file), so the default lives in the session's
        own config; this task only removes the stuck state when it happens.
   acceptance:
-    - claim: "a codex/ head red only on head-identity-gate yields exactly one re-home action onto a run-unfiled head, and a correctly named head yields none"
+    - claim: "a codex/ head red only on head-identity-gate and lacking a valid PR-<n> identity yields exactly one re-home action onto a run-unfiled head; a correctly named head, and a codex/ head with a valid PR-<n> trailer, yield none"
       proof: 'unit test: test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts'
     - claim: "the sweep ledgers each re-home"
       proof: 'grep: pr\.rehomed in src/lib/sweep.ts'
@@ -51,4 +56,5 @@
       proof: 'grep: headRehomePlan( in src/lib/sweep.ts'
   falsifier: |
     Route the head-identity-only red back to a ci-log fix round: the codex/ fixture produces no re-home action
-    and the test asserting exactly one fails.
+    and the test asserting exactly one fails. Drop the PR-<n> identity check: the codex/ fixture with a valid
+    PR-<n> trailer is re-homed and the test asserting none fails.

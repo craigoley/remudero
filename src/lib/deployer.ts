@@ -132,16 +132,29 @@ const POLICY_FIELD_BY_FLAG = {
   "memory-reservation": "MemoryReservation",
 } as const;
 
+/** The line readResourcePolicyDrift adds after the docker flags when deploy/memory-high-tuner.sh has
+ *  learned a memory.high for the container: the policy's own value in bytes, the tuner's floor. */
+export const LEARNED_MEMORY_HIGH_FLOOR = "learned-memory-high-floor=";
+
 /** W1-T4267: the policy's `docker run` flags (one per line) against `docker inspect`'s HostConfig
  *  JSON. A flag the policy omits expects Docker's own 0; unparseable JSON or a non-numeric field is
- *  UNKNOWN (`undefined`), never drift. */
+ *  UNKNOWN (`undefined`), never drift.
+ *
+ *  memory.high is the one limit with a second owner. Once deploy/memory-high-tuner.sh has learned a
+ *  value (a {@link LEARNED_MEMORY_HIGH_FLOOR} line), it sets the live memory.high at runtime and the
+ *  annotation is only the value the container STARTED from. Any annotation at or above the policy's
+ *  floor is then current: comparing it with the learned value would recycle the container back to
+ *  policy after every tuner step, the two fighting forever. Below the floor (or absent) is still drift. */
 export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: string): ResourcePolicyDrift[] | undefined {
   const expected: Record<ResourcePolicyDrift["field"], number> = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, MemoryHigh: 0 };
   const highArg = `--annotation=${MEMORY_HIGH_ANNOTATION}=uint64 `;
+  let learnedFloor: number | undefined;
   for (const arg of expectedArgs.split("\n")) {
     const m = /^--(memory|memory-swap|cpu-shares|memory-reservation)=(\d+)(m?)$/.exec(arg.trim());
     if (m) expected[POLICY_FIELD_BY_FLAG[m[1] as keyof typeof POLICY_FIELD_BY_FLAG]] = Number(m[2]) * (m[3] ? 1024 * 1024 : 1);
     if (arg.trim().startsWith(highArg) && /^\d+$/.test(arg.trim().slice(highArg.length))) expected.MemoryHigh = Number(arg.trim().slice(highArg.length));
+    const floor = arg.trim().startsWith(LEARNED_MEMORY_HIGH_FLOOR) ? arg.trim().slice(LEARNED_MEMORY_HIGH_FLOOR.length) : "";
+    if (/^\d+$/.test(floor) && Number(floor) > 0) learnedFloor = Number(floor);
   }
   let hostConfig: Record<string, unknown>;
   try {
@@ -166,7 +179,8 @@ export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: st
     if (!m) return undefined;
     actualHigh = Number(m[1]);
   }
-  if (actualHigh !== expected.MemoryHigh) drift.push({ field: "MemoryHigh", expected: expected.MemoryHigh, actual: actualHigh });
+  const learnedCurrent = learnedFloor !== undefined && expected.MemoryHigh > 0 && actualHigh >= Math.min(learnedFloor, expected.MemoryHigh);
+  if (actualHigh !== expected.MemoryHigh && !learnedCurrent) drift.push({ field: "MemoryHigh", expected: expected.MemoryHigh, actual: actualHigh });
   return drift;
 }
 
@@ -177,16 +191,19 @@ export function readResourcePolicyDrift(
   installPath: string,
   role: "serve" | "build",
   container: string,
+  stateRoot?: string, // config.root: where the tuner records a learned memory.high (state/memory-high-tuned-*.json)
 ): ResourcePolicyDrift[] | undefined {
   try {
     const expectedArgs = exec("bash", [
       "-c",
-      'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
-        'else resource_policy_build_args "$3"; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
+      'STATE_DIR="$4"; source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
+        'else resource_policy_build_args "$3"; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"; ' +
+        `if [ -n "\${RP_HIGH_LEARNED:-}" ] && [ -n "\${RP_HIGH_POLICY:-}" ]; then printf '${LEARNED_MEMORY_HIGH_FLOOR}%s\\n' "$((RP_HIGH_POLICY * 1024 * 1024))"; fi`,
       "resource-policy",
       join(installPath, "deploy", "resource-policy.sh"),
       role,
       container, // the build policy is THIS container's share of the host budget, not a shared ceiling
+      stateRoot ?? "",
     ]);
     return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
   } catch {
@@ -2382,6 +2399,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         o.installPath,
         process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
         process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
+        o.stateRoot, // a learned memory.high (deploy/memory-high-tuner.sh) is current, not drift
       ),
     mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
       readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
