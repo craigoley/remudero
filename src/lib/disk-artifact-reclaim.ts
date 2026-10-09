@@ -21,7 +21,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import type { Config } from "./config.js";
+import { resolveArtifactScanRoots, type Config } from "./config.js";
 import { readDiskFreeBytes } from "./daemon-health.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
@@ -71,9 +71,14 @@ export interface ArtifactSweepSummary {
 }
 
 export interface ArtifactSweepOptions {
-  /** Directory whose immediate children are candidate checkouts. Defaults to `config.root`'s
-   *  parent, which is where hand-made checkouts sit beside the managed one. */
+  /** Legacy single-root override for callers/tests; otherwise use config.diskArtifactScanRoots,
+   * defaulting to config.root's parent. */
   scanRoot?: () => string;
+  /** Container-visible references to the state and scratch filesystems watched by the host
+   * janitor. Defaults to config.root and its worktrees mount (deploy/scratch-mounts.sh). */
+  watchedRoots?: () => string[];
+  /** stat's device identity, including bind mounts; undefined means unreadable. */
+  filesystemDevice?: (path: string) => number | undefined;
   listEntries?: (dir: string) => string[];
   isDirectory?: (path: string) => boolean;
   /** True when `path` looks like a git checkout (a `.git` file or directory). */
@@ -109,7 +114,64 @@ export function sweepReclaimableArtifacts(
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: ArtifactSweepOptions = {},
 ): ArtifactSweepSummary {
-  const scanRoot = (opts.scanRoot ?? (() => join(config.root, "..")))();
+  const roots = opts.scanRoot ? [opts.scanRoot()] : resolveArtifactScanRoots(config);
+  const summary: ArtifactSweepSummary = { reclaimed: [], kept: [], bytesReclaimed: 0 };
+  for (const scanRoot of roots) {
+    reportUnwatchedRoot(config, scanRoot, log, opts);
+    const result = sweepArtifactRoot(scanRoot, log, opts);
+    summary.reclaimed.push(...result.reclaimed);
+    summary.kept.push(...result.kept);
+    summary.bytesReclaimed += result.bytesReclaimed;
+  }
+  return summary;
+}
+
+// A daemon holds one Config through its ticks. Weak keys avoid retaining completed instances.
+const checkedRootsByConfig = new WeakMap<Config, Set<string>>();
+
+function reportUnwatchedRoot(
+  config: Config,
+  path: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: ArtifactSweepOptions,
+): void {
+  let checked = checkedRootsByConfig.get(config);
+  if (!checked) {
+    checked = new Set<string>();
+    checkedRootsByConfig.set(config, checked);
+  }
+  if (checked.has(path)) return;
+  checked.add(path);
+  const filesystemDevice = opts.filesystemDevice ?? defaultFilesystemDevice;
+  const watchedRoots = opts.watchedRoots?.() ?? [config.root, join(config.root, "worktrees")];
+  const device = filesystemDevice(path);
+  const watchedDevices = watchedRoots.map(root => filesystemDevice(root));
+  if (device !== undefined && watchedDevices.includes(device)) return;
+  log("disk_artifact.sweep.root_unwatched", {
+    path,
+    device,
+    watchedRoots,
+    watchedDevices,
+    reason: device === undefined ? "scan-filesystem-unreadable"
+      : watchedDevices.every(id => id === undefined) ? "watched-filesystems-unreadable"
+      : "different-filesystem",
+  });
+}
+
+function defaultFilesystemDevice(path: string): number | undefined {
+  try {
+    return statSync(path).dev;
+  } catch {
+    // The caller logs this as unknown, distinct from a measured different filesystem.
+    return undefined;
+  }
+}
+
+function sweepArtifactRoot(
+  scanRoot: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: ArtifactSweepOptions,
+): ArtifactSweepSummary {
   const listEntries = opts.listEntries ?? ((dir: string) => readdirSync(dir));
   const isDirectory = opts.isDirectory ?? defaultIsDirectory;
   const isCheckout = opts.isCheckout ?? ((p: string) => existsSync(join(p, ".git")));
