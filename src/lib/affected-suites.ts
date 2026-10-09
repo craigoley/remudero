@@ -432,6 +432,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(viewEtags) && files.some((f) => viewEtagsEdges.includes(f))) {
     pathReaders.push(viewEtags);
   }
+  const proofExecTmpHygiene = "test/proof-exec-tmp-hygiene.test.ts";
+  const proofExecTmpHygieneEdges = [
+    "src/lib/ci-parity.ts",
+    "test/the-coverage-entry-shards-the-way-ci-does.test.ts",
+    "test/the-local-coverage-shard-count-equals-cis.test.ts",
+  ];
+  if (input.files.has(proofExecTmpHygiene) && files.some((f) => proofExecTmpHygieneEdges.includes(f))) {
+    pathReaders.push(proofExecTmpHygiene);
+  }
   // W1-T6783: a coverage shard failed on this suite (run 37877770799) and the narrow selector missed it.
   const coverageMode = "test/preflight-coverage-mode.test.ts";
   const coverageModeEdges = [

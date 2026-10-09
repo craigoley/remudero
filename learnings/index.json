@@ -76,6 +76,7 @@
         "a-board-wide-plan-red-is-main",
         "analyze-javascript-typescript-gate-pre-push-steps",
         "body-fetch-guards-on-http-not-size",
+        "ci-gate-refusals-repaired-by-hand",
         "ci-shard-one-eight-refuses-conflict-markers",
         "claims-gate-lane",
         "codeql-read-model-lane",

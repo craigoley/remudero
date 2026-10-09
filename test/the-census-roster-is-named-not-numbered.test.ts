@@ -158,17 +158,78 @@ test("a hand-added FAST_GATE_STEPS-shaped entry with no roster member fails the 
 // ═══════════════ acceptance: "the roster refuses nothing on its own and cannot fail a preflight ═══
 // ═══════════════ run by itself — admission stays the measured bound's decision" ═══════════════════
 
+// W1-T6885: roster wiring must not depend on live census health or runner contention.
+// Inject commands and time: healthy commands may exceed the soft bound; a confirmed
+// runaway and a failed command must still fail through the real preflight engine.
 test("runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing, the measured bound does", () => {
-  const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
+  const calls: string[][] = [];
+  let clock = 0;
+  const result = runPreflightFast(REPO_ROOT, {
+    steps: CENSUS_STEPS,
+    spawn: (file, args, opts) => {
+      assert.equal(file, "npm");
+      assert.equal(opts?.cwd, REPO_ROOT);
+      calls.push([...args]);
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    now: () => (clock += FAST_GATE_CENSUS_BOUND_MS + 1),
+  });
+  assert.deepEqual(calls, CENSUS_STEPS.map((step) => ["run", "--silent", step.script]));
   assert.equal(result.steps.length, CENSUS_ADMITTED_MEMBERS.length);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass: ${step.detail}`);
+    assert.match(step.detail, /over the 2000ms soft bound \(reported, not refused\)/);
   }
   assert.equal(result.ok, true, "the roster must not itself fail a clean run — only a bound breach can");
 });
 
+test("W1-T6885: the admitted roster still reports command failures and confirmed runaways", () => {
+  const target = CENSUS_STEPS[0]!;
+  const failed = runPreflightFast(REPO_ROOT, {
+    steps: CENSUS_STEPS,
+    spawn: (_file, args) => ({
+      status: args.includes(target.script) ? 1 : 0,
+      stdout: "",
+      stderr: args.includes(target.script) ? "census fixture failure" : "",
+    }),
+    now: () => 0,
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.steps[0]!.ok, false);
+  assert.match(failed.steps[0]!.detail, /census fixture failure/);
+  assert.ok(failed.steps.slice(1).every((step) => step.ok));
+
+  let clock = 0;
+  const calls: string[] = [];
+  const runaway = runPreflightFast(REPO_ROOT, {
+    steps: CENSUS_STEPS,
+    spawn: (_file, args) => {
+      const script = args[2]!;
+      calls.push(script);
+      clock += script === target.script ? 10_000 : 1000;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    now: () => clock,
+  });
+  assert.equal(runaway.ok, false);
+  assert.equal(runaway.steps[0]!.ok, false);
+  assert.match(runaway.steps[0]!.detail, /RUNAWAY/);
+  assert.ok(runaway.steps.slice(1).every((step) => step.ok));
+  assert.equal(calls.filter((script) => script === target.script).length, 2);
+  assert.equal(calls.length, CENSUS_STEPS.length + 2, "re-measure the runaway and its reference");
+});
+
 test("REFUSED roster members never run and never appear in a preflight result — refusing them is not a gate action", () => {
-  const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
+  const scripts: string[] = [];
+  const result = runPreflightFast(REPO_ROOT, {
+    steps: CENSUS_STEPS,
+    spawn: (_file, args) => {
+      scripts.push(args[2]!);
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    now: () => 0,
+  });
+  assert.deepEqual(scripts, CENSUS_ADMITTED_MEMBERS.map((member) => member.script));
   const refusedJobs = new Set(CENSUS_SUITE_ROSTER.filter((m) => m.verdict.status === "REFUSED").map((m) => m.job));
   for (const step of result.steps) {
     assert.ok(!refusedJobs.has(step.name), `${step.name}: a REFUSED roster member must never be run by the fast gate`);
