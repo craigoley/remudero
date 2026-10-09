@@ -1,0 +1,40 @@
+- id: W1-T7213
+  title: "CI FRICTION — repair the readPaced view union type error exposed by the prerequisite compiler test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-shard:read-model-worker-readPaced-type-error"
+  files:
+    - src/lib/read-model-worker.ts
+    - test/read-paced-view-union-typecheck.test.ts
+  acceptance:
+    - claim: "the readPaced access in src/lib/read-model-worker.ts type-checks for both ReadModelView and ReadModelViewFactory; a new compiler regression covers both view kinds and fails on the original unguarded union access, while the existing prerequisite compiler test continues rejecting omitted branch and reader arguments"
+      proof: "unit test: test/read-paced-view-union-typecheck.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406), reclassified in PR-10378 as a CI-friction remedy proposal. MACHINE-AUTHORED — verify: human is retained pending a pinned machine-filing judge release or escalation to a person. This filing does not implement or credit the source repair."
+  rationale: |
+    PR-10378 round 1 reports TS2339 in src/lib/read-model-worker.ts: paced reads unit.view.readPaced from ReadModelView | ReadModelViewFactory, but ReadModelViewFactory has no readPaced property.
+    The named test in test/prompt-render.test.ts invokes tsc on its import graph and requires exit 0; a source type error can therefore fail that test even when its own file is unchanged.
+    The cited retries all failed again. They do not establish an intermittent ordering failure; this task proposes repairing the observed compiler error and retaining the negative prerequisite type checks, without asserting that error caused every historical failure.
+    Original gardener origin: flake-incident:test/prompt-render.test.ts#test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments
+    Test: 'test/the-prerequisite-split-contract-has-no-optional-seam.test.ts: a type check rejects omitted branch and reader arguments' (test/prompt-render.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10265, #10362, #10369.
+    CI runs: 37941672866, 37941954001, 37943097615.
+    Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan scopes a union type-check repair to one source file and one compiler regression test; the declared files align with that scope."
+      - "Acceptance requires coverage of both view kinds, failure on the original unguarded access, and continued rejection of omitted prerequisite arguments, providing concrete verification criteria."
+      - "The supplied scope requests no sensitive access, destructive action, policy change, or operator-only decision. Filing-time gates report no failed checks."
+      - "The family's 39 declines versus 23 merges warrant scrutiny, but the supplied record shows no specific drift; implementation and test results remain unverified at filing time."
+    judged_at: "2026-10-09T19:14:59.044Z"
+    pin: "06a191ec77afa1d05eef576d6c2c8dda293814d30f85be5d1fb1ccfdb91146b2"
