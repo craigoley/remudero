@@ -345,46 +345,46 @@ test("the sampler module references no heap snapshot, inspector or gc entry poin
   assert.match(text, /getHeapStatistics\(\)/);
 });
 
-test("a thread whose heap read rejects is named unsized with its reason, never read as 0 bytes", async () => {
-  const refusing: WorkerThread = {
+// The three cases below replace the original implementation's refusal, listing and hook-throw tests (2ba829d99),
+// keeping each scenario but asserting the amended W1-T7092 contract instead of the removed per-site `unsized`
+// aggregation and `native_remainder_kind`.
+test("a heap read that rejects leaves its thread unanswered with the reason, no figures and no residual, never 0 bytes", async () => {
+  const refusing = {
     threadId: 8,
     once: (() => undefined) as unknown as WorkerThread["once"],
     getHeapStatistics: (() => Promise.reject(new Error("worker exited"))) as unknown as WorkerThread["getHeapStatistics"],
-  };
-  const book = workerHeapReadings({ live: () => [{ kind: "board-worker:spawnBoard", thread: refusing }], timeoutMs: 1_000, nowMs: () => 0 });
-  book.refresh();
+  } as unknown as WorkerThread;
+  const readings = book(() => [{ kind: "board-worker:spawnBoard", thread: refusing }]);
+  readings.refresh();
   await settle(20);
-  const fields = book.fields(MAIN);
-  assert.deepEqual(fields.worker_heaps, { "board-worker:spawnBoard": { threads: 1, total_bytes: 0, used_bytes: 0, unsized: [8] } });
-  assert.equal(fields.native_remainder_kind, "inferred-upper-bound", "a refused read leaves its heap inside the remainder");
+  const fields = readings.fields(MAIN);
+  assert.deepEqual(entry(fields, 8), { site: "board-worker:spawnBoard", role: "unmapped", thread_id: 8, state: "unanswered", error: "worker exited" },
+    "a refused read names the thread and its reason and carries no figures");
+  assert.equal(fields.unattributed_bytes_approx, undefined);
+  assert.equal(fields.unattributed_omitted, "threads-not-fresh:8=unanswered", "the residual is withheld, naming the thread");
+  assert.doesNotMatch(JSON.stringify(fields), /native|unsized/, "no removed field survives");
 });
 
-test("a registry that throws on listing carries error:<reason> on the next row instead of a reading", () => {
-  const book = workerHeapReadings({ live: () => { throw new Error("registry gone"); }, timeoutMs: 1_000 });
-  book.refresh();
-  assert.deepEqual(book.fields(MAIN), { mem_worker_heaps: "error:registry gone" });
+test("a registry that throws on listing carries error:<reason>, and the next good listing recovers", async () => {
+  const healthy = controlledThread(9);
+  let broken = true;
+  const readings = book(() => { if (broken) throw new Error("registry gone"); return [{ kind: "read-plane:startReadPlane", thread: healthy.thread }]; });
+  readings.refresh();
+  assert.deepEqual(readings.fields(MAIN), { mem_worker_heaps: "error:registry gone" }, "no reading is invented while the listing fails");
+  broken = false;
+  readings.refresh();
+  healthy.answer(heap(50));
+  await settle(5);
+  const recovered = readings.fields(MAIN);
+  assert.equal(recovered.mem_worker_heaps, undefined, "the error clears once a listing succeeds");
+  assert.equal(entry(recovered, 9)?.state, "fresh");
 });
 
-test("an afterRow hook that throws is logged and never stops the heartbeat", async () => {
-  const steps: string[] = [];
-  const failures: Record<string, unknown>[] = [];
+test("an afterRow hook that throws is logged after its row and every heartbeat still carries the memory fields", { timeout: 20_000 }, async () => {
+  const events: string[] = [];
   const readMemoryTelemetry = Object.assign(() => ({ ...MAIN }), { afterRow: () => { throw new Error("read could not start"); } });
-  let sleeps = 0;
-  let release: (() => void) | undefined;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  await runDaemon(
-    fixturePlan(),
-    {
-      refreshMerged: () => () => false,
-      runOne: async (id) => { await gate; return okResult(id); },
-      sweepLight: async () => {},
-      sleep: async () => { sleeps++; await settle(5); if (sleeps >= 3) release?.(); },
-      log: (step, e = {}) => { steps.push(step); if (step === "daemon.memory_read_failed") failures.push(e); },
-      readMemoryTelemetry,
-    },
-    { max: 1 },
-  );
-  assert.ok(steps.filter((s) => s === "daemon.alive").length >= 2, "heartbeats kept being written after the hook threw");
-  assert.ok(failures.length >= 1, "the throw is logged as daemon.memory_read_failed");
-  assert.equal(failures[0].error, "read could not start");
+  const rows = await heartbeat({ readMemoryTelemetry }, 3, 5, events);
+  assert.ok(rows.length >= 2, `heartbeats kept being written after the hook threw (got ${rows.length})`);
+  assert.ok(rows.every((row) => row.rss_bytes === MAIN.rss_bytes), "each row still carries the memory reading");
+  assert.deepEqual(events.slice(0, 2), ["row", "failed:read could not start"], "the failure is logged after its row, not instead of it");
 });
