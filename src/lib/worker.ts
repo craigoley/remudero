@@ -125,6 +125,7 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { openMemoryReservation, type HostMemoryLedgerOptions, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
+import { recordShadowMemoryVerdict, type ShadowMemoryPorts } from "./host-memory-shadow.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -1069,6 +1070,8 @@ export interface SpawnWorkerArgs {
   };
   /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
   workerClass?: WorkerClass;
+  /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
+  memoryShadow?: Partial<ShadowMemoryPorts>;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2298,6 +2301,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // one worker's advisory status read must not switch another's home.
   const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
+  // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
+  // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
+  recordShadowMemoryVerdict({
+    runId: args.runId,
+    taskId: args.taskId,
+    workerClass: workerClassOf(args),
+    reservationId: memoryReservation.id,
+    root: config.root,
+  }, args.memoryShadow);
   // HOISTED ABOVE PROVIDER SELECTION so the Codex branch cannot return past the HOME redirection the Claude path has had
   // since W1-T18. Below the early return, `codexSpawnEnv` fell back to the operator's real HOME, and a worker shell sourcing
   // an rc file from it re-exported ANTHROPIC_API_KEY past both of Codex's process-boundary exclusions. Computing the path
