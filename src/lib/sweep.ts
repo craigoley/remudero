@@ -20,7 +20,7 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
+  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
@@ -7638,6 +7638,7 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
 }
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
+export const BASE_REPRODUCTION_CONTRADICTED_STEP = "sweep.base_reproduction.contradicted";
 export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
@@ -15289,7 +15290,10 @@ export async function runSweep(
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
                 const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
                 const { verdict } = row;
-                if (verdict === "reproduced") {
+                const contradicted = verdict !== "clear" && reproductionFiles.every((file) => ciContradictedProbeFiles([...reproductionHistory, { ...row, step: "sweep.base_reproduction" }]).has(file));
+                if (contradicted) {
+                  appendLine(deps.ledgerPath, { ...row, step: BASE_REPRODUCTION_CONTRADICTED_STEP });
+                } else if (verdict === "reproduced") {
                   const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
                   for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
                     const refund = { run_id: deps.runId, task_id: pr.taskId!, step: "fix.strike_refunded", pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -15305,7 +15309,7 @@ export async function runSweep(
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
                 // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
-                const mainFailing = verdict === "clear" ? undefined : mainFailingTestFiles(reproductionHistory);
+                const mainFailing = verdict === "clear" || contradicted ? undefined : mainFailingTestFiles(reproductionHistory);
                 if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
                   acted = false;
                   const check = ciFailuresForFix.find((failure) => baseReproductionFiles([failure]).length > 0)!.name;
