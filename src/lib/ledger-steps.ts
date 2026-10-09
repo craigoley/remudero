@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "sweep.update_branch.pending_guard",
+    meaning: "The actual sweep selector declined the pending input head that would win with only its pending-CI guard removed. This is snapshot decision evidence; no saved run, CPU time or cash is established.",
+    writer: ["runSweep"],
+    outcomes: ["guarded"],
+  },
+  {
     step: "automerge.armed",
     meaning:
       "Auto-merge status was recorded for a PR. DISAGREEING WRITERS (the learning's own defect, " +

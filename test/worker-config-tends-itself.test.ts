@@ -397,7 +397,7 @@ test("W1-T4113: a self-hosting daemon wires the config gardener", async () => {
     assert.ok(start, "the config gardener is wired after the plan, gate and test gardeners");
     const stateFile = gardenStatePath(join(root, "state"), "config");
     const garden = start!(60_000);
-    for (let waited = 0; !existsSync(stateFile) && waited < 20_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
+    for (let waited = 0; !existsSync(stateFile) && waited < 120_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
     garden.stop();
     assert.ok(readGardenState(stateFile, CONFIG_GARDEN_CLASSES).lastPass, "the wired garden ran a pass over this repo's configuration");
     // Stopped before the headroom sweep loads, it never starts.

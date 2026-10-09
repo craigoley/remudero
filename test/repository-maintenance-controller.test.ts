@@ -193,7 +193,9 @@ test("unverifiable post-survey and Git's replacement marker each enter durable b
 });
 
 test("Git's database lock refuses a contender and preserves failure evidence", async () => {
-  const store = gitRepo({ kind: "maintenance-contender" });
+  // No seed commit: newer Git can detach automatic maintenance after a commit,
+  // and that fixture's lock release can race this deliberately held database lock.
+  const store = gitRepo({ kind: "maintenance-contender", seedCommit: false });
   const marker = join(store.dir, ".git", "gc.log");
   writeFileSync(marker, "original failure\n");
   const lock = join(store.dir, ".git", "objects", "maintenance.lock");
@@ -209,6 +211,21 @@ test("Git's database lock refuses a contender and preserves failure evidence", a
   assert.equal(readFileSync(lock, "utf8"), "held by another maintainer\n");
 });
 
+test("a zero-exit maintenance lock skip is never a completed child", async () => {
+  const store = gitRepo({ kind: "maintenance-zero-skip", seedCommit: false });
+  const lock = join(store.dir, ".git", "objects", "maintenance.lock");
+  const marker = join(store.dir, ".git", "gc.log");
+  writeFileSync(lock, "another maintenance owner\n");
+  writeFileSync(marker, "prior failure\n");
+  for (const kind of ["gc", "incremental"] as const) {
+    const result = await maintenance.runMaintenanceGit(store.dir, maintenance.maintenanceArgs(kind), 5000);
+    assert.equal(result.ok, false, `${kind} cannot report a skipped native child as complete`);
+    assert.match(!result.ok ? result.error : "", /lock file|already running/);
+    assert.equal(readFileSync(lock, "utf8"), "another maintenance owner\n");
+    assert.equal(readFileSync(marker, "utf8"), "prior failure\n");
+  }
+});
+
 test("idle linked worktrees share the surveyed object database and do not refuse full GC", async () => {
   const store = gitRepo({ kind: "maintenance-linked" });
   const linked = join(store.dir, "linked");
@@ -222,6 +239,8 @@ test("idle linked worktrees share the surveyed object database and do not refuse
     context: () => ({ activeLanes: 0, disk: "healthy" }),
   });
   assert.equal(existsSync(marker), false);
+  assert.equal(maintenance.readMaintenanceState(join(store.dir, "state.json")).lastOutcome, "complete",
+    "an actual uncontended native maintenance run still completes");
 });
 
 test("an unreadable or incomplete survey never spawns a maintenance child", async () => {

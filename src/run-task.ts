@@ -2873,6 +2873,8 @@ import {
 } from "./lib/live-write-guard.js";
 import {
   checkSharedPause,
+  disposeSharedPauseRefresh,
+  prepareSharedPause,
   clearKick,
   consumeDrainNow,
   clearPrAction,
@@ -34833,6 +34835,7 @@ async function drainCommand(
 
   const runDrainFn = deps.runDrain ?? runDrain;
   try {
+    if (!deps.runDrain && !stopDetail(config.root)) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
     const summary = await runDrainFn(
       plan,
       {
@@ -34957,6 +34960,7 @@ async function drainCommand(
     // one-shot — it existed only to halt THIS drain, so the drain it interrupted clears it as
     // it exits. A concurrent/next drain therefore sees a clean slate, never a silent latch.
     // PAUSE is deliberately NOT consumed here (persistent hold, cleared only by `rmd resume`).
+    if (!deps.runDrain) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     consumeStop(config.root);
     drainLock.release();
   }
@@ -37757,6 +37761,7 @@ export async function daemonCommand(
   // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
+  if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
   if (bootHold) {
@@ -38545,6 +38550,7 @@ export async function daemonCommand(
     return daemonExitCodeForSummary(summary);
   } finally {
     await readPlane?.stop();
+    if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     loopTelemetry.stop();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
@@ -43552,15 +43558,25 @@ export function commitWorkerEdits(
       reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
   }
 
+  // W1-T6639: an index deletion a merge already staged (`D `, absent on disk) matches nothing, so
+  // `git add -A -- <it>` dies "pathspec did not match" and takes the whole commit with it. It stays
+  // in the index and is committed as the deletion it already is; a worktree-only ` D` is still added.
+  const alreadyStagedDeletion = new Set(status.split("\0").filter((entry) => entry.startsWith("D ") && entry.length > 3)
+    .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
+  const withoutStagedDeletions = declared.filter((path) => !alreadyStagedDeletion.has(path));
+
   let sha: string;
   if (roundRef === undefined) {
-    runGit(["add", "-A", "--", ...declared]);
+    if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
     runGit(["commit", "-m", message]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
     const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
+    // Only a merge's index is seeded from the real one, so only there is a staged deletion already in it;
+    // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
+    const addable = mergeHead === undefined ? declared : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
-      hostWorktreeGit(repoDir, ["add", "-A", "--", ...declared], { env });
+      if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
