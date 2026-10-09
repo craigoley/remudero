@@ -2613,8 +2613,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }),
     );
     if (selection.provider === "codex") {
-      const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+      const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+        spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2642,7 +2644,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // process boundary while the worker's SHELL still read the operator's exported value from `$HOME/.bashrc`.
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
-        const result = await runCodex({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
         if (args.model) result.model = args.model;
@@ -2699,8 +2701,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     routedClaudePreferenceBypass = preferenceBypass;
   }
   if (args.mountProvider === "codex") {
-    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+    const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+      spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2719,7 +2723,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
-      const result = await runCodex({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config);
+      const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
       if (args.model) result.model = args.model;

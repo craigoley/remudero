@@ -24,9 +24,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -91,7 +91,7 @@ export interface ProcessListing {
 }
 
 export type HostMemoryLedgerOptions = Partial<Pick<Context,
-  "clock" | "probe" | "listProcesses" | "write" | "read" | "list" | "remove" | "limits"
+  "clock" | "probe" | "listProcesses" | "write" | "read" | "list" | "remove" | "limits" | "createSentinel"
 >> & {
   /** The ledger directory and whether it is host-wide. Default: `<test slot dir>/host-memory`. */
   location?: () => { dir: string; scope: "host" | "local" };
@@ -151,6 +151,9 @@ export interface ReadingEntry {
 }
 
 export interface HostMemoryReading {
+  /** Missing or replaced storage is explicit; it is never represented as an empty, healthy ledger. */
+  state: "present" | "missing" | "unreadable" | "reset";
+  reason?: string;
   scope: "host" | "local";
   dir: string;
   entries: ReadingEntry[];
@@ -164,6 +167,11 @@ export interface SweepResult {
 }
 
 const seenDiagnostics = new Set<string>();
+const ownReservations = new Map<string, MemoryReservationEntry>();
+const sentinelIds = new Map<string, string>();
+const pendingResets = new Map<string, string>();
+const pendingMissing = new Set<string>();
+const SENTINEL_NAME = ".ledger-id";
 
 function recordError(deps: HostMemoryLedgerOptions, op: string, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
@@ -283,6 +291,7 @@ interface Context {
   read: (path: string) => string;
   list: (dir: string) => string[];
   remove: (path: string) => void;
+  createSentinel: (path: string, content: string) => void;
   listProcesses: (limits: WalkLimits) => ProcessListing;
   limits: WalkLimits;
 }
@@ -303,9 +312,59 @@ function contextOf(deps: HostMemoryLedgerOptions): Context {
     read: deps.read ?? ((path) => readFileSync(path, "utf8")),
     list: deps.list ?? ((dir) => readdirSync(dir)),
     remove: deps.remove ?? ((path) => rmSync(path, { force: true })),
+    createSentinel: deps.createSentinel ?? ((path, content) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content, { flag: "wx", mode: 0o666 });
+    }),
     listProcesses: deps.listProcesses ?? ((limits) => defaultListProcesses(limits, clock)),
     limits: deps.limits ?? DEFAULT_WALK_LIMITS,
   };
+}
+
+type SentinelObservation = { state: "present" | "missing" | "unreadable" | "reset"; id?: string; reason?: string };
+
+function observeSentinel(ctx: Context, createIfMissing: boolean): SentinelObservation {
+  const path = join(ctx.dir, SENTINEL_NAME);
+  let raw: string;
+  let missingOnEntry = false;
+  try {
+    raw = ctx.read(path);
+  } catch (error) {
+    if (errnoOf(error) !== "ENOENT") {
+      return { state: "unreadable", reason: error instanceof Error ? error.message : String(error) };
+    }
+    missingOnEntry = true;
+    pendingMissing.add(ctx.dir);
+    if (!createIfMissing) return { state: "missing", reason: `missing ${path}` };
+    try {
+      ctx.createSentinel(path, `${randomUUID()}\n`);
+    } catch (createError) {
+      // Another writer may have won the create-once race; other failures are named and fail-soft.
+      if (errnoOf(createError) !== "EEXIST") {
+        return { state: "unreadable", reason: createError instanceof Error ? createError.message : String(createError) };
+      }
+    }
+    try {
+      raw = ctx.read(path);
+    } catch (readError) {
+      return errnoOf(readError) === "ENOENT"
+        ? { state: "missing", reason: `missing ${path} after create` }
+        : { state: "unreadable", reason: readError instanceof Error ? readError.message : String(readError) };
+    }
+  }
+  const id = raw.trim();
+  if (!id) return { state: "unreadable", reason: `empty sentinel ${path}` };
+  const previous = sentinelIds.get(ctx.dir);
+  if (previous !== undefined && previous !== id) pendingResets.set(ctx.dir, id);
+  sentinelIds.set(ctx.dir, id);
+  if (pendingResets.get(ctx.dir) === id) return { state: "reset", id, reason: `sentinel changed at ${path}` };
+  if (pendingMissing.has(ctx.dir)) return { state: "missing", id, reason: `missing ${path}` };
+  return missingOnEntry ? { state: "missing", id, reason: `missing ${path}` } : { state: "present", id };
+}
+
+function acknowledgeReset(ctx: Context, observation: SentinelObservation): void {
+  if (observation.state === "reset" && pendingResets.get(ctx.dir) === observation.id) pendingResets.delete(ctx.dir);
+  if (observation.state === "reset" || observation.state === "missing") pendingMissing.delete(ctx.dir);
 }
 
 const keyOf = (identity: ProcessIdentity): string => `${identity.pid}:${identity.start}`;
@@ -332,6 +391,18 @@ function entryPath(ctx: Context, id: string): string {
   return join(ctx.dir, `${id}.json`);
 }
 
+function ownKey(ctx: Context, id: string): string {
+  return entryPath(ctx, id);
+}
+
+function rememberOwn(ctx: Context, entry: MemoryReservationEntry): void {
+  ownReservations.set(ownKey(ctx, entry.id), entry);
+}
+
+function forgetOwn(ctx: Context, entry: MemoryReservationEntry): void {
+  ownReservations.delete(ownKey(ctx, entry.id));
+}
+
 function readEntry(ctx: Context, path: string): MemoryReservationEntry | undefined {
   const parsed = JSON.parse(ctx.read(path)) as MemoryReservationEntry;
   const shaped = parsed?.schema === 1 && typeof parsed.id === "string" && typeof parsed.generation?.containerId === "string" &&
@@ -344,11 +415,15 @@ function persist(ctx: Context, entry: MemoryReservationEntry): void {
 }
 
 /** Read-merge-write, so a handle never overwrites descendants a sweep recorded since its last write. */
-function mergeAndPersist(ctx: Context, entry: MemoryReservationEntry): void {
+function mergeAndPersist(ctx: Context, entry: MemoryReservationEntry, deps: HostMemoryLedgerOptions): void {
+  rememberOwn(ctx, entry);
   let onDisk: MemoryReservationEntry | undefined;
   try {
     onDisk = readEntry(ctx, entryPath(ctx, entry.id));
   } catch (error) {
+    if (errnoOf(error) === "ENOENT" && ownReservations.has(ownKey(ctx, entry.id))) {
+      recordError(deps, "own-entry-missing", new Error(ownKey(ctx, entry.id)));
+    }
     void error; // Absent (an earlier write failed) or torn: the in-memory entry is the whole record.
   }
   persist(ctx, onDisk ? {
@@ -373,6 +448,9 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
   const merged: HostMemoryLedgerOptions = { ...deps, root: input.root ?? deps.root };
   try {
     ctx = contextOf(merged);
+    const sentinel = observeSentinel(ctx, true);
+    if (sentinel.state === "unreadable") recordError(deps, "sentinel", new Error(sentinel.reason));
+    else if (sentinel.state === "missing") recordError(deps, "sentinel-missing", new Error(sentinel.reason));
     const ownerPid = deps.ownerPid ?? process.pid;
     const owner = ctx.probe(ownerPid);
     const nowIso = ctx.clock.iso();
@@ -391,6 +469,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       roots: [],
       tree: [],
     };
+    rememberOwn(ctx, entry);
   } catch (error) {
     recordError(deps, "open", error);
     return NOOP_HANDLE;
@@ -409,7 +488,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
         if (probed.state === "gone") return; // Exited before it could be bound: nothing of it can hold memory.
         const identity = { pid, start: probed.state === "alive" ? probed.start : "unknown" };
         entry = { ...entry, roots: union(entry.roots, [identity]), tree: union(entry.tree, [identity]) };
-        mergeAndPersist(ctx, entry);
+        mergeAndPersist(ctx, entry, deps);
       } catch (error) {
         recordError(deps, "bind", error);
       }
@@ -417,7 +496,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
     releaseOccupancy(): void {
       try {
         entry = { ...entry, occupancyReleasedAt: ctx.clock.iso() };
-        mergeAndPersist(ctx, entry);
+        mergeAndPersist(ctx, entry, deps);
         sweepWith(ctx, deps);
       } catch (error) {
         recordError(deps, "release", error);
@@ -475,7 +554,13 @@ function generationEnded(ctx: Context, entry: MemoryReservationEntry): boolean {
   return entry.instanceHostUnique && ctx.instance.hostUnique && entry.instance === ctx.instance.name;
 }
 
-function readingOf(ctx: Context, live: Array<{ entry: MemoryReservationEntry; path: string }>, unreadable: number): HostMemoryReading {
+function readingOf(
+  ctx: Context,
+  live: Array<{ entry: MemoryReservationEntry; path: string }>,
+  unreadable: number,
+  state: HostMemoryReading["state"],
+  reason?: string,
+): HostMemoryReading {
   const now = ctx.clock.now();
   const entries = live.map(({ entry, path }): ReadingEntry => {
     const owned = sameGeneration(entry.generation, ctx.generation);
@@ -497,6 +582,8 @@ function readingOf(ctx: Context, live: Array<{ entry: MemoryReservationEntry; pa
     };
   });
   return {
+    state,
+    ...(reason ? { reason } : {}),
     scope: ctx.scope,
     dir: ctx.dir,
     entries,
@@ -511,17 +598,22 @@ function readingOf(ctx: Context, live: Array<{ entry: MemoryReservationEntry; pa
   };
 }
 
-function listEntries(ctx: Context): { live: Array<{ entry: MemoryReservationEntry; path: string }>; unreadable: number } {
+function listEntries(ctx: Context): {
+  live: Array<{ entry: MemoryReservationEntry; path: string }>;
+  unreadable: number;
+  names: Set<string>;
+} {
   let names: string[];
   try {
     names = ctx.list(ctx.dir).filter((name) => name.endsWith(".json"));
   } catch (error) {
-    if (errnoOf(error) === "ENOENT") return { live: [], unreadable: 0 };
+    if (errnoOf(error) === "ENOENT") return { live: [], unreadable: 0, names: new Set() };
     throw error;
   }
+  const jsonNames = names.filter((name) => name.endsWith(".json"));
   const live: Array<{ entry: MemoryReservationEntry; path: string }> = [];
   let unreadable = 0;
-  for (const name of names) {
+  for (const name of jsonNames) {
     const path = join(ctx.dir, name);
     try {
       const entry = readEntry(ctx, path);
@@ -532,11 +624,89 @@ function listEntries(ctx: Context): { live: Array<{ entry: MemoryReservationEntr
       unreadable += 1;
     }
   }
-  return { live, unreadable };
+  return { live, unreadable, names: new Set(jsonNames.map((name) => join(ctx.dir, name))) };
+}
+
+function mergeOwnedCopy(disk: MemoryReservationEntry, memory: MemoryReservationEntry): MemoryReservationEntry {
+  return {
+    ...disk,
+    ...memory,
+    roots: union(disk.roots, memory.roots),
+    tree: union(disk.tree, memory.tree),
+    verifiedAt: disk.verifiedAt > memory.verifiedAt ? disk.verifiedAt : memory.verifiedAt,
+    ...(disk.walk && (!memory.walk || disk.walk.at > memory.walk.at) ? { walk: disk.walk } : {}),
+    ...(disk.occupancyReleasedAt || memory.occupancyReleasedAt
+      ? { occupancyReleasedAt: disk.occupancyReleasedAt ?? memory.occupancyReleasedAt }
+      : {}),
+  };
+}
+
+/** Reconcile this process's owner copies before any release decision. Missing owner files are recreated, never released. */
+function includeOwnCopies(
+  ctx: Context,
+  deps: HostMemoryLedgerOptions,
+  listed: ReturnType<typeof listEntries>,
+  rewrite: boolean,
+): Array<{ entry: MemoryReservationEntry; path: string }> {
+  const byPath = new Map(listed.live.map((item) => [item.path, item]));
+  for (const [path, memory] of ownReservations) {
+    if (!path.startsWith(`${ctx.dir}/`)) continue;
+    const disk = byPath.get(path);
+    if (!listed.names.has(path)) {
+      recordError(deps, "own-entry-missing", new Error(path));
+      if (rewrite) {
+        try {
+          persist(ctx, memory);
+        } catch (error) {
+          recordError(deps, "own-entry-rewrite", error);
+        }
+      }
+      byPath.set(path, { entry: memory, path });
+      continue;
+    }
+    // A present but torn/unreadable record is counted and left untouched; do not mask it with memory.
+    if (!disk) continue;
+    const merged = mergeOwnedCopy(disk.entry, memory);
+    if (rewrite) rememberOwn(ctx, merged);
+    byPath.set(path, { entry: merged, path });
+    if (rewrite && JSON.stringify(merged) !== JSON.stringify(disk.entry)) {
+      try {
+        persist(ctx, merged);
+      } catch (error) {
+        recordError(deps, "own-entry-rewrite", error);
+      }
+    }
+  }
+  return [...byPath.values()];
 }
 
 function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
-  const { live, unreadable } = listEntries(ctx);
+  const observation = observeSentinel(ctx, true);
+  let listed: ReturnType<typeof listEntries>;
+  try {
+    listed = listEntries(ctx);
+  } catch (error) {
+    recordError(deps, "sweep-list", error);
+    return {
+      released: [],
+      reading: readingOf(ctx, [...ownReservations]
+        .filter(([path]) => path.startsWith(`${ctx.dir}/`))
+        .map(([path, entry]) => ({ entry, path })), 1, "unreadable", String((error as Error)?.message ?? error)),
+    };
+  }
+  let live = includeOwnCopies(ctx, deps, listed, observation.state !== "unreadable");
+  if (observation.state === "unreadable") {
+    return { released: [], reading: readingOf(ctx, live, listed.unreadable + 1, observation.state, observation.reason) };
+  }
+  const mayRelease = observation.state === "present";
+  if (observation.state === "reset") {
+    // A reset invalidates absence-based conclusions. Re-publish owner copies before walking, but
+    // suppress every release decision until a subsequent present-sentinel pass.
+    listed = listEntries(ctx);
+    live = includeOwnCopies(ctx, deps, listed, false);
+  }
+  acknowledgeReset(ctx, observation);
+  const unreadable = listed.unreadable;
   const owned = live.filter(({ entry }) => sameGeneration(entry.generation, ctx.generation));
   const listing = owned.length > 0 ? ctx.listProcesses(ctx.limits) : { rows: [], complete: true };
   const released: SweepResult["released"] = [];
@@ -545,8 +715,9 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
     const { entry, path } = item;
     try {
       if (!sameGeneration(entry.generation, ctx.generation)) {
-        if (generationEnded(ctx, entry)) {
+        if (mayRelease && generationEnded(ctx, entry)) {
           ctx.remove(path);
+          forgetOwn(ctx, entry);
           released.push({ id: entry.id, rule: "generation-ended" });
         } else {
           remaining.push(item); // Another container's entry: never released here.
@@ -555,9 +726,16 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
       }
       const verdict = judgeOwned(ctx, entry, listing);
       if ("release" in verdict) {
-        ctx.remove(path);
-        released.push({ id: entry.id, rule: verdict.release });
+        if (mayRelease) {
+          ctx.remove(path);
+          forgetOwn(ctx, entry);
+          released.push({ id: entry.id, rule: verdict.release });
+        } else {
+          persist(ctx, entry);
+          remaining.push(item);
+        }
       } else {
+        if (ownReservations.has(path)) rememberOwn(ctx, verdict.keep);
         persist(ctx, verdict.keep);
         remaining.push({ entry: verdict.keep, path });
       }
@@ -566,7 +744,7 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
       remaining.push(item);
     }
   }
-  return { released, reading: readingOf(ctx, remaining, unreadable) };
+  return { released, reading: readingOf(ctx, remaining, unreadable, observation.state, observation.reason) };
 }
 
 /**
@@ -586,8 +764,19 @@ export function sweepMemoryReservations(deps: HostMemoryLedgerOptions = {}): Swe
 export function readMemoryLedger(deps: HostMemoryLedgerOptions = {}): HostMemoryReading | undefined {
   try {
     const ctx = contextOf(deps);
-    const { live, unreadable } = listEntries(ctx);
-    return readingOf(ctx, live, unreadable);
+    const observation = observeSentinel(ctx, false);
+    let listed: ReturnType<typeof listEntries>;
+    try {
+      listed = listEntries(ctx);
+    } catch (error) {
+      recordError(deps, "read-list", error);
+      return readingOf(ctx, [...ownReservations]
+        .filter(([path]) => path.startsWith(`${ctx.dir}/`))
+        .map(([path, entry]) => ({ entry, path })), 1, "unreadable", String((error as Error)?.message ?? error));
+    }
+    const live = includeOwnCopies(ctx, deps, listed, false);
+    const unreadable = listed.unreadable + (observation.state === "unreadable" ? 1 : 0);
+    return readingOf(ctx, live, unreadable, observation.state, observation.reason);
   } catch (error) {
     recordError(deps, "read", error);
     return undefined;
