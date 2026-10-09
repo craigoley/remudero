@@ -74,9 +74,10 @@ function fakeNow(elapsedMsList: readonly number[]): () => number {
   }
   let i = 0;
   return () => {
+    assert.ok(i < queue.length, "fakeNow: no duration supplied for this measurement");
     const value = queue[i];
     i += 1;
-    return value ?? base;
+    return value;
   };
 }
 
@@ -323,7 +324,7 @@ test("censusRunawayThresholdMs: an entry costing several times the run's TYPICAL
 
 test("runPreflightFast: mocked timings reproducing PR #5087's shape — a healthy entry whose own command PASSed is never marked RUNAWAY merely because a sibling finished fast", () => {
   const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 })); // soft bound never engages; only PASS TWO is under test
-  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 4296];
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 1850, 4296];
   const { spawn } = recordingSpawn();
   const result = runPreflightFast(REPO_ROOT, {
     spawn,
@@ -340,7 +341,7 @@ test("runPreflightFast: mocked timings reproducing PR #5087's shape — a health
 
 test("runPreflightFast: mocked timings — an entry costing several times the run's median is still refused as RUNAWAY, so the fix does not merely delete the guard", () => {
   const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
-  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 1850, 10_000, 10_000]; // one healthy entry per non-runaway member; the last is the runaway's one re-measure
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 1850, 10_000, 10_000, 1750];
   const { spawn } = recordingSpawn();
   const result = runPreflightFast(REPO_ROOT, {
     spawn,
@@ -355,6 +356,27 @@ test("runPreflightFast: mocked timings — an entry costing several times the ru
     assert.equal(step.ok, true, `expected ${step.name} to remain PASS: ${step.detail}`);
   }
   assert.equal(result.ok, false);
+});
+
+test("W1-T7272 pins the cause of the intermittent failure", () => {
+  const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
+  const { spawn, calls } = recordingSpawn();
+  const now = fakeNow([900, 1600, 1700, 1750, 1800, 1850, 10_000, 10_000, 1750]);
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    steps,
+    packageJsonText: packageJsonTextFor(steps),
+    now,
+  });
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), [
+    ...steps.map((step) => step.script),
+    steps[6].script,
+    steps[3].script,
+  ]);
+  assert.equal(result.ok, false);
+  assert.match(result.steps[6].detail, /RUNAWAY/);
+  assert.ok(result.steps[6].detail.includes(`${steps[3].job} re-timed back to back at 1750ms`));
+  assert.throws(now, /no duration supplied/, "an exhausted fixture must not invent a zero-cost reference");
 });
 
 test("runPreflightFast: a passing census just above the bound twice clears the narrow confirmation margin", () => {

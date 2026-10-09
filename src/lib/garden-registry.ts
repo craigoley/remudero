@@ -13,6 +13,7 @@
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -28,6 +29,7 @@ import {
   selectorShadowFlakeLedger,
 } from "./selector-shadow-gardener.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
+import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
 
@@ -136,6 +138,61 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
+}
+
+/**
+ * ADAPTIVE PACING for a garden whose result depends on something no cheap local probe can see (GitHub's CI
+ * runs, a model's verdicts). Each pass records whether it found anything new. While passes keep finding
+ * nothing, the garden waits half its quiet span before the next one, so the wait grows with the
+ * quiet and has no fixed ceiling, and a pass that finds something snaps it back to every poll. A cheap
+ * `inputs` stamp (a commit, a file's mtime) snaps it back without waiting for a pass at all.
+ * OBSERVED 2026-10-09 on the fleet host: selector-shadow passed 42 times an hour (about 35 s each), and 5
+ * of them saw a new CI run; machine-judge passed 43 times an hour and ledgered nothing at all.
+ */
+export const GARDEN_QUIET_BACKOFF_DIVISOR = 2;
+
+export interface GardenPacing {
+  lastPassAt: string;
+  /** The last pass that found something new; the quiet span runs from here to `lastPassAt`. */
+  lastNewAt: string;
+  /** The cheap inputs stamp the last pass saw, when the garden has one. */
+  inputs?: string;
+}
+
+export function gardenPacingPath(stateDir: string, name: RegisteredGardenName): string {
+  return join(stateDir, `${name}-garden-pacing.json`);
+}
+
+/** The recorded pacing; an absent or damaged record is none, so the next poll runs a pass. */
+export function readGardenPacing(stateDir: string, name: RegisteredGardenName): GardenPacing | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(gardenPacingPath(stateDir, name), "utf8")) as Partial<GardenPacing>;
+    if (!Number.isFinite(Date.parse(String(parsed.lastPassAt))) || !Number.isFinite(Date.parse(String(parsed.lastNewAt)))) return undefined;
+    if (parsed.inputs !== undefined && typeof parsed.inputs !== "string") return undefined;
+    return parsed as GardenPacing;
+  } catch {
+    // deliberate: no readable record means nothing has slowed this garden down yet.
+    return undefined;
+  }
+}
+
+/** Whether the paced garden is due: no record, changed inputs, or half its quiet span has passed. */
+export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, opts: { clock?: Clock; inputs?: () => string } = {}): boolean {
+  const pacing = readGardenPacing(stateDir, name);
+  if (pacing === undefined) return true;
+  if (opts.inputs !== undefined && opts.inputs() !== pacing.inputs) return true;
+  const last = Date.parse(pacing.lastPassAt); // expiring-fixture: exempt -- written by recordGardenPacing from the injected clock; tests derive it from that clock, never a fixed literal.
+  const quiet = Math.max(0, last - Date.parse(pacing.lastNewAt));
+  return (opts.clock ?? systemClock).now() - last >= quiet / GARDEN_QUIET_BACKOFF_DIVISOR;
+}
+
+/** Record one finished pass of a paced garden: `found` is whether it found anything new. */
+export function recordGardenPacing(stateDir: string, name: RegisteredGardenName, found: boolean, opts: { clock?: Clock; inputs?: string } = {}): void {
+  const at = (opts.clock ?? systemClock).iso();
+  const prior = readGardenPacing(stateDir, name);
+  const pacing: GardenPacing = { lastPassAt: at, lastNewAt: found || prior === undefined ? at : prior.lastNewAt,
+    ...(opts.inputs === undefined ? {} : { inputs: opts.inputs }) };
+  writeAtomic(gardenPacingPath(stateDir, name), JSON.stringify(pacing) + "\n");
 }
 
 /**
@@ -392,8 +449,11 @@ export function selectorShadowMainFailures(
  *  all read through `io` (absent: the gh transport). */
 export function selectorShadowGardenPass(
   d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: SelectorShadowGhReads = {},
-): () => Promise<void> {
-  return async () => {
+): (() => Promise<void>) & { due: () => boolean } {
+  const pass = async (): Promise<void> => {
+    // New evidence is a newly complete CI run stored, or a replay slice of history read; nothing else in
+    // this pass changes without one of them.
+    let found = false;
     try {
       const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
         readJson: io.readJson,
@@ -401,9 +461,10 @@ export function selectorShadowGardenPass(
         warn: (message) => d.log("selector-shadow.cache_failed", { message }),
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
-      await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
+      const report = await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
         undefined, undefined, selectorShadowMainFailures(owner, repo, io),
         { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
+      found = report.observations.appended > 0 || (report.replayPass?.attempted ?? 0) > 0;
     } catch (e) {
       d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
@@ -418,7 +479,13 @@ export function selectorShadowGardenPass(
     } catch (e) {
       d.log("flake_incident.gardener_failed", { error: String((e as Error)?.message ?? e) });
     }
+    try {
+      recordGardenPacing(d.stateDir, "selector-shadow", found, { clock: d.clock });
+    } catch (e) {
+      d.log("selector-shadow.pacing_failed", { error: String((e as Error)?.message ?? e) });
+    }
   };
+  return Object.assign(pass, { due: () => gardenPacingDue(d.stateDir, "selector-shadow", { clock: d.clock }) });
 }
 
 /** W1-T5904: one daily flow pass as the daemon builds it — the ledger union, GitHub's CI timings through

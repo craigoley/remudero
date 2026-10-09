@@ -1,0 +1,35 @@
+- id: W1-T7269
+  title: "FLAKE INCIDENT — test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+  files:
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+  acceptance:
+    - claim: "the cause of test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts's intermittent failure is fixed in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, pinned by a test that forces the failing order"
+      proof: "grep: W1-T7269 in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10203, #10310, #10377.
+    CI runs: 37865724208, 37919851949, 37946372738.
+    Retry outcomes: 0 recovered on retry, 5 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Codex fix-round assessment: the task declares only the existing test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts. The proposed repair is reversible; its acceptance requires a test that forces the reported failing order and a task-specific marker in that test file, absent before the repair."
+      - "The declared scope changes no host git implementation, credentials, permissions, merge or deploy policy, or operator decision. The deterministic escalation backstop returns no escalation reason."
+      - "The inspected test checks hardened git leaf calls and exact raw-site exception counts. An incident repair must preserve those security checks; this ruling assesses the filed task and does not assert the failure cause or completed repair."
+      - "The incident record supplies three pull request and CI run identifiers and five failures that persisted on retry. Those remote runs were not independently re-read; live family merge-credit and gardener state were unavailable, so this assessment uses the neutral family prior and the current policy confidence threshold."
+    judged_at: "2026-10-09T18:20:30.145Z"
+    pin: "2907c6b33754c2624263a78166c9faf6e01d14ed4ef1924a85c7c6b6d78a0d95"

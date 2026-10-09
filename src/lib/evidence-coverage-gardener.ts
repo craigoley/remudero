@@ -416,6 +416,28 @@ function sourceFollowupRaw(reason: string, firstSeenAt: string): string {
  * {@link EVIDENCE_COVERAGE_MAX_FILINGS_PER_PASS} follow-ups; writes the state atomically. Never
  * throws for a filer failure, and returns nothing a gate could read as a verdict.
  */
+function evidenceCoverageIntervalElapsed(lastPassAt: string | undefined, nowMs: number): boolean {
+  return !(lastPassAt && nowMs - Date.parse(lastPassAt) < EVIDENCE_COVERAGE_PASS_INTERVAL_MS);
+}
+
+/**
+ * Whether a pass would measure anything: the pass's own interval check, read before a child process is
+ * spawned for it. The daemon polled this garden every 60 s and each child booted only to read
+ * `lastPassAt` and stop: 48 to 57 `garden.pass name=evidence-coverage` rows an hour on the fleet host on
+ * 2026-10-09, against one measuring pass every {@link EVIDENCE_COVERAGE_PASS_INTERVAL_MS}. A state file
+ * this cannot read is due, so the pass runs and reports it.
+ */
+export function evidenceCoveragePassDue(stateDir: string, clock: Clock = systemClock): boolean {
+  let lastPassAt: unknown;
+  try {
+    lastPassAt = (JSON.parse(readFileSync(evidenceCoverageStatePath(stateDir), "utf8")) as { lastPassAt?: unknown }).lastPassAt;
+  } catch {
+    // deliberate: an absent or unreadable state is a pass to run; the pass itself logs an unreadable one.
+    return true;
+  }
+  return evidenceCoverageIntervalElapsed(typeof lastPassAt === "string" ? lastPassAt : undefined, clock.now());
+}
+
 export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): EvidenceCoveragePass {
   const clock = deps.clock ?? systemClock;
   const now = clock.now();
@@ -423,7 +445,7 @@ export function runEvidenceCoverageGardener(deps: EvidenceCoverageInput): Eviden
   const statePath = evidenceCoverageStatePath(deps.stateDir);
   const state = readState(statePath, deps.log);
   const result: EvidenceCoveragePass = { ran: true, gaps: [], insufficient: [], filed: [], updated: [], failed: [], deferred: 0 };
-  if (state.lastPassAt && now - Date.parse(state.lastPassAt) < EVIDENCE_COVERAGE_PASS_INTERVAL_MS) {
+  if (!evidenceCoverageIntervalElapsed(state.lastPassAt, now)) {
     return { ...result, ran: false, skipped: "not-due" };
   }
   const discarded = discardSubFloorBaselines(state);

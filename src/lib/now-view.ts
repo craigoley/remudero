@@ -83,12 +83,12 @@ import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
-import { currentVerifyHumanRulings } from "./verify-human-judge.js";
+import { currentVerifyHumanRulings, VERIFY_HUMAN_JUDGED_STEP } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
@@ -236,17 +236,25 @@ export function nowDependencyVerificationGates(input: {
   snapshot: Pick<BoardSnapshot, "tasks" | "prQueue" | "github_unreachable">;
 }): HumanGateSource[] {
   const { snapshot, rows, plan } = input;
+  const ledger = rows as Array<Record<string, unknown>>;
+  // Every read below is of a few steps' rows or a few tasks' rows: the step and task buckets of the index the board's
+  // snapshot stage already built for this row generation, never a walk of the whole ledger. Four whole-ledger walks
+  // (this loop, the rulings and one per dependency escalation) were the `decisions.dependencies` lap: 0.33-0.6 s per
+  // core build over ~0.85 M fact rows on 2026-10-08, due on every new ledger row.
+  const index = buildLedgerIndex(ledger);
+  const stepRows = (step: string): ReadonlyArray<Row> => (index.byStep.get(step) ?? []) as ReadonlyArray<Row>;
   const decided = new Map<number, Row>();
   const escalated = new Map<number, Set<string>>();
   const released = new Set<string>();
-  for (const row of rows) {
-    if (typeof row.task_id !== "string") continue;
-    const dep = DEP_REVIEW_TASK.exec(row.task_id);
-    if (row.step === "ratify.approved" && row.released === "verify-human") released.add(row.task_id);
-    else if (dep && row.step === "dep-review.decided" && !dep[1]) decided.set(Number(dep[2]), row);
-    else if (dep && row.step === "escalation.issue_opened") escalated.set(Number(dep[2]), (escalated.get(Number(dep[2])) ?? new Set()).add(row.task_id));
+  for (const row of stepRows("ratify.approved")) if (typeof row.task_id === "string" && row.released === "verify-human") released.add(row.task_id);
+  for (const row of stepRows("dep-review.decided")) {
+    const dep = typeof row.task_id === "string" ? DEP_REVIEW_TASK.exec(row.task_id) : null;
+    if (dep && !dep[1]) decided.set(Number(dep[2]), row);
   }
-  const ledger = rows as Array<Record<string, unknown>>;
+  for (const row of stepRows("escalation.issue_opened")) {
+    const dep = typeof row.task_id === "string" ? DEP_REVIEW_TASK.exec(row.task_id) : null;
+    if (dep) escalated.set(Number(dep[2]), (escalated.get(Number(dep[2])) ?? new Set()).add(row.task_id as string));
+  }
   const openPrs = new Map(snapshot.prQueue.rows.map((pr) => [pr.prNumber, pr.prUrl]));
   const dependencyReview = [...escalated].sort(([a], [b]) => a - b).map(([prNumber, taskIds]): DependencyReviewFact => {
     const verdict = decided.get(prNumber);
@@ -256,7 +264,7 @@ export function nowDependencyVerificationGates(input: {
       repo: input.repo ?? null, prNumber, prUrl: openPrs.get(prNumber) ?? (typeof verdict?.pr_url === "string" ? verdict.pr_url : null),
       decision: typeof decision === "string" ? decision : null, prOpen: snapshot.prQueue.complete ? openPrs.has(prNumber) : null,
       escalations: [...taskIds].sort().flatMap((taskId): DependencyEscalation[] => {
-        const open = resolveEscalation(ledger, taskId, input.github);
+        const open = resolveEscalation(ledger, taskId, input.github, index);
         return open ? [{ producer: (DEP_REVIEW_TASK.exec(taskId)![1] ?? "manual") as DependencyEscalation["producer"], ...(open.escalationClass ? { class: open.escalationClass } : {}),
           ...(open.issueUrl ? { issueUrl: open.issueUrl } : {}), ...(open.openedAt ? { openedAt: open.openedAt } : {}), ...(open.unverified ? { unverified: true as const } : {}) }] : [];
       }),
@@ -268,7 +276,7 @@ export function nowDependencyVerificationGates(input: {
     const task = plan?.byId.get(id);
     return task ? unmetDependencies(plan!, task, (t) => merged(t.id)).length === 0 : undefined;
   };
-  const rulings = currentVerifyHumanRulings(ledger, depsMerged);
+  const rulings = currentVerifyHumanRulings(stepRows(VERIFY_HUMAN_JUDGED_STEP) as ReadonlyArray<Record<string, unknown>>, depsMerged);
   const githubGap = snapshot.github_unreachable || !snapshot.prQueue.complete;
   return projectDependencyVerificationGates({
     instance: input.instance,

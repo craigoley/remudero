@@ -1330,6 +1330,8 @@ export interface DaemonDeps {
    *  `readLiveState`'s contract, so a merged-or-closed-but-cached PR can never park a feedback entry
    *  forever. An unreadable result fails open, same as the task lane (W1-T300). */
   readFeedbackLiveState?: (feedbackId: string, prNumber: number) => string | undefined;
+  /** The entry's `status:` on origin/main, read only once its triage PR reads MERGED; `undefined` fails open (#10265). */
+  readFeedbackStatusOnMain?: (feedbackId: string) => string | undefined;
   /** The restricted light-sweep ticker. Dispatch is unbounded and the full reconciler only runs between
    *  iterations, so a PR that went green-but-review-absent sat invisible for the dispatch's whole
    *  remaining duration — #707 swept at 13:12 and never swept the new head again (W1-T254). Trap: the
@@ -2644,6 +2646,18 @@ export function startPrActionPump(
       await Promise.all([...inFlight]);
     },
   };
+}
+
+/** The newest triage PR this ledger saw opened for `feedbackId` (#10265); the guard's live read decides if it is still open. */
+export function triagePrOpenedInLedger(lines: readonly string[] | undefined, feedbackId: string): number | undefined {
+  const owned = `"task_id":"TRIAGE-${feedbackId}"`;
+  for (let at = (lines?.length ?? 0) - 1; at >= 0; at -= 1) {
+    const line = lines![at]!;
+    if (!line.includes(owned) || !line.includes('"step":"pr.opened"')) continue;
+    const number = /"pr_url":"[^"]*\/pull\/(\d+)"/.exec(line)?.[1];
+    if (number !== undefined) return Number(number);
+  }
+  return undefined;
 }
 
 /** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
@@ -4743,13 +4757,20 @@ export async function runDaemon(
         // In-flight guard: the same shape as the task lane's pair above, keyed on feedback id. The decision
         // only knows the entry's own status and cannot see an already-open PR carrying this id's provenance,
         // so that read happens here, right before the fire it would otherwise duplicate (W1-T300).
-        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+        // #10265: that read is a once-per-boot snapshot, blind to a triage PR opened since; this boot's `pr.opened` row is not.
+        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
+          triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
         let inFlight = openPrNumber !== undefined;
+        let inFlightReason = "an open triage PR already carries this feedback id's provenance";
         if (inFlight && openPrNumber !== undefined) {
           // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
           // stands the guard down rather than parking the entry forever on yesterday's snapshot (W1-T177).
           const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
-          if (liveState !== undefined && liveState !== "OPEN") {
+          // #10265: a MERGED triage already moved the entry on main; this checkout is just behind.
+          const mainStatus = liveState === "MERGED" ? deps.readFeedbackStatusOnMain?.(decision.feedbackId) : undefined;
+          if (mainStatus !== undefined && mainStatus !== "new") {
+            inFlightReason = `its triage PR merged and origin/main holds the entry at status: ${mainStatus} — this checkout is behind`;
+          } else if (liveState !== undefined && liveState !== "OPEN") {
             inFlight = false;
             log("auto_triage.stood_down", {
               feedback: decision.feedbackId,
@@ -4765,7 +4786,7 @@ export async function runDaemon(
           log("auto_triage.skipped_inflight", {
             feedback: decision.feedbackId,
             pr_number: openPrNumber,
-            reason: "an open triage PR already carries this feedback id's provenance",
+            reason: inFlightReason,
           });
         } else {
           const hold = holdWorkerAdmission("auto-triage");

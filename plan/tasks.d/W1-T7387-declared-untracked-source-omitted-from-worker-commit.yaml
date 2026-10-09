@@ -1,0 +1,29 @@
+- id: W1-T7387
+  title: "A WORKER COMMIT CAN OMIT A DECLARED SOURCE FILE LEFT UNTRACKED IN ITS WORKTREE, AND THE RED PR THEN CANNOT SELF-REPAIR — prove every declared changed path is committed or durably refused before finalizing, and allow a fresh fix worktree when a dirty owner cannot be safely reclaimed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 120.00
+  rationale: "Observed on remudero-console API-T40 PR #1493: the task declared app/api/console/delegations/route.ts, but the worker commit/PR omitted it while it stayed untracked in the registered worktree. CI failed importing the absent route. The fix rung correctly refused to take ownership of the dirty worktree, leaving a known-red PR with no repair path."
+  design: |
+    TWO HALVES, ONE LIFECYCLE.
+    (1) PRE-FINALIZE PROOF: before a worker commit is finalized, every declared source path that changed in the worktree (including untracked files) must be either committed or recorded in a durable refusal (a persisted record naming the path and reason). An untracked declared path that is neither blocks finalization. Never force-stage ignored files.
+    (2) FRESH FIX WORKTREE: after a failed PR, if the dirty owner worktree cannot be safely reclaimed, permit dispatch of a fresh fix worktree from the PR head WITHOUT deleting, force-staging, resetting or otherwise mutating the dirty owner or its artifacts.
+    PRESERVE existing ownership, CAS and process-liveness protections, and do NOT weaken dirty-worktree refusal: the dirty owner is still never taken over; the fresh worktree is an additional path, not a bypass.
+    TESTS must discriminate: declared-untracked omission is caught (fails on the old behaviour), dirty-owner artifacts are byte-identical after the run, and the fresh-fix dispatch succeeds.
+  acceptance:
+    - claim: "a declared source path left untracked is committed or durably refused before a worker commit is finalized"
+      proof: "unit test: test/declared-untracked-source-finalize.test.ts"
+    - claim: "a dirty owner that cannot be reclaimed is preserved untouched and a fresh fix worktree is dispatched"
+      proof: "unit test: test/dirty-owner-fresh-fix-dispatch.test.ts"
+    - claim: "dirty-worktree refusal and ownership/CAS protections remain in force"
+      proof: "unit test: test/fix-branch-checkout-serialization.test.ts"
+  risk: high
+  origin: feedback#fb-1789937186992-270de8
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/declared-untracked-source-finalize.test.ts, test/dirty-owner-fresh-fix-dispatch.test.ts, test/fix-branch-checkout-serialization.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — touches commit finalization and ownership recovery in the core harness. Related merged work: W1-T3822, W1-T5918 (reset-and-reclaim); this task adds the no-mutation fresh-worktree path and the pre-finalize proof."

@@ -24,3 +24,11 @@
     - PR #10298: 2.42 PR-hours — every required check is green and remudero-review reports success, but the verdict ledgered for this head is CAPPED (zero proofs executed) with no operator override — so auto-merge refuses and no future pass at this head can decide differently. Escalating once rather than standing down silently forever: this PR looks mergeable on GitHub and is not. Resolve it by repairing the proofs so they execute (a new head re-earns the arm automatically), or by recording an explicit override with `rmd review <pr> --override-capped-by` — mergeability unread this pass; inherited last known "clean" observed 2026-10-09T12:25:44.881Z for this exact head 1d35a3b (W1-T4470)
     - PR #9551: 0.79 PR-hours — every required check is green and remudero-review reports success, but the verdict ledgered for this head is CAPPED (zero proofs executed) with no operator override — so auto-merge refuses and no future pass at this head can decide differently. Escalating once rather than standing down silently forever: this PR looks mergeable on GitHub and is not. Resolve it by repairing the proofs so they execute (a new head re-earns the arm automatically), or by recording an explicit override with `rmd review <pr> --override-capped-by`
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required check\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-09T13:52:00.646Z"
+    pin: "96bf07e9c9840892c661c7e9e8f845aadba01a1e07756f4ba7a78e5b70e35202"

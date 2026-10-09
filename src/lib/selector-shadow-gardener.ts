@@ -293,6 +293,24 @@ interface ShardEvidence {
   failedTitles: string[];
 }
 
+/** W1-T7125: the titles in a FLAKE-RETRY label. A label starting with "[" that parses as a JSON array
+ *  of strings is the unambiguous form (a title may contain ", "); anything else is the older
+ *  ", "-joined form from logs written before the producer changed. */
+function parseFlakeTitles(label: string): string[] {
+  const trimmed = label.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && parsed.every((t): t is string => typeof t === "string")) {
+        return parsed.map((t) => t.trim()).filter(Boolean);
+      }
+    } catch (error) {
+      void error; // not the array form (an old-form title that starts with "["): split it below
+    }
+  }
+  return label.split(", ").map((t) => t.trim()).filter(Boolean);
+}
+
 /** Per-shard verdicts and retry evidence from `coverage-shard (k/8)\t`-prefixed lines. */
 function shardEvidence(log: string): Map<number, ShardEvidence> {
   const shards = new Map<number, ShardEvidence>();
@@ -308,7 +326,7 @@ function shardEvidence(log: string): Map<number, ShardEvidence> {
     if (FLAKE_RETRY_RECOVERED.test(body)) entry.recovered = true;
     const headline = FLAKE_RETRY_HEADLINE.exec(body);
     if (headline) {
-      const titles = headline[2]!.trim() === FLAKE_NO_NAME ? [] : headline[2]!.split(", ").map((t) => t.trim()).filter(Boolean);
+      const titles = headline[2]!.trim() === FLAKE_NO_NAME ? [] : parseFlakeTitles(headline[2]!);
       if (headline[1] === "retry ALSO failed") {
         entry.alsoFailed = true;
         entry.failedTitles.push(...titles);

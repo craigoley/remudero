@@ -19,15 +19,17 @@ import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { ghLinesAsync } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, type CiFailure } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, proofDiscriminationEvidenceFromCheckLog, type CiFailure } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   buildSweepEffects,
   ciFailureRegionReducer,
   defaultCiJobLogRegionAsync,
+  extractCiFailureRegion,
   fetchCiFailures,
   fetchCiFailuresAsync,
   fixRungCiFailures,
+  gateVerdictRetention,
   RETAINED_REMEDY_HEADER,
 } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
@@ -349,4 +351,50 @@ test("W1-T5836: a failed streamed read names its cause, and each transport failu
       process.env.PATH = prependedPath;
     }
   });
+});
+
+// LIVE 2026-10-09: #10234's proof-discrimination gate named one stale `unit test:` proof, then printed
+// check-proof's ~19-line output before exiting 1. The region kept only the lines before `##[error]`, so
+// neither the FAIL header nor the proof survived, W1-T5544's proof-repair route found no evidence, and the
+// sweep escalated and parked the PR. The gate's verdict lines now ride along like generator remedies.
+const STALE_PROOF = "unit test: test/an-unfiled-prs-review-contract-has-a-sweep-side-producer.test.ts";
+
+function staleProofGateJobLog(): string[] {
+  const stamp = "2026-10-09T08:57:00.0000000Z ";
+  const output = Array.from({ length: 19 }, (_, i) => `    ok ${i + 1} - check-proof output line ${i + 1}`);
+  return [
+    "##[group]Run node --import tsx scripts/proof-discrimination-gate.mjs",
+    "##[endgroup]",
+    "proof-discrimination: FAIL — 1 proof(s) pass at both PR head and merge base (16651b3fc); they cannot establish this PR's work:",
+    `  proof: ${STALE_PROOF}`,
+    "  head hits: 22; base hits: 22",
+    ...output,
+    "Allowance for W1-T5714: 0 (scripts/proof-discrimination-baseline.json); this PR carries 1, 1 over.",
+    "Remedy: replace each stale proof with one that names behavior this PR changes, then rerun this check.",
+    "##[error]Process completed with exit code 1.",
+  ].map((line) => stamp + line);
+}
+
+function staleProofEvidence(logTail: string) {
+  return proofDiscriminationEvidenceFromCheckLog([{ name: "proof-discrimination", logTail }]);
+}
+
+test("the streamed log region keeps the stale proof the gate names", () => {
+  const reducer = ciFailureRegionReducer(60);
+  for (const line of staleProofGateJobLog()) reducer.push(line);
+  assert.deepEqual(staleProofEvidence(reducer.finish())?.proofs.map((p) => p.proof), [STALE_PROOF]);
+});
+
+test("the whole-log region keeps the stale proof the gate names", () => {
+  const log = staleProofGateJobLog().join("\n");
+  const verdict = gateVerdictRetention();
+  for (const line of log.split("\n")) verdict.push(line.replace(/^\S+Z /, ""));
+  assert.deepEqual(staleProofEvidence(verdict.wrap(extractCiFailureRegion(log, 60)))?.proofs.map((p) => p.proof), [STALE_PROOF]);
+});
+
+test("a log with no proof-discrimination verdict is returned unchanged", () => {
+  const reducer = ciFailureRegionReducer(60);
+  const plain = ["##[group]Run npm test", "  proof: not a gate line", "##[error]Process completed with exit code 1."];
+  for (const line of plain) reducer.push(line);
+  assert.equal(reducer.finish().includes("retained from earlier"), false);
 });

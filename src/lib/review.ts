@@ -15,6 +15,7 @@ import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFe
 import { isInPlanScope } from "./plan-scope.js";
 import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
+import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
@@ -987,6 +988,12 @@ function isMalformedDialectProof(proof: string): boolean {
   return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource);
 }
 
+/** The executable proof a claim-less `unit test:`/`grep:` bullet already is (code span unwrapped), or `""`. */
+function bareDialectProof(item: string): string {
+  const dialectSource = matchesDialectPrefix(item) ? item : stripCodeSpan(item);
+  return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource) ? dialectSource : "";
+}
+
 /** Sentence-level punctuation a bare test-name title would not carry: comma, colon, semicolon, parenthetical aside,
  * em/en dash, ellipsis. Any one marks a body as PROSE, not a plain title. */
 const PROSE_PUNCTUATION_RE = /[,;:()]|--|—|–|\.\.\./;
@@ -1537,7 +1544,10 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
 export type ProofResult = "pass" | "fail" | "no-match" | "cannot-load";
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
 export class ProofCannotLoadError extends RmdError {
-  constructor(readonly loadError: string) {
+  constructor(
+    readonly loadError: string,
+    readonly loadOutput?: string,
+  ) {
     super("usage", GENERIC_EXIT_CODE, `proof test files could not load after a toolchain refresh: ${loadError}`, { loadError });
   }
 }
@@ -2888,7 +2898,7 @@ export function execWhitelistedProof(
       }
       if (outcome === "cannot-load") {
         recordLoadError(whitelisted, stdout);
-        throw new ProofCannotLoadError(whitelisted.loadError!);
+        throw new ProofCannotLoadError(whitelisted.loadError!, stdout);
       }
       return outcome;
     }
@@ -2927,7 +2937,7 @@ export function execWhitelistedProof(
       }
       if (outcome === "cannot-load") {
         recordLoadError(whitelisted, `${stdout}\n${stderr}`);
-        throw new ProofCannotLoadError(whitelisted.loadError!);
+        throw new ProofCannotLoadError(whitelisted.loadError!, `${stdout}\n${stderr}`);
       }
       return outcome;
     }
@@ -2949,7 +2959,7 @@ export function execWhitelistedProof(
       const completedResults = pureTestIncompleteRunResultCount(stdout);
       if (completedResults !== undefined) throw new PureProofIncompleteRunError(completedResults);
       const wrapperName = pureTestNeverExecutedWrapperName(stdout);
-      if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName);
+      if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName, stdout);
     }
     return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
   }
@@ -3021,7 +3031,10 @@ export async function execWhitelistedProofAsync(
  *  run never reached a verdict about the criterion. {@link judgeCriterion} recognises it by `instanceof` and records
  *  `proof_skip: "runtime-broken"` plus the wrapper name: design (iv)'s "record the discriminator, not the stream". */
 class PureProofNeverExecutedError extends Error {
-  constructor(readonly wrapperName: string) {
+  constructor(
+    readonly wrapperName: string,
+    readonly loadOutput?: string,
+  ) {
     super(
       `pure-path proof's file (${wrapperName}) never reached a real subtest — only its own TAP ` +
         "wrapper reported `not ok`, meaning the file failed to load/run as a whole (a broken " +
@@ -3378,6 +3391,8 @@ function classifyBaseProofOutcome(
   baseUnreadablePaths?: ReadonlySet<string>,
   baseIsCheckout?: boolean,
   addedTestFiles?: ReadonlySet<string>,
+  headCwd?: string,
+  onMissingExport?: (note: string) => void,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
@@ -3398,8 +3413,16 @@ function classifyBaseProofOutcome(
     // subtest — THROWS out of `exec` and is caught below as `base_unknown`.
     const outcome = exec(whitelisted, baseCwd);
     return outcome === "pass" ? "stale" : "discriminates";
-  } catch {
-    return "base_unknown";
+  } catch (e) {
+    // A base that cannot LINK a named export the head supplies is a miss, not an environment gap.
+    const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+    const note =
+      whitelisted.kind === "test" && headCwd !== undefined && typeof loadOutput === "string"
+        ? baseLacksPrAddedExports(loadOutput, baseCwd, headCwd)
+        : undefined;
+    if (note === undefined) return "base_unknown";
+    onMissingExport?.(note);
+    return "discriminates";
   }
 }
 
@@ -3654,9 +3677,12 @@ export function judgeCriterion(
             } else {
               // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME whitelisted check against the PR's
               // merge-base — one execution answers both "is this stale" and, if not, why not.
+              let missingExportNote: string | undefined;
               const baseOutcome =
                 execCtx.baseCwd !== undefined
-                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles)
+                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
+                      missingExportNote = note;
+                    })
                   : undefined;
               if (baseOutcome === "base_unreadable") {
                 // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
@@ -3698,7 +3724,9 @@ export function judgeCriterion(
                 reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
                 // W1-T362: record the base-run outcome on the verdict for a `unit test:` proof specifically (grep's
                 // reason text stays byte-identical to its shipped W1-T273 shape).
-                if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
+                if (whitelisted.kind === "test" && baseOutcome === "discriminates" && missingExportNote !== undefined) {
+                  reason += ` — NOTE: re-run against the PR's merge-base, which could not load it: ${missingExportNote}`;
+                } else if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
                   reason +=
                     ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
                     `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
@@ -6460,10 +6488,13 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const item = bullet[1].trim();
       const sep = acceptanceSeparator(item);
       let claim = (sep ? item.slice(0, sep.index) : item).trim();
-      const proof = sep ? item.slice(sep.index + sep.width).trim() : "";
+      let proof = sep ? item.slice(sep.index + sep.width).trim() : "";
       // "- claim: <text>" form: strip the label and any surrounding quotes.
       const claimLabel = claim.match(/^claim\s*:\s*(.*)$/i);
       if (claimLabel) claim = stripQuotes(claimLabel[1].trim());
+      // A bare `- unit test: <title>` / `- grep: <p> in <f>` bullet names its proof and omits only the claim, so it is
+      // its own claim. Read as an empty proof it was "repaired" with a base-passing grep (#10404, #10413).
+      else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;

@@ -26,6 +26,7 @@
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
+import { prepareWorktreeTypecheck } from "../src/lib/typecheck-buildinfo.ts";
 
 const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--").map((arg) => resolve(arg));
 
@@ -74,7 +75,9 @@ const testCode = run(
   ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--", ...targets],
 );
 
-const tscCode = run("tsc --noEmit (whole project, as of NOW)", "npx", ["--no-install", "tsc", "-p", "tsconfig.json", "--noEmit"]);
+// Incremental against this checkout's own buildinfo (seeded from the canonical checkout's): the same
+// diagnostics at about half the peak memory of a cold check (src/lib/typecheck-buildinfo.ts).
+const tscCode = run("tsc --noEmit (whole project, as of NOW)", "npx", ["--no-install", "tsc", ...prepareWorktreeTypecheck(process.cwd()).args]);
 
 console.log(
   [

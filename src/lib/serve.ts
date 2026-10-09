@@ -1597,12 +1597,12 @@ export interface StaleCodeExitGate {
  * 2026-09-15 — so counting it would report constant attention and the gate would never recycle.
  * What the gate needs to know is whether a HUMAN surface is being read.
  */
-export function stampReadWith(route: Route, stamp: () => void): Route {
+export function stampReadWith(route: Route, stamp: (req: import("node:http").IncomingMessage) => void): Route {
   if (route.scope !== "read" || route.path === VIEW_EVENTS_PATH) return route;
   return {
     ...route,
     handler: (req, res, ctx) => {
-      stamp();
+      stamp(req);
       return route.handler(req, res, ctx);
     },
   };
@@ -3218,11 +3218,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // Both were blind to a polling console in exactly the same way, so both read the same signal
   // rather than growing a second notion of "someone is watching".
   const stampRead = (route: Route): Route =>
-    stampReadWith(route, () => {
+    stampReadWith(route, (req) => {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
-      readModel?.noteViewRead?.(route.path);
+      // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
+      readModel?.noteViewRead?.(route.path, new URL(req.url ?? "/", "http://localhost").searchParams.get("instance") ?? undefined);
     });
   // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
   const memory = createServeMemoryRegistry();
