@@ -2646,6 +2646,18 @@ export function startPrActionPump(
   };
 }
 
+/** The newest triage PR this ledger saw opened for `feedbackId` (#10265); the guard's live read decides if it is still open. */
+export function triagePrOpenedInLedger(lines: readonly string[] | undefined, feedbackId: string): number | undefined {
+  const owned = `"task_id":"TRIAGE-${feedbackId}"`;
+  for (let at = (lines?.length ?? 0) - 1; at >= 0; at -= 1) {
+    const line = lines![at]!;
+    if (!line.includes(owned) || !line.includes('"step":"pr.opened"')) continue;
+    const number = /"pr_url":"[^"]*\/pull\/(\d+)"/.exec(line)?.[1];
+    if (number !== undefined) return Number(number);
+  }
+  return undefined;
+}
+
 /** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
  *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
  *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was.
@@ -4743,7 +4755,9 @@ export async function runDaemon(
         // In-flight guard: the same shape as the task lane's pair above, keyed on feedback id. The decision
         // only knows the entry's own status and cannot see an already-open PR carrying this id's provenance,
         // so that read happens here, right before the fire it would otherwise duplicate (W1-T300).
-        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+        // #10265: that read is a once-per-boot snapshot, blind to a triage PR opened since; this boot's `pr.opened` row is not.
+        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
+          triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
         let inFlight = openPrNumber !== undefined;
         if (inFlight && openPrNumber !== undefined) {
           // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
