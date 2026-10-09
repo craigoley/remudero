@@ -25,7 +25,7 @@
 # own synthetic commit gets the full instrumented suite AND the slow tier, on the exact tree that
 # is about to land, with no separate wiring. `coverage-ratchet`'s few PR-scoped shell guards are
 # widened (never replaced — pull_request keeps every byte of its existing, separately-tested
-# behavior) to also treat `merge_group` as real work; see that job's own comments.
+# behavior) to also treat `merge_group` as real work. W1-T5940 since narrows a group to its affected suites.
 #
 # Why: the measurements, incidents and design arguments compacted out of this file are archived
 # verbatim in docs/forensics/ci-yml.md, per docs/comment-standard.md.
@@ -267,6 +267,21 @@ jobs:
             node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
             if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
           fi
+      - name: Select the merge group's suites (W1-T5940)
+        # Suites the combined diff and each member commit affect, or `full`; the base is a step env (push-safe).
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ] || [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
+          if [ "$(head -n 1 merge-group-suites.txt)" = "full" ]; then
+            echo "- W1-T5940: merge group selection: **full run** (the selection was unusable)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- W1-T5940: merge group selection: **$(grep -c . merge-group-suites.txt)** suite(s) of $(find test -maxdepth 1 -name '*.test.ts' | grep -c .)." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
         # `npm test`. A green run spawns the same command once; a red run retries it once and names
@@ -308,6 +323,11 @@ jobs:
           TIER_BASE="HEAD"
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
+          fi
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ]; then
+            cp merge-group-suites.txt affected-suites-selected.txt
+            CLASS="AFFECTED"
           fi
           # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
           # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
@@ -813,8 +833,23 @@ jobs:
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
         if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npx playwright install chromium
+      - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
+            && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
+            echo "W1-T5940: merge group selected $(grep -c . merge-group-suites.txt) suite(s); ci-shard runs them, slow tier included."
+            exit 0
+          fi
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
             echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its eight shards; suppressing duplicate execution."
             echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
@@ -1363,9 +1398,13 @@ jobs:
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
-          # W1-T4406: `merge_group` joins `pull_request` here — its own synthetic commit's first
-          # parent is the target branch's tip, exactly like a PR's, so HEAD^1...HEAD is the diff
-          # that is about to land, not a shallow guess.
+          # W1-T5940: each member already passed this instrumented run; NO_SRC is the existing skip class.
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            echo "W1-T5940: merge group — coverage-ratchet skips; ci-shard confirms the combination."
+            : > changed-files.txt
+            echo "class=NO_SRC" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
             git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else

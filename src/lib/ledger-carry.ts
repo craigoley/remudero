@@ -39,6 +39,13 @@ function recordedMergeKey(row: Record<string, unknown>, step: string | undefined
   return undefined;
 }
 
+/** A ledger row that records a PR MERGE: `verdict.merged`, a `verdict` row reading `merged`, or a sweep
+ *  `pr.terminal` row reading `merged` — most merges are ledgered only as the last. */
+export function isMergedLedgerRow(row: Record<string, unknown>): boolean {
+  return row.step === "verdict.merged" || (row.step === "verdict" && row.verdict === "merged")
+    || (row.step === PR_TERMINAL_STEP && row.state === "merged");
+}
+
 /**
  * A merged PR's rows that a live-file reader still asks for. `dueRepairFilings` counts acted
  * repair-surface rows of ANY PR inside its window (stale also dedups a re-close), and

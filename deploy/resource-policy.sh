@@ -181,3 +181,53 @@ resource_policy_build_args() {
   [ -n "${RP_HIGH}" ] && RESOURCE_POLICY_BUILD_ARGS+=("$(resource_policy_memory_high_arg "${RP_HIGH}")")
   RESOURCE_POLICY_NOTE="${RESOURCE_POLICY_NOTE}; ${container} ${RP_HIGH_NOTE}"
 }
+
+# ── the host's own agent sessions: user-<uid>.slice (2026-10-09) ──────────────────────────────────
+# OBSERVED 2026-10-09: user-1000.slice holds the operator's host agent sessions and the rmd-author-*
+# work they start. It had no cap, peaked at 11.9 GiB on the 15.6 GiB host and, at CPUWeight 100,
+# outranked every build daemon (59). The operator capped it by hand (CPUWeight=30, MemoryHigh=6G).
+# A rebuilt host would lose that hand fix, so deploy/install-host-units.sh now renders it.
+#
+# SOFT ONLY: MemoryHigh, NEVER MemoryMax. At memory.high the kernel throttles and reclaims the
+# slice's own pages. It never kills, so a session only slows down. The slice is one more weighted
+# claimant on the same budget as the containers above: RMD_SESSION_MEMORY_WEIGHT against
+# RMD_MEMORY_WEIGHTS. It is rounded to RMD_SESSION_HIGH_STEP_MIB so a MemTotal that moves by a few
+# MiB across kernels never rewrites the file. The container shares are left as they are: memory.high
+# is soft, and on this host their working-set floors already exceed the budget. CPUWeight 30 is about
+# half a build daemon's measured 59, so a session yields to the fleet when both want the CPU.
+RMD_SESSION_MEMORY_WEIGHT="${RMD_SESSION_MEMORY_WEIGHT:-24}"
+RMD_SESSION_CPU_WEIGHT="${RMD_SESSION_CPU_WEIGHT:-30}"
+RMD_SESSION_HIGH_STEP_MIB="${RMD_SESSION_HIGH_STEP_MIB:-256}"
+
+# Sets RP_SESSION_HIGH_MIB (empty when MemTotal is unreadable) and RP_SESSION_NOTE.
+resource_policy_session_slice() {
+  local total budget sum=0 entry share step="${RMD_SESSION_HIGH_STEP_MIB}"
+  RP_SESSION_HIGH_MIB="" RP_SESSION_NOTE=""
+  if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
+    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
+    return 0
+  fi
+  budget=$((total - RMD_HOST_RESERVE_MIB))
+  for entry in ${RMD_MEMORY_WEIGHTS}; do sum=$((sum + ${entry#*=})); done
+  sum=$((sum + RMD_SESSION_MEMORY_WEIGHT))
+  share=$((budget * RMD_SESSION_MEMORY_WEIGHT / sum))
+  [ "${step}" -gt 0 ] 2>/dev/null || step=1
+  share=$(((share + step / 2) / step * step))
+  if [ "${share}" -le 0 ]; then
+    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing"
+    return 0
+  fi
+  RP_SESSION_HIGH_MIB="${share}"
+  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT}"
+}
+
+# The systemd drop-in for user-<uid>.slice, or nothing when no cap can be sized.
+resource_policy_session_slice_dropin() {
+  resource_policy_session_slice
+  [ -n "${RP_SESSION_HIGH_MIB}" ] || return 0
+  local high="${RP_SESSION_HIGH_MIB}M"
+  [ $((RP_SESSION_HIGH_MIB % 1024)) -eq 0 ] && high="$((RP_SESSION_HIGH_MIB / 1024))G"
+  printf '# Rendered by deploy/install-host-units.sh from deploy/resource-policy.sh; edits are converged away.\n'
+  printf '# %s\n' "${RP_SESSION_NOTE}"
+  printf '[Slice]\nCPUWeight=%s\nMemoryHigh=%s\n' "${RMD_SESSION_CPU_WEIGHT}" "${high}"
+}

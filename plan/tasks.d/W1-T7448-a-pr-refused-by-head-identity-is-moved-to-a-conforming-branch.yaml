@@ -1,0 +1,54 @@
+- id: W1-T7448
+  title: "A PR REFUSED BY HEAD-IDENTITY-GATE IS MOVED TO A CONFORMING BRANCH, NOT LEFT RED — the fix lane only adds commits and a commit cannot rename a branch, so a pull request whose only red is a non-conforming head (a codex/ branch, no Remudero-Task trailer) sits red until an operator re-homes it by hand"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the sweep re-homes a head-identity-only red onto a conforming branch
+  band_meaning: span
+  origin: "operator ruling 2026-10-09: 'We should never be left with stuck prs. lean into automated flow and self improvement'"
+  plan_refs: [W1-T7421, W1-T3388, W1-T3510, W1-T3707]
+  files: [src/lib/head-rehome.ts, src/lib/sweep.ts, test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    On 2026-10-09 #10450 (author cao825, a Codex session, head codex/scratch-mount-fixture-20261009) sat red for
+    over two hours on head-identity-gate and therefore ci-gate. The head is neither run-<taskId>-<epoch> nor
+    run-unfiled-<epoch>, it carries no Remudero-Task trailer, and its diff touches test/, so none of the gate's
+    exemptions apply (scripts/head-identity-gate.mjs; W1-T3388 added the run-unfiled form). The test change itself
+    was not what failed. The fleet's fix lane only adds commits to the existing head, and no commit can change a
+    branch name, so nothing in rmd could clear the red: the sweep kept dispatching ci-log fix rounds against it,
+    and only an operator could push the same head to a conforming branch, open a replacement and close the
+    original. Codex sessions name heads codex/<slug> by default; .github/workflows/unwired-gate.yml records the
+    same shape reaching review on #3704. This task owns the remedy; W1-T7421 (the fix-lane gardener) owns the class.
+  design: |
+    1. src/lib/head-rehome.ts exports headRehomePlan(pr, deps): given a PR whose failing required checks are ONLY
+       head-identity-gate (ci-gate counted as its aggregate), it returns the conforming head name —
+       run-<taskId>-<epochMs> when a Remudero-Task trailer or a single task id is derivable from the head commits,
+       else run-unfiled-<epochMs> — or a named refusal (other reds present, diff unreadable, head moved).
+    2. The sweep (src/lib/sweep.ts) routes a head-identity-only red to that plan instead of a ci-log fix round:
+       push the SAME head sha to the new branch, open the replacement PR with the original body plus a backlink
+       line, close the original with a comment naming the replacement, and ledger a pr.rehomed row
+       (from_pr, to_pr, from_head, to_head, reason). A refusal is ledgered with its reason, never silent.
+    3. NO HARD WINDOW (operator ruling 2026-10-09, "I hate hard ceilings"): a PR whose head was pushed recently by a
+       non-fleet author may still be in use by its session. Whether it is quiet enough to re-home is a judge or
+       adaptive decision (e.g. the existing progress judge, W1-T7096, or the head's own push cadence), not a
+       constant count of minutes.
+    4. NOTE FOR SESSIONS: Codex sessions should default their branch prefix to run-unfiled- so the gate accepts
+       their heads at birth. No setting in this repo configures that prefix today (git grep codex/ finds only the
+       unwired-gate.yml comment and the image's codex requirements file), so the default lives in the session's
+       own config; this task only removes the stuck state when it happens.
+  acceptance:
+    - claim: "a codex/ head red only on head-identity-gate yields exactly one re-home action onto a run-unfiled head, and a correctly named head yields none"
+      proof: 'unit test: test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts'
+    - claim: "the sweep ledgers each re-home"
+      proof: 'grep: pr\.rehomed in src/lib/sweep.ts'
+    - claim: "the re-home planner exists"
+      proof: 'grep: export function headRehomePlan in src/lib/head-rehome.ts'
+    - claim: "the sweep calls the re-home planner"
+      proof: 'grep: headRehomePlan( in src/lib/sweep.ts'
+  falsifier: |
+    Route the head-identity-only red back to a ci-log fix round: the codex/ fixture produces no re-home action
+    and the test asserting exactly one fails.
