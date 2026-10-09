@@ -1,0 +1,19 @@
+- id: W1-T6920
+  title: "THE unwired-gate GATE REFUSED 3 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:10137:unwired-gate"
+  ci_learning_prs: [10137, 10215, 10271]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the unwired-gate gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:10137:unwired-gate in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:10137:unwired-gate. The unwired-gate gate went red on #10137 and was repaired; the repair touched test/a-coverage-shard-that-cannot-report-names-the-truncated-raw-file.test.ts, test/setup/tmp-hygiene.ts, test/the-drain-reads-the-ledger-once-per-pass.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
