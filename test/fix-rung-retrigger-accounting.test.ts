@@ -312,9 +312,41 @@ test("W1-T2403: a real defect (never retrigger-shaped) still spends real strikes
 
 test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", () => {
   assert.ok(DEFAULT_FIX_RETRIGGER_CAP >= 1 && DEFAULT_FIX_RETRIGGER_CAP <= 5, "small, per W1-T2345's own 'bound the repetition' shape");
-  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  assert.doesNotMatch(source, /retriggers\s*>=\s*(?:opts\.)?retriggerCap/, "the former bound must not choose whether another round runs");
-  assert.doesNotMatch(source, /retrigger_cap_exhausted/, "the progress judge owns the next-round decision");
+});
+
+test("W1-T7096: a judge that keeps saying continue runs the rung past the former retrigger count", async () => {
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  let spawnCalls = 0;
+  const RETRIGGER_CAP = 2, ROUNDS = RETRIGGER_CAP + 2;
+  const rung = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 50,
+    retriggerCap: RETRIGGER_CAP,
+    initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0"),
+    deps: {
+      fixProgressJudge: async () => spawnCalls >= ROUNDS
+        ? { verdict: "escalate", loop: "judge-chosen stop", reason: "enough rounds" }
+        : { verdict: "continue", reason: "progress is still possible" },
+      spawn: async () => {
+        spawnCalls++;
+        return result({ sessionId: `fix-session-${spawnCalls}` });
+      },
+      readRoundCommits: async () => [RETRIGGER_COMMIT],
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => FAKE_PR_BODY,
+      runReview: async () =>
+        fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], `sha-${spawnCalls}`),
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(spawnCalls, ROUNDS, "the former retrigger count did not stop the rung; the judge did");
+  assert.ok(rung.retriggers > RETRIGGER_CAP, "retriggers ran past the former cap");
+  assert.notEqual(rung.reason, "retrigger_cap_exhausted", "the counter is never the stated reason");
 });
 
 test("W1-T2403: fixStrikeCap's own default is unchanged by this task, in either direction", () => {
