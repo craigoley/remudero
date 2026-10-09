@@ -266,9 +266,9 @@ test("what the record cannot see is still selected: a spawner naming the file, a
 });
 
 test("without a usable read map a non-code change falls back to the full run and names why", () => {
-  const none = selectAffectedSuites(["openapi/daemon.yaml"], input());
+  const none = selectAffectedSuites(["deploy/unit.service"], input());
   assert.equal(none.fullRun, true);
-  assert.match(none.reasons[0]!, /openapi\/daemon\.yaml is outside what the selector models \(the read map cannot speak for it: no read map supplied\)/);
+  assert.match(none.reasons[0]!, /deploy\/unit\.service is outside what the selector models \(the read map cannot speak for it: no read map supplied\)/);
   assert.equal(none.readMapFallback, "no read map supplied");
 
   const stale = selectAffectedSuites(["deploy/unit.service"], input({ map: map(), drift: { distance: 900, changedSinceMap: [] } }));
@@ -288,8 +288,12 @@ test("paths the map does not observe keep the full run with their reason, map or
   const selection = selectAffectedSuites([".github/workflows/ci.yml", "openapi/daemon.yaml"], input(usable()));
   assert.equal(selection.fullRun, true);
   assert.match(selection.reasons[0]!, /\.github\/workflows\/ci\.yml is outside what the selector models$/);
-  assert.equal(fullRunTrigger(["openapi/daemon.yaml"]), "openapi/daemon.yaml");
+  assert.equal(fullRunTrigger(["openapi/daemon.yaml"]), undefined);
   assert.equal(fullRunTrigger(["openapi/daemon.yaml"], true), undefined);
+  assert.equal(fullRunTrigger(["deploy/unit.service"]), "deploy/unit.service");
+  assert.equal(fullRunTrigger(["deploy/unit.service"], true), undefined);
+  assert.equal(fullRunTrigger(["openapi/other.yaml"]), "openapi/other.yaml");
+  assert.equal(fullRunTrigger(["openapi/other.yaml"], true), "openapi/other.yaml");
   assert.equal(fullRunTrigger([".github/workflows/ci.yml"], true), ".github/workflows/ci.yml");
   assert.equal(fullRunTrigger(["test/helpers/x.ts"], true), "test/helpers/x.ts");
 });
@@ -355,7 +359,7 @@ test("readReadMapInput loads a saved map and measures its drift against the requ
       map: saved,
       drift: { changedSinceMap: [], problem: `other-tip does not descend from ${saved.sha}` },
     });
-    const fallback = selectAffectedSuites(["openapi/daemon.yaml"], input(foreign));
+    const fallback = selectAffectedSuites(["deploy/unit.service"], input(foreign));
     assert.equal(fallback.fullRun, true);
     assert.match(fallback.readMapFallback!, /not an ancestor of the base \(other-tip does not descend from/);
   } finally {
@@ -380,7 +384,7 @@ test("readReadMapInput preserves missing and malformed map problems without meas
       drift: { changedSinceMap: [] },
     });
     for (const loaded of [missing, malformed]) {
-      const selection = selectAffectedSuites(["openapi/daemon.yaml"], input(loaded));
+      const selection = selectAffectedSuites(["deploy/unit.service"], input(loaded));
       assert.equal(selection.fullRun, true);
       assert.equal(selection.readMapFallback, `no read map (${loaded.mapProblem})`);
     }
