@@ -3,7 +3,7 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
-import { renameSync } from "node:fs";
+import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -25573,6 +25573,7 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
 export function checkProofCommand(
   rest: string[],
   deps: {
+    pathStatus?: (cwd: string, path: string) => string;
     /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
      *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
      *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
@@ -25770,6 +25771,25 @@ export function checkProofCommand(
   // still be printed — this file never reads `diag` to decide the verdict.
   let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
   const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+    const proofPaths = grepTargetPath === undefined
+      ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
+        .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
+      : [grepTargetPath];
+    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => execFileSync(
+      "git", ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", path],
+      { cwd, encoding: "utf8", stdio: "pipe" },
+    ));
+    for (const path of new Set(proofPaths)) {
+      let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
+      try {
+        status = { kind: "read", text: pathStatus(spawnCwd, path) };
+      } catch (error) {
+        status = { kind: "unreadable", error };
+      }
+      if (status.kind === "read" && status.text.trim() !== "") {
+        console.error(`warning:    ${path} differs from HEAD; the pushed head may answer differently.`);
+      }
+    }
     try {
       const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
       diag = { stdout: out, status: 0, signal: null };
