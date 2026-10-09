@@ -21048,8 +21048,9 @@ export function repairRetroAcceptanceBlock(
     // (see bodyCarriesGenericAcceptanceFallback), so `proof-discrimination` REFUSES the retro
     // otherwise, even though `bodyNeedsAcceptanceRepair` alone calls it healthy.
     if (!bodyNeedsAcceptanceRepair(body) && !bodyCarriesGenericAcceptanceFallback(body)) return "healthy";
-    // W1-T4263: the proof greps a line this PR adds. With none, the static grep is the ledgered last resort, and a
-    // body that already carries exactly that grep is left alone, since rewriting it would change nothing.
+    // W1-T4263: the proof greps a line this PR adds, and a missing anchor is ledgered. Only an UNREADABLE diff falls
+    // back to the static grep. A diff that was read but has no safe line stays W1-T3819's honest refusal, and so
+    // does a body that already carries the static grep, since rewriting it would change nothing.
     let diff: string | undefined = deps.diff;
     if (!Object.hasOwn(deps, "diff")) {
       try {
@@ -21062,7 +21063,8 @@ export function repairRetroAcceptanceBlock(
       { claim: "the retro's plan-only sync PR is gate-compliant", proof: PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof },
     ];
     const fallback = diffAnchoredFallback(diff, staticFallback, "retro-repair", log, { pr_url: prUrl });
-    if (fallback === staticFallback && !bodyNeedsAcceptanceRepair(body)) {
+    const unreadable = (diff ?? "").trim() === "";
+    if (fallback === staticFallback && (!unreadable || !bodyNeedsAcceptanceRepair(body))) {
       log("acceptance.repair.unrepresentable", { pr_url: prUrl, reason: "no safe added diff line" });
       return "unrepresentable";
     }
