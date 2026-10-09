@@ -8,22 +8,20 @@ export interface MissingExportGap {
   name: string;
 }
 
-const MISSING_EXPORT_RE = /The requested module '([^']+)' does not provide an export named '([^']+)'/;
-const ERROR_HEADLINE_RE = /^#?\s*([A-Za-z]*Error)(?:\s*\[[A-Z_]+\])?:\s/;
-const IMPORTER_LINE_RE = /^#?\s*(\/\S+?):\d+\s*$/;
-const OTHER_LOAD_FAILURE_RE = /Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/i;
-
 /** The ESM missing-export failures in a proof run's output, or `undefined` when the output carries none, or carries
  *  ANY other load error alongside them — only a run that failed for this one reason is a candidate. */
 export function missingExportGaps(output: string): MissingExportGap[] | undefined {
-  if (OTHER_LOAD_FAILURE_RE.test(output)) return undefined;
+  const missingExportRe = /The requested module '([^']+)' does not provide an export named '([^']+)'/;
+  const errorHeadlineRe = /^#?\s*([A-Za-z]*Error)(?:\s*\[[A-Z_]+\])?:\s/;
+  const importerLineRe = /^#?\s*(\/\S+?):\d+\s*$/;
+  if (/Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/i.test(output)) return undefined;
   const gaps: MissingExportGap[] = [];
   let importer: string | undefined;
   for (const line of output.split("\n")) {
-    const at = IMPORTER_LINE_RE.exec(line);
+    const at = importerLineRe.exec(line);
     if (at) importer = at[1];
-    if (!ERROR_HEADLINE_RE.test(line)) continue;
-    const m = MISSING_EXPORT_RE.exec(line);
+    if (!errorHeadlineRe.test(line)) continue;
+    const m = missingExportRe.exec(line);
     if (!m || importer === undefined) return undefined;
     gaps.push({ importer, specifier: m[1]!, name: m[2]! });
   }

@@ -267,7 +267,7 @@ const LINKS_ADDED_EXPORT =
   'test("links an export the PR added to an existing module", () => { assert.equal(added, 3); });\n';
 
 /** Base `src/a.ts` exports only `widget`; the head writes `headA` there and adds `test/links-added.test.ts`. */
-function addedExportRepo(headA: string): { head: string } {
+function addedExportScenario(headA: string): { head: string } {
   const head = mkdtempSync(join(tmpdir(), "rmd-added-export-head-"));
   git(head, "init", "--quiet", "-b", "main");
   writeFileSync(join(head, "package.json"), JSON.stringify({ name: "added-export-fixture", private: true, type: "module" }));
@@ -289,7 +289,7 @@ function addedExportRepo(headA: string): { head: string } {
 const LINKS_ADDED_PROOF = "unit test: test/links-added.test.ts";
 
 test("a base that cannot link a named export the PR adds grades the proof discriminating and names the export", () => {
-  const { head } = addedExportRepo("export const widget = 1;\nexport const added = 3;\n");
+  const { head } = addedExportScenario("export const widget = 1;\nexport const added = 3;\n");
   let built: BaseProofDir | undefined;
   try {
     built = buildBaseProofDir([{ proof: LINKS_ADDED_PROOF }], head);
@@ -311,7 +311,7 @@ const loadMissingExport = () => import("../src/lib/proof-missing-export.js");
 
 test("a named import missing at both the base and the head never earns a missing-export discrimination", async () => {
   const missingExport = await loadMissingExport();
-  const { head } = addedExportRepo("export const widget = 2;\n");
+  const { head } = addedExportScenario("export const widget = 2;\n");
   let built: BaseProofDir | undefined;
   try {
     built = buildBaseProofDir([{ proof: LINKS_ADDED_PROOF }], head);
