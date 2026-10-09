@@ -1090,11 +1090,18 @@ export function selectorShadowCauseOf(origin: string | undefined): string | unde
   return /^selector-shadow:[^:]+:(?:floor|narrow):(.+)$/.exec(origin)?.[1];
 }
 
+/** Where a narrow edge repair's regression test lives. Every narrow edge adds an uncovered line to
+ *  src/lib/affected-suites.ts, so a shard declaring only that file yields a diff-coverage red that
+ *  no worker may fix in scope: #10073, #10250, #10306 and #10441 were each covered by hand. */
+export const SELECTOR_SHADOW_MISS_TEST_PATH = "test/the-affected-suite-selector-runs-in-shadow.test.ts";
+
 /** A parked plan task names the missed suite and the first observed changed paths into it, without
  *  guessing imports. */
 export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string, changedPaths: readonly string[] = []): string {
   const origin = selectorShadowCauseOrigin(miss.file);
   const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
+  const pattern = miss.file.replaceAll(".", "\\.");
+  const files = ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH];
   const q = JSON.stringify;
   return [
     `- id: ${taskId}`,
@@ -1102,13 +1109,15 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...machineShardHeaderLines(["src/lib/affected-suites.ts"]),
+    ...machineShardHeaderLines(files),
     `  origin: ${q(origin)}`,
-    "  files: [src/lib/affected-suites.ts]",
-    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again.`)}`,
+    `  files: [${files.join(", ")}]`,
+    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in ${SELECTOR_SHADOW_MISS_TEST_PATH} that selects ${miss.file} for each edge: diff-coverage blocks an edge no test exercises.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes ${miss.file} when this edge is exercised`)}`,
-    `      proof: ${q(`grep: ${miss.file.replaceAll(".", "\\.")} in src/lib/affected-suites.ts`)}`,
+    `      proof: ${q(`grep: ${pattern} in src/lib/affected-suites.ts`)}`,
+    `    - claim: ${q(`a regression test selects ${miss.file} for each recorded edge`)}`,
+    `      proof: ${q(`grep: ${pattern} in ${SELECTOR_SHADOW_MISS_TEST_PATH}`)}`,
     "",
   ].join("\n");
 }

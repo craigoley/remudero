@@ -36,6 +36,7 @@ import {
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -181,7 +182,7 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
     files.find(
       (f) =>
         f.startsWith(PLAN_TASK_SHARD_PREFIX) &&
-        f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+        isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), taskId),
     );
   const criteria: AcceptanceCriterion[] = [];
   for (const taskId of taskIds) {
@@ -318,7 +319,7 @@ function listedChangedFiles(body: string): string[] | undefined {
  */
 export function diffContributesTaskShard(taskId: string, files: readonly string[]): boolean {
   return files.some(
-    (f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+    (f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), taskId),
   );
 }
 

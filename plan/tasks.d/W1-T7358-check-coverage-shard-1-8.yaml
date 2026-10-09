@@ -12,7 +12,7 @@
   author_class: machine
   origin: "ci-friction:check:coverage-shard (1/8)"
   files:
-    - src/lib/ci-friction-gardener.ts
+    - .github/workflows/ci.yml
     - test/check-coverage-shard-1-8.test.ts
   acceptance:
     - claim: "the harness no longer spends a fix round on check:coverage-shard (1/8)"
