@@ -40681,6 +40681,9 @@ const CI_STEP_GROUP_LINE = /^##\[(?:end)?group\]/;
 const CI_TAP_FAILURE_LINE = /^\s*not ok \d+ - /;
 const CI_TAP_BLOCK_END_LINE = /^\s*\.\.\.\s*$/;
 const CI_FLAKE_RETRY_LINE = /FLAKE-RETRY(?:-RECOVERED)?\s*:/;
+/** A run whose every test passed but whose coverage report died names the cause only here, far
+ *  above the step's `##[error]`; without it the region reads as an unnamed flake (#10400). */
+const CI_COVERAGE_REPORT_FAILED_LINE = /Could not report code coverage|COVERAGE-REPORT-FAILED:/;
 const CI_FAILING_TESTS_LINE = /(?:✖|✕|✗|x)\s+failing tests:/i;
 const CI_TEST_SUMMARY_LINE = /^\s*(?:#|ℹ)\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/;
 
@@ -40701,6 +40704,8 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
   const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
   const isRetryLine = (line: string) => CI_FLAKE_RETRY_LINE.test(line);
+  const isCoverageReportLine = (line: string) => CI_COVERAGE_REPORT_FAILED_LINE.test(line);
+  const coverageReport: number[] = [];
   let inTapFailure = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -40708,17 +40713,20 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     if (inTapFailure) kept.add(index);
     if (inTapFailure && CI_TAP_BLOCK_END_LINE.test(line)) inTapFailure = false;
     if (isRetryLine(line)) kept.add(index);
+    if (isCoverageReportLine(line)) coverageReport.push(index);
   }
   const stepErrors = stepErrorContext(lines);
-  // One copy of each retry line: a shard repeats the same one dozens of times.
+  // One copy of each retry or coverage-report line: a shard repeats the same one dozens of times,
+  // and node prints its coverage warning once per reporter (`ℹ Warning` and `# Warning`).
   const region = (indexes: Iterable<number>) => {
-    const retrySeen = new Set<string>();
+    const repeatSeen = new Set<string>();
     return [...new Set(indexes)]
       .sort((a, b) => a - b)
       .filter((index) => {
-        if (!isRetryLine(lines[index])) return true;
-        const seen = retrySeen.has(lines[index].trim());
-        retrySeen.add(lines[index].trim());
+        if (!isRetryLine(lines[index]) && !isCoverageReportLine(lines[index])) return true;
+        const key = lines[index].trim().replace(/^(?:ℹ|#)\s+/, "");
+        const seen = repeatSeen.has(key);
+        repeatSeen.add(key);
         return !seen;
       })
       .slice(-Math.max(1, tailLines))
@@ -40726,7 +40734,7 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
       .join("\n")
       .trim();
   };
-  if (kept.size > 0) return region([...kept, ...stepErrors]);
+  if (kept.size > 0) return region([...kept, ...stepErrors, ...coverageReport]);
   const failingTestsAt = lines.findIndex((line) => CI_FAILING_TESTS_LINE.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
@@ -40736,7 +40744,7 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
     const end = summaryAt >= 0 ? summaryAt : failingTestsAt + tailLines;
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
   }
-  if (stepErrors.length > 0) return region(stepErrors);
+  if (stepErrors.length > 0) return region([...stepErrors, ...coverageReport]);
   return lines.slice(-tailLines).join("\n").trim();
 }
 
