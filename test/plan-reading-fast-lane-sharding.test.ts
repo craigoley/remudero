@@ -27,7 +27,7 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
     testFiles: string[],
     manifest: { thresholdMs: number; files: Record<string, number> },
     shard: { index: number; count: number },
-  ) => { candidates: string[]; files: string[]; predictedDurationMs: number };
+  ) => { selection: string; candidates: string[]; files: string[]; predictedDurationMs: number };
   listTestFiles: (root: string) => string[];
   tierFiles: (
     testFiles: string[],
@@ -74,10 +74,7 @@ test("recorded durations drive deterministic longest-processing-time assignment"
   assert.deepEqual(again, first, "candidate input order cannot move an equal manifest and shard count");
 });
 
-// W1-T4430 retitled this from "... unknown, untiered, empty ..." — an untiered candidate is no
-// longer a refusal (the next test proves it is admitted). Every other arm is unchanged, and
-// "unknown" (a candidate naming no file on disk) is the arm that still guards a stale name.
-test("unsafe, duplicate, unknown, empty, and under-width candidate sets all fail closed", () => {
+test("unsafe, duplicate, unknown, and empty candidate sets all fail closed", () => {
   assert.throws(
     () => selectPlanReadingShard(candidates, files, manifest, { index: 0, count: 4 }),
     /valid shard index\/count/,
@@ -89,13 +86,26 @@ test("unsafe, duplicate, unknown, empty, and under-width candidate sets all fail
     "C:\\absolute.test.ts\n",
     "test/a.test.ts\ntest/a.test.ts\n",
     "test/unknown.test.ts\n",
-    "test/a.test.ts\ntest/b.test.ts\ntest/c.test.ts\n",
   ];
   for (const text of invalid) {
     assert.throws(
       () => selectPlanReadingShard(text, files, manifest, { index: 1, count: 4 }),
       `candidate set must refuse: ${JSON.stringify(text)}`,
     );
+  }
+});
+
+test("under-width candidate sets stay narrow and leave the remaining shards explicitly empty", () => {
+  const narrow = files.slice(0, 3);
+  const selected = [1, 2, 3, 4].map((index) =>
+    selectPlanReadingShard(narrow.join("\n"), files, manifest, { index, count: 4 }),
+  );
+  assert.deepEqual(selected.map((entry) => entry.files), [...narrow.map((file) => [file]), []]);
+  assert.deepEqual(selected.flatMap((entry) => entry.files).sort(), narrow, "every candidate runs exactly once");
+  assert.deepEqual(selected.map((entry) => entry.predictedDurationMs), [800, 700, 600, 0]);
+  for (const entry of selected) {
+    assert.equal(entry.selection, "narrow");
+    assert.deepEqual(entry.candidates, narrow);
   }
 });
 

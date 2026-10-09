@@ -314,16 +314,11 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
   }
 
   const candidates = [...seen].sort();
-  if (candidates.length < shard.count) {
-    throw new Error(
-      `plan-reading candidate set has ${candidates.length} file(s), fewer than ${shard.count} shards; ` +
-        "a zero-work shard is not an established matrix",
-    );
-  }
   const balanced = balanceFilesByDuration(candidates, manifest, shard.count);
   const files = balanced[shard.index - 1];
   const balance = summarizeShardBalance(candidates, manifest, shard.count, balanced);
   return {
+    selection: "narrow",
     candidates,
     files,
     predictedDurationMs: files.reduce((sum, file) => sum + weightedDurationMs(file, manifest), 0),
@@ -630,6 +625,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       );
       console.error(
         "test-tier-manifest: plan-reading shard summary " +
+          `selection=${selection.selection} ` +
           `candidate_count=${selection.candidates.length} assigned_count=${selection.files.length} ` +
           `predicted_duration_ms=${selection.predictedDurationMs} ` +
           `selected_total_duration_ms=${selection.balance.selectedDurationMs} ` +
@@ -642,9 +638,10 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
           `fallback=none shard=${shard.index}/${shard.count}`,
       );
       if (candidateMode === "select") {
-        console.log(selection.files.join("\n"));
+        if (selection.files.length > 0) console.log(selection.files.join("\n"));
         return 0;
       }
+      if (selection.files.length === 0) return 0;
       return spawnTestFiles(selection.files);
     } catch (error) {
       console.error(
