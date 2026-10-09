@@ -1123,6 +1123,17 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/  /' >&2
     state_snapshot_offhost=failed
   }
+  # The names on stdin that are this rung's own: <disk>-<UTC stamp>, nothing else. The `case` lives
+  # here, not inside the $(...) that calls it: Bash 3.2 (the Mac's /bin/bash) re-parses a command
+  # substitution when it runs it, and a case pattern's bare `)` there is a syntax error (W1-T6594).
+  offhost_own_names() { # <disk>
+    local old
+    while IFS= read -r old; do
+      case "${old}" in
+        "$1"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) printf '%s\n' "${old}" ;;
+      esac
+    done
+  }
   offhost_disk_snapshot() { # <resource group> <disk>
     local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
     if ! out="$(sync 2>&1)"; then
@@ -1159,11 +1170,7 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       offhost_fail "az snapshot list -g ${rg} exited ${rc}, so no snapshot beyond the newest ${OFFHOST_KEEP} was expired:" "${all}"
       return
     fi
-    all="$(printf '%s\n' "${all}" | while IFS= read -r old; do
-      case "${old}" in
-        "${disk}"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) printf '%s\n' "${old}" ;;
-      esac
-    done)"
+    all="$(printf '%s\n' "${all}" | offhost_own_names "${disk}")"
     count="$(printf '%s\n' "${all}" | grep -c . || true)"
     excess=$((count - OFFHOST_KEEP))
     [ "${excess}" -gt 0 ] || return 0
