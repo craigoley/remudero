@@ -26,6 +26,7 @@ import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type W
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { taskIdFromRunBranch } from "./status.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** One worker-proposed replacement, parsed from the fix-rung report (see {@link
  *  parseProofAmendmentProposal}) or constructed directly by a test. `claim`/`oldProof` must be
@@ -298,7 +299,7 @@ export function findTaskShard(repoDir: string, taskId: string): { path: string; 
   let shardRelPath: string | undefined;
   try {
     shardRelPath = readdirSync(join(layout.planDir, "tasks.d"))
-      .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+      .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
       .map((f) => toRepoRelative(join(layout.planDir, "tasks.d", f)))[0];
   } catch {
     /* no readable task-shard directory — fall through to the monolith below */
