@@ -5777,6 +5777,9 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
  * this same generic block, just later. And it is INERT wherever criteria really resolve — a body
  * carrying a `Remudero-Task:` trailer whose shard is on main is judged from the shard, and
  * `bodyNeedsAcceptanceRepair` leaves a healthy block untouched.
+ *
+ * W1-T4263: both constants are now the LAST RESORT. Their proof passes at every merge base, so a site uses them only
+ * when {@link diffAnchor} finds no added line to grep, and it ledgers that case.
  */
 const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
   {
@@ -20999,7 +21002,7 @@ export async function withMaterializedWorktree<T>(
  * so `check-proof --base` reads it `executed_stale` on every retro that takes this path — measured
  * live on #5769, which failed the REQUIRED `proof-discrimination` check for exactly this proof.
  * `bodyNeedsAcceptanceRepair` alone does not see this: the fallback parses fine and its proof is
- * non-empty, so it calls the body "healthy" — the retro's own non-dialect fallback below never gets
+ * non-empty, so it calls the body "healthy" — the retro's diff-anchored repair below never gets
  * a chance to replace it. This predicate closes that gap by recognising the ONE known-stale generic
  * shape and routing it back into repair, without touching `bodyNeedsAcceptanceRepair` itself (which
  * other callers, e.g. `acceptanceGateBodyRepair`, still need to read this same body as healthy).
