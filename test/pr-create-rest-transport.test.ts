@@ -343,3 +343,19 @@ test("runGhPrCreate: a NON-rate-limit failure rethrows with NO log/say — no se
   assert.equal(logged.length, 0, "an auth failure is not classified as rate-limited — no throttled ledger line");
   assert.equal(said.length, 0, "and nothing is said aloud for it either — this task builds no second classifier");
 });
+
+test("a PR opened with no Acceptance block takes its proof from a test the branch adds, not the base-passing generic grep", () => {
+  const dir = makeFixtureRepo();
+  try {
+    git(dir, "checkout", "-q", "-b", "run-T1-2");
+    commit(dir, "a.txt", "feat(x): a change with a suite", "the real body");
+    execFileSync("mkdir", ["-p", join(dir, "test")]);
+    commit(dir, "test/the-suite-this-branch-adds.test.ts", "test(x): the suite");
+    const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "acme", "remudero", "run-T1-2", "feat(x): a change"));
+    const body = built.args.find((a) => a.startsWith("body="))!.slice("body=".length);
+    assert.match(body, /unit test: test\/the-suite-this-branch-adds\.test\.ts/);
+    assert.doesNotMatch(body, /acceptanceAuthorTimeCheck/, "a proof main already satisfies can never discriminate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -2,7 +2,8 @@ import { reconcilePlan } from "./plan-reconcile.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { getHeapStatistics } from "node:v8";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { validateConfig, type Config } from "./config.js";
@@ -3395,18 +3396,35 @@ export function fileCiLearningShards(
   return { filed, skipped, refused };
 }
 
-// ── W1-T5723: the cadence runs in a child process ───────────────────────────────────────────
-// In-process, its synchronous work froze the daemon loop (one 365.7 s block, 2026-10-08) and a
-// restart killed it. The daemon only starts the child and reads its result row from the state file.
+// ── W1-T5723: the cadence runs in a child (in-process it froze the loop; a restart killed it) ──
 
-/** BACKSTOP: the child's V8 heap cap, the garden child's figure (W1-T5365). */
-export const MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB = 2048;
+/** The child's V8 heap is the daemon's own: a fixed 2048 MB (a quarter of it) killed every child from 2026-10-08. */
+export function measurementCadenceChildHeapLimitMb(parentHeapLimitBytes: number = getHeapStatistics().heap_size_limit): number {
+  return Math.max(1, Math.round(parentHeapLimitBytes / (1024 * 1024)));
+}
 /** BACKSTOP: a dead child's run gets this many attempts in all, then is discarded. */
 export const MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS = 2;
 const MEASUREMENT_CADENCE_CHILD_NICENESS = 10;
 /** The child entry's first argument; without it the entry module does nothing on import. */
 export const MEASUREMENT_CADENCE_CHILD_FLAG = "--measurement-cadence-child";
 const MEASUREMENT_CADENCE_CHILD_POLL_MS = 5_000;
+const MEASUREMENT_CADENCE_CHILD_STDERR_TAIL_BYTES = 2_000;
+
+/** The child's stderr: the only account of a death it cannot record itself (a V8 heap abort, a signal). */
+export function measurementCadenceChildLogPath(statePath: string): string {
+  return `${statePath.replace(/\.json$/, "")}.stderr.log`;
+}
+
+/** The tail of the child's stderr log, or a note saying why there is none: never empty, never throws. */
+export function measurementCadenceChildDeathDetail(statePath: string): string {
+  try {
+    const bytes = readFileSync(measurementCadenceChildLogPath(statePath));
+    const tail = bytes.subarray(Math.max(0, bytes.length - MEASUREMENT_CADENCE_CHILD_STDERR_TAIL_BYTES)).toString("utf8").trim();
+    return tail === "" ? "the child wrote nothing to stderr" : tail;
+  } catch (e) {
+    return `no stderr log: ${String((e as Error)?.message ?? e)}`; // the row says why there is no account
+  }
+}
 
 export interface MeasurementCadenceChildState {
   runId: string;
@@ -3418,7 +3436,6 @@ export interface MeasurementCadenceChildState {
   error?: string;
 }
 
-/** Start one child for `runId`; returns its pid. */
 export type MeasurementCadenceChildSpawn = (runId: string, statePath: string) => number;
 
 export type MeasurementCadenceChildOutcome =
@@ -3469,8 +3486,7 @@ export function measurementCadenceChildAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    // ESRCH is no such process; EPERM is a live process under another uid.
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // ESRCH: no such process; EPERM: alive under another uid
   }
 }
 
@@ -3495,7 +3511,7 @@ export function measurementCadenceChildRunner(opts: {
         if (state?.status === "done" && state.result) return resolve(state.result);
         if (state?.status === "failed") return reject(new Error(`measurement cadence child ${runId} failed: ${state.error ?? "no error recorded"}`));
         if (state?.status === "running" && isAlive(pid)) return void setTimeout(look, pollMs).unref?.();
-        reject(new Error(`measurement cadence child ${runId} (pid ${pid}) exited without a result`));
+        reject(new Error(`measurement cadence child ${runId} (pid ${pid}) exited without a result; stderr: ${measurementCadenceChildDeathDetail(opts.statePath)}`));
       };
       look();
     });
@@ -3528,13 +3544,14 @@ export function measurementCadenceChildRunner(opts: {
       if (isAlive(state.pid)) {
         return { kind: "adopted", runId: state.runId, pid: state.pid, attempt: state.attempt, settled: settle(state.runId, state.pid) };
       }
+      const detail = measurementCadenceChildDeathDetail(opts.statePath);
       if (state.attempt < MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS) {
         const attempt = state.attempt + 1;
         const { pid, settled } = launch(state.runId, attempt);
-        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once" } };
+        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once", detail } };
       }
-      writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}` });
-      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const };
+      writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}: ${detail}` });
+      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const, detail };
       return fire ? startFresh(previous) : { kind: "discarded", runId: state.runId, pid: state.pid, attempt: state.attempt, previous };
     },
   };
@@ -3591,8 +3608,7 @@ export function measurementCadenceChildRun(
   return async () => build(namedMeasurementCadenceChildConfig(env)).runMeasurementCadence();
 }
 
-/** The production spawn: `<entry> --measurement-cadence-child <statePath> <runId>` on this node and loader, detached so a
- *  daemon restart leaves it running, heap-capped and niced like a garden child. */
+/** The production spawn: detached (a restart leaves it running), niced, stderr and exit kept in the child log. */
 export function childMeasurementCadenceSpawn(opts: {
   entry: string;
   execPath?: string;
@@ -3601,18 +3617,40 @@ export function childMeasurementCadenceSpawn(opts: {
   env?: NodeJS.ProcessEnv;
   config?: Config;
   heapLimitMb?: number;
+  parentHeapLimitBytes?: () => number;
   spawnChild?: typeof spawn;
   setPriority?: (pid: number, priority: number) => void;
 }): MeasurementCadenceChildSpawn {
   return (runId, statePath) => {
-    const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${opts.heapLimitMb ?? MEASUREMENT_CADENCE_CHILD_HEAP_LIMIT_MB}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
-    const child = (opts.spawnChild ?? spawn)(opts.execPath ?? process.execPath, argv, {
-      cwd: opts.cwd,
-      env: opts.config ? { ...(opts.env ?? process.env), [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : (opts.env ?? process.env),
-      detached: true,
-      stdio: "ignore",
-    });
+    const heapLimitMb = opts.heapLimitMb ?? measurementCadenceChildHeapLimitMb(opts.parentHeapLimitBytes?.());
+    const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${heapLimitMb}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
+    const logPath = measurementCadenceChildLogPath(statePath);
+    let stderrFd: number | undefined;
+    try {
+      stderrFd = openSync(logPath, "w");
+    } catch {
+      // An unwritable log costs the account, never the run.
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = (opts.spawnChild ?? spawn)(opts.execPath ?? process.execPath, argv, {
+        cwd: opts.cwd,
+        env: opts.config ? { ...(opts.env ?? process.env), [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : (opts.env ?? process.env),
+        detached: true,
+        stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
+      });
+    } finally {
+      if (stderrFd !== undefined) closeSync(stderrFd);
+    }
     if (child.pid === undefined) throw new Error("measurement cadence child did not start");
+    const pid = child.pid;
+    child.once?.("exit", (code, signal) => {
+      try {
+        appendFileSync(logPath, `\n[measurement cadence child ${pid} exited: code=${code} signal=${signal} heap_limit_mb=${heapLimitMb}]\n`);
+      } catch {
+        // Best-effort, like the log itself.
+      }
+    });
     child.unref();
     try {
       (opts.setPriority ?? osSetPriority)(child.pid, MEASUREMENT_CADENCE_CHILD_NICENESS);
