@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import * as provider from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const config = { claudeBin: "/unused", root: "/tmp", workerProviders: { codexHome: "/tmp/unused-codex-home" } } as unknown as Config;
 
@@ -60,5 +61,5 @@ test("a codex probe thread still reports when a killed app-server never exits, a
   const result = await reader()(config, "/bin/codex", { spawn: () => child, timeoutMs: 5_000, clock: { now: Date.now } }, 80) as { rateLimits?: unknown };
   assert.equal(child.killed, true);
   assert.ok(result.rateLimits, "a child that never exits cannot withhold the reading");
-  assert.ok(Date.now() - started < 3_000, "the wait is bounded by the grace");
+  assertWallClockBound(Date.now() - started, 3_000, "the wait is bounded by the grace");
 });
