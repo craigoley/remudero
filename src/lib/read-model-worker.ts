@@ -397,12 +397,7 @@ export function viewsReadBy(path: string, names: readonly string[], readers: Rea
   return [...read];
 }
 
-/**
- * The one instance a read of `path` is for, and the view it reads directly: `?instance=` (serve's per-instance
- * view routes, `/v1/views/now?instance=site`) or a `/v1/i/<x>/` copy. Only that direct view, when it is per
- * instance, is read for that instance alone; a view reached through another (needs-you composes every instance's
- * `now`) and a read naming no instance warm each instance's unit.
- */
+/** The instance a read names (`?instance=` or a `/v1/i/<x>/` copy) and the view it reads directly: only that view's unit for that instance is warmed. */
 export function readScopeOf(path: string): { direct?: string; instance?: string } {
   const [route = "", query = ""] = path.split("?");
   const instance = new URLSearchParams(query).get("instance") ?? /^\/v1\/i\/([^/]+)\//.exec(route)?.[1];
@@ -411,7 +406,6 @@ export function readScopeOf(path: string): { direct?: string; instance?: string 
   return { ...(direct ? { direct } : {}), ...(instance ? { instance } : {}) };
 }
 
-/** The read serve posts for a route: the instance it names rides as `?instance=`, so it is noted, and throttled, per instance. */
 export function scopedReadPath(path: string, instance: string | undefined): string {
   return instance === undefined ? path : `${path}?instance=${encodeURIComponent(instance)}`;
 }
@@ -1170,7 +1164,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
   const readAt = new Map<string, number>();
   const pacedFrom = clock.now();
-  /** A unit's newest read: of its whole view, or of its own instance's copy (`view@instance`) for a per-instance unit. */
   function lastReadOf(unit: ViewUnit): number {
     const whole = readAt.get(unit.view.name);
     const own = unit.slot ? readAt.get(`${unit.view.name}@${unit.slot.instance.name}`) : undefined;
@@ -1419,7 +1412,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const now = clock.now();
       const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers));
       const { direct, instance } = readScopeOf(path);
-      // A per-instance view read for one named instance warms that instance's unit alone; any other read warms them all.
       const only = (name: string): string | undefined =>
         instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
       for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
@@ -1914,8 +1906,7 @@ export interface ReadModelWorkerHandle {
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
   /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
   noteGithubRead?(): void;
-  /** Serve answered a read-scoped route: the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per
-   *  path and instance). `instance`, the one the request named, scopes a per-instance view's read to that instance's unit; an unknown name is dropped. */
+  /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path and instance). */
   noteViewRead?(path: string, instance?: string): void;
 }
 
