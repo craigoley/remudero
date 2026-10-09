@@ -254,6 +254,10 @@ export function main(argv, {
         : `No resolvable Remudero-Task trailer (task identity read from ${identity.read}), so no grandfathered allowance applies: a PR authoring its own body criteria has no backlog to inherit.`,
     );
     log.error("Remedy: replace each stale proof with one that names behavior this PR changes, then rerun this check.");
+    // #10234: the sweep reads only a failed step's last lines (CI_STEP_ERROR_CONTEXT_LINES), and each proof's output
+    // above can run long, so the verdict and its proofs close the log for the stale-proof route to find.
+    log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${base.mergeBase}):`);
+    for (const row of result.stale) log.error(`  proof: ${row.proof}`);
     return 1;
   }
   log.log(`proof-discrimination: OK — ${result.executed} executable proof(s) from ${source} did not pass at both head and merge base.`);
