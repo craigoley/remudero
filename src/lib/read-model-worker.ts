@@ -258,11 +258,6 @@ export interface ReadModelView {
   snapshotSourced?: true;
 }
 
-/**
- * A view a lane constructs only for a unit it builds (each per-instance unit its own), and lets go of once that
- * unit leaves the lane. Constructed eagerly, every view lane held a full copy of every view's memos, board
- * projections included, for units the other lane builds: about 1.2 GB of serve's RSS on 2026-10-08.
- */
 export interface ReadModelViewFactory {
   name: string;
   perInstance?: true;
@@ -611,7 +606,6 @@ export interface ReadModelTicker {
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
 interface ViewUnit {
   view: ReadModelView | ReadModelViewFactory;
-  /** A factory view's instance, made on this lane's first build of the unit and dropped when the unit leaves it. */
   made?: ReadModelView;
   slot?: Slot;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
@@ -1153,7 +1147,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return builtViews.has(view);
   };
   const owns = (unit: ViewUnit): boolean => opts.lane === undefined || (unit.heavy === true) === (opts.lane === "heavy");
-  /** The unit's view: a factory's is made on the first build this lane owns, so a lane holds only what it builds. */
   function viewOf(unit: ViewUnit): ReadModelView {
     const spec = unit.view;
     if (!isViewFactory(spec)) return spec;
@@ -1164,14 +1157,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     return (unit.made = made);
   }
-  /** A factory unit that left this lane drops its view, and every memo it held, for a cold one when it comes back. */
   function letGo(unit: ViewUnit): void {
     if (!unit.made || owns(unit)) return;
     unit.made = undefined;
     unit.startedAt = undefined;
     unit.peakMs = undefined;
   }
-  /** The shadow's legacy side for a key: a plain view's own, or that of whichever of this lane's made views published the body. */
   function legacyOf(name: string, key: string, now: number, data: unknown): ShadowLegacy | undefined {
     const spec = views.find((view) => view.name === name);
     if (!spec) return undefined;
@@ -1476,7 +1467,7 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
-      views: [...readModelLaneViews(data, { clock, log, demand }), ...extra],
+      views: [...readModelLaneViews(data, clock, log, demand), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1484,15 +1475,12 @@ export function runReadModelViewWorker(
   })();
 }
 
-/**
- * The views a view lane builds, each a factory: a lane makes a view only for the units it owns. The order is
- * the order units tie-break in, unchanged from when each lane constructed every one of them up front.
- */
 export function readModelLaneViews(
   data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host">,
-  deps: { clock: Clock; log: (step: string, extra: Record<string, unknown>) => void; demand: DemandBook },
+  clock: Clock,
+  log: (step: string, extra: Record<string, unknown>) => void,
+  demand: DemandBook,
 ): Array<ReadModelView | ReadModelViewFactory> {
-  const { clock, log, demand } = deps;
   const instances = data.instances;
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
