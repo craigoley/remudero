@@ -20,7 +20,7 @@ import * as tierManifest from "../scripts/test-tier-manifest.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CI_YAML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+const CI_YAML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 type Step = { name?: string; id?: string; run?: string; env?: Record<string, string> };
 const jobs = (parseYaml(CI_YAML) as { jobs: Record<string, { steps: Step[] }> }).jobs;
 
