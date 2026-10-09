@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,13 @@
   acceptance:
     - claim: "the narrow selector includes test/now-view-rederives-only-dirtied-tasks.test.ts when this edge is exercised"
       proof: "grep: test/now-view-rederives-only-dirtied-tasks\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.92
+    reasons:
+      - "The filed plan scopes the remedy to including one named test in the narrow selector, with only src/lib/affected-suites.ts declared."
+      - "The supplied family record reports 8 merged and 0 declined tasks, supporting established practice for this repair."
+      - "The supplied scope requests no sensitive access, deletion, irreversible action, operator decision, or merge, deploy, infrastructure, or review policy change; filing-time gates report no concerning condition."
+    judged_at: "2026-10-09T09:43:50.271Z"
+    pin: "c8d760c52546cc4a3283bc7cfdc82ea58ac68ad6ba43c06b2ac5ba2ae1701ea9"
