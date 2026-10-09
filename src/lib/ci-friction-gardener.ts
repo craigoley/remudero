@@ -338,6 +338,10 @@ function causeFromDispatchMode(mode: unknown): CiFrictionCause {
  *  removed so two rounds of the same failure share one signature. `undefined` when neither exists. */
 export function ciFailureSignature(logTail: string): string | undefined {
   const lines = logTail.split("\n");
+  // A test runner's log speaks only through its own failure markers: a line a passing test printed
+  // on purpose (a fixture's "worktree materialization failed", #10392) is never its failure.
+  const runner = testRunnerFailureSignature(lines);
+  if (runner !== undefined) return runner;
   const failing = lines.filter((l) => /not ok|✖|FAIL|fail(?:ed|ure)?\b|Error|refused|BLOCKED/.test(l));
   // The file a failure line names, else (a stack frame under it) the first file the tail names.
   for (const l of failing.length > 0 ? [...failing, ...lines] : []) {
@@ -351,6 +355,29 @@ export function ciFailureSignature(logTail: string): string | undefined {
     .replace(/\d+/g, "N")
     .trim();
   return first ? first.slice(0, 120) : undefined;
+}
+
+/** The signature of a red check whose log is a test runner's but names no failing test. */
+export const RED_WITH_NO_FAILING_TEST = "red with no failing test";
+
+/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
+ *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
+ *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
+  if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
+  const named: string[] = [];
+  for (const b of bodies) {
+    const name = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]
+      ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(b)?.[1]
+      ?? /^FLAKE-RETRY: .* — (?!\(no test name)(.+)$/.exec(b)?.[1]
+      ?? /COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
+    if (name !== undefined && !/^failing tests:?$/.test(name.trim())) named.push(name.trim());
+  }
+  const file = named.map((n) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(n)?.[1]).find((f) => f !== undefined);
+  if (file !== undefined) return file;
+  const first = named[0]?.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
+  return first ? first.slice(0, 120) : RED_WITH_NO_FAILING_TEST;
 }
 
 /** A refused commit's reason, stripped of its volatile parts, so every round refused the same way
