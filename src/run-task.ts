@@ -10433,6 +10433,9 @@ export function fixWorkerReceipt(
   workerRunId: string,
   work: BenchmarkWorkInput = {},
   repair?: RepairReceiptContext,
+  /** When given, the round mirrors its worker's output onto the SAME bounded, retained tail a build run
+   *  keeps (`<root>/state/runs/<workerRunId>.tail`, W1-T942), so a failed round can be replayed. */
+  tail?: { root: string },
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   joinFields: () => Record<string, unknown>;
@@ -10451,9 +10454,25 @@ export function fixWorkerReceipt(
       throw error;
     }
   }, workerBoundaryStack, work);
+  // Tail ONLY: the capped ring and its best-effort write, never the per-event worker.activity rows a
+  // build's full sensor appends, so a frequent fix lane adds no ledger volume for this.
+  const tailRoot = typeof tail?.root === "string" && tail.root.length > 0 ? tail.root : undefined;
+  const tailPath = tailRoot ? join(tailRoot, "state", "runs", `${workerRunId}.tail`) : undefined;
+  const tailField = tailPath ? { worker_tail: join("state", "runs", `${workerRunId}.tail`) } : {};
+  let tailLines: string[] = [];
+  const tailObserver: WorkerStreamObserver = (event) => {
+    if (!tailPath || !event.text) return;
+    tailLines = capWorkerTailLines([...tailLines, event.text]);
+    writeWorkerTailBestEffort(tailPath, tailLines);
+  };
+  const observed = (args: SpawnWorkerArgs): SpawnWorkerArgs => {
+    if (!tailPath) return args;
+    const own = args.streamObserver;
+    return { ...args, streamObserver: own ? (event) => { tailObserver(event); own(event); } : tailObserver };
+  };
   const receipted = (args: SpawnWorkerArgs): Promise<WorkerResult> =>
     recordBenchmarkWorkerAttempt(() => spawn(withCallerOwnedReceipt({
-      ...args,
+      ...observed(args),
       onSelectionAssignment: (selected) => {
         assignment = selected;
         try {
@@ -10479,6 +10498,7 @@ export function fixWorkerReceipt(
       ...fields,
       ...repairFields,
       worker_run_id: workerRunId,
+      ...tailField,
       ...(assignmentId ? { selection_assignment_id: assignmentId } : { selection_assignment_unavailable_reason: "assignment-not-observed" }),
       ...(assignment ? { requested_model: assignment.requested.model, selected_model: assignment.selected.model } : {}),
       ...(receiptFailure ? { benchmark_receipt_unavailable_reason: receiptFailure } : {}),
@@ -12604,7 +12624,7 @@ export async function runFixRung(opts: {
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
-      { prUrl: opts.prUrl, roundId });
+      { prUrl: opts.prUrl, roundId }, { root: opts.config.root });
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
