@@ -23,7 +23,8 @@ import {
   type UpdateBranchOutcome,
 } from "../src/lib/sweep.js";
 // run-task.ts re-exports the classifier from src/lib/fix-rung-classify.ts (W1-T2891).
-import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
+import { classifyUpdateBranchFailure, ghUpdateBranch as fixRungUpdateBranch, updateBranchViaGh } from "../src/run-task.js";
+import { ghUpdateBranch as armUpdateBranch } from "../src/lib/arm-auto-merge.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // The three 422 bodies GitHub returns for this endpoint, as `gh api` prints them on stderr.
@@ -60,6 +61,40 @@ test("W1-T5933: the real update-branch leaf reports head-moved and up-to-date fr
   } finally {
     process.env.PATH = oldPath;
   }
+});
+
+// #10470 (2026-10-09): an update-branch merged main into a PR and no ledger row said who asked.
+test("every update-branch writer ledgers one row naming the path that asked for it", async () => {
+  const rows: Record<string, unknown>[] = [];
+  const record = (row: Record<string, unknown>) => { rows.push(row); };
+  const target = { prNumber: 7, prUrl: "https://github.com/acme/remudero/pull/7", headSha: "d00d", updateReason: "distance" as const };
+  const oldPath = process.env.PATH;
+  try {
+    const shim = ghShim([{ when: "update-branch", stdout: "{}", exit: 0 }], { kind: "branch-update-row-gh" });
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    assert.equal(await withLiveWritesAllowed(() => updateBranchViaGh(target, record)), "updated");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  const ok = () => Buffer.from("");
+  withLiveWritesAllowed(() => fixRungUpdateBranch("acme", "remudero", 8, ok as never, "fix-rung", record));
+  withLiveWritesAllowed(() => armUpdateBranch("acme", "remudero", 9, ok as never, record));
+  assert.deepEqual(rows.map((r) => [r.step, r.pr_number, r.via, r.outcome]), [
+    ["branch.update_requested", 7, "sweep:distance", "updated"],
+    ["branch.update_requested", 8, "fix-rung", "updated"],
+    ["branch.update_requested", 9, "arm-direct-merge-preflight", "updated"],
+  ]);
+  assert.equal(rows[0]!.expected_head_sha, "d00d");
+});
+
+test("a refused update-branch request still ledgers its row with the refusal", () => {
+  const rows: Record<string, unknown>[] = [];
+  const refuse = () => { throw new Error("gh: merge conflict between base and head (HTTP 422)"); };
+  const result = withLiveWritesAllowed(() => fixRungUpdateBranch("acme", "remudero", 8, refuse as never, "fix-rung", (r) => rows.push(r)));
+  assert.equal(result.ok, false);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.outcome, "error");
+  assert.match(String(rows[0]!.error), /merge conflict/);
 });
 
 // ── W1-T5921's ci-gate-timeout lane ───────────────────────────────────────────────────────────
