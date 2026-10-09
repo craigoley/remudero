@@ -2539,7 +2539,10 @@ export function buildSweepEffects(
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
-    runFixRungImpl: (opts) => runFixRung({ ...opts, deps: { ...opts.deps, writeFixCensusSnapshot } }),
+    runFixRungImpl: (opts) => {
+      const deps = { ...opts.deps, writeFixCensusSnapshot };
+      return runFixRung({ ...opts, deps });
+    },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
