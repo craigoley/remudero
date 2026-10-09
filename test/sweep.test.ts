@@ -1361,17 +1361,14 @@ test("W1-T196 acceptance 2 — the stand-down is TRACED, never silent: it re-led
 });
 
 test("W1-T196 acceptance 3 — a DELIBERATELY-unattributed filing PR is distinguished from BROKEN attribution: without the POSITIVE isPlanFiling signal, an unresolved task id still escalates unchanged (a real defect stays surfaced)", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   // Same shape as unattributableFilingPr, minus the emitter's positive filing
   // signal — the shape of an IMPLEMENTING PR whose trailer went missing/malformed.
-  const brokenAttributionPr = unattributableFilingPr({
-    isPlanFiling: undefined,
-    body: "## Acceptance\n- the worker's implementation satisfies this criterion",
-  });
-  const deps = fakeDeps({
-    fixProgressJudge: async () => ({ verdict: "escalate", loop: "criteria unrecoverable", reason: "the broken attribution needs a human" }),
-  });
+  const brokenAttributionPr = unattributableFilingPr({ isPlanFiling: undefined });
+  const deps = fakeDeps();
   const summary = await runSweep([brokenAttributionPr], deps);
-  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(
     deps.escalated.length,
     1,
@@ -1386,9 +1383,11 @@ test("W1-T196 acceptance 3 — a DELIBERATELY-unattributed filing PR is distingu
 });
 
 test("W1-T196 acceptance 4 — an attributable PR with a genuine block still escalates exactly as before this task", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const summary = await runSweep([strikesExhaustedPr()], deps);
-  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(deps.escalated.length, 1, "an attributed PR's genuine block is unaffected by the stand-down carve-out");
   assert.equal(deps.escalated[0].question.taskId, "W1-D");
 });
@@ -1538,12 +1537,14 @@ test("W1-T100 acceptance 1 — the #170 fixture (ci red, review none, zero strik
 });
 
 test("W1-T100 acceptance 2 — a strike-exhausted ci-red PR routes to the question rung — the ladder, not a loop: zero new spawns", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const seeded = blockedCiExhaustedPr();
 
   const summary = await runSweep([seeded], deps);
 
-  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(deps.fixed.length, 0, "zero new spawns once strikes are exhausted");
   assert.equal(deps.escalated.length, 1, "escalates to the clarification-question rung instead");
   assert.match(deps.escalated[0].reason, /exhausted/);
@@ -1615,7 +1616,9 @@ test("W1-T138 — a checks-red PR at its former ceiling escalates only when the 
 
   const summary = await runSweep([exhausted], deps);
 
-  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  // Ruling 2026-10-09 (W1-T7096): the progress judge rules the former ceiling a loop; that verdict enters
+  // main's strikes-exhausted (blocked-ambiguous) route unchanged, so the escalation and its dedup stand.
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(deps.fixed.length, 0, "the judge explicitly declines another fix dispatch");
   assert.equal(deps.escalated.length, 1);
   assert.match(deps.escalated[0]?.reason ?? "", /unchanged red checks/);
@@ -1698,6 +1701,8 @@ test("runSweep acceptance 3 — an rmd-owned deletion conflict dispatches one bo
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
 
 test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix carrying BOTH criteria, one close, one escalation}; none-count == 0", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const seeded = [mergeablePr(), blockedFixablePr(), supersededOrphanPr(), strikesExhaustedPr()];
 
@@ -1724,10 +1729,10 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
   // Disposition tally + the INVARIANT: no seeded PR ends disposition=none.
   assert.deepEqual(summary.byDisposition, {
     mergeable: 1,
-    "blocked-fixable": 2,
+    "blocked-fixable": 1,
     "refused-escalate": 0,
     stale: 1,
-    "blocked-ambiguous": 0,
+    "blocked-ambiguous": 1,
     "dep-review": 0,
     "post-review": 0,
     conflicted: 0,
@@ -1876,13 +1881,14 @@ test("W1-T1110 acceptance 3 — a fix dispatch that DID resolve (landed a workin
 });
 
 test("W1-T1110 acceptance 4 — the strike ceiling and its escalation at the cap are unchanged by the dedup re-arm", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const summary = await runSweep([strikesExhaustedPr()], deps);
-  assert.equal(summary.actions[0].disposition, "blocked-fixable", "the old cap now routes through progress judgment");
-  assert.match(String(summary.actions[0].reason), /progress judgment due/, "the action routes through progress judgment at the former ceiling");
-  assert.match(deps.escalated[0].reason, /fix strikes exhausted/, "the fixture judge explicitly elects the former handoff");
-  assert.equal(deps.escalated.length, 1, "the explicit fixture verdict escalates");
-  assert.equal(deps.fixed.length, 0, "the judge declines another fix dispatch");
+  assert.equal(summary.actions[0].disposition, "blocked-ambiguous", "exhaustion still routes off the disposition rule, not the dedup");
+  assert.match(String(summary.actions[0].reason), /fix strikes exhausted \(2\/2\)/, "the cap itself (2) is untouched");
+  assert.equal(deps.escalated.length, 1, "exhaustion still escalates loudly");
+  assert.equal(deps.fixed.length, 0, "no fix dispatch fires once the cap is reached — the dedup re-arm never widens the cap");
 });
 
 // ── W1-T1210 — a gate seeded by a dispatch that THREW BEFORE run-task.ts ever started (the
@@ -1997,6 +2003,8 @@ test("W1-T1210: clearing the gate dispatches nothing by itself", async () => {
 });
 
 test("W1-T1210: the strike ceiling is unchanged by the clearing path", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   // strikesExhaustedPr never reaches the blocked-fixable/conflicted dedup arm this task touches
   // (its disposition is blocked-ambiguous, routed purely off `priorStrikes` — see
   // DISPOSITION_RULES) — the SAME regression lock W1-T1110's own acceptance 4 already
@@ -2006,13 +2014,12 @@ test("W1-T1210: the strike ceiling is unchanged by the clearing path", async () 
   const summary = await runSweep([strikesExhaustedPr()], deps);
   assert.equal(
     summary.actions[0].disposition,
-    "blocked-fixable",
-    "exhaustion routes through the progress judge, not the (now-clearable) blocked-fixable dedup",
+    "blocked-ambiguous",
+    "exhaustion still routes off the disposition rule, not the (now-clearable) blocked-fixable dedup",
   );
-  assert.match(String(summary.actions[0].reason), /progress judgment due/, "the action routes through progress judgment at the former ceiling");
-  assert.match(deps.escalated[0].reason, /fix strikes exhausted/, "the fixture judge explicitly chooses the former handoff");
-  assert.equal(deps.escalated.length, 1, "the explicit judge verdict escalates");
-  assert.equal(deps.fixed.length, 0, "the judge declines another fix dispatch");
+  assert.match(String(summary.actions[0].reason), /fix strikes exhausted \(2\/2\)/, "the cap itself (2) is untouched");
+  assert.equal(deps.escalated.length, 1, "exhaustion still escalates loudly");
+  assert.equal(deps.fixed.length, 0, "the clearing path (scoped to blocked-fixable/conflicted only) never reaches an exhausted PR");
 });
 
 // ── W1-T177: TERMINAL-STATE CHECK AT EVERY SPENDING SITE — a sweep disposition
@@ -2640,37 +2647,33 @@ test("deriveDisposition: resetStrikeCounterOnAnswer=false still routes a later e
   assert.match(result.reason, /operator answered the clarification question/);
 });
 
-test("runSweep: broken attribution escalates through an explicit progress verdict and is deduped on the same head", async () => {
+test("runSweep: a BLOCKED-AMBIGUOUS PR ledgers its clarification question EVERY sweep, even once escalate() is deduped — an unanswered question stays visible, nothing else is ever dispatched", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge rules the former ceiling a loop; that verdict enters
+  // main's strikes-exhausted (blocked-ambiguous) route unchanged, so the escalation and its dedup stand.
   const shared = ledgerPath();
-  const judge = async () => ({ verdict: "escalate" as const, loop: "criteria unrecoverable", reason: "a human must resolve the missing task attribution" });
-  const first = fakeDeps({ ledgerPath: shared, fixProgressJudge: judge });
-  const filing = unattributableFilingPr({
-    isPlanFiling: undefined,
-    body: "## Acceptance\n- the worker's implementation satisfies this criterion",
-  });
-  const summary1 = await runSweep([filing], first);
+  const first = fakeDeps({ ledgerPath: shared });
+  const summary1 = await runSweep([strikesExhaustedPr()], first);
   assert.equal(first.escalated.length, 1, "escalate() fires on the first sweep");
-  assert.match(first.escalated[0].reason, /criteria unrecoverable/);
-  assert.equal(summary1.actions[0].disposition, "blocked-fixable");
+  assert.match(first.escalated[0].question.question, /still unmet/);
+  assert.equal(summary1.actions[0].question?.question, first.escalated[0].question.question);
 
-  // A second sweep over the SAME (unanswered) state: the progress verdict is not delivered twice.
-  const second = fakeDeps({ ledgerPath: shared, fixProgressJudge: judge });
-  const summary2 = await runSweep([filing], second);
+  // A second sweep over the SAME (unanswered) state: deduped — no repeat escalate() —
+  // but the disposition (and its question) is still re-derived and ledgered.
+  const second = fakeDeps({ ledgerPath: shared });
+  const summary2 = await runSweep([strikesExhaustedPr()], second);
   assert.equal(second.escalated.length, 0, "deduped — escalate() does not fire again");
-  assert.equal(summary2.actions[0].disposition, "blocked-fixable", "the state is still re-derived");
   assert.equal(second.armed.length, 0);
   assert.equal(second.closed.length, 0);
-  assert.equal(second.fixed.length, 0, "the escalated progress input is not dispatched again on the same head");
-  assert.equal(summary2.byDisposition["blocked-fixable"], 1, "the repairable red state remains fixable");
-  assert.match(String(summary2.actions[0].reason), /progress judgment due/);
+  assert.equal(second.fixed.length, 0, "nothing else is ever dispatched for an unanswered clarification");
+  assert.equal(summary2.byDisposition["blocked-ambiguous"], 1, "still BLOCKED-AMBIGUOUS");
+  assert.ok(summary2.actions[0].question, "the question is still rendered/ledgered on the deduped sweep");
 
   const lines = readLedgerLines(shared);
   const disposed = lines.filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed.length, 2, "one sweep.disposed line per sweep");
   for (const line of disposed) {
-    assert.match(String(line.reason ?? ""), /progress judgment due/, "the fixable state remains visible on EVERY sweep");
+    assert.match(String(line.question ?? ""), /still unmet/, "the question is ledgered on EVERY sweep");
   }
-  assert.match(String(disposed[1]?.stand_down_reason ?? ""), /already escalated/);
 });
 
 // ── W1-T103 — checksState green means REQUIRED contexts green (the #170 ──────
