@@ -235,6 +235,6 @@
   "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 18000,
+  "src/run-task.ts": 18250,
   "src/spike.ts": 18
 }

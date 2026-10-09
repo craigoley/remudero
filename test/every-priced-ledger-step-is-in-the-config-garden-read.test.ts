@@ -55,6 +55,9 @@ const EXEMPT: Readonly<Record<string, string>> = {
   worker_smoke: DONE_STEPS_PRICE_THE_RUN,
   "sweep.plan_round.worker": DONE_STEPS_PRICE_THE_RUN,
   // The sweep.
+  "main.repair.pr_unreadable": A_LANE_RUN_ID,
+  "main-repair.pr_opened": A_LANE_RUN_ID,
+  "main-repair.revert_pr_opened": A_LANE_RUN_ID,
   "sweep.absent_repush": A_LANE_RUN_ID,
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.armed_stalled": A_LANE_RUN_ID,

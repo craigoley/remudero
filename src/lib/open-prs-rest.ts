@@ -30,6 +30,7 @@ export {
   defaultGhRetryAfterSeconds,
   GhPaceFloorStandDownError,
   paceGhEntry,
+  paceGhEntryAsync,
   type GhBudgetReading,
   type GhCallPacer,
   type GhRefusalBackoffOpts,
@@ -75,6 +76,28 @@ function budgetFromRateLimitLikeReading(reading: {
   if (remaining === undefined || limit === undefined || resource === undefined) return undefined;
   if (!Number.isFinite(remaining) || !Number.isFinite(limit)) return undefined;
   return { remaining, limit, resource };
+}
+
+/** W1-T6591: git-push.ts's `Steps` (one set of reads, a sync and an async driver), restated to avoid an import cycle. */
+export type GhReadSteps<R> = Generator<() => unknown, R, unknown>;
+
+function* ghRead(read: GhApiFetcher, args: string[], onRateLimit?: Parameters<GhApiFetcher>[1]): GhReadSteps<unknown> {
+  return yield () => (onRateLimit ? read(args, onRateLimit) : read(args));
+}
+
+export function runGhReadSteps<R>(steps: GhReadSteps<R>): R {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
 }
 
 /** Check-runs for a head SHA. GitHub can return multiple same-name runs on this endpoint,
@@ -325,11 +348,15 @@ export function prStateFromRest(row: { state?: string; merged?: boolean; merged_
  *  the point-priced budget (`gh pr view --json statusCheckRollup`, every 6s for a whole CI wait) and
  *  migrate onto this read. Falsifier: test/poll-rollup-over-rest.test.ts. */
 export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher): RestRollupEntry[] {
-  const runs = fetch(checkRunsRestArgs(owner, repo, sha)) as { check_runs?: RestCheckRun[] };
-  const combined = fetch(combinedStatusRestArgs(owner, repo, sha)) as { statuses?: RestStatus[] };
+  return runGhReadSteps(rollupSteps(owner, repo, sha, fetch));
+}
+
+function* rollupSteps(owner: string, repo: string, sha: string, fetch: GhApiFetcher): GhReadSteps<RestRollupEntry[]> {
+  const runs = (yield* ghRead(fetch, checkRunsRestArgs(owner, repo, sha))) as { check_runs?: RestCheckRun[] };
+  const combined = (yield* ghRead(fetch, combinedStatusRestArgs(owner, repo, sha))) as { statuses?: RestStatus[] };
   const checks = runs?.check_runs ?? [];
   const listing = needsWorkflowIdentity(checks)
-    ? fetch(runsForHeadRestArgs(owner, repo, sha)) as { workflow_runs?: RestWorkflowRunIdentity[] }
+    ? (yield* ghRead(fetch, runsForHeadRestArgs(owner, repo, sha))) as { workflow_runs?: RestWorkflowRunIdentity[] }
     : undefined;
   return rollupFromRest(checks, combined?.statuses ?? [], listing === undefined ? undefined : listing?.workflow_runs ?? []);
 }
@@ -359,19 +386,25 @@ export async function rollupForAsync(
  *  alone asks `fetch` for its rate-limit reading and returns it via {@link withGhBudgetReading}, for
  *  {@link paceGhEntry} to arm the floor from. */
 export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
+  return runGhReadSteps(fetchOpenPrsRestSteps(owner, repo, fetch));
+}
+
+export function* fetchOpenPrsRestSteps(owner: string, repo: string, fetch: GhApiFetcher): GhReadSteps<OpenPrRest[]> {
   let budget: GhBudgetReading | undefined;
-  const rows = fetch(openPrsRestArgs(owner, repo), (reading) => {
+  const rows = (yield* ghRead(fetch, openPrsRestArgs(owner, repo), (reading) => {
     budget = budgetFromRateLimitLikeReading(reading);
-  }) as RestPullRow[];
-  const result = rows.map((row) => {
-    const pr = mapRestPr(row);
-    try {
-      return { ...pr, statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch) };
-    } catch {
-      return { ...pr, rollupUnreadable: true as const };
-    }
-  });
+  })) as RestPullRow[];
+  const result: OpenPrRest[] = [];
+  for (const row of rows) result.push(yield* openPrWithRollupSteps(owner, repo, mapRestPr(row), fetch));
   return withGhBudgetReading(result, budget);
+}
+
+function* openPrWithRollupSteps(owner: string, repo: string, pr: OpenPrRest, fetch: GhApiFetcher): GhReadSteps<OpenPrRest> {
+  try {
+    return { ...pr, statusCheckRollup: yield* rollupSteps(owner, repo, pr.headRefOid, fetch) };
+  } catch {
+    return { ...pr, rollupUnreadable: true as const };
+  }
 }
 
 /** The `rmd fix` single-PR read — same mapping, plus the `state` token `routeFix` gates on. */
@@ -740,10 +773,20 @@ export function hydrateMergeStateObservations(
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, MergeStateObservation> {
+  return runGhReadSteps(hydrateMergeStateObservationsSteps(owner, repo, prNumbers, fetch, cap));
+}
+
+export function* hydrateMergeStateObservationsSteps(
+  owner: string,
+  repo: string,
+  prNumbers: readonly number[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): GhReadSteps<Map<number, MergeStateObservation>> {
   const out = new Map<number, MergeStateObservation>();
   for (const n of prNumbers.slice(0, cap)) {
     try {
-      const row = fetch(singlePrRestArgs(owner, repo, n)) as {
+      const row = (yield* ghRead(fetch, singlePrRestArgs(owner, repo, n))) as {
         mergeable_state?: string | null;
         mergeable?: boolean | null;
         merge_commit_sha?: string | null;
@@ -953,9 +996,18 @@ export function observeScannerBlocker(
   candidate: ScannerBlockerCandidate,
   fetch: GhApiFetcher,
 ): ScannerBlockerObservation {
+  return runGhReadSteps(observeScannerBlockerSteps(owner, repo, candidate, fetch));
+}
+
+function* observeScannerBlockerSteps(
+  owner: string,
+  repo: string,
+  candidate: ScannerBlockerCandidate,
+  fetch: GhApiFetcher,
+): GhReadSteps<ScannerBlockerObservation> {
   let behindBy: unknown;
   try {
-    const compare = fetch(["api", `repos/${owner}/${repo}/compare/${candidate.headSha}...main`]) as { ahead_by?: unknown } | null;
+    const compare = (yield* ghRead(fetch, ["api", `repos/${owner}/${repo}/compare/${candidate.headSha}...main`])) as { ahead_by?: unknown } | null;
     behindBy = compare ? compare.ahead_by : undefined;
   } catch {
     const reason = "the head-to-main compare read failed";
@@ -968,13 +1020,13 @@ export function observeScannerBlocker(
   let alerts: unknown;
   let comments: unknown;
   try {
-    alerts = fetch(scannerAlertsRestArgs(owner, repo, candidate.number));
+    alerts = yield* ghRead(fetch, scannerAlertsRestArgs(owner, repo, candidate.number));
   } catch {
     const reason = "the code-scanning alert read failed";
     return ambiguousScanner("unreadable", reason);
   }
   try {
-    comments = fetch(reviewCommentsRestArgs(owner, repo, candidate.number));
+    comments = yield* ghRead(fetch, reviewCommentsRestArgs(owner, repo, candidate.number));
   } catch {
     const reason = "the review comment read failed";
     return ambiguousScanner("unreadable", reason);
@@ -989,9 +1041,19 @@ export function hydrateScannerBlockerObservations(
   fetch: GhApiFetcher,
   cap: number = SCANNER_BLOCKER_HYDRATION_CAP,
 ): Map<number, ScannerBlockerObservation> {
+  return runGhReadSteps(hydrateScannerBlockerObservationsSteps(owner, repo, candidates, fetch, cap));
+}
+
+export function* hydrateScannerBlockerObservationsSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly ScannerBlockerCandidate[],
+  fetch: GhApiFetcher,
+  cap: number = SCANNER_BLOCKER_HYDRATION_CAP,
+): GhReadSteps<Map<number, ScannerBlockerObservation>> {
   const out = new Map<number, ScannerBlockerObservation>();
   for (const candidate of candidates.slice(0, cap)) {
-    out.set(candidate.number, observeScannerBlocker(owner, repo, candidate, fetch));
+    out.set(candidate.number, yield* observeScannerBlockerSteps(owner, repo, candidate, fetch));
   }
   return out;
 }
@@ -1070,11 +1132,22 @@ export function hydrateCodeqlHeadAlerts(
   cap: number = CODEQL_HEAD_ALERT_HYDRATION_CAP,
   onUnreadable: (prNumber: number, reason: string) => void = () => {},
 ): Map<number, CodeqlHeadObservation> {
+  return runGhReadSteps(hydrateCodeqlHeadAlertsSteps(owner, repo, candidates, fetch, cap, onUnreadable));
+}
+
+export function* hydrateCodeqlHeadAlertsSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly { number: number; headSha: string }[],
+  fetch: GhApiFetcher,
+  cap: number = CODEQL_HEAD_ALERT_HYDRATION_CAP,
+  onUnreadable: (prNumber: number, reason: string) => void = () => {},
+): GhReadSteps<Map<number, CodeqlHeadObservation>> {
   const out = new Map<number, CodeqlHeadObservation>();
   for (const candidate of candidates.slice(0, cap)) {
     let listing: unknown;
     try {
-      listing = fetch(codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
+      listing = yield* ghRead(fetch, codeqlHeadAlertsRestArgs(owner, repo, candidate.number));
     } catch (error) {
       const reason = String((error as Error)?.message ?? error);
       onUnreadable(candidate.number, reason);
@@ -1143,7 +1216,17 @@ export function fetchWorkflowRunObservations(
   fetch: GhApiFetcher,
   jobsCache: ConcludedRunJobsCache = concludedRunJobs,
 ): WorkflowRunObservation[] {
-  const listing = fetch(runsForHeadRestArgs(owner, repo, headSha)) as {
+  return runGhReadSteps(workflowRunObservationSteps(owner, repo, headSha, fetch, jobsCache));
+}
+
+function* workflowRunObservationSteps(
+  owner: string,
+  repo: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+  jobsCache: ConcludedRunJobsCache,
+): GhReadSteps<WorkflowRunObservation[]> {
+  const listing = (yield* ghRead(fetch, runsForHeadRestArgs(owner, repo, headSha))) as {
     workflow_runs?: ReadonlyArray<{ id?: number; run_attempt?: number; conclusion?: string | null }>;
   };
   const runs = listing?.workflow_runs ?? [];
@@ -1161,7 +1244,7 @@ export function fetchWorkflowRunObservations(
       continue;
     }
     try {
-      const j = fetch(jobsForRunRestArgs(owner, repo, run.id)) as {
+      const j = (yield* ghRead(fetch, jobsForRunRestArgs(owner, repo, run.id))) as {
         jobs?: ReadonlyArray<{ status?: string | null }>;
       };
       jobs = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
@@ -1187,10 +1270,20 @@ export function hydrateWorkflowRuns(
   fetch: GhApiFetcher,
   cap: number = WORKFLOW_RUN_HYDRATION_CAP,
 ): Map<number, readonly WorkflowRunObservation[]> {
+  return runGhReadSteps(hydrateWorkflowRunsSteps(owner, repo, pendingPrs, fetch, cap));
+}
+
+export function* hydrateWorkflowRunsSteps(
+  owner: string,
+  repo: string,
+  pendingPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = WORKFLOW_RUN_HYDRATION_CAP,
+): GhReadSteps<Map<number, readonly WorkflowRunObservation[]>> {
   const out = new Map<number, readonly WorkflowRunObservation[]>();
   for (const p of pendingPrs.slice(0, cap)) {
     try {
-      out.set(p.number, fetchWorkflowRunObservations(owner, repo, p.headRefOid, fetch));
+      out.set(p.number, yield* workflowRunObservationSteps(owner, repo, p.headRefOid, fetch, concludedRunJobs));
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined workflowRuns, the pass continues */
     }
@@ -1320,8 +1413,8 @@ function logFromCompareCommits(commits: RestCompareCommit[] | undefined): string
   return (commits ?? []).map((c) => `${(c.sha ?? "").slice(0, 7)} ${(c.commit?.message ?? "").split("\n")[0]}`).join("\n");
 }
 
-function contentBytes(owner: string, repo: string, path: string, ref: string, fetch: GhApiFetcher): Buffer {
-  const raw = fetch(contentRestArgs(owner, repo, path, ref)) as RestContentResponse;
+function* contentBytes(owner: string, repo: string, path: string, ref: string, fetch: GhApiFetcher): GhReadSteps<Buffer> {
+  const raw = (yield* ghRead(fetch, contentRestArgs(owner, repo, path, ref))) as RestContentResponse;
   if (raw.encoding !== "base64" || typeof raw.content !== "string") {
     throw new Error(`content response for ${path}@${ref} was not a base64 file`);
   }
@@ -1330,21 +1423,21 @@ function contentBytes(owner: string, repo: string, path: string, ref: string, fe
 
 const REDUNDANT_REFIX_COMPARE_PATH_CAP = 25;
 
-function redundantRefixEvidence(
+function* redundantRefixEvidence(
   owner: string,
   repo: string,
   targetBranch: string,
   headRefOid: string,
   files: readonly ConflictFileDiff[],
   fetch: GhApiFetcher,
-): RedundantRefixEvidence | undefined {
+): GhReadSteps<RedundantRefixEvidence | undefined> {
   if (files.length === 0 || files.length > REDUNDANT_REFIX_COMPARE_PATH_CAP) return undefined;
   try {
     const comparedPaths: string[] = [];
     const differingPaths: string[] = [];
     for (const file of files) {
-      const target = contentBytes(owner, repo, file.path, targetBranch, fetch);
-      const head = contentBytes(owner, repo, file.path, headRefOid, fetch);
+      const target = yield* contentBytes(owner, repo, file.path, targetBranch, fetch);
+      const head = yield* contentBytes(owner, repo, file.path, headRefOid, fetch);
       comparedPaths.push(file.path);
       if (!target.equals(head)) differingPaths.push(file.path);
     }
@@ -1369,10 +1462,20 @@ export function fetchMergeConflictEvidence(
   headRefOid: string,
   fetch: GhApiFetcher,
 ): MergeConflictEvidence {
-  const ours = fetch(compareRestArgs(owner, repo, targetBranch, headRefOid)) as RestCompareResponse;
+  return runGhReadSteps(mergeConflictEvidenceSteps(owner, repo, targetBranch, headRefOid, fetch));
+}
+
+function* mergeConflictEvidenceSteps(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headRefOid: string,
+  fetch: GhApiFetcher,
+): GhReadSteps<MergeConflictEvidence> {
+  const ours = (yield* ghRead(fetch, compareRestArgs(owner, repo, targetBranch, headRefOid))) as RestCompareResponse;
   const mergeBaseSha = ours.merge_base_commit?.sha;
   if (!mergeBaseSha) throw new Error("conflict evidence compare carried no merge_base_commit.sha");
-  const theirs = fetch(compareRestArgs(owner, repo, mergeBaseSha, targetBranch)) as RestCompareResponse;
+  const theirs = (yield* ghRead(fetch, compareRestArgs(owner, repo, mergeBaseSha, targetBranch))) as RestCompareResponse;
 
   const oursDeletions = new Map((ours.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
   const theirsDeletions = new Map((theirs.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
@@ -1389,7 +1492,7 @@ export function fetchMergeConflictEvidence(
     files,
     oursLog: logFromCompareCommits(ours.commits),
     theirsLog: logFromCompareCommits(theirs.commits),
-    redundantRefix: redundantRefixEvidence(owner, repo, targetBranch, headRefOid, files, fetch),
+    redundantRefix: yield* redundantRefixEvidence(owner, repo, targetBranch, headRefOid, files, fetch),
   };
 }
 
@@ -1485,6 +1588,17 @@ export function hydratePlanFilingFiles(
   cache: PlanFilingFileCache,
   opts: { missCap: number; maxEntries?: number },
 ): Map<number, PlanFilingFileObservation> {
+  return runGhReadSteps(hydratePlanFilingFilesSteps(owner, repo, candidates, fetch, cache, opts));
+}
+
+export function* hydratePlanFilingFilesSteps(
+  owner: string,
+  repo: string,
+  candidates: readonly PlanFilingFileCandidate[],
+  fetch: GhApiFetcher,
+  cache: PlanFilingFileCache,
+  opts: { missCap: number; maxEntries?: number },
+): GhReadSteps<Map<number, PlanFilingFileObservation>> {
   const out = new Map<number, PlanFilingFileObservation>();
   const missCap = Math.max(0, Math.floor(opts.missCap));
   const maxEntries = opts.maxEntries ?? PLAN_FILING_FILE_CACHE_MAX_ENTRIES;
@@ -1518,7 +1632,7 @@ export function hydratePlanFilingFiles(
 
     let raw: unknown;
     try {
-      raw = fetch(prFilesRestArgs(owner, repo, candidate.number));
+      raw = yield* ghRead(fetch, prFilesRestArgs(owner, repo, candidate.number));
     } catch {
       out.set(candidate.number, { state: "unreadable", reason: "fetch-failed" });
       continue;
@@ -1628,8 +1742,20 @@ export function fetchSupersessionVerdict(
   fetch: GhApiFetcher,
   isPlanPath: PlanPathPredicate,
 ): SupersessionVerdict {
-  const ours = fetch(prFilesRestArgs(owner, repo, prNumber)) as RestPrFile[];
-  const theirs = fetch(prFilesRestArgs(owner, repo, supersedingPrNumber)) as RestPrFile[];
+  return runGhReadSteps(supersessionVerdictSteps(owner, repo, prNumber, supersedingPrNumber, taskId, fetch, isPlanPath));
+}
+
+function* supersessionVerdictSteps(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  supersedingPrNumber: number,
+  taskId: string,
+  fetch: GhApiFetcher,
+  isPlanPath: PlanPathPredicate,
+): GhReadSteps<SupersessionVerdict> {
+  const ours = (yield* ghRead(fetch, prFilesRestArgs(owner, repo, prNumber))) as RestPrFile[];
+  const theirs = (yield* ghRead(fetch, prFilesRestArgs(owner, repo, supersedingPrNumber))) as RestPrFile[];
   if (!Array.isArray(ours) || !Array.isArray(theirs)) throw new Error("supersession read carried no file list");
 
   const ourFiles = new Map(ours.map((f) => [f.filename, f] as const).filter((entry): entry is [string, RestPrFile] => typeof entry[0] === "string" && entry[0].length > 0));
@@ -1732,10 +1858,21 @@ export function hydrateSupersessionVerdicts(
   isPlanPath: PlanPathPredicate,
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, SupersessionVerdict> {
+  return runGhReadSteps(hydrateSupersessionVerdictsSteps(owner, repo, supersededPrs, fetch, isPlanPath, cap));
+}
+
+export function* hydrateSupersessionVerdictsSteps(
+  owner: string,
+  repo: string,
+  supersededPrs: readonly { number: number; supersededBy: number; taskId: string }[],
+  fetch: GhApiFetcher,
+  isPlanPath: PlanPathPredicate,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): GhReadSteps<Map<number, SupersessionVerdict>> {
   const out = new Map<number, SupersessionVerdict>();
   for (const p of supersededPrs.slice(0, cap)) {
     try {
-      out.set(p.number, fetchSupersessionVerdict(owner, repo, p.number, p.supersededBy, p.taskId, fetch, isPlanPath));
+      out.set(p.number, yield* supersessionVerdictSteps(owner, repo, p.number, p.supersededBy, p.taskId, fetch, isPlanPath));
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined supersessionVerdict, the pass continues */
     }
@@ -1756,10 +1893,21 @@ export function hydrateMergeConflictEvidence(
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
 ): Map<number, MergeConflictEvidence> {
+  return runGhReadSteps(hydrateMergeConflictEvidenceSteps(owner, repo, targetBranch, dirtyPrs, fetch, cap));
+}
+
+export function* hydrateMergeConflictEvidenceSteps(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  dirtyPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): GhReadSteps<Map<number, MergeConflictEvidence>> {
   const out = new Map<number, MergeConflictEvidence>();
   for (const p of dirtyPrs.slice(0, cap)) {
     try {
-      out.set(p.number, fetchMergeConflictEvidence(owner, repo, targetBranch, p.headRefOid, fetch));
+      out.set(p.number, yield* mergeConflictEvidenceSteps(owner, repo, targetBranch, p.headRefOid, fetch));
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined mergeConflict, the pass continues */
     }
@@ -1848,7 +1996,17 @@ export function fetchReviewReuseFacts(
   headSha: string,
   fetch: GhApiFetcher,
 ): ReviewReuseFacts {
-  const compare = fetch(compareRestArgs(owner, repo, targetBranch, headSha)) as RestCompareResponse;
+  return runGhReadSteps(reviewReuseFactsSteps(owner, repo, targetBranch, headSha, fetch));
+}
+
+function* reviewReuseFactsSteps(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): GhReadSteps<ReviewReuseFacts> {
+  const compare = (yield* ghRead(fetch, compareRestArgs(owner, repo, targetBranch, headSha))) as RestCompareResponse;
   const mergeBaseSha = compare.merge_base_commit?.sha;
   if (!mergeBaseSha) throw new Error("review-reuse compare carried no merge_base_commit.sha");
   return { ownDiffDigest: ownDiffDigestFromCompareFiles(compare.files), mergeBaseSha };
@@ -1900,15 +2058,28 @@ export function hydrateReviewReuseFacts(
   /** Per-PR failure reason, forwarded from {@link tryFetchReviewReuseFacts}. */
   onUnreadable?: (prNumber: number, reason: string) => void,
 ): Map<number, ReviewReuseFacts> {
+  return runGhReadSteps(hydrateReviewReuseFactsSteps(owner, repo, targetBranch, orphanedPrs, fetch, cap, onUnreadable));
+}
+
+export function* hydrateReviewReuseFactsSteps(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  orphanedPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+  onUnreadable?: (prNumber: number, reason: string) => void,
+): GhReadSteps<Map<number, ReviewReuseFacts>> {
   const out = new Map<number, ReviewReuseFacts>();
   for (const p of orphanedPrs.slice(0, cap)) {
-    // Best-effort per PR: an unreadable compare leaves this PR out of the map entirely, so its
-    // `currentOwnDiffDigest` stays `undefined` and the reuse decision falls back to a full review.
-    // The reason is handed to `onUnreadable` rather than dropped — see that parameter's own doc.
-    const facts = tryFetchReviewReuseFacts(owner, repo, targetBranch, p.headRefOid, fetch, (reason) =>
-      onUnreadable?.(p.number, reason),
-    );
-    if (facts) out.set(p.number, facts);
+    // Best-effort per PR: an unreadable compare leaves `currentOwnDiffDigest` undefined, so the reuse
+    // decision falls back to a full review; the reason goes to `onUnreadable` (see tryFetchReviewReuseFacts).
+    try {
+      out.set(p.number, yield* reviewReuseFactsSteps(owner, repo, targetBranch, p.headRefOid, fetch));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      onUnreadable?.(p.number, reason);
+    }
   }
   return out;
 }

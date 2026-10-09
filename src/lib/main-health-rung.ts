@@ -8,6 +8,7 @@ import {
 import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
+import { baseReproductionFiles } from "./base-reproduction.js";
 import {
   CHECK_REQUEUE_STEP,
   classifyCiInfrastructureFailure,
@@ -126,9 +127,128 @@ export interface MainHealthRungDeps {
   mergeReader?: MainHealthMergeReader;
   /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T6403: the PR openers of the red-main repair lane. Absent, a red main only escalates. */
+  repair?: MainRepairLane;
 }
 
 type Awaitable<T> = T | Promise<T>;
+
+/** W1-T6403 — PRIMARY CONTROL: red observations a fix PR may sit through with no new head and no
+ *  merge before the lane opens the revert PR (the operator ruling's "two daemon ticks"). */
+export const MAIN_REPAIR_STALL_TICKS = 2;
+
+/** W1-T6403 — PRIMARY CONTROL: the least time since a fix PR last moved before it counts as stalled.
+ *  A daemon tick is 60 s (`pollIntervalMs`) and one CI run on a fix PR takes far longer, so two
+ *  ticks alone would revert while the fix PR's own CI was still running. #10092's red lasted 40
+ *  minutes before a hand fix merged. */
+export const MAIN_REPAIR_STALL_MS = 30 * 60_000;
+
+/** W1-T6403 — what the priority fix PR's worker is told: the failing checks, their failing test
+ *  titles and log excerpt, and the merge that turned main red. */
+export interface MainRepairFixRequest {
+  readonly branch: string;
+  readonly headSha: string;
+  readonly offendingSha: string;
+  readonly offendingPr?: number;
+  /** The offending merge's per-file `+added -deleted` lines, or why they were not read. */
+  readonly diffStat: string;
+  readonly failingChecks: readonly string[];
+  readonly failingTestTitles: readonly string[];
+  readonly testFiles: readonly string[];
+  readonly logExcerpt: string;
+  readonly reason: string;
+}
+
+/** W1-T6403 — the one revert PR of the offending merge, opened once its fix PR was not enough. */
+export interface MainRepairRevertRequest {
+  readonly branch: string;
+  readonly headSha: string;
+  readonly offendingSha: string;
+  readonly offendingPr?: number;
+  readonly failingChecks: readonly string[];
+  readonly fixPrUrl?: string;
+  readonly whyFixInsufficient: string;
+}
+
+/** A revert PR opened, or the revert refused (a conflicting `git revert`, or a failed push or open). */
+export type MainRepairRevertOutcome =
+  | { readonly prUrl: string }
+  | { readonly refused: string; readonly conflictPaths?: readonly string[] };
+
+export interface MainRepairPr {
+  readonly state: "open" | "closed" | "merged";
+  readonly headSha?: string;
+}
+
+/** W1-T6403 — the lane's effects. Both openers cut a fresh branch off origin/main and open a PR;
+ *  neither pushes to main. `readPr`/`closePr` default to GitHub's REST calls over `fetch`. */
+export interface MainRepairLane {
+  openFixPr(request: MainRepairFixRequest): Awaitable<string | undefined>;
+  openRevertPr(request: MainRepairRevertRequest): Awaitable<MainRepairRevertOutcome>;
+  readPr?(prUrl: string): Awaitable<MainRepairPr>;
+  closePr?(prUrl: string, comment: string): Awaitable<void>;
+}
+
+/** One offending merge's repair, folded from its `main.repair.*` ledger rows. */
+export interface MainRepairRecord {
+  offendingSha: string;
+  offendingPr?: number;
+  failingChecks: string[];
+  fixDispatched: boolean;
+  fixPrUrl?: string;
+  fixRefused?: string;
+  revertPrUrl?: string;
+  revertRefused?: string;
+  resolved: boolean;
+}
+
+/** W1-T6403 — every offending merge this lane has acted on, keyed by its sha. The ledger, not
+ *  memory, is the dedupe: a restarted daemon must not open a second fix PR for the same merge. */
+export function mainRepairRecordsFromLedger(lines: readonly Record<string, unknown>[]): Map<string, MainRepairRecord> {
+  const records = new Map<string, MainRepairRecord>();
+  for (const line of lines) {
+    const sha = line.offending_sha;
+    if (typeof line.step !== "string" || !line.step.startsWith("main.repair.") || typeof sha !== "string") continue;
+    const record = records.get(sha);
+    if (line.step === "main.repair.located") {
+      if (!record || record.resolved) {
+        records.set(sha, {
+          offendingSha: sha,
+          ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}),
+          failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+          fixDispatched: false,
+          resolved: false,
+        });
+      }
+      continue;
+    }
+    if (!record) continue;
+    if (line.step === "main.repair.fix_dispatched") record.fixDispatched = true;
+    else if (line.step === "main.repair.fix_opened") record.fixPrUrl = String(line.pr_url);
+    else if (line.step === "main.repair.fix_refused") record.fixRefused = String(line.reason);
+    else if (line.step === "main.repair.revert_opened") record.revertPrUrl = String(line.pr_url);
+    else if (line.step === "main.repair.revert_refused") record.revertRefused = String(line.reason);
+    else if (line.step === "main.repair.resolved") record.resolved = true;
+  }
+  return records;
+}
+
+function pullNumberOf(prUrl: string): string {
+  const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
+  if (!n) throw new Error(`not a pull request url: ${prUrl}`);
+  return n;
+}
+
+/** PRIMARY CONTROL: characters of the failing checks' log tails a fix worker is handed. */
+export const MAIN_REPAIR_LOG_EXCERPT_CHARS = 4000;
+
+function logExcerptOf(failures: readonly CiFailure[], failingChecks: readonly string[]): string {
+  const text = failures
+    .filter((failure) => failingChecks.includes(failure.name))
+    .map((failure) => `--- ${failure.name} ---\n${failure.logTail}`)
+    .join("\n");
+  return text.slice(-MAIN_REPAIR_LOG_EXCERPT_CHARS);
+}
 
 /** W1-T5806 — the git questions {@link findMetPrs} asks. Every answer is awaited. */
 export interface MainHealthMergeReader {
@@ -405,8 +525,11 @@ export function escalationFor(observation: MainHealthObservation, branch: string
           `merged, and they share ${met.sharedPaths.map((path) => `\`${path}\``).join(", ")}. Each passed CI alone. `
         : "") +
       `The default branch \`${branch}\` at \`${observation.sha}\` is red. ${observation.reason}.${diagnosis} ` +
-      "This observer never auto-reverts or pauses unrelated dispatch; an explicit operator ruling " +
-      "is required to hold the queue. The automatic PR repair and update paths remain active.",
+      "This observer never auto-reverts or pauses unrelated dispatch: when it locates the first red " +
+      "merge it opens one priority fix PR and, if main stays red, one revert PR of that merge, each " +
+      "judged by review and CI like any PR (W1-T6403); this issue means that lane could not locate, " +
+      "fix or revert. An explicit operator ruling is required to hold the queue. The automatic PR " +
+      "repair and update paths remain active.",
     options: [
       {
         label: "let automatic repair continue",
@@ -455,6 +578,198 @@ export function buildMainHealthRung(
     });
   const freshMs = Math.max(0, deps.freshMs ?? 0);
   const now = deps.now ?? Date.now;
+
+  // W1-T6403 — the red-main repair lane: locate the offending merge, open ONE fix PR for it, then ONE
+  // revert PR if main stays red, then close out once main is green on its own head. The ledger rows
+  // are the dedupe across daemon restarts; the stall counters below are this process's own.
+  let repairedSignature: string | undefined;
+  let repairsMayBeActive = true;
+  const fixInFlight = new Set<string>();
+  const fixProgress = new Map<string, { marker: string; ticks: number; sinceMs: number }>();
+  const repairRow = (step: string, fields: Record<string, unknown>): void => {
+    appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, surface: "main", ...fields });
+    repairsMayBeActive = true;
+  };
+  const readRepairPr = async (prUrl: string): Promise<MainRepairPr | undefined> => {
+    try {
+      if (deps.repair?.readPr) return await deps.repair.readPr(prUrl);
+      const pr = (await deps.fetch(["api", `repos/${owner}/${repo}/pulls/${pullNumberOf(prUrl)}`])) as {
+        state?: unknown;
+        merged?: unknown;
+        head?: { sha?: unknown };
+      };
+      const state = pr?.merged === true ? "merged" : pr?.state === "closed" ? "closed" : pr?.state === "open" ? "open" : undefined;
+      if (!state) throw new Error(`GitHub's read of ${prUrl} carried no state`);
+      return { state, ...(typeof pr.head?.sha === "string" ? { headSha: pr.head.sha } : {}) };
+    } catch (error) {
+      // An unreadable repair PR decides nothing this observation: no revert or close-out on a guess.
+      deps.log("main.repair.pr_unreadable", { pr_url: prUrl, error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+  };
+  const closeRepairPr = async (prUrl: string, comment: string): Promise<void> => {
+    if (deps.repair?.closePr) return deps.repair.closePr(prUrl, comment);
+    const n = pullNumberOf(prUrl);
+    await deps.fetch(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${n}/comments`, "-f", `body=${comment}`]);
+    await deps.fetch(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${n}`, "-f", "state=closed"]);
+  };
+  const diffStatOf = async (sha: string): Promise<string> => {
+    try {
+      const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as {
+        files?: ReadonlyArray<{ filename?: unknown; additions?: unknown; deletions?: unknown }>;
+      };
+      const lines = (commit?.files ?? []).map((f) => ` ${String(f.filename)} | +${Number(f.additions ?? 0)} -${Number(f.deletions ?? 0)}`);
+      return lines.length > 0 ? lines.join("\n") : "(GitHub's commit read listed no files)";
+    } catch (error) {
+      return `(diff stat unreadable: ${String((error as Error)?.message ?? error)})`;
+    }
+  };
+  /** The fix worker runs for minutes, so it is never awaited here: its outcome lands as a ledger row. */
+  const dispatchFix = (lane: MainRepairLane, request: MainRepairFixRequest): void => {
+    const at = { offending_sha: request.offendingSha, offending_pr: request.offendingPr };
+    repairRow("main.repair.fix_dispatched", { ...at, head_sha: request.headSha, failing_checks: request.failingChecks });
+    fixInFlight.add(request.offendingSha);
+    void Promise.resolve()
+      .then(() => lane.openFixPr(request))
+      .then(
+        (prUrl) =>
+          prUrl
+            ? repairRow("main.repair.fix_opened", { ...at, pr_url: prUrl })
+            : repairRow("main.repair.fix_refused", { ...at, reason: "the fix run opened no pull request" }),
+        (error) => repairRow("main.repair.fix_refused", { ...at, reason: String((error as Error)?.message ?? error) }),
+      )
+      .catch((error) => deps.log("main.repair.error", { ...at, error: String((error as Error)?.message ?? error) }))
+      .finally(() => fixInFlight.delete(request.offendingSha));
+  };
+  /** A stall reason once the same fix-PR marker has held for the tick and time windows, else undefined. */
+  const stallOf = (sha: string, marker: string, atMs: number, what: string): string | undefined => {
+    const prior = fixProgress.get(sha);
+    if (!prior || prior.marker !== marker) {
+      fixProgress.set(sha, { marker, ticks: 0, sinceMs: atMs });
+      return undefined;
+    }
+    prior.ticks += 1;
+    const quietMs = atMs - prior.sinceMs;
+    if (prior.ticks < MAIN_REPAIR_STALL_TICKS || quietMs < MAIN_REPAIR_STALL_MS) return undefined;
+    return `${what} made no progress (no new head, no merge) across ${prior.ticks} red observations and ${Math.round(quietMs / 60_000)} minutes`;
+  };
+  /** One step of an existing repair. True while the lane still owns this red; false when it was refused. */
+  const advanceRepair = async (lane: MainRepairLane, record: MainRepairRecord, sha: string, branch: string, atMs: number): Promise<boolean> => {
+    if (record.revertRefused) return false;
+    if (record.revertPrUrl) return (await readRepairPr(record.revertPrUrl))?.state !== "closed";
+    if (fixInFlight.has(record.offendingSha)) return true;
+    let stalled: string | undefined;
+    if (record.fixPrUrl) {
+      const fix = await readRepairPr(record.fixPrUrl);
+      if (!fix) return true;
+      stalled =
+        fix.state === "closed"
+          ? `fix PR ${record.fixPrUrl} closed unmerged while main stayed red`
+          : stallOf(record.offendingSha, `${fix.state}:${fix.headSha ?? ""}`, atMs, `fix PR ${record.fixPrUrl}`);
+    } else if (record.fixRefused) {
+      stalled = `the fix run opened no fix PR: ${record.fixRefused}`;
+    } else {
+      stalled = stallOf(record.offendingSha, "no-pr", atMs, "the fix run, dispatched before this daemon process started,");
+    }
+    if (!stalled) return true;
+    const at = { offending_sha: record.offendingSha, offending_pr: record.offendingPr, head_sha: sha };
+    let outcome: MainRepairRevertOutcome;
+    try {
+      outcome = await lane.openRevertPr({
+        branch,
+        headSha: sha,
+        offendingSha: record.offendingSha,
+        ...(record.offendingPr !== undefined ? { offendingPr: record.offendingPr } : {}),
+        failingChecks: record.failingChecks,
+        ...(record.fixPrUrl ? { fixPrUrl: record.fixPrUrl } : {}),
+        whyFixInsufficient: stalled,
+      });
+    } catch (error) {
+      outcome = { refused: String((error as Error)?.message ?? error) };
+    }
+    if ("prUrl" in outcome) {
+      repairRow("main.repair.revert_opened", { ...at, pr_url: outcome.prUrl, fix_pr_url: record.fixPrUrl, reason: stalled });
+      return true;
+    }
+    repairRow("main.repair.revert_refused", { ...at, reason: outcome.refused, conflict_paths: outcome.conflictPaths ?? [] });
+    return false;
+  };
+  /** Locate the offending merge and open its fix PR, or advance the repair already under way. */
+  const repairRedMain = async (
+    lane: MainRepairLane,
+    observation: MainHealthObservation,
+    sha: string,
+    branch: string,
+    failures: readonly CiFailure[],
+    atMs: number,
+  ): Promise<boolean> => {
+    const records = mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath));
+    const first = observation.firstRedCommit;
+    const active = [...records.values()].filter((record) => !record.resolved);
+    const record = first ? active.find((r) => r.offendingSha === first.headSha) : active[active.length - 1];
+    if (record) return advanceRepair(lane, record, sha, branch, atMs);
+    if (!first) {
+      repairRow("main.repair.unlocated", {
+        head_sha: sha,
+        failing_checks: observation.failingChecks,
+        reason: observation.runHistoryWindowExhausted
+          ? "main's push run history window holds no green run to bound the red streak"
+          : "main's push run history names no first red merge after a green run",
+      });
+      return false;
+    }
+    const offendingPr = first.pullRequest?.number;
+    const testFiles = baseReproductionFiles(failures);
+    repairRow("main.repair.located", {
+      head_sha: sha,
+      offending_sha: first.headSha,
+      offending_pr: offendingPr,
+      failing_checks: observation.failingChecks,
+      test_files: testFiles,
+      method: "first-red-run",
+    });
+    dispatchFix(lane, {
+      branch,
+      headSha: sha,
+      offendingSha: first.headSha,
+      ...(offendingPr !== undefined ? { offendingPr } : {}),
+      diffStat: await diffStatOf(first.headSha),
+      failingChecks: [...observation.failingChecks],
+      failingTestTitles: [...(observation.failingTestTitles ?? [])],
+      testFiles,
+      logExcerpt: logExcerptOf(failures, observation.failingChecks),
+      reason: observation.reason,
+    });
+    return true;
+  };
+  /** Main is green on its own head: every open repair is resolved, and its still-open PRs closed. */
+  const resolveRepairs = async (sha: string): Promise<void> => {
+    if (!repairsMayBeActive) return;
+    let pending = false;
+    for (const record of mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()) {
+      if (record.resolved) continue;
+      if (fixInFlight.has(record.offendingSha)) {
+        pending = true;
+        continue;
+      }
+      const fix = record.fixPrUrl ? await readRepairPr(record.fixPrUrl) : undefined;
+      const revert = record.revertPrUrl ? await readRepairPr(record.revertPrUrl) : undefined;
+      const by = revert?.state === "merged" ? "revert" : fix?.state === "merged" ? "fix" : "other";
+      const closed: string[] = [];
+      for (const [url, pr] of [[record.fixPrUrl, fix], [record.revertPrUrl, revert]] as const) {
+        if (!url || pr?.state !== "open") continue;
+        await closeRepairPr(
+          url,
+          `Closed by the red-main repair lane (W1-T6403): \`${owner}/${repo}\` is green on its own head \`${sha}\` ` +
+            `again (resolved by ${by}), so this repair of \`${record.offendingSha}\` is redundant.`,
+        );
+        closed.push(url);
+      }
+      repairRow("main.repair.resolved", { offending_sha: record.offendingSha, head_sha: sha, by, closed_prs: closed });
+      fixProgress.delete(record.offendingSha);
+    }
+    repairsMayBeActive = pending;
+  };
 
   const observe = async (startedAtMs: number): Promise<void> => {
     try {
@@ -640,6 +955,14 @@ export function buildMainHealthRung(
           lastSuccessfulObservationAtMs = startedAtMs;
           return;
         }
+        // W1-T6403: the same red the lane already owns re-reads no CI log; it only advances the repair.
+        if (signature === repairedSignature && deps.repair) {
+          if (await repairRedMain(deps.repair, observation, sha, branch, [], startedAtMs)) {
+            lastSuccessfulObservationAtMs = startedAtMs;
+            return;
+          }
+          repairedSignature = undefined;
+        }
         let failures: CiFailure[] | undefined;
         let ciFailuresUnavailable: string | undefined;
         // W1-T4472: `main-tripwire` is never in `required` (it is not a ci-gate-required check),
@@ -740,6 +1063,13 @@ export function buildMainHealthRung(
             }
           }
         }
+        // W1-T6403: a red the lane locates is repaired through PRs; MAIN-HEALTH is raised only once
+        // locating, fixing and reverting were all refused.
+        if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, failures ?? [], startedAtMs))) {
+          repairedSignature = signature;
+          lastSuccessfulObservationAtMs = startedAtMs;
+          return;
+        }
         const issueUrl = await tryEscalateAsync(escalationFor(observation, branch, metLookup?.met), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
@@ -760,11 +1090,13 @@ export function buildMainHealthRung(
       }
 
       escalatedSignature = undefined;
+      repairedSignature = undefined;
       if (observation.state !== "green") {
         resolvedSignature = undefined;
         lastSuccessfulObservationAtMs = startedAtMs;
         return;
       }
+      if (deps.repair && decidedBySha === sha) await resolveRepairs(sha);
       const signature = `${observation.state}:${sha}`;
       if (signature === resolvedSignature) {
         lastSuccessfulObservationAtMs = startedAtMs;

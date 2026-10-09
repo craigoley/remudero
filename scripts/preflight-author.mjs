@@ -99,14 +99,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath) => {
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}) => {
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs: AUTHOR_STEP_RUNTIME_MS });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(file, args);
+    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
-    const result = captureStepSync(file, args, { cwd: root, env: authorEnvironment(process.env),
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
       ...logs, resultPath });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
@@ -117,7 +117,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     return result.stdout;
   };
-  const report = (name, result, ok) => {
+  const report = (name, result, ok, metadata = {}) => {
     ensureDiagnostics();
     const stdout = result.stdout ?? '';
     const stderr = result.stderr ?? '';
@@ -126,7 +126,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       writeFileSync(logs.stdout, stdout, { mode: 0o600, flag: 'wx' });
       writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
     }
-    receipt.steps.push({ name, ok, exitCode: result.status, signal: result.signal ?? null,
+    receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name === 'affected-tests' ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
@@ -218,28 +218,33 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
-        const staticResult = runStep('static-preflight', ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
-          '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-        const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-        report('static-preflight', staticResult, staticOk);
-        // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
-        // receipt and selected floor, but don't spend another full run on known-doomed tests.
-        if (staticOk) {
-          // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-          // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
-          const slot = acquireTestSlot('preflight-author:affected-tests');
-          try {
-            receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+        // The cheap census runs first. One owner then admits BOTH expensive phases;
+        // nested production checks borrow only its actual live ancestor lease.
+        const slot = acquireTestSlot('preflight-author:static-and-affected');
+        try {
+          receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+          const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
+            join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
+            '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment);
+          const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
+          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+          // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
+          // receipt and selected floor, but don't spend another full run on known-doomed tests.
+          if (staticOk) {
+            // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
+            // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
+            slot.refresh();
             const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites], Math.min(4, slot.concurrency)));
             const tests = runStep('affected-tests', child.args, child.file);
             report('affected-tests', tests, completeTestResult(tests));
-          } finally {
-            slot.release();
+          } else {
+            receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
+            console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');
           }
-        } else {
-          receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
-          console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');
+        } finally {
+          slot.release();
         }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
