@@ -1,0 +1,19 @@
+- id: W1-T6919
+  title: "THE ci-shard (7/8) GATE REFUSED 6 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:9979:ci-shard (7/8)"
+  ci_learning_prs: [9979, 10001, 10135, 10140, 10186, 10255]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the ci-shard (7/8) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:9979:ci-shard (7/8) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:9979:ci-shard (7/8). The ci-shard (7/8) gate went red on #9979 and was repaired; the repair touched learnings/ci.yaml, learnings/index.json, plan/feedback/fb-1789382557136-8e0974.yaml, plan/feedback/fb-1789845689573-0abbac.yaml, plan/feedback/fb-1789927308301-29a363.yaml, plan/tasks.d/w1-t6287-selector-shadow-miss.yaml, test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts, test/recycle-container.test.ts, test/serve-is-replaced-when-its-scratch-mount-plan-drifts.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
