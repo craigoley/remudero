@@ -617,6 +617,16 @@ BEAT_N=0
 if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)"; fi
 case "$BEAT_N" in ''|*[!0-9]*) BEAT_N=0 ;; esac
 CONSUMER_LINES=""
+# A whole filesystem's root reads its used KB from statfs: `du -sk /mnt/rmd` walked every inode at
+# the data disk's IOPS cap for minutes (2026-10-09). A bind of a subdirectory still walks.
+mount_root_used_kb() {
+  [ "$(findmnt -n -o FSROOT -M "$1" 2>/dev/null)" = "/" ] || return 1
+  df_field "$1" 3
+}
+# Every remaining walk runs at idle I/O priority, so it yields to the daemon on a busy disk.
+du_idle() {
+  if command -v ionice >/dev/null 2>&1; then ionice -c3 -t nice -n 19 du -sk "$1"; else nice -n 19 du -sk "$1"; fi
+}
 consumer_kb() {
   local name="$1" total=0 seen=0 failed=0 p kb device devices="" paths=""
   shift
@@ -630,7 +640,9 @@ $p
     paths="${paths}
 ${p}"
     seen=1
-    if kb="$(du -sk "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
+    if kb="$(mount_root_used_kb "$p")" && [[ "$kb" =~ ^[0-9]+$ ]]; then
+      total=$((total + kb))
+    elif kb="$(du_idle "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
       case "$kb" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + kb)) ;; esac
     else
       failed=1
@@ -683,6 +695,11 @@ if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
     "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
+fi
+# The pacing counter advances on every real beat, published or not: advanced only after a confirmed
+# push, a failing push left it on a measuring beat and every 5-minute beat re-walked the disks.
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+  mkdir -p "$(dirname "$BEAT_N_FILE")" 2>/dev/null && printf '%s\n' "$((BEAT_N + 1))" > "$BEAT_N_FILE" 2>/dev/null
 fi
 
 LEDGER_BYTES="unknown"
@@ -1074,7 +1091,5 @@ git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/
 # Only after a CONFIRMED push, so `since_prev_beat_s` measures published beats rather than
 # attempts. Best-effort: a state file that cannot be written must not fail a beat that landed.
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null && printf '%s\n' "$NOW_ISO" > "$STATE_FILE" 2>/dev/null
-# The beat counter that paces the consumer-size probe; advanced only after a confirmed push too.
-printf '%s\n' "$((BEAT_N + 1))" > "$BEAT_N_FILE" 2>/dev/null
 
 printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
