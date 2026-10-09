@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
 import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -819,8 +819,15 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
 /** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
  *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
 export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
-  const res = spawnSync("git", ["-C", root, "show", `origin/main:plan/feedback/${feedbackId}.yaml`], { encoding: "utf8", timeout: 10_000 });
-  return res.status === 0 ? /^status:\s*(\S+)\s*$/m.exec(res.stdout)?.[1] : undefined;
+  let text: string;
+  try {
+    text = hostWorktreeGit(root, ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 });
+  } catch (error) {
+    // A missing ref/file is an unreadable main status. Preserve security refusals from the leaf.
+    if (error !== null && typeof error === "object" && "status" in error) return undefined;
+    throw error;
+  }
+  return /^status:\s*(\S+)\s*$/m.exec(text)?.[1];
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

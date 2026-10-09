@@ -90,3 +90,13 @@ test("feedbackStatusOnMain reads the status committed on origin/main, not the wo
     upstream.cleanup();
   }
 });
+
+test("feedbackStatusOnMain propagates a refused repository before reading main", async () => {
+  const { feedbackStatusOnMain } = await import("../src/lib/auto-triage.js");
+  const dir = mkdtempSync(join(tmpdir(), "rmd-triage-refused-"));
+  try {
+    assert.throws(() => feedbackStatusOnMain(dir, ID), { name: "WorktreePointerRefusedError" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
