@@ -435,6 +435,7 @@ import {
   type StarvationClearedInfo,
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
+  v8HeapStatistics,
 } from "./lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
@@ -1623,7 +1624,6 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
-  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -1714,7 +1714,9 @@ import {
   hasCapturedMergeConflictEvidence,
   clearedConflictEscalationCause,
   type FixRoundBranchClaim,
+  inFlightReviewCount,
 } from "./lib/sweep.js";
+import { sampleDaemonMemory } from "./lib/daemon-memory-telemetry.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
 export {
@@ -37146,6 +37148,15 @@ export function orphanSweepRunActive(
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
+/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. */
+export function daemonMemoryTelemetryReader(bootHeadSha: string | undefined): () => Record<string, unknown> {
+  return () => ({ ...sampleDaemonMemory({
+    heapStatistics: v8HeapStatistics,
+    workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
+    bootHeadSha,
+  }) });
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -37999,6 +38010,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
@@ -45824,7 +45836,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
-          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+          readLiveStateAtAct: effects.readLiveState,
           ledgerPath,
           runId,
           log,
@@ -46188,7 +46200,7 @@ export function buildSweepLightHook(
             // sees one consistent answer.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
-            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            readLiveStateAtAct: effects.readLiveState,
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently

@@ -1,0 +1,38 @@
+- id: W1-T6975
+  title: "THE SCRATCH CHECK READS WHAT= FROM THE UNIT FILE — check_scratch_static (deploy/install-container-runtime-mount-order.sh) compares systemctl show's What= to /mnt/scratch/containerd, but for an ACTIVE bind mount systemd reports the resolved device, so check mode exits 1 on a correctly installed host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — check mode stops reporting a false MISSING; install mode writes are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-09: docker/containerd → scratch window verification"
+  plan_refs: [W1-T2856, W1-T6494]
+  files: [deploy/install-container-runtime-mount-order.sh, test/container-runtime-mount-order-install.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 06:51Z on the host after the docker→scratch window: RMD_RUNTIME_ON_SCRATCH=1 check mode
+    exited 1 with "MISSING — var-lib-containerd.mount What= is not /mnt/scratch/containerd", while
+    /etc/systemd/system/var-lib-containerd.mount holds What=/mnt/scratch/containerd, FragmentPath is that file, and
+    findmnt shows /var/lib/containerd as /dev/nvme1n1[/containerd]. `systemctl show -p What` on the active unit
+    printed What=/dev/nvme1n1: once a mount is active systemd refreshes What= from mountinfo, and for a bind the
+    source column is the backing DEVICE (the same shape W1-T6494 fixed for /proc/mounts). check_scratch_static's
+    comment says it reads "what systemd RESOLVED", which for What= is the device, so the check can never pass
+    on a live host; the fake systemctl in the test reports the unit-file path and hides the defect.
+    W1-T6494 (shipped, #10153) fixed the DEFAULT mode's /proc/mounts read; this task fixes the SCRATCH check mode's
+    What= read, which W1-T6494 did not touch.
+  design: |
+    In check_scratch_static, read What= from the unit file named by FragmentPath (which the next line already
+    asserts is ${UNIT_DIR}/${MOUNT_UNIT}) instead of systemctl show; the live mount's device and root stay proven
+    by check_scratch_live's mountinfo comparison. Add a test whose fake systemctl reports What=/dev/<device> for the
+    active unit while the rendered unit file says What=/mnt/scratch/containerd, and assert check mode exits 0.
+  acceptance:
+    - claim: "check mode passes when systemd reports an active bind mount's What= as its device"
+      proof: 'grep: test("W1-T6975: check mode reads What= from the unit file, not the active mount device" in test/container-runtime-mount-order-install.test.ts'
+  falsifier: |
+    Keep the systemctl show What= read: the fake reports /dev/nvme1n1, check mode exits 1 with the MISSING line,
+    and the test fails.

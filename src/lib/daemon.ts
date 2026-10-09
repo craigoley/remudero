@@ -963,6 +963,9 @@ export interface DaemonDeps {
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
+  /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
+   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost. */
+  readMemoryTelemetry?: () => Record<string, unknown>;
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1502,6 +1505,17 @@ interface InterphaseReviewClock {
   passCount(): number;
 }
 
+/** The memory half of `daemon.alive` (W1-T6782). A throwing sampler must never cost the heartbeat
+ *  the watchdog and doctor read, so its error rides the row instead of escaping the tick. */
+function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">): Record<string, unknown> {
+  if (!deps.readMemoryTelemetry) return {};
+  try {
+    return deps.readMemoryTelemetry();
+  } catch (e) {
+    return { mem_telemetry: `error:${String((e as Error)?.message ?? e).slice(0, 160)}` };
+  }
+}
+
 function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
   try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
@@ -1988,6 +2002,7 @@ function startInFlightTicker(
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
             ...deps.readLoopTelemetry?.(),
+            ...readMemoryTelemetrySafely(deps),
             phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.

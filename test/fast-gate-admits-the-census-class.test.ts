@@ -113,7 +113,7 @@ test("runPreflightFast: an entry whose OWN measured wall time runs away from its
   const { spawn } = recordingSpawn(); // every call returns {status: 0} — the underlying command WOULD pass
   // Three steps, six reads: two cheap siblings (0->1000ms, 1000->2000ms) then the runaway
   // 2000->32000ms (30s, well over 4x the 1000ms median of [1000, 1000, 30000]).
-  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000, 32000, 62000]; // then one re-measure, also 30s
+  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000, 32000, 62000, 62000, 63000]; // then one re-measure, also 30s, then the 1000ms reference re-time (W1-T5676)
   let tick = 0;
   const now = () => clockTicks[tick++];
   const syntheticSteps = [
@@ -134,6 +134,8 @@ test("runPreflightFast: an entry whose OWN measured wall time runs away from its
 
   assert.equal(step.ok, false);
   assert.match(step.detail, /RUNAWAY/);
+  assert.doesNotMatch(step.detail, /NaN/, "the fake clock covers the reference re-time");
+  assert.match(step.detail, /re-timed back to back at 1000ms/, "the fake clock covers the reference re-time");
   assert.match(step.detail, /would have PASSed/, "the underlying command DID succeed — refusal is the measured bound, not the command's own exit code");
   assert.doesNotMatch(step.detail, /FAIL —/, "must not be reported as an ordinary command failure");
   assert.equal(result.ok, false);

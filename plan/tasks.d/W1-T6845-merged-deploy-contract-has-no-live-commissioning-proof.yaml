@@ -1,0 +1,50 @@
+- id: W1-T6845
+  title: "A MERGED DEPLOY CONTRACT HAS NO LIVE COMMISSIONING PROOF — W1-T3245 is merged and the renderer's watchdog tick runs `deploy-run`, yet the Azure host was observed 2026-09-20 with only a heartbeat cron and `host-update.sh --reclaim-only`, and remudero-serve on baked 089af54c while origin/main was efdd3169"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: feedback#fb-1789927308301-29a363
+  plan_refs: ["W1-T3245", "W1-T2953", "W1-T3583", "W1-T6245", "W1-T6249", "W1-T2877"]
+  files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-commissioning.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=eb47b44d87634676
+  attempts: 0
+  rationale: |
+    GROUNDING. The controller topology is already decided: ONE level-triggered host controller,
+    the systemd `rmd-fleet-watchdog.timer` tick, which invokes `rmd deploy-run` (W1-T3245,
+    operator ruling 2026-09-09). No second timer, no cron deployer, no container-native
+    reconciler is expected; the cron `--reclaim-only` is disk reclamation by contract and must stay
+    pull-free. Serve image drift is covered by W1-T6245 and a busy primary's recycle by W1-T6249
+    (both merged). All deployment goes through the existing script process (idle drain, build,
+    pull, digest match, health check, rollback, restart-rate limit) in recycle-container.sh.
+    This feedback therefore asks for NO new controller and NO new decision policy.
+
+    WHAT IS MISSING is evidence that the merged contract is installed and live on the host, and a
+    read-only way to tell the two restart kinds apart. This task adds:
+      1. A read-only `install-host-units.sh --verify` (or equivalent check mode) that reports, per
+         expected unit, installed / missing / DIFFERS-FROM-RENDER and never writes. It must report
+         which of the host's existing units are STRONGER than the render (mount ordering, timer
+         persistence, heap ceiling per W1-T2953) and refuse to overwrite them; installing is only
+         ever additive for a missing unit.
+      2. Drift classification in its output that distinguishes a MOUNTED-SOURCE restart (daemon
+         freshness exit / checkout fast-forward, no image change) from a BAKED-IMAGE recycle
+         (recycle-container.sh path), and states that a recycle is acted on only for a VERIFIED
+         baked-path drift (origin/main fetched, baked sha known and differing, baked paths
+         actually changed). An unverified or unreadable baked sha reports "unverified: no action",
+         never a deploy.
+      3. An operator-guide commissioning section: the exact read-only probe commands, the additive
+         install step, and the post-install proof (timer active, last tick log, deploy-run reports
+         the drift decision). No direct `docker restart`, no hand recycle outside the script.
+    The live-host installation itself is an operator deployment step that runs AFTER this reviewed
+    code merges and W1-T2953 is satisfied; this task makes it safe and provable, and does not
+    perform it.
+  acceptance:
+    - claim: "a read-only verify mode reports installed, missing and differing units without writing any file"
+      proof: "unit test: test/host-units-commissioning.test.ts"
+    - claim: "the operator guide names the additive commissioning and post-install proof steps"
+      proof: "grep: commissioning proof in docs/operator-guide.md"

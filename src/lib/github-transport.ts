@@ -235,6 +235,32 @@ export function withGhKillEscalation<T extends { stdout: string; stderr: string 
  */
 const asyncReadInFlight = new Map<string, Promise<unknown>>();
 
+function ghArgsAreCoalescibleRead(args: readonly string[]): boolean {
+  if (args[0] === "pr") return ["view", "list", "checks"].includes(args[1] ?? "");
+  if (args[0] !== "api") return false;
+  let explicitGet = false;
+  let hasPayload = false;
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "-X" || arg === "--method" || arg.startsWith("-X") || arg.startsWith("--method=")) {
+      const method = arg === "-X" || arg === "--method" ? args[++i]
+        : arg.startsWith("-X") ? arg.slice(2).replace(/^=/, "") : arg.slice("--method=".length);
+      if (method !== "GET") return false;
+      explicitGet = true;
+    } else if (/^(?:-[fF]|--(?:raw-field|field|input))$/.test(arg)) {
+      hasPayload = true;
+      i += 1;
+    } else if (/^(?:-[fF].|--(?:raw-field|field|input)=)/.test(arg)) {
+      hasPayload = true;
+    } else if (/^(?:-[Hqpt]|--(?:header|jq|preview|template|hostname|cache))$/.test(arg)) {
+      i += 1;
+    } else if (arg.startsWith("-") && !/^(?:-i|--(?:include|paginate|slurp|silent|verbose|allow-escape-sequences)|--(?:header|jq|preview|template|hostname|cache)=.*|-[Hqpt].+)$/.test(arg)) {
+      return false;
+    }
+  }
+  return explicitGet || !hasPayload;
+}
+
 /** A successful `gh` process whose JSON response cannot be read is a transport failure, not a
  * worker/parser failure. The operation is deliberately reduced to the command family so an error
  * can be logged without carrying request arguments, headers, tokens, or response contents. */
@@ -287,8 +313,8 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Injected executors are test/offline seams and may have independent side effects, so only the
   // real `gh` transport participates in production single-flight coalescing.
   if (execAsync !== execFileAsync) return run();
-  const key = JSON.stringify(execArgs);
-  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? JSON.stringify(execArgs) : undefined;
+  const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
@@ -298,6 +324,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await applyGhReadCadenceAsync(args);
     return run();
   })();
+  if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
     return await request;
@@ -324,14 +351,15 @@ export async function ghTextAsync(
   // An injected executor is an offline seam; only the real `gh` process spends cadence and joins
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
   if (execAsync !== execFileAsync) return read();
-  const key = `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}`;
-  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  const key = ghArgsAreCoalescibleRead(args) ? `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     refuseSentinelGhToken("gh", args, undefined);
     await applyGhReadCadenceAsync(args);
     return read();
   })();
+  if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
   try {
     return await request;
@@ -976,6 +1004,7 @@ export interface GhReadCadenceDeps {
 /** ONE LINE PER PROCESS. An advisory that prints on every paced read is noise the daemon's log
  *  would bury, and noise is how a floor stops being read. Reset only for tests. */
 let ghCadenceAdvisoryEmitted = false;
+let ghCadenceAsyncContentionAdvisoryEmitted = false;
 // A daemon can perform several read-shaped calls in one process. The shared file is for
 // coordination with sibling processes; sleeping after our own stamp would turn every normal
 // sweep into a 1.5s-per-read queue (and made the instrumented CI suite hit its timeout). Keep the
@@ -1039,9 +1068,8 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
   }
 }
 
-/** W1-T4970: async reads in ONE process queue here before the file lock. The sync path never
- *  needed this — a blocking caller cannot overlap itself — but an awaited gap can, and a second
- *  read polling a lock its own process holds would give up after the bounded wait and race. */
+/** Async reads queue before the file lock; sync reads consult this queue to avoid blocking
+ *  the event loop an async holder needs to release its lock. */
 const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
 
 /** The async twin of {@link withGhCadenceLock}: the same lock, attempts and bound, but every wait
@@ -1079,6 +1107,7 @@ async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) 
 
 export function resetGhCadenceAdvisoryForTest(): void {
   ghCadenceAdvisoryEmitted = false;
+  ghCadenceAsyncContentionAdvisoryEmitted = false;
 }
 
 /** One read's cadence, shared by the sync and async paths: the decision, and the shared-gap
@@ -1168,6 +1197,19 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const plan = planGhReadCadence(args, deps);
   const stampPath = plan.coordinatedStampPath;
   if (stampPath === undefined) return plan.evaluate();
+  if (ghCadenceAsyncQueue.has(stampPath)) {
+    if (!ghCadenceAsyncContentionAdvisoryEmitted) {
+      ghCadenceAsyncContentionAdvisoryEmitted = true;
+      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+      warn(
+        "gh read cadence (advisory, W1-T5770): the same process has an async read pending; " +
+          "skipping synchronous lock and gap waits so its event loop can continue.",
+      );
+    }
+    const decision = plan.evaluate();
+    plan.stampAfterGap(stampPath);
+    return decision;
+  }
   const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
   return withGhCadenceLock(stampPath, sleepSync, () => {
     const decision = plan.evaluate();
@@ -1259,7 +1301,7 @@ export async function routeInteractiveGhRead(
   deps: GhReadCadenceDeps = {},
 ): Promise<InteractiveGhReadRoute> {
   if (ghArgvIsWrite(args) || ghArgvIsCadenceExempt(args)) {
-    return { usesAppToken: false, envOverlay: {}, decision: applyGhReadCadence(args, deps) };
+    return { usesAppToken: false, envOverlay: {}, decision: await applyGhReadCadenceAsync(args, deps) };
   }
   const env = deps.env ?? process.env;
   const mint = deps.mint ?? defaultMintGhAppToken;
@@ -1270,16 +1312,16 @@ export async function routeInteractiveGhRead(
     minted = { ok: false };
   }
   if (!minted.ok || !minted.token) {
-    return { usesAppToken: false, envOverlay: {}, decision: applyGhReadCadence(args, deps) };
+    return { usesAppToken: false, envOverlay: {}, decision: await applyGhReadCadenceAsync(args, deps) };
   }
-  const decision = applyGhReadCadence(args, { ...deps, bucketOverride: GH_APP_READ_BUCKET });
+  const decision = await applyGhReadCadenceAsync(args, { ...deps, bucketOverride: GH_APP_READ_BUCKET });
   return { usesAppToken: true, envOverlay: { GH_TOKEN: minted.token }, decision };
 }
 
 /**
  * The wired entry point: routes, then actually spawns `gh` with the routed identity. This is the
  * one function an interactive caller needs — it never double-paces, because the routing above is
- * the ONLY place that calls `applyGhReadCadence` for this call; the spawn below goes through the
+ * the ONLY place that calls `applyGhReadCadenceAsync` for this call; the spawn below goes through the
  * unpaced `ghExecFile` building block.
  */
 export function ghInteractiveRead(

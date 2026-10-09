@@ -1,0 +1,11 @@
+- id: ci-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    Before the first push, run the two cheap ratchets, rule15-precheck for plan/ changes, and
+    rmd census-membership for census-mapped paths.
+  evidence: >-
+    The ci-gate refusals are recorded as ci-learning:6058:ci-gate and each was repaired.
+  src: "ci-learning:6058:ci-gate"
+  cited: "2026-10-09"
