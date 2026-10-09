@@ -201,12 +201,12 @@ function errnoOf(error: unknown): string | undefined {
 }
 
 /** The real identity probe: /proc first, then `kill(pid, 0)` for ESRCH, then the test slot's ps fallback. */
-export function defaultProbe(pid: number, deps: {
-  readStat?: (path: string) => string;
-  checkPid?: (pid: number) => void;
-  processFacts?: typeof testSlotProcessFacts;
-} = {}): ProbeResult {
-  const readStat = deps.readStat ?? ((path: string) => readFileSync(path, "utf8"));
+export function defaultProbe(
+  pid: number,
+  readStat: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  checkPid: (pid: number) => void = (id) => { process.kill(id, 0); },
+  processFacts: typeof testSlotProcessFacts = testSlotProcessFacts,
+): ProbeResult {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { state: "unknown", reason: "invalid pid" };
   try {
     const stat = parseProcStat(readStat(`/proc/${pid}/stat`));
@@ -216,12 +216,12 @@ export function defaultProbe(pid: number, deps: {
     if (errnoOf(error) === "ENOENT" && procMounted(readStat)) return { state: "gone" };
   }
   try {
-    (deps.checkPid ?? ((id) => { process.kill(id, 0); }))(pid);
+    checkPid(pid);
   } catch (error) {
     // ESRCH is a verified exit; EPERM means alive under another uid, so the start-time read below decides.
     if (errnoOf(error) === "ESRCH") return { state: "gone" };
   }
-  const facts = (deps.processFacts ?? testSlotProcessFacts)(pid);
+  const facts = processFacts(pid);
   return facts ? { state: "alive", start: facts.start } : { state: "unknown", reason: "start time unreadable" };
 }
 

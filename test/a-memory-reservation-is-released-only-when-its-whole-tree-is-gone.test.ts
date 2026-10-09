@@ -407,39 +407,41 @@ const processStat = (state = "S") => `42 (worker) ${state} 7 42 42 0 -1 0 0 0 0 
 const noProc = () => { throw Object.assign(new Error("proc unavailable"), { code: "ENOENT" }); };
 
 test("a probe without proc verifies ESRCH through the real kernel pid check", () => {
-  assert.deepEqual(defaultProbe(2_147_483_647, { readStat: noProc }), { state: "gone" });
+  assert.deepEqual(defaultProbe(2_147_483_647, noProc), { state: "gone" });
 });
 
 test("a malformed proc read falls back to the real process facts for a live pid", () => {
   const expected = defaultProbe(process.pid);
   assert.equal(expected.state, "alive");
-  assert.deepEqual(defaultProbe(process.pid, { readStat: () => "malformed stat" }), expected);
+  assert.deepEqual(defaultProbe(process.pid, () => "malformed stat"), expected);
 });
 
 test("an EPERM pid check uses the fallback start identity rather than declaring termination", () => {
   const calls: number[] = [];
-  const result = defaultProbe(42, {
-    readStat: noProc,
-    checkPid: (pid) => {
+  const result = defaultProbe(
+    42,
+    noProc,
+    (pid) => {
       calls.push(pid);
       throw Object.assign(new Error("different uid"), { code: "EPERM" });
     },
-    processFacts: (pid) => {
+    (pid) => {
       calls.push(pid);
       return { parent: 7, start: "ps:Thu Oct 8 20:00:00 2026" };
     },
-  });
+  );
   assert.deepEqual(calls, [42, 42]);
   assert.deepEqual(result, { state: "alive", start: "ps:Thu Oct 8 20:00:00 2026" });
 });
 
 test("an unreadable start identity remains unknown even when the pid check succeeds", () => {
-  assert.deepEqual(defaultProbe(42, {
-    readStat: () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
-    checkPid: () => undefined,
-    processFacts: () => undefined,
-  }), { state: "unknown", reason: "start time unreadable" });
-  assert.deepEqual(defaultProbe(42, { readStat: () => processStat("Z") }), { state: "gone" });
+  assert.deepEqual(defaultProbe(
+    42,
+    () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
+    () => undefined,
+    () => undefined,
+  ), { state: "unknown", reason: "start time unreadable" });
+  assert.deepEqual(defaultProbe(42, () => processStat("Z")), { state: "gone" });
 });
 
 test("an unreadable proc directory reports an incomplete walk with its error", () => {
