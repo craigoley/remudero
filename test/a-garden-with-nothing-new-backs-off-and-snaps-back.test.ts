@@ -121,3 +121,15 @@ test("the machine judge's inputs stamp follows its plan tree and operator releas
   assert.equal(machineJudgeFoundWork({ ...empty, proceeded: ["W1-T1"] }), true);
   assert.equal(machineJudgeFoundWork({ ...empty, prUrl: "https://github.com/o/r/pull/1" }), true);
 });
+
+test("a selector-shadow pass whose pacing cannot be recorded logs it and still finishes", async (t) => {
+  const dir = scratch(t);
+  const blocker = join(dir, "not-a-directory");
+  writeFileSync(blocker, "");
+  const steps: string[] = [];
+  const pass = selectorShadowGardenPass({ stateDir: join(blocker, "state"), repoRoot: dir, openWorkspace: () => { throw new Error("unused"); }, log: (step) => void steps.push(step) },
+    "o", "r", () => "W1-T1", { readJson: async () => { throw new Error("GitHub is unreachable"); }, readText: async () => "" });
+  await pass();
+  assert.ok(steps.includes("selector-shadow.gardener_failed"), "the unreadable runs are reported");
+  assert.ok(steps.includes("selector-shadow.pacing_failed"), "an unwritable pacing record is reported, not thrown");
+});
