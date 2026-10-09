@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+
+const CLI = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
 
 // ── W1-T1224: `grepZeroHitCauseLine`'s wiring inside `checkProofCommand` — line-seam, case-only ──
 // and matched, exercised through the REAL command against a REAL `grep` child process, never a
@@ -23,20 +26,15 @@ function markerFixture(content: string): string {
   return dir;
 }
 
-/** Run `checkProofCommand` with stdout captured, from `cwd`. Restores both, always. */
+/** Run the public command from the fixture checkout and capture its process result. */
 function runCheckProof(argv: string[], cwd: string): { code: number; out: string } {
-  const lines: string[] = [];
-  const realLog = console.log;
-  const realCwd = process.cwd();
-  console.log = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
-  try {
-    process.chdir(cwd);
-    const code = checkProofCommand(argv);
-    return { code, out: lines.join("\n") };
-  } finally {
-    console.log = realLog;
-    process.chdir(realCwd);
-  }
+  const result = spawnSync(process.execPath,
+    ["--import", import.meta.resolve("tsx"), CLI, "--repo-root", cwd, "check-proof", ...argv],
+    { cwd, encoding: "utf8", timeout: 60_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null, result.stderr);
+  assert.notEqual(result.status, null, result.stderr);
+  return { code: result.status!, out: result.stdout };
 }
 
 test("line-seam: a phrase wrapped across a line break reads a genuine zero-hit grep AND a line-seam cause", () => {
@@ -44,7 +42,7 @@ test("line-seam: a phrase wrapped across a line break reads a genuine zero-hit g
   const dir = markerFixture("the quick\nbrown fox\n");
   try {
     const { code, out } = runCheckProof(["grep:", "quick brown", "in", "src/marker.txt"], dir);
-    assert.equal(code, CHECK_PROOF_EXIT.fail, "a genuine zero-hit grep proof fails, exactly as before this task");
+    assert.equal(code, 1, "a genuine zero-hit grep proof fails, exactly as before this task");
     assert.match(out, /^exit:\s+1\s*$/m);
     assert.match(out, /^hits:\s+0\s*$/m);
     assert.match(out, /^verdict:\s+fail\s*$/m);
@@ -60,7 +58,7 @@ test("case-only: a phrase present with different capitalisation reads a genuine 
   const dir = markerFixture("Hello World\n");
   try {
     const { code, out } = runCheckProof(["grep:", "hello world", "in", "src/marker.txt"], dir);
-    assert.equal(code, CHECK_PROOF_EXIT.fail);
+    assert.equal(code, 1);
     assert.match(out, /^exit:\s+1\s*$/m);
     assert.match(out, /^hits:\s+0\s*$/m);
     assert.match(out, /^verdict:\s+fail\s*$/m);
@@ -79,7 +77,7 @@ test("matched: a real GNU-grep-vs-classifier disagreement over an escaped `\\+` 
   const dir = markerFixture("ab+c\n");
   try {
     const { code, out } = runCheckProof(["grep:", "ab\\+c", "in", "src/marker.txt"], dir);
-    assert.equal(code, CHECK_PROOF_EXIT.fail, "the real grep genuinely found nothing");
+    assert.equal(code, 1, "the real grep genuinely found nothing");
     assert.match(out, /^exit:\s+1\s*$/m);
     assert.match(out, /^hits:\s+0\s*$/m);
     assert.match(out, /^verdict:\s+fail\s*$/m);
