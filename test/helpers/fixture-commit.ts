@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { GIT_REPO_FIXTURE_IDENTITY } from "./git-repo.js";
 
 /** A fake worker's commit, refused unless its cwd lies inside the fixture's own root. A fake fix worker
  * trusts the `cwd` its spawn hook is handed; when production code reused that hook (2026-10-09, the
@@ -15,5 +16,13 @@ export function commitInsideFixture(root: string, cwd: string | undefined, file:
   }
   writeFileSync(join(target, file), "fixed\n");
   execFileSync("git", ["-C", target, "add", "--", file]);
-  execFileSync("git", ["-C", target, "commit", "--no-verify", "--quiet", "-m", message]);
+  execFileSync("git", ["-C", target, "commit", "--no-verify", "--quiet", "-m", message], {
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    },
+  });
 }

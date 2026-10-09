@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 // 2026-10-09: the progress judge borrowed the fix-worker spawn hook, and a fixture's fake worker
 // committed `fix.txt` into a developer worktree. Fake workers now commit through this guard.
@@ -23,6 +23,20 @@ test("a fake fix worker commits inside its own fixture repository", () => {
   const owned = gitRepo({ kind: "fixture-commit-owned" });
   assert.equal(typeof helper?.commitInsideFixture, "function", "test/helpers/fixture-commit.ts exports commitInsideFixture");
   const before = Number(owned.git("rev-list", "--count", "HEAD").trim());
-  helper!.commitInsideFixture(owned.dir, owned.dir, "fix.txt", "fix: owned");
+  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+  const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    for (const key of keys.slice(2)) delete process.env[key];
+    helper!.commitInsideFixture(owned.dir, owned.dir, "fix.txt", "fix: owned");
+  } finally {
+    for (const key of keys) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+  }
   assert.equal(Number(owned.git("rev-list", "--count", "HEAD").trim()), before + 1);
+  assert.equal(owned.git("show", "-s", "--format=%an <%ae> | %cn <%ce>", "HEAD"),
+    `${GIT_REPO_FIXTURE_IDENTITY.name} <${GIT_REPO_FIXTURE_IDENTITY.email}> | ${GIT_REPO_FIXTURE_IDENTITY.name} <${GIT_REPO_FIXTURE_IDENTITY.email}>`);
 });
