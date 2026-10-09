@@ -11,6 +11,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildInboxDraftHook } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const PROOF = "unit test: test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts";
 
@@ -25,7 +26,7 @@ test(`${PROOF} — a pass without tick facts preserves selection and constructs 
       env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "", RMD_T5784_CONSTRUCTOR_PROBE: "1" },
     });
     assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
-    assert.match(probe.stdout, /^# tests 1$/m);
+    assert.match(probe.stdout, /^# tests 2$/m);
     assert.match(probe.stdout, /^# fail 0$/m);
   }
   const root = makeTempDir("t5784-draft-selection");
@@ -111,6 +112,39 @@ test(`${PROOF} — a pass without tick facts preserves selection and constructs 
       await session.post("Profiler.stopPreciseCoverage");
       session.disconnect();
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function withCountingGh<T>(body: (calls: () => string[]) => Promise<T>): Promise<T> {
+  const shim = ghShim([{ when: "api", stdout: "[]" }], { kind: "t5650-gh" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  try {
+    return await body(() => shim.calls().filter((l) => /search/.test(l)));
+  } finally {
+    process.env.PATH = oldPath;
+  }
+}
+
+test("the draft rung runs clean without a gateway and spawns no search", async () => {
+  const root = makeTempDir("t5650c");
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ids = Array.from({ length: 50 }, (_, i) => `T-${i}`);
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: ids.map((id) => ({ id: `proof-debt:${id}`, summary: "s", evidenceAnchors: [] })) }),
+    );
+    const logs: string[] = [];
+    await withCountingGh(async (searches) => {
+      const hook = buildInboxDraftHook("o", "r", { root } as Config, "RUN-5650", (s) => void logs.push(s), async () => [], undefined, () => "sha");
+      await hook();
+      assert.deepEqual(searches(), []);
+    });
+    assert.ok(!logs.includes("inbox.draft_readiness_unavailable"), "draft selection was built successfully");
+    assert.ok(!logs.includes("inbox.draft_rung.error"), "the rung itself ran clean");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

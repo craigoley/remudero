@@ -12,20 +12,15 @@
  *     `ghGateway(` is the population; loop reach is a name-based fixed point seeded from
  *     `daemonCommand`'s body. A reachable member is refused by name unless a shrink-only exemption
  *     names why its calls are bounded per pass.
- *  2. DRAFT RUNG: the hook builds neither gateway and runs with zero `gh` search spawns.
+ *  2. DRAFT RUNG: the hook builds neither gateway; its execution tests live in the dedicated
+ *     inbox-draft-hook suite.
  */
 // @source-text-subject: src/**/*.ts — the claim is a property of EVERY function that builds the
 // gateway, including paths no single execution drives; the same shape as test/gh-transport-census.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildInboxDraftHook } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
 
 /** Functions the loop DOES reach that build the unbatched gateway, with the reason each is bounded.
  *  SHRINK-ONLY: an entry the census no longer reaches (or whose function no longer builds the
@@ -176,18 +171,6 @@ test("unit test: test/the-inbox-intake-rung-derives-readiness-from-the-batched-g
   ]);
 });
 
-/** A `gh` on PATH that logs every invocation: the only way to SEE a synchronous spawn. */
-async function withCountingGh<T>(body: (calls: () => string[]) => Promise<T>): Promise<T> {
-  const shim = ghShim([{ when: "api", stdout: "[]" }], { kind: "t5650-gh" });
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
-  try {
-    return await body(() => shim.calls().filter((l) => /search/.test(l)));
-  } finally {
-    process.env.PATH = oldPath;
-  }
-}
-
 test("unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts — the inbox draft hook builds no gateway", () => {
   const hook = topLevelFunctions().find((fn) => fn.name === "buildInboxDraftHook");
   assert.ok(hook, "the census finds the draft hook");
@@ -196,23 +179,4 @@ test("unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts �
   assert.match(hook.body + "\n const gateway = buildBatchedGithub(owner, repo);", buildsGateway,
     "restoring either gateway is visible to the census");
   assert.match(hook.body + "\n const gateway = ghGateway(owner, repo);", buildsGateway);
-});
-
-test("the draft rung runs clean without a gateway and spawns no search", async () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5650c-`));
-  const root = join(dir, "root");
-  mkdirSync(join(root, "state"), { recursive: true });
-  const ids = Array.from({ length: 50 }, (_, i) => `T-${i}`);
-  writeFileSync(
-    join(root, "state", "inbox-proposals.json"),
-    JSON.stringify({ proposals: ids.map((id) => ({ id: `proof-debt:${id}`, summary: "s", evidenceAnchors: [] })) }),
-  );
-  const logs: string[] = [];
-  await withCountingGh(async (searches) => {
-    const hook = buildInboxDraftHook("o", "r", { root } as Config, "RUN-5650", (s) => void logs.push(s), async () => [], undefined, () => "sha");
-    await hook();
-    assert.deepEqual(searches(), []);
-  });
-  assert.ok(!logs.includes("inbox.draft_readiness_unavailable"), "draft selection was built successfully");
-  assert.ok(!logs.includes("inbox.draft_rung.error"), "the rung itself ran clean");
 });
