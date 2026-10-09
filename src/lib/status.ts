@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { ghExec, ghExecFile } from "./github-transport.js";
+import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
@@ -41,6 +41,7 @@ import {
 } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
+import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -205,6 +206,7 @@ export interface StatusProjection {
   needsHuman?: true;
   /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
   independentFailureBlocked?: true;
+  categorizedRefusalRejoin?: CategorizedRefusalRejoin;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
@@ -3438,6 +3440,7 @@ export function latestIndependentFailureBlock(
   taskId: string,
   index?: LedgerIndex,
   nowMs?: number,
+  categorizedRefusalRunId?: string,
 ): boolean {
   let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
   // W1-T4597: the stage each run's verdict named, the current streak of consecutive environmental
@@ -3502,7 +3505,7 @@ export function latestIndependentFailureBlock(
       line.harness_commit_refused === true
     ) {
       const originalRunId = typeof line.original_run_id === "string" ? line.original_run_id : "";
-      if (harnessRefusalRuns.has(originalRunId) && !retrySpent) {
+      if (harnessRefusalRuns.has(originalRunId) && !retrySpent && originalRunId !== categorizedRefusalRunId) {
         retryPending = true;
       }
     }
@@ -3576,9 +3579,15 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const now = deps.now ?? (() => Date.now());
   const projection: StatusProjection = { ...base };
 
-  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now())) {
-    projection.status = "blocked";
-    projection.independentFailureBlocked = true;
+  const taskRows = indexedTaskRows(ledgerLines, task.id, deps.ledgerIndex);
+  const refusalSource = activeCategorizedRefusal(task.id, taskRows);
+  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now(), refusalSource?.runId)) {
+    const rejoin = categorizedRefusalRejoin(dirname(deps.ledgerPath), task, taskRows, refusalSource);
+    if (rejoin) projection.categorizedRefusalRejoin = rejoin;
+    else {
+      projection.status = "blocked";
+      projection.independentFailureBlocked = true;
+    }
   }
 
   // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` — a closed PR is stronger GitHub
@@ -4134,15 +4143,37 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = ghExec(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
+    const requiredArgs = requiredStatusChecksArgs(owner, repo, branch);
+    raw = ghExec(requiredArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     // THE FACT THIS TASK EXISTS TO PRESERVE. Classified at the point of failure, because nothing downstream can
     // recover it: an absent binary, an unprivileged token, a network error and a 404 on an unprotected branch
     // all land here and all used to become a bare `undefined`.
     return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
   }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+export async function readRequiredStatusCheckContextsAsync(
+  owner: string,
+  repo: string,
+  branch = "main",
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<RequiredContextsRead> {
+  let raw: string;
+  try {
+    raw = await readText(requiredStatusChecksArgs(owner, repo, branch));
+  } catch (e) {
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
+  }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+function requiredStatusChecksArgs(owner: string, repo: string, branch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`];
+}
+
+function requiredContextsFromProtection(raw: string, branch: string): RequiredContextsRead {
   try {
     const parsed = JSON.parse(raw) as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
     const fromChecks = (parsed.checks ?? [])

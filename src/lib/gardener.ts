@@ -557,6 +557,33 @@ export function gardenPassDue<C extends string>(
   return state.lastCheap !== spec.cheapFingerprint();
 }
 
+/**
+ * Whether a pass of `spec` would read its inventory (W1-T5668), mirroring every return {@link gardenPassSteps}
+ * takes before `spec.inventory()` and writing nothing. `gardenPassDue` is true for the whole life of a pending
+ * PR, yet the pass then returns on an unchanged cheap fingerprint without reading the inventory, so a caller
+ * that builds the inventory first (the config gardener's off-loop 60-day read) pays for nothing. Waiting
+ * overseer effects answer true, because the pass folds them and may change what it does. `prState` is the
+ * pending PR's state, already resolved by the caller, since this read is synchronous; a settled PR is
+ * judged without an inventory, and a merged metric-judged one is read on its terminal or release clock.
+ */
+export function gardenNeedsInventory<C extends string>(
+  spec: Pick<GardenSpec<C, unknown, GardenAction<C>, GardenCheckout>, "name" | "classes" | "cheapFingerprint" | "review" | "decision">,
+  deps: Pick<GardenerDeps, "stateDir" | "clock">,
+  prState?: PrState,
+): boolean {
+  const state = readGardenState(gardenStatePath(deps.stateDir, spec.name), spec.classes);
+  if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
+  const clock = deps.clock ?? systemClock;
+  if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > clock.now()) return false;
+  // A decision-judged merge or a closed PR is judged and, on an unchanged fingerprint, returns unread; neither
+  // can be a merged metric-judged pending, so the terminal and release terms below are false for them.
+  const metricPending = state.pending && !judgedByDecision(spec, state.pending.actionClass) && prState === "merged" ? state.pending : undefined;
+  const terminalMetric = metricPending !== undefined && !metricPending.atMerge;
+  const releaseDue = metricPending?.atMerge !== undefined &&
+    (!metricPending.mergeSeenAt || clock.now() - Date.parse(metricPending.mergeSeenAt) >= GARDEN_PENDING_RELEASE_MS);
+  return state.lastCheap !== spec.cheapFingerprint() || terminalMetric || releaseDue;
+}
+
 /** What one pass did. */
 export interface GardenPassResult<C extends string, A extends GardenAction<C>> {
   ran: boolean;

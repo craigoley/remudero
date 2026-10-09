@@ -523,22 +523,24 @@ import {
   combinedStatusRestArgs,
   createGhCallPacer,
   fetchOpenPrsRest,
+  fetchOpenPrsRestSteps,
   type OpenPrRest,
   fetchSinglePrRest,
-  hydrateMergeConflictEvidence,
-  hydratePlanFilingFiles,
-  hydrateSupersessionVerdicts,
-  hydrateWorkflowRuns,
-  hydrateMergeStateObservations,
+  hydrateMergeConflictEvidenceSteps,
+  hydratePlanFilingFilesSteps,
+  hydrateSupersessionVerdictsSteps,
+  hydrateWorkflowRunsSteps,
+  hydrateMergeStateObservationsSteps,
   hydrateMergeStates,
-  hydrateScannerBlockerObservations,
-  hydrateCodeqlHeadAlerts,
+  hydrateScannerBlockerObservationsSteps,
+  hydrateCodeqlHeadAlertsSteps,
   codeqlCheckFailed,
   isScannerBlockerCandidate,
   liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
   paceGhEntry,
+  paceGhEntryAsync,
   prStateFromRest,
   rollupFor,
   rollupForAsync,
@@ -547,12 +549,11 @@ import {
   // — the review records it, a later sweep pass asks what is true now. See its own header doc for
   // why two representations would be a silent, permanent bug.
   tryFetchReviewReuseFacts,
-  hydrateReviewReuseFacts,
+  hydrateReviewReuseFactsSteps,
   type ReviewReuseFacts,
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
-  createGhReadWarmer,
   PLAN_FILING_FILE_CACHE_MAX_ENTRIES,
   type PlanFilingFileCache,
   type PlanFilingFileObservation,
@@ -1558,6 +1559,7 @@ import {
   readMergeCreditedTaskIds,
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
+  readRequiredStatusCheckContextsAsync,
   persistVerifiedCredit,
   isPlanTextDeliverable,
   type RequiredContextsRead,
@@ -6683,11 +6685,18 @@ function attachPostedGateIds<T extends object>(
 }
 
 export function fetchOpenPrsWithPostedIds(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
+  return runStepsSync(openPrsWithPostedIdsSteps(owner, repo, fetch));
+}
+
+function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: GhApiFetcher): Steps<OpenPrRest[]> {
   const checkRuns = new Map<string, unknown>();
-  const prs = fetchOpenPrsRest(owner, repo, (args, onRateLimit) => {
+  const prs = yield* fetchOpenPrsRestSteps(owner, repo, (args, onRateLimit) => {
+    const remember = (response: unknown) => {
+      if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+      return response;
+    };
     const response = fetch(args, onRateLimit);
-    if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
-    return response;
+    return response instanceof Promise ? response.then(remember) : remember(response);
   });
   for (const pr of prs) {
     if (pr.statusCheckRollup) {
@@ -19132,7 +19141,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
       }
-      log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
+      log("verdict", { ...v.ledger, pre_dispatch_contract_revision: preDispatchContractRevision(task), ...terminalVerdictFields(impl) });
       say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
       return {
         taskId,
@@ -23836,6 +23845,8 @@ export type ReapBranchesOpts = {
   /** Carry the daemon's run identity into the reaper's durable rows. */
   runId?: string;
   readFile?: (path: string) => string;
+  /** W1-T6590: the plan this tick already parsed for `root`; when it answers, `loadPlan` is never called. */
+  plan?: () => Plan | undefined;
   loadPlan?: (path: string) => Plan;
   readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
   /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
@@ -23902,7 +23913,7 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   let creditedTaskIds = new Set<string>();
   let creditReadSucceeded = false;
   try {
-    const taskPlan = (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
+    const taskPlan = opts.plan?.() ?? (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
     const candidates = taskPlan.tasks.map((task) => task.id);
     for (const name of names) {
       const taskId = taskIdFromSlugBranch(name, candidates);
@@ -36867,12 +36878,15 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   changedFilesFetch?: (prNumber: string) => Promise<string[] | undefined>;
   commitTrailerIndex?: () => Map<string, PrRef[]> | null;
   evidenceRootFor?: (owner: string, repo: string) => string | undefined;
-  viewsDeps?: Parameters<typeof buildOpenPrViews>[3];
+  viewsDeps?: Parameters<typeof buildOpenPrViewsAsync>[3];
+  /** W1-T6591: the open-PR reads' async transport; absent, `fetch` or `ghJsonAsync` answers them. */
+  fetchAsync?: GhApiFetcher;
+  pacer?: GhCallPacer;
   log?: (step: string, extra?: Record<string, unknown>) => void;
 } = {}) {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
-  const pacer = createGhCallPacer();
+  const pacer = io.pacer ?? createGhCallPacer();
   const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
   const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
   const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
@@ -36882,7 +36896,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   let generationClock = 0;
   const closedAt = new Map<number, string>();
   let closedRows: ReadonlyArray<{ number: number; url: string; state: string }> = [];
-  const fetch: GhApiFetcher = (args, budget) => {
+  const readKey = (args: string[]) => {
     const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
     let key = args.join("\0");
     if (endpoint?.includes("/pulls?") && endpoint.includes("state=open")) {
@@ -36893,8 +36907,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       url.searchParams.sort();
       key = url.pathname + url.search;
     }
-    if (reads.has(key)) return reads.get(key);
-    const answer = (io.fetch ?? ghJson)(args, budget);
+    return { endpoint, key };
+  };
+  const remember = (endpoint: string | undefined, key: string, answer: unknown) => {
     reads.set(key, answer);
     if (endpoint?.includes("state=closed") && Array.isArray(answer)) { // W1-T5318: GitHub's own terminal times
       for (const pr of answer as Array<{ number?: unknown; merged_at?: unknown; closed_at?: unknown }>) {
@@ -36903,6 +36918,16 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       }
     }
     return answer;
+  };
+  const fetch: GhApiFetcher = (args, budget) => {
+    const { endpoint, key } = readKey(args);
+    return reads.has(key) ? reads.get(key) : remember(endpoint, key, (io.fetch ?? ghJson)(args, budget));
+  };
+  const fetchAsync: GhApiFetcher = async (args, budget) => {
+    const { endpoint, key } = readKey(args);
+    if (reads.has(key)) return reads.get(key);
+    const read: GhApiFetcher = io.fetchAsync ?? io.fetch ?? ((a, b) => ghJsonAsync(a, undefined, b));
+    return remember(endpoint, key, await read(args, budget));
   };
   const github = io.github ?? buildBatchedGithub(owner, repo, {
     log, pacer, snapshotCache: {
@@ -36930,7 +36955,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = paceGhEntry(pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)); }
+    try { openPrRows = await fetchOpenPrsWithPostedIdsAsync(owner, repo, fetchAsync, pacer); }
     catch (error) {
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
@@ -36964,8 +36989,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
     credits = creditBefore;
     projection = derive();
-    const openPrViews = openPrRows ? buildOpenPrViews(owner, repo, ledgerPath, {
-      ...io.viewsDeps, fetch, pacer, planFilingFileCache: filingFiles, openPrRows,
+    const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
     }) : [];
     const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
@@ -36991,13 +37016,15 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
-    const postFixCiFailuresByPr = new Map(openPrViews.map((pr) => {
+    const postFixCiFailuresByPr = new Map<number, CiFailure[] | undefined>();
+    for (const pr of openPrViews) {
       const raw = rawByNumber.get(pr.prNumber);
-      const failures = pr.checksState === "pending" && raw && !raw.rollupUnreadable
-        ? (io.viewsDeps?.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, raw.statusCheckRollup)
-        : pr.ciFailures;
-      return [pr.prNumber, failures] as const;
-    }));
+      const syncRead = io.viewsDeps?.fetchCiFailureEvidence;
+      postFixCiFailuresByPr.set(pr.prNumber, pr.checksState === "pending" && raw && !raw.rollupUnreadable
+        ? (syncRead ? syncRead(owner, repo, raw.statusCheckRollup)
+          : await (io.viewsDeps?.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync)(owner, repo, raw.statusCheckRollup))
+        : pr.ciFailures);
+    }
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
@@ -38152,6 +38179,7 @@ export async function daemonCommand(
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: daemonFreshnessReads(repoRoot).checkFreshness,
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
+        categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the
         // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because
@@ -41398,7 +41426,24 @@ function openPrPlanIdentity(path: string): { kind: "readable"; identity: string 
  * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
  * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
-export function buildOpenPrViews(
+export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string, deps: NonNullable<Parameters<typeof openPrViewSteps>[3]> = {}): ClassifiedOpenPrView[] {
+  const fetch = deps.fetch ?? ghJson;
+  return runStepsSync(openPrViewSteps(owner, repo, ledgerPath, deps, {
+    read: fetch,
+    openPrRows: () => paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)),
+    ciFailures: deps.fetchCiFailureEvidence ?? fetchCiFailures,
+    requiredContexts: readRequiredStatusCheckContexts,
+  }));
+}
+
+interface OpenPrViewReads {
+  read: GhApiFetcher;
+  openPrRows: () => unknown;
+  ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
+  requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
+}
+
+function* openPrViewSteps(
   owner: string,
   repo: string,
   ledgerPath: string,
@@ -41442,14 +41487,13 @@ export function buildOpenPrViews(
      *  for every PR — fail closed, exactly today's behavior for every existing caller/fixture. */
     isMerged?: MergedResolver;
   } = {},
-): ClassifiedOpenPrView[] {
-  const fetch = deps.fetch ?? ghJson;
+  io: OpenPrViewReads,
+): Steps<ClassifiedOpenPrView[]> {
+  const fetch = io.read;
   const assessPendingOwner =
     deps.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
-  // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
-  // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
-  const raw = (deps.openPrRows ?? paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch))) as RawOpenPr[];
+  const raw = (deps.openPrRows ?? (yield* step(io.openPrRows))) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
@@ -41467,7 +41511,7 @@ export function buildOpenPrViews(
     ? ((r) => (r && r.length > 0 ? ({ kind: "contexts", contexts: r } as const) : ({ kind: "none" } as const)))(
         deps.requiredContexts(owner, repo),
       )
-    : readRequiredStatusCheckContexts(owner, repo);
+    : yield* step(() => io.requiredContexts(owner, repo));
   const requiredContexts = requiredRead.kind === "contexts" ? requiredRead.contexts : undefined;
   // W1-T2399: the read failure's own cause, hoisted so the view below can assign the key
   // unconditionally — see that assignment's own comment for why the conditional-spread form could
@@ -41500,7 +41544,7 @@ export function buildOpenPrViews(
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
   const emitterPlanFilings = new Map(raw.map((pr) => [pr.number, isPlanOnlyFilingPr(ledger, pr.url)]));
-  const planFilingFiles = hydratePlanFilingFiles(
+  const planFilingFiles = yield* hydratePlanFilingFilesSteps(
     owner,
     repo,
     raw
@@ -41523,7 +41567,7 @@ export function buildOpenPrViews(
   // 5,735 sweeps — and hard-capped, so the pathological case cannot run away. Best-effort by
   // construction: an exhausted budget yields an empty map and every PR keeps the `undefined` it
   // has carried since the REST migration, i.e. exactly today's behaviour.
-  const mergeStateObservations = hydrateMergeStateObservations(
+  const mergeStateObservations = yield* hydrateMergeStateObservationsSteps(
     owner,
     repo,
     raw.map((p) => p.number),
@@ -41541,7 +41585,7 @@ export function buildOpenPrViews(
   // `raw` list, so a healthy sweep pays nothing extra. "main" is this repo's one merge target,
   // the same literal `ghPrCreateFillCommand`'s own `--base` argv already hardcodes.
   const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
-  const mergeConflicts = hydrateMergeConflictEvidence(owner, repo, "main", dirtyPrs, fetch);
+  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch);
 
     // WORKFLOW RUNS (W1-T2340 — the producer `OpenPrView.workflowRuns` has lacked since it was
     // declared): a THIRD bounded follow-up fetch, scoped the same way the conflict-evidence one
@@ -41555,7 +41599,7 @@ export function buildOpenPrViews(
     const pendingPrs = raw
       .filter((p) => checksStateFromRollup(p.statusCheckRollup, requiredContexts) === "pending")
       .map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
-    const workflowRuns = hydrateWorkflowRuns(owner, repo, pendingPrs, fetch);
+    const workflowRuns = yield* hydrateWorkflowRunsSteps(owner, repo, pendingPrs, fetch);
 
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
@@ -41589,7 +41633,7 @@ export function buildOpenPrViews(
     const newest = peers.length ? Math.max(...peers) : pr.number;
     if (newest > pr.number) supersededPrs.push({ number: pr.number, supersededBy: newest, taskId: t });
   }
-  const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
+  const supersessionVerdicts = yield* hydrateSupersessionVerdictsSteps(owner, repo, supersededPrs, fetch, isInPlanScope);
 
   // W1-T3704 (completed here) — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
   //
@@ -41609,8 +41653,8 @@ export function buildOpenPrViews(
       return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
-  const scannerBlockers = hydrateScannerBlockerObservations(
+  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
     raw
@@ -41630,7 +41674,7 @@ export function buildOpenPrViews(
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
-  const codeqlHeadAlerts = hydrateCodeqlHeadAlerts(
+  const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
     owner,
     repo,
     raw
@@ -41639,6 +41683,15 @@ export function buildOpenPrViews(
       .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
   );
+
+  const ciFailuresByPr = new Map<number, CiFailure[] | undefined>();
+  for (const pr of raw) {
+    const redRequiredChecks = redQualityGateNames(pr.statusCheckRollup, ciGateRequired);
+    const red = checksStateFromRollup(pr.statusCheckRollup, requiredContexts) === "red";
+    if (!red && redRequiredChecks.length === 0) continue;
+    const evidenceRollup = red ? pr.statusCheckRollup : earlyRedEvidenceRollup(pr.statusCheckRollup, redRequiredChecks);
+    ciFailuresByPr.set(pr.number, yield* step(() => io.ciFailures(owner, repo, evidenceRollup)));
+  }
 
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
@@ -41676,12 +41729,7 @@ export function buildOpenPrViews(
     const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
     const redRequiredChecks = redQualityGateNames(pr.statusCheckRollup, ciGateRequired);
-    const earlyRedRollup = earlyRedEvidenceRollup(pr.statusCheckRollup, redRequiredChecks);
-    const ciFailures = checksState === "red"
-      ? (deps.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, pr.statusCheckRollup)
-      : redRequiredChecks.length > 0
-        ? (deps.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, earlyRedRollup)
-        : undefined;
+    const ciFailures = ciFailuresByPr.get(pr.number);
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
@@ -41929,6 +41977,37 @@ export function buildOpenPrViews(
       pendingAnswer: taskId ? operatorVerdictEvidence(taskId, ledger, questionLines) : undefined,
     };
   });
+}
+
+type OpenPrCiFailureRead = (owner: string, repo: string, rollup: RollupCheck[] | undefined) => Promise<CiFailure[]>;
+
+export function fetchOpenPrsWithPostedIdsAsync(
+  owner: string,
+  repo: string,
+  read: GhApiFetcher,
+  pacer: GhCallPacer | undefined,
+): Promise<OpenPrRest[]> {
+  return paceGhEntryAsync(pacer, isGhRateLimitError, () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, read)));
+}
+
+/** W1-T6591: {@link buildOpenPrViews} in ONE pass, every remote read awaited at its own step. */
+export function buildOpenPrViewsAsync(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  deps: Omit<NonNullable<Parameters<typeof openPrViewSteps>[3]>, "fetch"> & {
+    fetchAsync?: GhApiFetcher;
+    fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
+    readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
+  } = {},
+): Promise<ClassifiedOpenPrView[]> {
+  const read: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  return runStepsAsync(openPrViewSteps(owner, repo, ledgerPath, deps, {
+    read,
+    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, read, deps.pacer),
+    ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
+    requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
+  }));
 }
 
 /**
@@ -43502,27 +43581,48 @@ export function commitWorkerEdits(
   };
 }
 
-/** Inspect declarations rather than comments or string examples; never execute worker content. */
-function declaresProofTitle(content: string, titles: readonly string[]): boolean {
+/** Inspect declarations rather than comments or string examples; never execute worker content.
+ *  Template expressions are re-scanned as template text after their closing brace (as
+ *  scripts/census-precheck.mjs does); a scanner that stops advancing ends the scan as "not found". On
+ *  2026-10-08 `${prefix}\n## Acceptance` scanned `##` as a zero-length PrivateIdentifier forever,
+ *  pinning the daemon's event loop at 95% CPU for over an hour inside a fix round's commit. */
+export function declaresProofTitle(content: string, titles: readonly string[]): boolean {
   const scanner = createScanner(true, undefined, content);
-  let token = scanner.scan();
+  const braceDepths: number[] = [];
+  let lastEnd = -1;
+  const scanNext = (): SyntaxKind => {
+    let next = scanner.scan();
+    if (next === SyntaxKind.TemplateHead) braceDepths.push(0);
+    else if (next === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
+    else if (next === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        next = scanner.reScanTemplateToken(false);
+        if (next === SyntaxKind.TemplateTail) braceDepths.pop();
+      } else braceDepths[braceDepths.length - 1]--;
+    }
+    return next;
+  };
+  let token = scanNext();
   while (token !== SyntaxKind.EndOfFile) {
+    const end = scanner.getTokenEnd();
+    if (end <= lastEnd) return false;
+    lastEnd = end;
     if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
     if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
-      token = scanner.scan();
+      token = scanNext();
       while (token === SyntaxKind.DotToken) {
-        scanner.scan();
+        scanNext();
         if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
-        token = scanner.scan();
+        token = scanNext();
       }
       if (token === SyntaxKind.OpenParenToken) {
-        token = scanner.scan();
+        token = scanNext();
         if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
             !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
-            scanner.scan() === SyntaxKind.CommaToken) return true;
+            scanNext() === SyntaxKind.CommaToken) return true;
       }
     }
-    token = scanner.scan();
+    token = scanNext();
   }
   return false;
 }
@@ -45160,6 +45260,7 @@ export function runAutomaticBranchReapRung(
     clock?: Pick<Clock, "now">;
     intervalMs?: number;
     exec?: BranchReapExec;
+    plan?: () => Plan | undefined;
   } = {},
 ): void | Promise<void> {
   const root = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -45192,6 +45293,7 @@ function* automaticBranchReapSteps(
     clock?: Pick<Clock, "now">;
     intervalMs?: number;
     exec?: BranchReapExec;
+    plan?: () => Plan | undefined;
   } = {},
 ): Steps<void> {
   const checkoutRoot = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -45237,6 +45339,7 @@ function* automaticBranchReapSteps(
       root: checkoutRoot,
       ownerRepo: { owner, repo },
       exec,
+      plan: opts.plan,
       ledgerPath,
       quiet: true,
       runId,
@@ -45586,7 +45689,6 @@ export function buildSweepHook(
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  const openPrReads = createGhReadWarmer(ghJsonAsync);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
   // `boardGithub` above — from THIS repository's own file, so a restart with an unchanged branch
   // set and an unexpired interval reads "unchanged" instead of every boot re-judging every remote
@@ -45619,9 +45721,7 @@ export function buildSweepHook(
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
-      if (!tickRead) await openPrReads.warm();
-      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : buildOpenPrViews(owner, repo, ledgerPath, {
-        fetch: openPrReads.fetcher(ghJson),
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
@@ -45721,6 +45821,7 @@ export function buildSweepHook(
       if (targetCheckoutRoot) {
         await runAutomaticBranchReapRung(owner, repo, config, ledgerPath, runId, log, branchReapState, {
           root: targetCheckoutRoot,
+          plan: () => plan, // W1-T6590: this tick's parse of the target checkout's plan
         });
         // W1-T4476 design (i)/(iii): persist the cadence fields AND the merged-head cache
         // `runAutomaticBranchReapRung` just mutated in place, so the NEXT daemon boot loads
@@ -45981,15 +46082,12 @@ export function buildSweepLightHook(
     : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
-  const openPrReads = createGhReadWarmer(ghJsonAsync);
   return async (scope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
     const reviewOnly = scope?.reviewOnly === true;
     try {
-      await openPrReads.warm();
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
-        fetch: openPrReads.fetcher(ghJson),
+      const openPrs = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,

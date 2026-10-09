@@ -27,8 +27,8 @@
 // run, the only process given NODE_V8_COVERAGE=<raw-dir> (not this wrapper, which would otherwise
 // write its own raw report), and the ONLY source of coverage figures; a failed file is re-run once
 // UNINSTRUMENTED (no coverage flags, no reporter files), so a retry can never move the lcov. A failure
-// no file can be named for is not retried at all — re-running the whole instrumented suite is what
-// the 2026-08-28 ruling removed. A pass on retry prints FLAKE-RETRY-RECOVERED, never a clean pass.
+// no file can be named for keeps its verdict, except W1-T6592's all-pass empty-coverage failure:
+// drop empty reports, rebuild lcov, or retry coverage once. Recovery prints FLAKE-RETRY-RECOVERED.
 //
 // A deterministic failure fails BOTH attempts -- red is unchanged, the retry cannot mask a real
 // break. TEST_RETRY=0 disables the retry entirely (the first attempt's exit code is final) -- a
@@ -52,10 +52,12 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
+import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -383,7 +385,78 @@ function recordFlakeEvidence(headline, names) {
   }
 }
 
+function coverageOptions(args) {
+  const values = (flag) => args.flatMap((arg, index) => {
+    if (arg === flag) return [args[index + 1]];
+    return arg.startsWith(`${flag}=`) ? [arg.slice(flag.length + 1)] : [];
+  });
+  const reporters = values("--test-reporter");
+  const destinations = values("--test-reporter-destination");
+  return {
+    output: destinations[reporters.indexOf("lcov")],
+    excludeGlobs: values("--test-coverage-exclude"),
+    includeGlobs: values("--test-coverage-include"),
+    sourceMaps: args.includes("--enable-source-maps"),
+  };
+}
+
+function rebuildCoverage(rawDir, args) {
+  try {
+    const { output, ...options } = coverageOptions(args);
+    const { TestCoverage } = createRequire(import.meta.url)("internal/test_runner/coverage");
+    const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), ...options });
+    collector.coverageDirectory = resolve(rawDir);
+    const summary = collector.summary();
+    if (summary.files.length === 0) throw new Error("no source coverage remains after dropping empty files");
+    writeFileSync(output, renderCoverageSummary(summary));
+    return 0;
+  } catch (error) {
+    console.error(`test-with-retry: coverage rebuild failed: ${error.message}`);
+    return /failed to parse coverage file/.test(error.message) || error instanceof TypeError ? 2 : 1;
+  }
+}
+
+function emptyCoverageFailure(cmd, args, output) {
+  const count = (label) => Number(output.match(new RegExp(`^# ${label} (\\d+)$`, "m"))?.[1]);
+  return isNodeCommand(cmd) && args.includes("--test") && args.includes("--experimental-test-coverage") &&
+    /ERR_OPERATION_FAILED[^\n]*coverage file is empty:/.test(output) &&
+    count("tests") > 0 && count("tests") === count("pass") && count("fail") === 0 && count("cancelled") === 0;
+}
+
+async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
+  const dropped = [];
+  try {
+    for (const entry of readdirSync(rawDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^coverage-\d+-\d{13}-\d+\.json$/.test(entry.name)) continue;
+      const path = join(rawDir, entry.name);
+      if (statSync(path).size !== 0) continue;
+      unlinkSync(path);
+      dropped.push(path);
+    }
+  } catch (error) {
+    console.error(`test-with-retry: could not drop empty coverage files: ${error.message}`);
+    return reportTrackedTreeDirt(treeBefore, first.code);
+  }
+  if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
+  const env = { ...process.env, NODE_V8_COVERAGE: "" };
+  const rebuilt = await runOnce(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+  let code = rebuilt.code;
+  if (code === 1) {
+    console.log(`FLAKE-RETRY: coverage rebuild failed — retrying the coverage shard once — ${dropped.join(", ")}`);
+    const second = await runOnce(cmd, args, { ...env, NODE_V8_COVERAGE: rawDir });
+    code = second.code;
+    if (code !== 0) recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+  }
+  if (code === 0) {
+    const line = `FLAKE-RETRY-RECOVERED: dropped empty coverage file(s) — ${dropped.join(", ")}`;
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
+  }
+  return reportTrackedTreeDirt(treeBefore, code === 0 ? 0 : first.code);
+}
+
 export async function main(argv) {
+  if (argv[0] === "--rebuild-coverage") return rebuildCoverage(argv[1], argv.slice(2));
   const coverageFirstPass = argv[0] === "--coverage-first-pass";
   const rawCoverageDir = coverageFirstPass ? argv[1] : undefined;
   const [cmd, ...given] = coverageFirstPass ? argv.slice(2) : argv;
@@ -427,6 +500,7 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
+  if (coverageFirstPass && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
   if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
 
   const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);

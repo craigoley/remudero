@@ -259,47 +259,51 @@ function parseGhJsonBody(args: string[], body: string): unknown {
   }
 }
 
-export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsync = execFileAsync): Promise<unknown> {
-  // Injected executors are test/offline seams and may have independent side effects, so only the
-  // real `gh` transport participates in production single-flight coalescing.
-  if (execAsync === execFileAsync) {
-    const key = JSON.stringify(args);
-    const existing = asyncReadInFlight.get(key);
-    if (existing) return existing;
-    const request = (async (): Promise<unknown> => {
-      // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
-      // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
-      // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
-      refuseSentinelGhToken("gh", args, undefined);
-      await applyGhReadCadenceAsync(args);
-      const { stdout } = await withGhKillEscalation(
-        execAsync("gh", args, {
-          encoding: "utf8",
-          maxBuffer: DEFAULT_GH_MAX_BUFFER,
-          timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
-        }),
-        args,
-        DEFAULT_GH_CALL_TIMEOUT_MS,
-      );
-      return parseGhJsonBody(args, stdout);
-    })();
-    asyncReadInFlight.set(key, request);
-    try {
-      return await request;
-    } finally {
-      if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
-    }
-  }
-  const { stdout } = await withGhKillEscalation(
-    execAsync("gh", args, {
+export async function ghJsonAsync(
+  args: string[],
+  execAsync: typeof execFileAsync = execFileAsync,
+  /** W1-T6591: {@link ghJson}'s rate-limit reading, from the response headers of an `api` read. */
+  onRateLimit?: (reading: GhRateLimitReading) => void,
+): Promise<unknown> {
+  const withHeaders = onRateLimit !== undefined && args[0] === "api";
+  const execArgs = withHeaders ? [...args, "-i"] : args;
+  const stdout = await ghStdoutAsync(args, execArgs, execAsync);
+  if (!withHeaders) return parseGhJsonBody(args, stdout);
+  const { headers, body } = splitGhHeaderBlock(stdout, args.includes("--slurp"));
+  onRateLimit(parseGhRateLimitHeaders(headers));
+  return parseGhJsonBody(args, body);
+}
+
+async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: typeof execFileAsync): Promise<string> {
+  const run = async (): Promise<string> => (await withGhKillEscalation(
+    execAsync("gh", execArgs, {
       encoding: "utf8",
       maxBuffer: DEFAULT_GH_MAX_BUFFER,
       timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
     }),
-    args,
+    execArgs,
     DEFAULT_GH_CALL_TIMEOUT_MS,
-  );
-  return parseGhJsonBody(args, stdout);
+  )).stdout;
+  // Injected executors are test/offline seams and may have independent side effects, so only the
+  // real `gh` transport participates in production single-flight coalescing.
+  if (execAsync !== execFileAsync) return run();
+  const key = JSON.stringify(execArgs);
+  const existing = asyncReadInFlight.get(key) as Promise<string> | undefined;
+  if (existing) return existing;
+  const request = (async (): Promise<string> => {
+    // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
+    // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
+    // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+    refuseSentinelGhToken("gh", args, undefined);
+    await applyGhReadCadenceAsync(args);
+    return run();
+  })();
+  asyncReadInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
+  }
 }
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
@@ -424,6 +428,9 @@ export interface GhCallPacer {
   wait(): void;
   recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
   sleepSync?(ms: number): void;
+  /** W1-T6591: {@link wait} for an event loop — the same gap and floor, the sleep an awaited timer. */
+  waitAsync?(): Promise<void>;
+  sleepAsync?(ms: number): Promise<void>;
 }
 
 export function createGhCallPacer(
@@ -438,6 +445,7 @@ export function createGhCallPacer(
     // src/lib/clock.ts's Clock exists to retire.
     now?(): number;
     sleepSync?: (ms: number) => void;
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): GhCallPacer {
   const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
@@ -446,21 +454,31 @@ export function createGhCallPacer(
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? systemClock.now;
   const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
+  const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
   let standDown: GhBudgetReading | undefined;
+  const takeStandDown = (): void => {
+    if (!standDown) return;
+    const reading = standDown;
+    standDown = undefined;
+    throw new GhPaceFloorStandDownError(reading);
+  };
   return {
     wait() {
-      if (standDown) {
-        const reading = standDown;
-        standDown = undefined;
-        throw new GhPaceFloorStandDownError(reading);
-      }
+      takeStandDown();
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
         if (remaining > 0) sleepSync(remaining);
       }
       lastCallAt = now();
+    },
+    async waitAsync() {
+      takeStandDown();
+      const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
+      // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
+      lastCallAt = now() + Math.max(0, remaining);
+      if (remaining > 0) await sleep(remaining);
     },
     recordResult(rateLimited, budget) {
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
@@ -468,6 +486,7 @@ export function createGhCallPacer(
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
     },
     sleepSync,
+    sleepAsync: sleep,
   };
 }
 
@@ -579,6 +598,38 @@ export function paceGhEntry<T>(
       attempt += 1;
     }
     pacer.wait();
+  }
+}
+
+/** W1-T6591: {@link paceGhEntry} for an awaited call — the same pacer, budget floor and refusal
+ *  backoff, but the gap and the backoff are timers, never a blocking sleep on the event loop. */
+export async function paceGhEntryAsync<T>(
+  pacer: GhCallPacer | undefined,
+  isRateLimited: (err: unknown) => boolean,
+  call: () => Promise<T>,
+  backoff: GhRefusalBackoffOpts = {},
+): Promise<T> {
+  if (!pacer) return call();
+  const floorMs = backoff.floorMs ?? DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS;
+  const maxAttempts = backoff.maxAttempts ?? DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS;
+  const retryAfterSeconds = backoff.retryAfterSeconds ?? defaultGhRetryAfterSeconds;
+  const random = backoff.random ?? Math.random;
+  const wait = async (): Promise<void> => (pacer.waitAsync ? pacer.waitAsync() : pacer.wait());
+  await wait();
+  let attempt = 0;
+  for (;;) {
+    try {
+      const result = await call();
+      pacer.recordResult(false, ghBudgetReadingOf(result));
+      return result;
+    } catch (err) {
+      const limited = isRateLimited(err);
+      pacer.recordResult(limited);
+      if (!limited || attempt + 1 >= maxAttempts) throw err;
+      await (pacer.sleepAsync ?? defaultTimerSleep)(ghRefusalBackoffMs(attempt, err, { retryAfterSeconds, floorMs, random }));
+      attempt += 1;
+    }
+    await wait();
   }
 }
 

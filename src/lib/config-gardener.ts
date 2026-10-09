@@ -20,7 +20,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
+import { gardenNeedsInventory, gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -310,6 +310,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
   "retro.preflight_repair", "fix.done", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
+  // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
+  "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
@@ -869,8 +871,20 @@ type ConfigGardenSpec = Omit<GardenSpec<ConfigGardenClass, ConfigInventory, Conf
 export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<GardenPassResult<ConfigGardenClass, ConfigGardenAction>> {
   await tendConfigCanaries(deps, async () => (await configInventory(deps, sources)).runs);
   if (!gardenPassDue(spec, deps)) return { ran: false };
-  const inventory = await spec.inventory();
-  const pass = await runGardenAsync({ ...spec, inventory: () => inventory }, deps);
+  // W1-T5668: a pending PR keeps the pass due, yet the pass then returns on an unchanged cheap fingerprint
+  // without reading the inventory, so build the 60-day inventory only when the pass would use it. The
+  // pending PR's state is read once and handed to the pass, which would otherwise ask for it again.
+  const pending = readGardenState(gardenStatePath(deps.stateDir, spec.name), spec.classes).pending;
+  const prState = pending ? (deps.prState?.(pending.prUrl) ?? "unknown") : undefined;
+  const passDeps: GardenerDeps = pending ? { ...deps, prState: () => prState! } : deps;
+  const inventory = gardenNeedsInventory(spec, deps, prState) ? await spec.inventory() : undefined;
+  const pass = await runGardenAsync({
+    ...spec,
+    inventory: () => {
+      if (inventory === undefined) throw new Error("config gardener: the pass read an inventory gardenNeedsInventory ruled out");
+      return inventory;
+    },
+  }, passDeps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
     // The action's shadow evidence was measured by the inventory. Starting the window from a

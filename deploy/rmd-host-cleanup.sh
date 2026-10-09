@@ -702,6 +702,8 @@ lender_check() {
 sweep_scratch_unit() {
   local p="$1" status entries entry repo head bundles bytes
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
+  # Empty when the unit holds no repository: healthy, and it still passes every check below.
+  # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
   local -a SCRATCH_LIVE_REPOS=()
   scratch_guard "$p" || return
   is_worktree_idle "$p"; status=$?
@@ -723,7 +725,7 @@ sweep_scratch_unit() {
     if ! scratch_repo_check "$repo"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON ($repo)" "$entries"; return; fi
   done <<< "$entries"
   # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
-  for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
+  for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
       if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
         keep_scratch_for_repo "$p" "Git fetch failed (unknown)" "$entries"; return
@@ -743,7 +745,7 @@ sweep_scratch_unit() {
     [ -n "$entry" ] || continue
     if ! archive_scratch_bundle "$entry"; then keep_scratch_for_repo "$p" "bundle could not be archived safely" "$entries"; return; fi
   done <<< "$bundles"
-  for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
+  for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
     if [ -f "$repo/.git" ]; then
       log "REMOVE $repo (linked worktree)"
       if ! act rgit "$repo" worktree remove -- "$repo"; then
