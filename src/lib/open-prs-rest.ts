@@ -468,6 +468,7 @@ export interface BoardPrRest {
   title: string;
   /** REST's `updated_at`. Not rendered — the delta's stop key. */
   updatedAt: string;
+  mergedAt?: string;
 }
 
 /** Translate one REST pull row to the board's row shape. Everything except `state` and `title` comes
@@ -487,6 +488,7 @@ export function mapBoardPr(row: RestPullRow): BoardPrRest {
     autoMergeRequest: base.autoMergeRequest,
     title: row.title ?? "",
     updatedAt: base.updatedAt,
+    ...(typeof row.merged_at === "string" ? { mergedAt: row.merged_at } : {}),
   };
 }
 
