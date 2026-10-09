@@ -9708,7 +9708,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
   taskId: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
-  prerequisiteBranch?: string;
+  prerequisiteBranch: string;
 }): SpawnWorkerArgs {
   return {
     cwd: args.worktreePath,
@@ -9734,18 +9734,18 @@ export function buildPrerequisitePrDispatchArgs(args: {
   };
 }
 
-/** W1-T5779: why an opened prerequisite PR cannot pass head-identity-gate or acceptance-author-gate, or undefined
- *  when it can or a read gave no evidence (an `ok:false` head, a throwing body read), which leaves the CI wait as before. */
+/** W1-T5810: requires both readers; an `ok:false` head or throwing body read leaves the CI wait as before.
+ *  Returns why the prerequisite fails admission, or undefined when the available evidence admits it. */
 export async function prerequisitePrAdmissionRefusal(
   prUrl: string,
   mintedBranch: string,
-  read: { readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody?: (prUrl: string) => Promise<string> },
+  read: { readLiveHead: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody: (prUrl: string) => Promise<string> },
 ): Promise<string | undefined> {
-  const head = read.readLiveHead ? await read.readLiveHead(prUrl) : undefined;
+  const head = await read.readLiveHead(prUrl);
   if (head?.ok && head.headRefName !== undefined && head.headRefName !== mintedBranch) {
     return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
   }
-  const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const body = await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) }));
   const trailer = typeof body === "string" ? extractTaskTrailerId(body) : undefined;
   if (trailer !== undefined) return `prerequisite ${prUrl} body carries "Remudero-Task: ${trailer}" — a prerequisite credits no task`;
   const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
@@ -10792,7 +10792,7 @@ export async function runFixRung(opts: {
      * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
      * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
      * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
-     * cached snapshot, mirroring `readLiveState`. Omitted, or a failed/indeterminate read, the rung proceeds.
+     * cached snapshot, mirroring `readLiveState`. Omission refuses a prerequisite dispatch; indeterminate reads proceed.
      */
     readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
     /**
@@ -10836,7 +10836,7 @@ export async function runFixRung(opts: {
      * sites wire {@link fetchPrBodyViaGh} explicitly. Every fix mode also uses the fetched
      * snapshot only as its retry/backoff identity, so a worker transcript never masquerades as PR
      * input. Best-effort: a throwing fetcher falls back to the worker-text report for judgment
-     * and leaves the exact-input identity unset.
+     * and leaves the exact-input identity unset. Omission refuses a prerequisite dispatch (W1-T5810).
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
     /**
@@ -12032,7 +12032,12 @@ export async function runFixRung(opts: {
           });
           return await escalateAndExhaust();
         }
-        const admissionRefusal = await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, deps);
+        const missingReaders = [!deps.readLiveHead && "readLiveHead", !deps.fetchPrBody && "fetchPrBody"].filter(Boolean);
+        const admissionRefusal = missingReaders.length
+          ? `prerequisite ${prerequisiteUrl} missing required reader(s): ${missingReaders.join(", ")}`
+          : await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, {
+              readLiveHead: deps.readLiveHead!, fetchPrBody: deps.fetchPrBody!,
+            });
         if (admissionRefusal) {
           deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();

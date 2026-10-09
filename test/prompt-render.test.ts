@@ -64,6 +64,7 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
     prUrl: "https://github.com/craigoley/remudero/pull/2886",
     instrumentPaths: ["test/prompt-render.test.ts"],
     srcPaths: ["src/run-task.ts", "src/lib/prompt-render.ts"],
+    prerequisiteBranch: "run-unfiled-1700000000000",
   });
   const recon = renderReconPrompt(
     "PLAN INDEX\n- section 1: Mission",
@@ -89,7 +90,7 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T6465 re-baselined fix: NEEDS_SCOPE now tells the worker to keep out-of-scope edits saved
   // (test/a-fix-round-that-needs-scope-gets-it.test.ts pins the new text itself).
   assert.equal(sha256(fix), "178ed4a5d6104ffbd54cb01067dbc57c30d84c2cfcab13904eb785f1d2d491af");
-  assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
+  assert.equal(sha256(prerequisite), "802d1ed90dfcdf9bafe73c210c63c61a2856e36228cd268235bc412543518b2b");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted
   // check-runner instead of a shell cannot follow those literally -- which pinned the recon lane to
@@ -135,6 +136,7 @@ test("prompt renderers: run-task keeps compatibility re-exports of the lib templ
       prUrl: "https://github.com/craigoley/remudero/pull/2886",
       instrumentPaths: ["test/prompt-render.test.ts"],
       srcPaths: ["src/run-task.ts", "src/lib/prompt-render.ts"],
+      prerequisiteBranch: "run-unfiled-1700000000000",
     }),
     compatRenderPrerequisitePrPrompt({
       task: TASK,
@@ -142,6 +144,7 @@ test("prompt renderers: run-task keeps compatibility re-exports of the lib templ
       prUrl: "https://github.com/craigoley/remudero/pull/2886",
       instrumentPaths: ["test/prompt-render.test.ts"],
       srcPaths: ["src/run-task.ts", "src/lib/prompt-render.ts"],
+      prerequisiteBranch: "run-unfiled-1700000000000",
     }),
   );
   assert.equal(renderReconPrompt("PLAN INDEX"), compatRenderReconPrompt("PLAN INDEX"));
