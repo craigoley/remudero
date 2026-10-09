@@ -764,6 +764,12 @@
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
     },
     {
+      "path": "docs/semgrep-native-ce.md",
+      "title": "Native hash-locked Semgrep Community Edition",
+      "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
+      "grepHint": "Native hash-locked Semgrep Community Edition"
+    },
+    {
       "path": "docs/system-diagrams.md",
       "title": "System diagrams",
       "summary": "Three Mermaid diagrams of how remudero actually runs: the two hosts, the daemon loop, and the",

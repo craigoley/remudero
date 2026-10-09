@@ -26,7 +26,8 @@ concurrency:
 jobs:
   semgrep:
     name: Scan
-    runs-on: ubuntu-latest
+    # The runtime lock deliberately targets CPython 3.12 / Linux x86_64.
+    runs-on: ubuntu-24.04
     # R-50: observed PR runs complete in ~1-2 minutes; 20m bounds a genuine hang with
     # generous headroom.
     timeout-minutes: 20
@@ -34,16 +35,54 @@ jobs:
       security-events: write
       contents: read
       actions: read
-    # Community edition from the official image pinned by digest (W1-T66: Scorecard PinnedDependencies
-    # flagged `pip install semgrep==…`, which cannot hash-pin its transitive deps in one line) — no pip,
-    # no SEMGREP_APP_TOKEN, no Semgrep Cloud.
-    container:
-      image: semgrep/semgrep@sha256:4095860d71cc40d42617b92b0b420711736ada7d67fdb254c5ef4f37dd8fc3ec # 1.167.0
+    # Native Community Edition: avoid Docker Hub initialization/rate limits and image
+    # redistribution. Both build tools and the entire runtime are reviewed hash locks.
+    # No Pro engine, registry token, SEMGREP_APP_TOKEN or Semgrep Cloud login.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.15"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            .github/semgrep/build-requirements.txt
+            .github/semgrep/requirements.txt
+
+      - name: Install hash-locked Community Edition
+        shell: bash
+        env:
+          # Peewee 3.18.3 has no published wheel. Only its reviewed/hash-locked sdist
+          # may build; this disables its optional SQLite C extensions, not Semgrep's engine.
+          NO_SQLITE: "1"
+        run: |
+          VENV="$(mktemp -d "${RUNNER_TEMP}/semgrep-ce.XXXXXX")"
+          python -m venv "$VENV"
+          "$VENV/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple \
+            --require-hashes --only-binary=:all: --no-deps --force-reinstall \
+            -r .github/semgrep/build-requirements.txt
+          # Cache downloads, not an executable environment or unverified built wheel.
+          "$VENV/bin/python" -m pip --isolated download \
+            --index-url https://pypi.org/simple \
+            --require-hashes --only-binary=:all: --no-binary=peewee \
+            --no-build-isolation --no-deps --dest "$VENV/artifacts" \
+            -r .github/semgrep/requirements.txt
+          # Re-check the downloaded bytes; build the one exception offline with the
+          # locked tools. Disable built-wheel cache reuse, then verify dependency closure.
+          "$VENV/bin/python" -m pip --isolated install \
+            --no-index --find-links "$VENV/artifacts" --no-cache-dir \
+            --require-hashes --only-binary=:all: --no-binary=peewee \
+            --no-build-isolation --no-deps --force-reinstall \
+            -r .github/semgrep/requirements.txt
+          "$VENV/bin/python" -m pip check
+          test "$("$VENV/bin/semgrep" --version)" = "1.180.0"
+          printf '%s\n' "$VENV/bin" >> "$GITHUB_PATH"
 
       - name: Run Semgrep
         # Never fail the build here; findings surface in the Security tab via SARIF.
