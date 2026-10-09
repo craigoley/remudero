@@ -365,12 +365,17 @@ export interface MachineFilingAdmissionContext {
 
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
+/** What may own a ci-friction cause: code under src/ or scripts/, or — since the gardener resolves a
+ *  check to the workflow job that declares it (#10428) — that workflow file. A workflow-owned remedy
+ *  still parks for the judge; drain routes its build to an operator (W1-T5351). */
+const CI_FRICTION_OWNER = /^(?:src|scripts)\/|^\.github\/workflows\/[^/]+\.ya?ml$/;
+
 function isCiFrictionRemedyProposal(task: Task): boolean {
   const files = task.files ?? [];
   return (
     task.origin?.startsWith("ci-friction:") === true &&
-    files.some((f) => /^(src|scripts)\//.test(f)) &&
-    files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
+    files.some((f) => CI_FRICTION_OWNER.test(f)) &&
+    files.every((f) => CI_FRICTION_OWNER.test(f) || NEW_TEST_FILE.test(f))
   );
 }
 
