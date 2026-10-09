@@ -3614,7 +3614,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             prNumber: pr.prNumber,
             headSha: pr.headSha,
             ledgerLines: readLedgerLines(ledgerPath), // ledger-read-intent: live
-            onUnreadable: (reason) => log("sweep.fix.prior_partial_work_unreadable", { pr_number: pr.prNumber, task_id: task.id, head_sha: pr.headSha, reason }),
+            onUnreadable: (why) => log("sweep.fix.prior_partial_work_unreadable", { pr_number: pr.prNumber, task_id: task.id, head_sha: pr.headSha, ...why }),
           });
         } catch (e) {
           log("sweep.fix.prior_partial_work_unreadable", {
@@ -10228,7 +10228,7 @@ export function readPreservedOwnerPatch(args: {
   headSha: string;
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   git?: (repoDir: string, argv: string[]) => string;
-  onUnreadable?: (reason: string) => void;
+  onUnreadable?: (why: { reason: string }) => void;
 }): PriorPartialWork | undefined {
   const row = args.ledgerLines.findLast(
     (line) => line.step === "sweep.fix.owner_residue_preserved" && line.pr_number === args.prNumber && line.head_sha === args.headSha,
@@ -10236,7 +10236,7 @@ export function readPreservedOwnerPatch(args: {
   if (!row) return undefined;
   const recoveryRef = typeof row.recovery_ref === "string" ? row.recovery_ref : "";
   if (!recoveryRef.startsWith(PRESERVED_PATCH_REF_PREFIX) || /[\s\0]/.test(recoveryRef)) {
-    args.onUnreadable?.("recovery_ref is outside the recovery namespace");
+    args.onUnreadable?.({ reason: "recovery_ref is outside the recovery namespace" });
     return undefined;
   }
   const git = args.git ?? ((dir: string, argv: string[]) => hostWorktreeGit(dir, argv, { maxBuffer: 1 << 24 }));
@@ -10247,7 +10247,7 @@ export function readPreservedOwnerPatch(args: {
       "diff", "--no-ext-diff", "--no-textconv", "--no-color", `${recoveryRef}^`, recoveryRef, "--", ".", ...PRESERVED_PATCH_WITHHELD_PATHSPECS,
     ]);
   } catch (e) {
-    args.onUnreadable?.(capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP));
+    args.onUnreadable?.({ reason: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP) });
     return undefined;
   }
   const scrubbed = scrubRiskJudgeText(diff).text;

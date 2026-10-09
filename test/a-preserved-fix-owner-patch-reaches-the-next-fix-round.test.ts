@@ -218,7 +218,7 @@ test("W1-T6434: a head with no preserved row prompts exactly as before", async (
 test("W1-T6434: an unreadable or out-of-namespace recovery ref yields no prior work and reports why", () => {
   const p = preservedResidue();
   const reasons: string[] = [];
-  const onUnreadable = (reason: string) => reasons.push(reason);
+  const onUnreadable = (why: { reason: string }) => reasons.push(why.reason);
   const missing = readPreservedOwnerPatch({
     repoDir: p.repo.dir, prNumber: PR, headSha: p.head, onUnreadable,
     ledgerLines: [preservedRow(p, { recovery_ref: `refs/rmd-recovery/fix-dirty/gone/${p.head}/${"0".repeat(40)}` })],
