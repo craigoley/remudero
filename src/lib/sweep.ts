@@ -1947,7 +1947,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
     settingsFile: join(repoRoot, "settings", "worker.json") }) : undefined;
-  log("sweep.progress_judge_wiring", { judge: effectsProgressJudge ? "production" : "former_bound_stand_in" });
+  sweepEffectsWiringObserver?.(effectsProgressJudge ? "production" : "former_bound_stand_in");
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
@@ -5648,6 +5648,8 @@ export interface OpenPrView {
   /** Completed worker rounds that moved the head or reached a verdict (from the ledger). */
   priorStrikes: number;
   repeatedFixRefusal?: string;
+  /** W1-T7096: the progress judge ruled this exhausted PR a loop — it enters the strikes-exhausted route. */
+  progressEscalation?: { loop: string; reason: string; judged: boolean };
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
@@ -8534,6 +8536,11 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
  * CONFLICTED ABOVE mergeable, so a conflicting PR is never armed however green; and the
  * refused-head post-review row before the first-sighting one.
  */
+/** W1-T7096: exhausted rounds the progress judge (or the announced stand-in) ruled a loop. */
+export function isFixStrikeJudgedExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
+  return pr.progressEscalation !== undefined && isFixStrikeExhausted(pr, policy);
+}
+
 export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
   const fixableReview = pr.reviewState === "failure" && (
     pr.unmetCriteria.length > 0 ||
@@ -8773,6 +8780,23 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined),
     reason: (pr) =>
       `task id unresolved for PR #${pr.prNumber} — a plan-filing PR carries no Remudero-Task trailer by design (W1-T136 criterion 5) — standing down`,
+  },
+  {
+    // W1-T100 + W1-T7096 (ruling 2026-10-09): the strikes-exhausted route — ladder, digest, stale-base
+    // refresh, operator re-arm — is entered only when the progress judge rules the rounds a loop. The
+    // count makes judgment DUE; it never decides alone. An unwired caller gets the announced stand-in.
+    disposition: "blocked-ambiguous",
+    when: isFixStrikeJudgedExhausted,
+    blocker: "strikes-exhausted",
+    reason: (pr, policy) => {
+      const judged = pr.progressEscalation?.judged ? ` — judged loop: ${pr.progressEscalation.loop}` : "";
+      if (pr.repeatedFixRefusal !== undefined) return repeatedFixRefusalReason(pr.repeatedFixRefusal) +
+        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "") + judged;
+      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+      return (isBlockedCi(pr)
+        ? `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — ${describeCiFailures(pr)} — escalating`
+        : `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — escalating`) + judged;
+    },
   },
   {
     // W1-T7096: reaching the former cap or repeating a refusal routes to judgment, never stops a round.
@@ -13099,6 +13123,51 @@ export async function runSweep(
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
     : pr);
+  // W1-T7096: judge every PR whose rounds reached the former ceiling BEFORE dispositions derive, so an
+  // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
+  const judgedContinue = new Map<number, FixProgressVerdict>();
+  const judgedUnavailable = new Map<number, string>();
+  // An unwired caller (a fixture) keeps the former bound as an announced stand-in: escalate once the
+  // former ceiling is reached, continue below it. Production always wires the judge (W1-T7096 guard suite).
+  let standInAnnounced = false;
+  const progressJudge: FixProgressJudge = deps.fixProgressJudge ?? (async (input) => {
+    if (!standInAnnounced) {
+      standInAnnounced = true;
+      log("sweep.progress_judge_stand_in", { judge: "former_bound_stand_in" });
+    }
+    const pr = openPrs.find((candidate) => candidate.prNumber === input.prNumber);
+    return pr !== undefined && isFixStrikeExhausted(pr, policy)
+      ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
+      : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
+  });
+  {
+    const judged = deps.fixProgressJudge !== undefined;
+    const next: OpenPrView[] = [];
+    for (const pr of openPrs) {
+      // A repeated refusal is judged later, with its parked reason; only a reached ceiling is judged here.
+      // The parked waits W1-T7096 owns (a refused commit at this head, a metadata or proof repair in
+      // flight) are judged later on the fixable path, which supplies their parked reason.
+      if (!isFixStrikeExhausted(pr, policy) || pr.repeatedFixRefusal !== undefined ||
+          sameHeadRedFixRefusal(ledgerLines, pr) !== undefined || metadataOnlyRed(pr) !== undefined ||
+          proofRepairRouteEvidence(pr) !== undefined) { next.push(pr); continue; }
+      const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+        currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
+        ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
+        formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: pr.repeatedFixRefusal });
+      const result = await judgeFixProgress(input, progressJudge);
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
+        step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha, site: "exhaustion",
+        round_count: input.rounds.length, signals: input.signals, ...result });
+      if (result.verdict === "escalate") {
+        next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
+        continue;
+      }
+      if (result.verdict === "continue" || result.verdict === "change-approach") judgedContinue.set(pr.prNumber, result);
+      else judgedUnavailable.set(pr.prNumber, result.reason);
+      next.push(pr);
+    }
+    openPrs = next;
+  }
   // W1-T3471: a live miss is not enough to call a verdict absent. Read the bounded archive∪live
   // union only on that rare path; an unreadable or archive-free corpus stays incomplete so the
   // historical fail-open remains intact.
@@ -14159,7 +14228,7 @@ export async function runSweep(
       disposition = "stale";
     }
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
-      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted;
+      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
     const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
@@ -14294,7 +14363,7 @@ export async function runSweep(
       disposition === "blocked-ambiguous" && pr.repeatedFixRefusal !== undefined && pr.priorStrikes < policy.strikeCap &&
       typeof deps.dispatchPlanOnlyRepair === "function" && metadataOnlyRed(pr) !== undefined &&
       proofRepairRouteEvidence(pr) !== undefined && priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES &&
-      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeExhausted
+      selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted
     ) {
       disposition = "blocked-fixable";
       reason =
@@ -14883,7 +14952,14 @@ export async function runSweep(
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
               const askProgress = async (): Promise<boolean> => {
+                progressDecision ??= judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
+                const unavailable = judgedUnavailable.get(pr.prNumber);
+                if (unavailable !== undefined) {
+                  acted = false;
+                  standDownReason = unavailable;
+                  return false;
+                }
                 const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber,
                   headSha: pr.headSha, currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
                     ...pr.unmetCriteria.map(c => `review:${c.claim}`),
@@ -14898,7 +14974,7 @@ export async function runSweep(
                   standDownReason = "this fix progress loop is already escalated; awaiting new evidence or an operator answer";
                   return false;
                 }
-                const result = await judgeFixProgress(input, deps.fixProgressJudge);
+                const result = await judgeFixProgress(input, progressJudge);
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   input_key: inputKey, round_count: input.rounds.length, signals: input.signals, ...result });
@@ -17264,6 +17340,13 @@ export function windowCostRows(
 export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+
+let sweepEffectsWiringObserver: ((judge: "production" | "former_bound_stand_in") => void) | undefined;
+/** W1-T7096: lets a test see which progress judge each real sweep-effects construction wired, without a log row. */
+export function observeSweepEffectsWiring(observer: typeof sweepEffectsWiringObserver): () => void {
+  sweepEffectsWiringObserver = observer;
+  return () => { sweepEffectsWiringObserver = undefined; };
+}
 
 const PRODUCTION_FIX_PROGRESS_JUDGES = new WeakSet<FixProgressJudge>();
 /** True for a judge built by {@link productionFixProgressJudge} — lets a fixture tell a chosen judge from a default one. */

@@ -3,18 +3,29 @@
 // that each one constructs the production progress judge, so no production path can silently fall
 // back to the bound Craig ruled out. The stand-in itself must announce itself when it is used.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepEffects } from "../src/lib/sweep.js";
+import { buildSweepEffects, observeSweepEffectsWiring, runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { buildSweepHook, buildSweepLightHook, fixCommand, formerBoundStandIn } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 type Row = { step: string; extra?: Record<string, unknown> };
-const wiring = (rows: Row[]) => rows.filter((r) => r.step === "sweep.progress_judge_wiring").map((r) => r.extra?.judge);
+
+/** Records which judge every real sweep-effects construction wired while `run` executes. */
+async function observeWiring(run: () => Promise<void> | void): Promise<string[]> {
+  const seen: string[] = [];
+  const stop = observeSweepEffectsWiring((judge) => { seen.push(judge); });
+  try {
+    await run();
+  } finally {
+    stop();
+  }
+  return seen;
+}
 
 async function withGh<T>(stdout: string, run: (root: string) => Promise<T>): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t7096-entry-`));
@@ -31,30 +42,27 @@ async function withGh<T>(stdout: string, run: (root: string) => Promise<T>): Pro
 }
 
 test("W1-T7096: the daemon's full sweep hook wires the production progress judge", async () => {
-  const rows: Row[] = [];
-  await withGh("[]", async (root) => {
+  const wired = await withGh("[]", (root) => observeWiring(async () => {
     const hook = buildSweepHook("o", "r", { root, claudeBin: "/bin/true" } as Config, join(root, "ledger.ndjson"),
-      "DAEMON-T7096", { tasks: [], byId: new Map() } as never, (step, extra) => { rows.push({ step, extra }); });
+      "DAEMON-T7096", { tasks: [], byId: new Map() } as never, () => {});
     await hook();
-  });
-  assert.ok(wiring(rows).length > 0, `the hook built its sweep effects: ${JSON.stringify(rows.map((r) => r.step))}`);
-  assert.deepEqual([...new Set(wiring(rows))], ["production"]);
+  }));
+  assert.ok(wired.length > 0, "the hook built its sweep effects");
+  assert.deepEqual([...new Set(wired)], ["production"]);
 });
 
 test("W1-T7096: the daemon's light sweep hook wires the production progress judge", async () => {
-  const rows: Row[] = [];
-  await withGh("[]", async (root) => {
+  const wired = await withGh("[]", (root) => observeWiring(async () => {
     const hook = buildSweepLightHook("o", "r", { root } as never, join(root, "ledger.ndjson"), "RUN-T7096",
-      { tasks: [] } as never, (step, extra) => { rows.push({ step, extra }); },
-      { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false });
+      { tasks: [] } as never, () => {}, { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false });
     await hook();
-  });
-  assert.ok(wiring(rows).length > 0, `the light hook built its sweep effects: ${JSON.stringify(rows.map((r) => r.step))}`);
-  assert.deepEqual([...new Set(wiring(rows))], ["production"]);
+  }));
+  assert.ok(wired.length > 0, "the light hook built its sweep effects");
+  assert.deepEqual([...new Set(wired)], ["production"]);
 });
 
 test("W1-T7096: `rmd fix` wires the production progress judge", async () => {
-  await withGh('{"contexts":[]}', async (root) => {
+  const wired = await withGh('{"contexts":[]}', (root) => observeWiring(async () => {
     mkdirSync(join(root, "state"), { recursive: true });
     const oldError = console.error;
     console.error = () => {};
@@ -70,23 +78,32 @@ test("W1-T7096: `rmd fix` wires the production progress judge", async () => {
     } finally {
       console.error = oldError;
     }
-    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean)
-      .map((line) => JSON.parse(line) as { step: string; judge?: string });
-    const judges = ledger.filter((r) => r.step === "sweep.progress_judge_wiring").map((r) => r.judge);
-    assert.ok(judges.length > 0, "rmd fix built its sweep effects");
-    assert.deepEqual([...new Set(judges)], ["production"]);
-  });
+  }));
+  assert.ok(wired.length > 0, "rmd fix built its sweep effects");
+  assert.deepEqual([...new Set(wired)], ["production"]);
 });
 
-test("W1-T7096: sweep effects built without the opt-in say so in a ledger row", () => {
-  const rows: Row[] = [];
+test("W1-T7096: sweep effects built without the opt-in wire no judge, and the sweep's stand-in ledgers itself when used", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t7096-effects-`));
   try {
-    const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as Config,
-      ledgerPath: join(root, "ledger.ndjson"), runId: "T7096", plan: { tasks: [] } as never,
-      log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); } } as never);
-    assert.equal(effects.fixProgressJudge, undefined, "no production judge was built");
-    assert.deepEqual(wiring(rows), ["former_bound_stand_in"]);
+    let effects: ReturnType<typeof buildSweepEffects> | undefined;
+    const wired = await observeWiring(() => {
+      effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as Config,
+        ledgerPath: join(root, "ledger.ndjson"), runId: "T7096", plan: { tasks: [] } as never, log: () => {} } as never);
+    });
+    assert.equal(effects?.fixProgressJudge, undefined, "no production judge was built");
+    assert.deepEqual(wired, ["former_bound_stand_in"]);
+
+    // A PR whose rounds reached the former ceiling, swept with no judge wired: the stand-in decides and says so.
+    const rows: Row[] = [];
+    const escalated: string[] = [];
+    const pr = { prNumber: 7096, prUrl: "https://github.com/o/r/pull/7096", taskId: "W1-T7096", headSha: "h",
+      reviewState: "failure", checksState: "green", unmetCriteria: [{ claim: "c", proof: "unit test: c", met: false, reason: "r" }],
+      priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, lastActivityAt: new Date().toISOString() } as unknown as OpenPrView;
+    await runSweep([pr], { ledgerPath: join(root, "ledger.ndjson"), runId: "T7096", readLedger: () => [], appendLine: () => {},
+      log: (step, extra) => { rows.push({ step, extra }); }, arm: () => {}, close: () => {},
+      escalate: (_pr, reason) => { escalated.push(reason); }, dispatchFix: () => {} });
+    assert.deepEqual(rows.filter((r) => r.step === "sweep.progress_judge_stand_in").map((r) => r.extra?.judge), ["former_bound_stand_in"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
