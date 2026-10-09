@@ -6089,6 +6089,7 @@ export type WorktreeKeepReason =
   | "activity-unknown"
   /** Removal itself failed — best-effort, the rest of the pass continues. */
   | "removal-failed"
+  | "locked"
   /** The entry's own `.git` is present but could not be read or parsed, so whether an admin record exists in some parent clone
    * is UNKNOWABLE. An ambiguous signal keeps; it never destroys — the same doctrine `activity-unknown` applies one gate
    * above. See {@link planWorktreeRemoval}. */
@@ -6164,7 +6165,7 @@ export interface WorktreeReapSummary {
   kept: string[];
   /** The same entries as `kept`, each paired with why it survived, so a pass that keeps everything is diagnosable rather than
    * silent. Optional so three-field literals keep typechecking; {@link reapStaleWorktrees} always populates it (W1-T378). */
-  keptReasons?: Array<{ name: string; reason: WorktreeKeepReason }>;
+  keptReasons?: Array<{ name: string; reason: WorktreeKeepReason; error?: string }>;
 }
 
 export interface WorktreeReapOpts {
@@ -6356,9 +6357,10 @@ function executeWorktreeRemoval(
   // `keep` is excluded at the type level, not merely by convention: the caller must have already acted on it (by keeping the
   // entry) before anything here could destroy something.
   plan: Exclude<WorktreeRemovalPlan, { kind: "keep" }>,
+  initializing: boolean,
 ): void {
   if (plan.kind === "git-remove") {
-    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", entryPath], {
+    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath], {
       stdio: "pipe",
     });
     return;
@@ -6429,10 +6431,10 @@ function* worktreeReapPass(
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
   const kept: string[] = [];
-  const keptReasons: Array<{ name: string; reason: WorktreeKeepReason }> = [];
-  const keep = (name: string, reason: WorktreeKeepReason): void => {
+  const keptReasons: Array<{ name: string; reason: WorktreeKeepReason; error?: string }> = [];
+  const keep = (name: string, reason: WorktreeKeepReason, error?: string): void => {
     kept.push(name);
-    keptReasons.push({ name, reason });
+    keptReasons.push({ name, reason, ...(error === undefined ? {} : { error }) });
   };
 
   const candidatePaths = opts.candidatePaths;
@@ -6516,8 +6518,25 @@ function* worktreeReapPass(
       continue;
     }
     try {
+      let initializing = false;
+      if (removalPlan.repoDir) {
+        const gitdir = readFileSync(join(entryPath, ".git"), "utf8").match(/^gitdir:\s*(.+?)\s*$/m)![1];
+        let lockReason: string | undefined;
+        try {
+          lockReason = readFileSync(join(resolve(entryPath, gitdir), "locked"), "utf8").replace(/\n$/, "");
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+        if (lockReason !== undefined) {
+          if (lockReason !== "initializing") {
+            keep(name, "locked");
+            continue;
+          }
+          initializing = true;
+        }
+      }
       if (!dryRun) {
-        executeWorktreeRemoval(entryPath, removalPlan);
+        executeWorktreeRemoval(entryPath, removalPlan, initializing);
         removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
         // The base record is a sibling FILE on disk, so its cleanup belongs INSIDE the dryRun guard: removing it during a
         // survey would destroy state while claiming only to look. One orphan per reap otherwise (W1-T406 x W1-T405 merge
@@ -6525,8 +6544,10 @@ function* worktreeReapPass(
         removeWorktreeBase(entryPath);
       }
       reaped.push(name); // SURVEY (dryRun) or real removal — either way this is what qualified
-    } catch {
-      keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass
+    } catch (e) {
+      const stderr = (e as { stderr?: Buffer | string })?.stderr?.toString();
+      const error = stderr || String((e as Error)?.message ?? e);
+      keep(name, "removal-failed", error);
     }
   }
 
