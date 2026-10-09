@@ -4,13 +4,47 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
-import { resolveArtifactScanRoots, type Config } from "../src/lib/config.js";
+import { loadConfig, resolveArtifactScanRoots, validateConfig, ConfigValidationError, type Config } from "../src/lib/config.js";
+import { ConfigShapeError } from "../src/lib/config-schema.js";
 import { sweepReclaimableArtifacts, type ArtifactSweepOptions } from "../src/lib/disk-artifact-reclaim.js";
 
 const GiB = 1024 ** 3;
 const now = 1_800_000_000_000;
 const configFor = (root: string, roots?: string[]): Config =>
   ({ claudeBin: "/usr/bin/claude", root, ...(roots === undefined ? {} : { diskArtifactScanRoots: roots }) });
+
+test("loadConfig preserves persisted artifact scan roots through validation and resolution", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-artifact-config-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const configDir = join(home, ".config", "remudero");
+    mkdirSync(configDir, { recursive: true });
+    const roots = [join(home, "state"), join(home, "scratch")];
+    writeFileSync(join(configDir, "config.json"), JSON.stringify(configFor(join(home, "managed"), roots)));
+    const config = loadConfig();
+    assert.deepEqual(config.diskArtifactScanRoots, roots);
+    assert.deepEqual(resolveArtifactScanRoots(config), roots);
+    assert.doesNotThrow(() => validateConfig(configFor(config.root)));
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+});
+
+test("artifact scan roots reject malformed arrays and invalid paths at the config boundary", () => {
+  const valid = configFor("/managed", ["/one", "/two"]);
+  assert.doesNotThrow(() => validateConfig(valid));
+  for (const roots of ["/one", {}, ["/one", 42], null]) {
+    assert.throws(() => validateConfig({ ...valid, diskArtifactScanRoots: roots } as Config),
+      (err: unknown) => err instanceof ConfigShapeError && err.message.includes("diskArtifactScanRoots"));
+  }
+  for (const roots of [[], [""], ["relative"], ["/one\0"], ["/one", "/one/."]]) {
+    assert.throws(() => validateConfig(configFor("/managed", roots)),
+      (err: unknown) => err instanceof ConfigValidationError && err.message.includes("diskArtifactScanRoots"));
+  }
+});
 
 test("test/the-artifact-reclaimer-scans-a-disk-that-can-fill.test.ts: each configured root uses its own free space", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-artifact-roots-"));
