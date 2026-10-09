@@ -455,7 +455,7 @@ export function workerHeapReadings(sources: WorkerHeapSources): { refresh(): voi
       try {
         mainHeap = isolateHeap(sources.mainHeap());
       } catch (e) {
-        mainError = reasonOf(e);
+        mainError = reasonOf(e); // Reason: carried as `unattributed_omitted: main-heap-unread:<reason>`; the row omits `main`.
       }
       const out: WorkerHeapFields = {
         worker_heaps: {

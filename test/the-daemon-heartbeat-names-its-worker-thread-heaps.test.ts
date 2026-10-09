@@ -26,7 +26,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { workerHeapReadings, type HeapStatistics, type WorkerHeapEntry, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
-import type { TrackedWorker, WorkerThread } from "../src/lib/worker-heaps.js";
+import { readWorkerHeaps, type TrackedWorker, type WorkerThread } from "../src/lib/worker-heaps.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -253,6 +253,17 @@ test("every heartbeat is written on time while a thread never answers, and it is
   assert.equal(events.filter((e) => e === "read").length, 1, "the silent thread is never asked twice");
   const last = rows.at(-1) as WorkerHeapFields;
   assert.equal(entry(last, 61)?.state, "unanswered", "the silent thread is unanswered, never zero");
+});
+
+test("serve's own worker-heap reading keeps its shape: the daemon book changes nothing serve.memory reads", async () => {
+  const served = controlledThread(71);
+  const reading = readWorkerHeaps([{ kind: "read-model-worker:spawnReadModel", thread: served.thread }], 1_000);
+  served.answer(heap(200));
+  const h = heap(200);
+  assert.deepEqual(await reading, [{
+    name: "worker-heap:read-model-worker:spawnReadModel", kind: "worker-heap", entries: 1,
+    bytes: h.total_heap_size + h.external_memory, parts: { "thread-71": { entries: 1, bytes: h.total_heap_size + h.external_memory } },
+  }], "serve.memory's worker-heap line is still committed heap plus external, one part per thread");
 });
 
 test("the sampler module references no heap snapshot, inspector or gc entry point", () => {
