@@ -1,0 +1,21 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -240,0 +241,16 @@
++- id: acceptance-author-gate-task-authoring-lane
++  subsystem: ci
++  lifecycle: active
++  files: ["plan/tasks.d/**", src/run-task.ts, ".github/workflows/ci.yml"]
++  fact: >-
++    Before opening a PR from the task-authoring lane, ensure its acceptance block has the required
++    header and at least one executable proof using a supported dialect (`unit test:` or `grep:`),
++    and that each proof matches evidence in the proposed tree. The acceptance-author-gate refuses
++    bodies it cannot judge; repair the block and open a new head so CI evaluates the corrected body.
++  evidence: >-
++    The acceptance-author-gate runs the shared acceptance-author-time predicate on pull request
++    bodies. Pull requests #10003 and #10010 were refused by that gate and repaired; their filing
++    records identify this task-authoring lane and the acceptance-block gate as the recurring
++    refusal surface.
++  src: "ci-learning:10003:acceptance-author-gate"
++  cited: "2026-10-09"
