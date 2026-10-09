@@ -1,0 +1,35 @@
+- id: W1-T6640
+  title: "THE SHARED PAUSE CHECK READS THE REMOTE OFF THE LOOP — checkPause → checkSharedPause → lsRemoteSharedPause (src/lib/fleet-control.ts) runs a synchronous `git ls-remote origin <shared pause ref>` through deps.run on the daemon thread every time it is asked; the 2026-10-09 round-6b CPU profile caught it as the longest remaining daemon block, 5.4 s, after the 10-08 loop fixes cut busy share from 88% to 11%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — asking whether the fleet is paused never blocks the daemon thread on a network round trip
+  band_meaning: span
+  origin: "operator session 2026-10-09: round-6b daemon CPU profile with stacks (lanes/claude/daemon-cpu-round6b.cpuprofile, pid 347149)"
+  plan_refs: [W1-T2262, W1-T6590, W1-T6591]
+  files: [src/lib/fleet-control.ts, src/run-task.ts, test/the-shared-pause-check-reads-the-remote-off-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-09 00:49-00:54Z (300 s Profiler session, daemon pid 347149): busy 32.2/301 s; longest run 7.2 s =
+    read-plane → daemon → fleet-control checkPause (run-task.ts) → checkSharedPause → lsRemoteSharedPause 5.4 s.
+    READ on origin/main: lsRemoteSharedPause calls deps.run(["ls-remote", "origin", sharedPauseRef()]) — the
+    production deps.run is a synchronous git spawn — and run-task.ts wires `checkPause: () => checkSharedPause(config.root,
+    realDeps().sharedPauseGit)` for the daemon and drain. The remaining daemon-thread spawn self time was 19.5 s of the window.
+  design: |
+    Keep the shared-pause decision's meaning (held / absent / unreachable, and WHO set it) but stop paying a synchronous
+    network round trip per ask: read the ref asynchronously (async git leaf) on a short refresh interval and answer
+    checkPause from the last completed read, treating "never read yet" exactly as today's first read does (block or not,
+    per the existing semantics). A pause that lands is seen within one refresh interval; a local PAUSE file still wins
+    immediately. No other pause semantics change.
+  acceptance:
+    - claim: "the daemon thread keeps turning while the shared pause ref is read"
+      proof: 'grep: test("W1-T6640: the loop turns while the shared pause is read" in test/the-shared-pause-check-reads-the-remote-off-the-loop.test.ts'
+    - claim: "a held, absent or unreachable shared pause is reported exactly as before"
+      proof: 'grep: test("W1-T6640: shared pause outcomes are unchanged" in test/the-shared-pause-check-reads-the-remote-off-the-loop.test.ts'
+  falsifier: |
+    Keep the synchronous ls-remote: a fake git that sleeps 200 ms blocks a setInterval tick and the first test fails.
