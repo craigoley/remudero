@@ -15,10 +15,11 @@ raw: "Observed live: feedback landing branches are intentionally ephemeral and
   --prune repaired the state and the 17:02Z normal sweep landed PR 6226."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
