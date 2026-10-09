@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import { LANDING_BRANCH, sweepFeedbackLanding, sweepFeedbackLandingAsync } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const execFileAsync = promisify(execFile);
@@ -146,5 +147,28 @@ test("a per-poll landing lets a timer fire while its git fetch is in flight, ret
     assert.deepEqual(verbs.filter((v) => NETWORK_VERBS.has(v)), [], `no network verb: ${JSON.stringify(f.events)}`);
     assert.equal(f.events.filter((e) => e.startsWith("async:")).length, 0, "the awaited seam was never asked");
     assert.equal(f.ghCalls.length, 0, "no PR call");
+  });
+
+  await t.test("un-injected seams spawn the real awaited git and the paced async gh transport", async () => {
+    const f = fixture("defaults", 1);
+    const shim = ghShim([
+      { when: "pr list", stdout: "[]" },
+      { when: "pr create", stdout: `${PR_URL}\n` },
+    ]);
+    const priorPath = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${priorPath ?? ""}`;
+    try {
+      const result = await withLiveWritesAllowed(() =>
+        sweepFeedbackLandingAsync(f.clone.dir, { planPrPreflight: async () => GREEN }),
+      );
+      assert.equal(result.landed, true, JSON.stringify(result));
+      assert.equal(result.prUrl, PR_URL);
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH;
+      else process.env.PATH = priorPath;
+    }
+    assert.ok(f.landed().includes("plan/feedback/fb-0.yaml"), "the record reached the landing branch through the default git");
+    const calls = shim.calls();
+    assert.ok(calls.some((c) => c.includes("pr list")) && calls.some((c) => c.includes("pr create")), JSON.stringify(calls));
   });
 });
