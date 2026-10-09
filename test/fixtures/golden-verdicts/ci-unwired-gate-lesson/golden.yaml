@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T6920: the unwired-gate repair guidance must reach the checker and workflow
+  lanes through a matched learning with an executable acceptance proof.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

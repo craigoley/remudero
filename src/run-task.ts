@@ -3,7 +3,7 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
-import { renameSync } from "node:fs";
+import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
@@ -845,6 +845,7 @@ import {
   writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftSelectionContext,
   type DraftRungOutcome,
   type EvidenceAnchor,
   type BatchApproveResult,
@@ -1624,7 +1625,6 @@ import {
   runSweep,
   runSweepLightPass,
   withFullSweepRepairAdmission,
-  liveHeadShaFrom,
   redQualityGateNames,
   stillRedRequiredNames,
   terminalStateReason,
@@ -25573,6 +25573,7 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
 export function checkProofCommand(
   rest: string[],
   deps: {
+    pathStatus?: (cwd: string, path: string) => string;
     /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
      *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
      *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
@@ -25770,6 +25771,25 @@ export function checkProofCommand(
   // still be printed — this file never reads `diag` to decide the verdict.
   let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
   const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+    const proofPaths = grepTargetPath === undefined
+      ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
+        .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
+      : [grepTargetPath];
+    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => hostWorktreeGitAtTopLevel(
+      cwd, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", resolve(cwd, path)],
+      { log: () => {} },
+    ));
+    for (const path of new Set(proofPaths)) {
+      let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
+      try {
+        status = { kind: "read", text: pathStatus(spawnCwd, path) };
+      } catch (error) {
+        status = { kind: "unreadable", error };
+      }
+      if (status.kind === "read" && status.text.trim() !== "") {
+        console.error(`warning:    ${path} differs from HEAD; the pushed head may answer differently.`);
+      }
+    }
     try {
       const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
       diag = { stdout: out, status: 0, signal: null };
@@ -26331,9 +26351,9 @@ export function gitRunAdapter(
 }
 
 export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
-  const log = (step: string, extra: Record<string, unknown>) => {
+  const log = opts.log ?? ((step: string, extra: Record<string, unknown>) => {
     if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
-  };
+  });
   for (let at = resolve(dir); ; at = dirname(at)) {
     try {
       return hostWorktreeGit(at, args, { ...opts, log });
@@ -36245,10 +36265,10 @@ export function shardRepairsPending(stateDir: string, clock: Clock = systemClock
 }
 
 /** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
-export function withShardRepairs(stateDir: string, repairs: () => void, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
-  return Object.assign(() => {
+export function withShardRepairs(stateDir: string, repairs: () => void | Promise<void>, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
+  return Object.assign(async () => {
     try {
-      repairs();
+      await repairs();
     } catch (e) {
       log("plan.shard_repair_failed", { stage: "pass", reason: String((e as Error)?.message ?? e) });
     }
@@ -36262,16 +36282,16 @@ type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
 /** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
 type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
 
-function repairRequestedShard(
+async function repairRequestedShard(
   request: ShardRepairRequest,
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined; prState: (prUrl: string) => PrState },
-): ShardRepairOutcome {
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string | Promise<string>; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>; prState: (prUrl: string) => PrState | Promise<PrState> },
+): Promise<ShardRepairOutcome> {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
   let text: string;
   try {
-    text = opts.readOriginBlob(rel);
+    text = await opts.readOriginBlob(rel);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("read", e));
     return { retry: true };
@@ -36293,7 +36313,7 @@ function repairRequestedShard(
     return { done: true };
   }
   if (prior !== undefined) {
-    const prState = opts.prState(prior);
+    const prState = await opts.prState(prior);
     if (prState === "unknown") {
       opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR" });
       return { retry: true, blob };
@@ -36320,7 +36340,7 @@ function repairRequestedShard(
   };
   let prUrl: string | undefined;
   try {
-    prUrl = opts.land(rel, verdict.text, pr);
+    prUrl = await opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
     return { retry: true, blob };
@@ -36354,38 +36374,39 @@ function rescheduleShardRepair(path: string, request: ShardRepairRequest, blob: 
 
 /**
  * Off the loop, inside the plan garden's child: each due request is repaired from origin/main's blob
- * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
+ * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckoutAsync} (its
  * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`, unless that PR was
  * closed unmerged, when one fresh PR is opened (W1-T5618). A request is consumed only at an end state — a PR
  * open or merged, a refusal, a request that cannot be read; a not-landed or failed attempt backs off and is
  * retried on a later pass until {@link SHARD_REPAIR_ATTEMPT_CAP} abandons it.
  */
-export function runShardRepairPass(opts: {
+export async function runShardRepairPass(opts: {
   stateDir: string;
   repoDir: string;
   worktreesRoot: string;
   owner: string;
   repo: string;
   log: ShardRepairLog;
-  readOriginBlob?: (rel: string) => string;
-  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
-  prState?: (prUrl: string) => PrState;
+  readOriginBlob?: (rel: string) => string | Promise<string>;
+  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined | Promise<string | undefined>;
+  prState?: (prUrl: string) => PrState | Promise<PrState>;
+  openCheckout?: (opts: GardenCheckoutOpts) => Promise<GardenCheckoutAsync>;
   clock?: Clock;
-}): void {
+}): Promise<void> {
   const readOriginBlob =
-    opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
+    opts.readOriginBlob ?? (async (rel: string) => (await execFilePromise("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 })).stdout);
   const land =
     opts.land ??
-    ((rel: string, text: string, pr: { title: string; body: string }) => {
-      const checkout = gardenCheckout({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log });
+    (async (rel: string, text: string, pr: { title: string; body: string }) => {
+      const checkout = await (opts.openCheckout ?? gardenCheckoutAsync)({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, clock: opts.clock });
       try {
         writeFileSync(join(checkout.root, rel), text);
-        return checkout.land({ paths: [rel], ...pr });
+        return await checkout.land({ paths: [rel], ...pr });
       } finally {
-        checkout.dispose();
+        await checkout.dispose();
       }
     });
-  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
+  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJsonAsync));
   const now = (opts.clock ?? systemClock).now();
   for (const path of shardRepairRequests(opts.stateDir)) {
     if (!shardRepairRequestDue(path, now)) continue;
@@ -36397,7 +36418,7 @@ export function runShardRepairPass(opts: {
       rmSync(path, { force: true });
       continue;
     }
-    const outcome = repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    const outcome = await repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
     if ("done" in outcome) rmSync(path, { force: true });
     else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
@@ -45746,7 +45767,7 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   // W1-T4476 design (i): loaded ONCE, at daemon-start construction time — the same lifetime as
@@ -45837,7 +45858,7 @@ export function buildSweepHook(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
           ...effects,
-          readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+          readLiveStateAtAct: effects.readLiveState,
           ledgerPath,
           runId,
           log,
@@ -46201,7 +46222,7 @@ export function buildSweepLightHook(
             // sees one consistent answer.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
-            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            readLiveStateAtAct: effects.readLiveState,
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
@@ -48641,24 +48662,23 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-  github?: GitHub,
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  legacyGrepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // 2026-10-06: the sync `git grep` behind each anchor held the daemon loop up to 29 s a spawn. The
   // readiness pass stays sync, so every anchor is warmed into the cache OFF the loop first. A test
   // that injects only the sync seam warms through that same seam, so its answers are unchanged.
   const grepAnchorSync = grepAnchor ?? ((ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, ref, anchor));
   const grepAnchorWarm =
+    legacyGrepAnchorAsync ??
     grepAnchorAsync ??
     (grepAnchor
       ? async (ref: string, anchor: EvidenceAnchor) => grepAnchor(ref, anchor)
       : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
-  let lazyGithub: GitHub | undefined;
-  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
-  return async (tickRead) => {
+  return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -48711,21 +48731,13 @@ export function buildInboxDraftHook(
         }
       }
 
-      let draftReadiness: ReadinessContext | undefined;
+      let draftSelection: DraftSelectionContext | undefined;
       try {
-        const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
-        const { isMerged, depsUnobservable } = tickRead
-          ? projectionReadinessAccessors(new Map(tickRead.projection))
-          : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
-        draftReadiness = {
-          plan,
-          isMerged,
-          depsUnobservable,
+        draftSelection = {
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -48736,7 +48748,7 @@ export function buildInboxDraftHook(
       }
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -48746,7 +48758,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
