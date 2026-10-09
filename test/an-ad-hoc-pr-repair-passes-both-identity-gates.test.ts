@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const workerScript = join(root, "scripts", "worker-branch-shape.mjs");
@@ -21,12 +21,10 @@ const headRef = "codex/ad-hoc-repair";
 const message = `fix(flow): repair gates\n\nRemudero-Task: ${prId}\n`;
 
 function fixture(t: TestContext, commitMessage = message) {
-  const path = mkdtempSync(join(tmpdir(), "rmd-ad-hoc-identity-"));
-  t.after(() => rmSync(path, { recursive: true, force: true }));
-  const git = (args: string[]) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
-  git(["init", "-q"]);
-  git(["config", "user.email", "test@example.com"]);
-  git(["config", "user.name", "Identity fixture"]);
+  const repo = gitRepo({ kind: "ad-hoc-identity", seedCommit: false });
+  const path = repo.dir;
+  t.after(() => repo.cleanup());
+  const git = (args: string[]) => repo.git(...args);
   mkdirSync(join(path, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(path, "plan", "tasks.yaml"), `- id: ${filedId}\n`);
   writeFileSync(join(path, "plan", "tasks.d", "positive.yaml"), "- id: W1-T100\n");
