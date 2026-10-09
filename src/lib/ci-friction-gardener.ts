@@ -650,6 +650,17 @@ export function readCiFrictionPlanState(repoRoot: string, git?: CiFrictionGit): 
   return { tasks, ...(degraded ? { degraded } : {}), ...(unreadable.length > 0 ? { unreadable } : {}) };
 }
 
+/** Whether a job runs on the merge queue's group commit: its workflow declares `merge_group`, and a job
+ *  `if:` that branches on `github.event_name` names it. An `if:` that never reads the event is not a filter. */
+export function runsOnMergeGroup(on: unknown, jobIf: unknown): boolean {
+  const events = typeof on === "string" ? [on]
+    : Array.isArray(on) ? on.filter((event): event is string => typeof event === "string")
+    : on && typeof on === "object" ? Object.keys(on) : [];
+  if (!events.includes("merge_group")) return false;
+  if (typeof jobIf !== "string" || !jobIf.includes("github.event_name")) return true;
+  return /==\s*['"]merge_group['"]/.test(jobIf);
+}
+
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
  *  Missing paths are absence; failed git reads or unsupported identities refuse the pass. */
 export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
@@ -671,7 +682,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       const source = pinned();
       const paths = git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
         .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort();
-      const matches: Array<{ file: string; jobId: string; witness: unknown }> = [];
+      const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean }> = [];
       const unsupported: string[] = [];
       for (const file of paths) {
         const document = parseDocument(git(["show", `${source}:${file}`]));
@@ -681,7 +692,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
           throw new Error(`ci-friction workflow ${file} at ${source}: unsupported jobs input`);
         for (const [jobId, raw] of Object.entries(workflow.jobs)) {
           if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`ci-friction workflow ${file}: unsupported job ${jobId}`);
-          const job = raw as { name?: unknown; strategy?: { matrix?: Record<string, unknown> } };
+          const job = raw as { name?: unknown; if?: unknown; strategy?: { matrix?: Record<string, unknown> } };
           const name = job.name === undefined ? jobId : job.name;
           if (typeof name !== "string") throw new Error(`ci-friction workflow ${file}: unsupported name for ${jobId}`);
           const matrixName = /^(.*?)\s*\(\$\{\{\s*matrix\.([\w-]+)\s*\}\}\/(\d+)\)$/.exec(name);
@@ -696,15 +707,24 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
             declared = matrixName[1]!;
           }
           if (identity(declared) !== identity(family)) continue;
-          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined } });
+          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined },
+            queued: runsOnMergeGroup(workflow.on, job.if) });
         }
       }
       if (unsupported.length > 0) throw new Error(`ci-friction workflow ownership unsupported for ${family} at ${source}: ${unsupported.join(", ")}`);
-      if (matches.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${matches.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
-      const match = matches[0];
+      // Two jobs may report one check name: ci.yml's `ci-gate` produces the required context on every PR
+      // push and on the merge queue's group commit, while ci-gate.yml's `ci-gate` only re-aggregates on a
+      // body `edited` event. The producer the merge queue gates on owns the check; the others are re-run
+      // variants of it. Throwing here instead (2026-10-09) failed every ci-friction inventory.
+      const queued = matches.filter(match => match.queued);
+      const owners = matches.length > 1 && queued.length === 1 ? queued : matches;
+      if (owners.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${owners.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
+      const match = owners[0];
       if (!match) return undefined;
+      const variants = matches.filter(other => other !== match).map(other => `${other.file}:${other.jobId}`);
       workflowWitnesses.set(`${identity(family)}:${match.file}`, match.witness);
-      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`] };
+      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`
+        + (variants.length > 0 ? ` and runs it on merge_group (re-run variant not on the queue: ${variants.join(", ")})` : "")] };
     },
     evidence: (key, details, owner) => {
       const source = pinned();
