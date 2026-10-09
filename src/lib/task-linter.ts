@@ -295,9 +295,9 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
         `retired (withdrawn) shard ${task.id} will never be built — sizing observation downgraded to warn`,
     };
   }
-  // The same slug `duplicateTitleViolations` reads, never re-derived — this module reads no disk.
-  // Blank or absent ⇒ undefined, keeping the W1-T2543 discount for callers with no slug (W1-T2525).
-  const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() || undefined;
+  // Unscoped callers carry the shard path rather than duplicate-check options; derive it purely.
+  const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() ||
+    (task.sourcePath ? shardSlugFromPath(task.sourcePath)?.text.toLowerCase() : undefined);
   if (task.risk !== "high") {
     const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
@@ -3577,8 +3577,8 @@ export interface LintOpts {
    *  The check is WARN-only regardless of it, and has no severity override. */
   duplicateTitleCutoff?: number;
   /** THIS task's own shard filename slug, for {@link duplicateTitleViolations} to score instead of
-   *  the title; the linter reads no disk and `Task` carries no path, so the caller supplies it.
-   *  Absent or blank ⇒ the title is scored. ALSO consumed by {@link sizingViolation}. */
+   *  the title; supplied by the caller without reading disk.
+   *  Absent or blank ⇒ the title is scored. {@link sizingViolation} falls back to the task path. */
   duplicateSlug?: string;
   /** Shingle width for {@link duplicateTitleViolations}. The live caller passes {@link
    *  DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}. */

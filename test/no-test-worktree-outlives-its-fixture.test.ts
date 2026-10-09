@@ -46,7 +46,22 @@ const PARENT_OF_FIXTURE_DIR =
 function siblingPathSites(file: string, text: string): string[] {
   if (!ADDS_WORKTREE.test(text)) return [];
   const sites: string[] = [];
-  for (const shape of [SUFFIXED_FIXTURE_DIR, PARENT_OF_FIXTURE_DIR]) {
+  const aliases = new Set<string>();
+  for (const binding of [
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$.]*|gitRepo\([^;]*?\))\.dir\b/g,
+    /\b(?:const|let|var)\s*\{[^}]*?\bdir\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/g,
+  ]) {
+    for (const match of text.matchAll(binding)) aliases.add(match[1]);
+  }
+  const shapes = [SUFFIXED_FIXTURE_DIR, PARENT_OF_FIXTURE_DIR];
+  for (const alias of aliases) {
+    const operand = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    shapes.push(
+      new RegExp(`\\$\\{\\s*${operand}\\s*\\}[-\\w.]|(?<![\\w$.])${operand}\\s*\\+\\s*["'\u0060][-\\w.]`, "g"),
+      new RegExp(`\\b(?:join|resolve)\\(\\s*dirname\\(\\s*${operand}\\s*\\)\\s*,|\\$\\{\\s*dirname\\(\\s*${operand}\\s*\\)\\s*\\}\\/`, "g"),
+    );
+  }
+  for (const shape of shapes) {
     for (const match of text.matchAll(shape)) {
       sites.push(`${file}:${text.slice(0, match.index).split("\n").length}`);
     }
@@ -62,6 +77,30 @@ function testSources(): Array<{ file: string; text: string }> {
 
 // Samples are assembled from halves so this file never matches its own census.
 const DIR = ".d" + "ir";
+
+test("W1-T5735: a fixture dir held in a plain variable and suffixed is refused", () => {
+  const bindings = [
+    ["const repo = fixture", DIR, ";"].join(""),
+    ["const { d", "ir: repo } = gitRepo();"].join(""),
+    ["const repo = gitRepo({ name: \"fixture\" })", DIR, ";"].join(""),
+  ];
+  for (const binding of bindings) {
+    for (const path of [
+      "const wt = `${repo}-wt`;",
+      'const wt = repo + "-wt";',
+      'const wt = join(dirname(repo), "wt");',
+      "const wt = `${dirname(repo)}/wt`;",
+    ]) {
+      const text = [binding, path, 'worktreeAdd(repo, wt, "run");'].join("\n");
+      assert.deepEqual(siblingPathSites("alias.ts", text), ["alias.ts:2"], text);
+    }
+    const inside = [binding, 'const wt = repo + "/wt";', 'worktreeAdd(repo, wt, "run");'].join("\n");
+    assert.deepEqual(siblingPathSites("inside-alias.ts", inside), []);
+    assert.deepEqual(siblingPathSites("noadd-alias.ts", binding + '\nconst wt = `${repo}-wt`;'), []);
+  }
+  const unrelated = 'const repo = "somewhere";\nconst wt = `${repo}-wt`;\nworktreeAdd(repo, wt, "run");';
+  assert.deepEqual(siblingPathSites("non-fixture.ts", unrelated), []);
+});
 
 test("W1-T5625 census: shape (a), the fixture dir plus a suffix, is seen however the path reaches the add", () => {
   const held = ["const wt = `${repo", DIR, "}-wt`;", "worktreeAdd(repo", DIR, ", wt, \"run\");"].join("");
