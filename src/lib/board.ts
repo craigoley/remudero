@@ -41,7 +41,7 @@ import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
 import { deriveBlockedPrSections, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
-import { liveRunSpend, subscribeStatusStream } from "./status-stream-publisher.js";
+import { liveRunSpendByTask, subscribeStatusStream } from "./status-stream-publisher.js";
 
 // Keep the live consumer's boundary visible to the ledger render-retention census.
 const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
@@ -349,15 +349,20 @@ function derivePrQueue(
   const unique = new Map<number, PrRef>();
   for (const pr of index.open ?? []) if (pr.state.toUpperCase() === "OPEN" && !unique.has(pr.number)) unique.set(pr.number, pr);
 
+  // Each open head's newest `sweep.disposed` row, from ONE pass: a scan per open PR was P x L on core's fact store.
+  const disposedAt = new Map<string, Record<string, unknown>>();
+  const wanted = new Set([...unique.values()].flatMap((pr) => (pr.headRefOid ? [`${pr.number}\u0000${pr.headRefOid}`] : [])));
+  if (wanted.size > 0) {
+    for (const line of lines) {
+      if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+      const id = `${line.pr_number}\u0000${line.head_sha}`;
+      if (wanted.has(id)) disposedAt.set(id, line);
+    }
+  }
+
   const rows: PrQueueRow[] = [];
   for (const pr of unique.values()) {
-    let transition: Record<string, unknown> | undefined;
-    if (pr.headRefOid) {
-      for (const line of lines) {
-        if (line.step !== "sweep.disposed" || line.pr_number !== pr.number || line.head_sha !== pr.headRefOid) continue;
-        transition = line;
-      }
-    }
+    const transition = pr.headRefOid ? disposedAt.get(`${pr.number}\u0000${pr.headRefOid}`) : undefined;
     const taskRow = taskByPr.get(pr.number);
     const transitionTask = typeof transition?.task_id === "string" && deps.plan.byId.has(transition.task_id) ? transition.task_id : undefined;
     const taskId = taskRow?.taskId ?? planTaskFromOpenPr(pr, deps.plan) ?? transitionTask;
@@ -417,6 +422,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const byId = projectPlan(deps.plan, effectiveDeps);
   options.captureProjections?.(byId);
   const lastActivity = lastActivityByTask(lines);
+  const liveSpend = liveRunSpendByTask(lines, [...byId.values()].filter((p) => p.phase).map((p) => p.taskId));
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
     // A task-less escalation's own row (W1-T283) owns no plan Task to join title/risk from.
     // Fall back to its own title (or the bare id) and the default risk band rather than a
@@ -430,7 +436,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     const ts = lastActivity.get(p.taskId)?.ts;
     if (ts) row.lastActivityAt = ts;
     if (p.phase) {
-      const spend = liveRunSpend(lines, p.taskId);
+      const spend = liveSpend.get(p.taskId);
       if (spend?.hasData) {
         row.liveSpendUsd = spend.spendUsd;
         row.liveTurns = spend.turns;

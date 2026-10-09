@@ -19,7 +19,7 @@ import { dirname, join, normalize } from "node:path/posix";
 import { fixedClock, systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { renderMachineShard } from "./machine-filing.js";
 import { selectorShadowPlanTasksAsync, type SelectorShadowTaskIdMinter } from "./selector-shadow-gardener.js";
 
@@ -27,6 +27,12 @@ export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 
 /** The ledger step the evidence rows carry (selectorShadowFlakeLedger writes them). */
 export const FLAKE_RETRY_STEP = "test.flake_retry";
+
+/** Every step a pass reads: the evidence and the gardener's own prior answers. */
+export const FLAKE_INCIDENT_EVIDENCE_STEPS: readonly string[] = [FLAKE_RETRY_STEP, "flake_incident.filed", "flake_incident.skipped", "flake_incident.watch"];
+
+/** Bump whenever {@link FLAKE_INCIDENT_EVIDENCE_STEPS} changes: it keys the durable per-rotation digests. */
+export const FLAKE_INCIDENT_DIGEST_VERSION = "1";
 
 /**
  * The tiered response, as policy values with this one home. One PR is noise; `watchPrs` distinct
@@ -139,8 +145,13 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   const clock = deps.clock ?? systemClock;
   const nowMs = clock.now();
   const sinceIso = fixedClock(nowMs - policy.windowMs).iso();
+  const steps = new Set(FLAKE_INCIDENT_EVIDENCE_STEPS);
+  // The pass runs in a fresh child every time, so each archive in the window is answered from its durable
+  // digest and only a rotation cut since the last pass is decompressed.
   const { rows } = readLedgerUnionRecordsSync(deps.stateDir, {
-    step: [FLAKE_RETRY_STEP, "flake_incident.filed", "flake_incident.skipped", "flake_incident.watch"], since: sinceIso,
+    step: FLAKE_INCIDENT_EVIDENCE_STEPS, since: sinceIso,
+    rotationRecords: ledgerRotationDigests(deps.stateDir, (all) => all.filter((r) => steps.has(r.step as string)),
+      { holder: FLAKE_INCIDENT_GARDEN_NAME, reducerVersion: FLAKE_INCIDENT_DIGEST_VERSION }).rotationRecords,
   });
   const byStep = (step: string) => rows.filter((r) => r.step === step);
   const observations = observationsOf(byStep(FLAKE_RETRY_STEP));
