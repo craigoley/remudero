@@ -11111,6 +11111,7 @@ export async function runFixRung(opts: {
   // resolved enough for GitHub to compute the merge ref, so every later
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
+  const consecutiveMergeRefusalReasons: string[] = [];
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -11212,7 +11213,7 @@ export async function runFixRung(opts: {
   // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
   // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
   // timer.
-  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
+  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap && consecutiveMergeRefusalReasons.length < 2) {
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -11271,7 +11272,7 @@ export async function runFixRung(opts: {
       currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
-      deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      deps.captureWorktreeSnapshot && consecutiveMergeRefusalReasons.length === 0 ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
       opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
@@ -12369,6 +12370,7 @@ export async function runFixRung(opts: {
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
       if (!merged.started) {
+        consecutiveMergeRefusalReasons.push(merged.reason ?? "the merge of current main did not start (no reason reported)");
         strikes = attempt;
         deps.log("fix.dispatch", {
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
@@ -12588,6 +12590,8 @@ export async function runFixRung(opts: {
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
     const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
+    if (mergeCommitRefused) consecutiveMergeRefusalReasons.push(MERGE_HEAD_ABSENT_REASON);
+    else consecutiveMergeRefusalReasons.length = 0;
     // W1-T5227: a refusal for leftover conflict markers IS an unresolved conflict. The merge stays pending
     // (nothing was staged), so the next strike is a merge-conflict round on those files; exhaustion then
     // reports the existing merge_conflict_unresolved. No new outcome, no new escalation path.
@@ -13479,9 +13483,10 @@ export async function runFixRung(opts: {
         ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
         : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
       detail: stillConflicted
-        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
+        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) spent ${strikes} bounded strike(s) ` +
           `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
-          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined)
+          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined) +
+          (consecutiveMergeRefusalReasons.length > 0 ? `\n\nConsecutive merge refusals:\n${consecutiveMergeRefusalReasons.map((reason, i) => `${i + 1}. ${reason}`).join("\n")}` : "")
         : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
