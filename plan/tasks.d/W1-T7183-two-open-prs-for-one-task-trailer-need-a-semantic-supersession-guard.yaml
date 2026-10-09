@@ -1,0 +1,55 @@
+- id: W1-T7183
+  title: "TWO OPEN PRs CARRYING ONE CANONICAL TASK TRAILER NEED A SEMANTIC-SUPERSESSION GUARD — UI-T36 produced #1484 (older head, an out-of-scope CSS file, an in-flight review) and #1491 (the later worker result, current plan, exactly the declared files); retain the provably newer build, close or disarm only the older with an attributable receipt, never merge both, and hold ambiguous pairs for a human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  band_meaning: span
+  origin: feedback#fb-1789935292646-eff0ac
+  plan_refs: [W1-T2794, W1-T5520, W1-T920, W1-T3219, W1-T3535]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/supersession-pair.ts, test/open-pr-pair-semantic-supersession.test.ts]
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=4535eb1aefe8c28e
+  attempts: 0
+  rationale: |
+    GROUNDING. Neighbouring work does NOT cover this. W1-T2794 closes an open PR once its task has MERGED.
+    W1-T5520 stops the orchestrator creating a second PR but states in its design 6(a) that closing a
+    duplicate that is already open is out of scope and a separate task. W1-T920 is a trailer-keyed
+    disposition behind a flag and is built on W1-T919's ruling that a disposition must act on a REASON,
+    never on a match. No plan entry covers the case where two PRs are open together for one task and
+    neither has merged.
+    OBSERVED 2026-09-20 (console task UI-T36, after a freshness handoff): #1484 carried an older head
+    plus an out-of-scope CSS file and an in-flight review. #1491 was the later worker result, based on the
+    current plan, and changed exactly the declared files. Merging both would double-apply the task.
+  design: |
+    A pure pair classifier in src/lib/supersession-pair.ts, called from the sweep. It runs only when two
+    OPEN PRs share the same canonical `Remudero-Task:` trailer (last trailer, as `extractTaskTrailerId`
+    reads it; the `unfiled` sentinel never matches, W1-T3535).
+    verdict is three-valued: `superseded` (names older and newer), `unique`, `ambiguous`.
+    `superseded` requires ALL of:
+      (a) ANCESTRY: the newer PR's base is at or after the older PR's base on the plan history. The
+          older head must not be an ancestor-descendant of the newer one, and the newer branch must have
+          been cut from a plan state that includes the handoff the older predates.
+      (b) OWNERSHIP: the newer PR's changed files are a subset of the task's declared `files:`, and the
+          older PR either touches a path outside that declared set or is a strict subset of the newer.
+      A timestamp or PR number alone NEVER decides. Any unreadable input (ancestry query, file list,
+      declared files, review state) yields `ambiguous`, never `superseded`; a zero-length file read is
+      `ambiguous`.
+    ACTION on `superseded` only: retain the newer PR untouched, then disarm auto-merge on the older and
+    close it WITHOUT `--delete-branch` (reversible, per W1-T919's axis), with a comment naming the
+    newer PR, the shared task id, the ancestry and ownership evidence, and the actor. Write the
+    existing `sweep.disposed` row with its own reason string; add no new ledger step without a reader.
+    An older PR with an in-flight review is disarmed and flagged but the closure is attributable in the
+    receipt. Never act on both PRs, and never merge both: while a pair is `ambiguous` the sweep adds a
+    `needs-human` hold on both and arms neither.
+    The act is gated by the policy flag pattern used by `sweep.armSessionPrs` if the implementer finds
+    W1-T920's flag already exists; reuse it rather than adding a second flag.
+  acceptance:
+    - claim: "a pair with the same trailer where the newer branch is provably newer by ancestry and owns exactly the declared files closes only the older PR, with a receipt naming the newer PR and the evidence"
+      proof: "unit test: test/open-pr-pair-semantic-supersession.test.ts"
+    - claim: "the pair classifier is invoked from the sweep"
+      proof: "grep: classifyOpenPrPair( in src/lib/sweep.ts"
