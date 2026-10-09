@@ -1,4 +1,6 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
+import { buildFixProgressInput, judgeFixProgress, productionFixProgressJudge,
+  type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from "./worktree-git.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -51,7 +53,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
+import { MAX_PLAN_REPAIR_STRIKES } from "./classify.js";
 import {
   blockerFields, decideSloRung, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -1739,6 +1741,7 @@ export const SWEEP_EFFECT_SURFACE = [
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
+  | "fixProgressJudge"
   | "reproduceFailingTestsOnMain"
   | "arm"
   | "readArmFacts"
@@ -2176,6 +2179,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    fixProgressJudge: productionFixProgressJudge({ cwd: repoRoot,
+      settingsFile: join(repoRoot, "settings", "worker.json"), spawn: spawnImpl }),
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -2993,44 +2998,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           return;
         }
 
-        // W1-T78: an operator's answer to a PRIOR clarification question (routed here by the
-        // DISPOSITION_RULES "answered" row) re-arms this SAME dispatch — never a new call site —
-        // carrying the answer as an added constraint (threaded below, once `task` resolves),
-        // its ceiling extended per the answer's own policy (config-driven, {@link
-        // strikeCapForAnswer}, folded into {@link fixCeilingInForce} below), instead of the
-        // ORIGINAL blocked_review dispatch's plain strikeCap. The fallback (when the answer
-        // itself carries no override) is `policy.clarify` — the SAME policy
-        // `DISPOSITION_RULES`' answered row just used to ROUTE here — never a second,
-        // independently-hardcoded default that could silently diverge from the routing decision.
-        //
-        // W1-T2452: THE CUMULATIVE CEILING NOW BINDS, and is checked BEFORE any worktree/git
-        // side effect — the SAME discipline the preflight check just above uses, so a refusal
-        // here never leaves a stray worktree behind. `runFixRung` always counts a NEW call from
-        // 0 strikes, so handing it a fresh full cap on every dispatch let one PR's ledger-derived
-        // `priorStrikes` exceed the ceiling by up to `cap - 1` on every dispatch after the first
-        // (observed: "fix strikes exhausted (3/2)" on PR #3043, cap=2). `fixCeilingInForce`
-        // (sweep.ts) names the SAME ceiling `DISPOSITION_RULES`' rows already render — base cap,
-        // or the extended answer ceiling when `pr.pendingAnswer` is live — and
-        // `fixDispatchBudget` hands `runFixRung` only the REMAINDER against it, so the ledger's
-        // running strike count for one PR can never cross that ceiling regardless of how many
-        // dispatches it takes.
-        const ceiling = fixCeilingInForce(pr, fixStrikeCap(config), policy.clarify);
-        const strikeCap = fixDispatchBudget(pr.priorStrikes, ceiling);
-        if (strikeCap == null) {
-          // W1-T2452 design note (ii), THE LOAD-BEARING HALF: a non-positive remainder must
-          // NEVER dispatch a zero-budget rung — that would silently convert an overspend into
-          // a no-op that strands an otherwise-fixable PR forever. `DISPOSITION_RULES` row 4
-          // already routes `priorStrikes >= strikeCap` to escalate, so reaching here at all
-          // means THIS dispatch's own routing disagreed with the ceiling actually in force —
-          // ledger that disagreement (naming the ceiling) instead of silently swallowing it,
-          // and spend nothing.
-          log("sweep.fix.ceiling_exhausted", {
-            pr_number: pr.prNumber,
-            prior_strikes: pr.priorStrikes,
-            ceiling,
-          });
-          return;
-        }
+        // W1-T7096: the old cap is context for the judge and the mount schedule, never a budget.
+        const strikeCap = fixStrikeCap(config);
 
         // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
         // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
@@ -8673,23 +8642,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `(${refusedCriterionClasses(pr.unmetCriteria)}) — escalating without a fix strike`,
   },
   {
-    // W1-T78: an operator's answer RE-ARMS the fix rung, but only within its own strike
-    // allowance, so a bad answer still eventually escalates rather than looping. W1-T100
-    // generalised it to the blocked_ci shape via the same `isBlockedCi` rows 4 and 5 share —
-    // without that, a strike-exhausted blocked_ci PR could never be re-armed by an answer.
+    // W1-T7096: an operator answer is new evidence for the judge, not a fixed extra allowance.
     disposition: "blocked-fixable",
     blocker: "review-failed",
-    when: (pr, policy) => {
+    when: (pr) => {
       if (!pr.pendingAnswer) return false;
       const reviewShape = pr.reviewState === "failure" && pr.unmetCriteria.length > 0;
       if (!reviewShape && !isBlockedCi(pr)) return false;
-      const clarify: ClarifyPolicy = {
-        resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
-      };
-      // `strikeCapForAnswer` returns the ADDITIONAL strikes an answer grants, so the cumulative
-      // ceiling is the ORIGINAL cap plus that allowance — never an unconditional bypass of the
-      // ledger's running count.
-      return pr.repeatedFixRefusal === undefined && pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
+      return true;
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
@@ -8759,25 +8719,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `#${pr.prNumber} to restore authoritative evidence in structured form; one exact-input post refusal stops retries`,
   },
   {
-    // W1-T100: the exhaustion check now covers BOTH failure shapes — a failing
-    // review AND a blocked_ci PR (checks red) — off the SAME strike counter/cap
-    // (design note iv: one ladder, one exhaustion route).
-    disposition: "blocked-ambiguous",
+    // W1-T7096: reaching the former cap or repeating a refusal routes to judgment, never stops a round.
+    disposition: "blocked-fixable",
     when: isFixStrikeExhausted,
-    blocker: "strikes-exhausted",
-    // W1-T186: once checks are the reason strikes exhausted, NAME the check and sha here too, so
-    // the ledgered reason never reads as the generic, uninvestigable "fix strikes exhausted".
-    //
-    // W1-T2452: the denominator is {@link fixCeilingInForce}, NEVER the bare `policy.strikeCap` —
-    // an answered PR renders against its EXTENDED ceiling, so reaching it reads as exactly that
-    // rather than an impossible overshoot of the base cap.
+    blocker: "review-failed",
     reason: (pr, policy) => {
-      if (pr.repeatedFixRefusal !== undefined) return repeatedFixRefusalReason(pr.repeatedFixRefusal) +
-        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "");
+      if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}`;
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      return isBlockedCi(pr)
-        ? `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — ${describeCiFailures(pr)} — escalating`
-        : `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — escalating`;
+      return `fix progress judgment due after ${pr.priorStrikes} rounds (former ceiling ${ceiling})`;
     },
   },
   {
@@ -8821,12 +8770,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // strictly before row 6, so a dispatch that would only reproduce a strike already proven to
     // add nothing is preempted the first time it recurs. `fixRungRepeatsIdenticalFailure` fails
     // CLOSED until a producer populates `StrikeAttempt.unmetClaims`, so this row is inert today.
-    disposition: "blocked-ambiguous",
+    disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr),
-    blocker: "escalated",
+    blocker: "review-failed",
     reason: (pr, policy) =>
       `fix strike repeated the identical unmet criteria (strike ${pr.priorStrikes}/${policy.strikeCap}) — ` +
-      `no further strike can add information — escalating before the cap`,
+      `progress judge must decide whether another approach can add information`,
   },
   {
     // W1-T3172 — Rule 25's refusal is structurally fixable only through W1-T2436's prerequisite
@@ -9080,7 +9029,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // routes to the existing fix rung, inside the shared strike cap; W1-T3920 still owns a
     // positive-distance PR, which never reaches here.
     disposition: "blocked-fixable",
-    when: (pr, policy) => repairableCodeqlBlocker(pr) !== undefined && pr.priorStrikes < policy.strikeCap,
+    when: (pr) => repairableCodeqlBlocker(pr) !== undefined,
     blocker: "own-red",
     reason: (pr) => {
       const alert = repairableCodeqlBlocker(pr);
@@ -9724,7 +9673,6 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
   if (blocker.kind === "ambiguous") return `${blocker.cause}: ${blocker.detail}`;
   if (blocker.headSha !== pr.headSha) return "stale: the CodeQL alert was observed at a different head";
   if (repairableCodeqlBlocker(pr) === undefined) return "foreign-branch: the head is not this PR task's rmd-owned run branch";
-  if (pr.priorStrikes >= policy.strikeCap) return `exhausted: fix strikes ${pr.priorStrikes}/${policy.strikeCap}`;
   return undefined;
 }
 
@@ -10285,6 +10233,8 @@ export function operatorVerdictEvidence(
  *  ALONGSIDE `unmetCriteria` on a review-mode dispatch, which used to discard it at this boundary. */
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];
+  progressDecision?: FixProgressVerdict;
+  progressApproach?: string;
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
   mergeConflict?: MergeConflictEvidence;
@@ -10805,6 +10755,7 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  fixProgressJudge?: FixProgressJudge;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
   reviewerCodeStaleThisPass?: () => { oldSha: string; newSha: string } | undefined;
@@ -13750,15 +13701,14 @@ export async function runSweep(
     // caller wrote before this instant is counted here even though this pass's own `ledgerLines`,
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
-    const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
     const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
-    if (freshTally.strikes >= ceiling || (freshTally.repeatedRefusal !== undefined && !planFlagRung)) {
+    const history = (lines: readonly Record<string, unknown>[]) => JSON.stringify(lines.filter(row =>
+      row.task_id === pr.taskId && ["fix.dispatch", "fix.retrigger", "fix.done", "fix.commit_refused"].includes(String(row.step))));
+    if (history(freshLines) !== history(ledgerLines)) {
       inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
-        reason: freshTally.repeatedRefusal !== undefined
-          ? repeatedFixRefusalReason(freshTally.repeatedRefusal)
-          : `fix strikes exhausted under the claim (${freshTally.strikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+        reason: "fix round history changed during judgment — re-derive and re-ask next pass",
       };
     }
     pr.priorStrikes = freshTally.strikes;
@@ -14236,30 +14186,10 @@ export async function runSweep(
         : undefined;
     // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
     // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
-    let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       planProofBlockedPrs.add(pr.prNumber);
-      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
-      const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
-      const action = planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
-        planRepairCapable,
-      });
-      if (action.kind === "give_up") {
-        disposition = "blocked-ambiguous";
-        reason = planRepairCapable
-          ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
-            `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
-      } else {
-        disposition = "blocked-fixable";
-        planShardRepairDue = action.kind === "repair_plan_shard";
-        reason = planShardRepairDue
-          ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
-            `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
-            `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
-      }
+      disposition = "blocked-fixable";
+      reason = "capped review has non-discriminating proofs — the progress judge decides the next repair round";
     }
     // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read
     // as `repeatedFixRefusal`, which `isFixStrikeExhausted` turns into the strike ladder's blocked-ambiguous. For a
@@ -14684,8 +14614,6 @@ export async function runSweep(
                 const unfixable = fixTaskId === undefined ||
                   !fixHeadAcceptable(pr.headRefName, fixTaskId, isSyntheticOrchestratorLaneId(fixTaskId))
                   ? "the head is not this PR task's rmd-owned run branch, so no fix worker may push to it"
-                  : pr.priorStrikes >= policy.strikeCap
-                  ? `fix strikes are exhausted (${pr.priorStrikes}/${policy.strikeCap})`
                   : undefined;
                 if (unfixable !== undefined) {
                   // A fix that cannot be dispatched must still never sit silent: ask once per head.
@@ -14856,6 +14784,44 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              let progressDecision: FixProgressVerdict | undefined;
+              let progressParkedReason: string | undefined;
+              const askProgress = async (): Promise<boolean> => {
+                if (progressDecision) return true;
+                const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber,
+                  headSha: pr.headSha, currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                    ...pr.unmetCriteria.map(c => `review:${c.claim}`),
+                    ...(pr.reviewState === "failure" && pr.unmetCriteria.length === 0 ? ["remudero-review"] : [])], ledger: ledgerLines,
+                  operatorAnswer: pr.pendingAnswer?.constraint,
+                  formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
+                const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+                if (ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                    row.head_sha === pr.headSha && row.progress_escalated_key === inputKey)) {
+                  acted = false;
+                  spent = false;
+                  standDownReason = "this fix progress loop is already escalated; awaiting new evidence or an operator answer";
+                  return false;
+                }
+                const result = await judgeFixProgress(input, deps.fixProgressJudge);
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
+                  step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
+                  input_key: inputKey, round_count: input.rounds.length, signals: input.signals, ...result });
+                if (result.verdict === "unavailable") {
+                  acted = false;
+                  standDownReason = result.reason;
+                  return false;
+                }
+                if (result.verdict === "escalate") {
+                  const reason = `fix progress loop: ${result.loop} — ${result.reason}`;
+                  await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey };
+                  spent = false;
+                  standDownReason = reason;
+                  return false;
+                }
+                progressDecision = result;
+                return true;
+              };
               // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this PR's state
               // FRESH, right before a strike is spent, never the snapshot this pass started from.
               // Omitted or indeterminate behaves exactly as before — dispatch proceeds, failing
@@ -14944,6 +14910,7 @@ export async function runSweep(
                   standDownReason = codeqlFailureHold.reason;
                   break;
                 }
+                if (!await askProgress()) break;
                 const codeqlClaim = claimFixDispatch(pr);
                 if (!codeqlClaim.ok) {
                   acted = false;
@@ -14973,11 +14940,13 @@ export async function runSweep(
                 });
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
+                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
+                  progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence, onPhase)), dedupeKey);
+                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase)), dedupeKey);
                   break;
                 }
-                const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, codeqlEvidence));
+                const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence));
                 if (codeqlOutcome !== undefined) spent = dispatchFixSpent(codeqlOutcome);
                 break;
               }
@@ -14999,11 +14968,13 @@ export async function runSweep(
                   line.head_sha === pr.headSha && JSON.stringify(line.metadata_red_checks) === JSON.stringify(metadataChecks) &&
                   (line.metadata_repair_outcome === "repaired" || line.metadata_repair_outcome === "escalated"));
                 if (priorRepair) {
-                  acted = false;
-                  standDownReason = `metadata red already ${priorRepair.metadata_repair_outcome} at this head and red set; awaiting a fresh edited-event verdict`;
-                  break;
+                  progressParkedReason = `metadata red already ${priorRepair.metadata_repair_outcome} at this head and red set; awaiting a fresh edited-event verdict`;
+                  if (!await askProgress()) break;
+                  proofRepairRoute = proofRepairRouteEvidence(pr);
                 }
-                const result: MetadataRepairResult = deps.repairMetadata
+                const result: MetadataRepairResult = priorRepair
+                  ? { repaired: false, notMetadata: true, reason: "progress judge released the metadata wait" }
+                  : deps.repairMetadata
                   ? await deps.repairMetadata(pr, metadataChecks)
                   : { repaired: false, reason: "metadata repair effect is not wired" };
                 if (result.noCure && !result.repaired && !result.notMetadata) {
@@ -15054,9 +15025,15 @@ export async function runSweep(
                 break;
               }
               if (refusedSameRed && fixRoundTally(ledgerLines, pr.taskId, pr.headSha).refusals.length === 0) {
-                acted = false;
-                standDownReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history; awaiting a changed head or red set`;
-                break;
+                progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;
+                const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                  row.head_sha === pr.headSha && typeof row.stand_down_reason === "string" && row.stand_down_reason.includes("incomplete round history"));
+                if (!waited) {
+                  acted = false;
+                  standDownReason = progressParkedReason;
+                  break;
+                }
+                if (!await askProgress()) break;
               }
               // W1-T527 — classify the evidence in hand before selecting a worker.
               // Only base-caused and environment stand down here.
@@ -15377,10 +15354,15 @@ export async function runSweep(
                 standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
                 break;
               }
-              const proofRepairActive =
+              let proofRepairActive =
                 proofRepairRoute !== undefined && proofRepairState !== undefined &&
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
-              const fixEvidence = proofRepairActive
+              if (proofRepairRoute && proofRepairState && !proofRepairActive) {
+                progressParkedReason = `proof-repair refused ${proofRepairState.refusals} rounds at this head`;
+                if (!await askProgress()) break;
+                proofRepairActive = true;
+              }
+              const fixEvidence: FixDispatchEvidence = proofRepairActive
                 ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
                 : isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
@@ -15490,6 +15472,9 @@ export async function runSweep(
                 standDownReason = declineHold.reason;
                 break;
               }
+              if (!await askProgress()) break;
+              fixEvidence.progressDecision = progressDecision;
+              if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
@@ -15512,7 +15497,7 @@ export async function runSweep(
               }
               // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
               // decision above found the body budget spent and a plan-shard repair still owed.
-              const planRepairEvidence = proofRepairActive ? undefined : planShardRepairDue ? proofDiscrimination : staleProofs;
+              const planRepairEvidence = proofRepairActive ? undefined : staleProofs;
               if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (deps.detachFixWait) {

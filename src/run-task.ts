@@ -1,4 +1,6 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { buildFixProgressInput, judgeFixProgress, productionFixProgressJudge,
+  type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
@@ -2200,6 +2202,7 @@ export function buildSweepEffects(
 ): Pick<
   SweepDeps,
   | "reproduceFailingTestsOnMain"
+  | "fixProgressJudge"
   | "arm"
   | "close"
   | "dispatchFix"
@@ -10450,6 +10453,8 @@ async function spawnFixWorkerBounded(
 export interface FixRoundCommit {
   changedFiles: number;
   subject: string;
+  diffStat?: string;
+  diffDigest?: string;
 }
 
 /**
@@ -10516,7 +10521,10 @@ export function readFixRoundCommitsViaGit(worktreePath: string, sinceSha: string
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean).length;
-    return { subject, changedFiles };
+    const patch = hostWorktreeGit(worktreePath, ["show", "--format=", "--stat", "--patch", sha]);
+    const diffAt = patch.indexOf("diff --git ");
+    return { subject, changedFiles, diffStat: diffAt < 0 ? patch.trim() : patch.slice(0, diffAt).trim(),
+      diffDigest: createHash("sha256").update(diffAt < 0 ? "" : patch.slice(diffAt)).digest("hex") };
   });
 }
 
@@ -10606,8 +10614,8 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
 }
 
 /**
- * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
- * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
+ * Dispatch one bounded fix worker per judge-admitted round (W1-T7096).
+ * Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
  * a time — the anti-ping-pong invariant) and amends the SAME branch/PR this
  * run already opened — never a fresh PR, never a `fix/*` branch, because
@@ -10618,8 +10626,8 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  *
  * §3's ladder: strike 1 RESUMES the failing implement session (it already has
  * the context of what it tried); strike 2 (and any further strike up to the
- * cap) is a FRESH worker on the same branch, never resumed twice. Exhausting
- * the cap escalates (BLOCKED class, W1-T8) rather than looping forever.
+ * old cap) is a FRESH worker on the same branch, never resumed twice. The
+ * progress judge decides whether another round is justified and names loops for escalation.
  *
  * Every external interaction is injected (`deps`) so the whole rung is
  * unit-testable with fakes — no real spawn, git, or `gh` call in the test
@@ -10672,6 +10680,8 @@ export async function runFixRung(opts: {
   config: Config;
   budgetUsd: number;
   strikeCap: number;
+  progressDecision?: FixProgressVerdict;
+  progressApproach?: string;
   /**
    * W1-T2403: the per-head bound on retrigger-shaped rounds (see {@link isRetriggerShapedCommit})
    * this invocation spends before it stops retriggering and escalates naming the check(s) that
@@ -10749,6 +10759,7 @@ export async function runFixRung(opts: {
   proofDiscrimination?: ProofDiscriminationEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    fixProgressJudge?: FixProgressJudge;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     readMainTip?: () => string | Promise<string>;
@@ -11026,7 +11037,16 @@ export async function runFixRung(opts: {
     branchClaim?: FixRoundBranchClaim;
   };
 }): Promise<FixRungOutcome> {
-  const { deps } = opts;
+  const roundRows: Record<string, unknown>[] = [];
+  const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
+    roundRows.push({ ...extra, task_id: opts.taskId, step });
+    opts.deps.log(step, extra);
+  } };
+  const progressJudge = deps.fixProgressJudge ?? productionFixProgressJudge({ cwd: opts.worktreePath,
+    settingsFile: opts.settingsFile });
+  let progressApproach = opts.progressApproach;
+  let progressRoundReason: string | undefined;
+  const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`].filter(Boolean).join("\n\n") || undefined;
   // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
   // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
   // built by the next sweep, after a plan amendment, would ever see a different one). Threaded
@@ -11044,7 +11064,6 @@ export async function runFixRung(opts: {
       cwd: opts.worktreePath,
       settingsFile: opts.settingsFile,
     });
-  const retriggerCap = opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP;
   let review = opts.initialReview;
   const proofDiscriminationStillNeedsRepair = () =>
     opts.proofDiscrimination !== undefined &&
@@ -11127,7 +11146,6 @@ export async function runFixRung(opts: {
   // invocation's pre-strike gate ran — `undefined` on the first round (nothing recorded yet;
   // see {@link unchangedTreeStandDownReason}'s own "first round" contract) and whenever
   // `deps.captureWorktreeSnapshot` is not wired at all.
-  let lastGateSnapshot: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
   // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
   // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
   // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
@@ -11207,12 +11225,8 @@ export async function runFixRung(opts: {
     }
   };
 
-  // W1-T2403: `retriggers < retriggerCap` is the SEPARATE bound that stops an unbounded loop the
-  // moment `strikes` stops moving (a retrigger-shaped round never increments it, below) — without
-  // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
-  // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
-  // timer.
-  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
+  // W1-T7096: every completed round, including retriggers, returns to the progress judge.
+  while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -11231,16 +11245,6 @@ export async function runFixRung(opts: {
     // then ci-log, then review) — content only, never the base and never the check rollup (Q2's
     // own constraint) — so a rung that fixed check A and moved on to a newly-red check B, or one
     // whose base moved and flipped WHICH check is red, is never told "nothing changed".
-    const gateKey =
-      currentMergeConflict !== undefined
-        ? `merge-conflict:${JSON.stringify((conflictedFilePaths(currentMergeConflict) ?? []).sort())}`
-        : noReviewYet
-        ? `ci:${(currentCiFailures ?? []).map((f) => f.name).slice().sort().join(",")}`
-        : `review:${visibleCriteria(review.criteria.filter((c) => !c.met))
-            .map((c) => c.claim)
-            .slice()
-            .sort()
-            .join(",")}`;
     let currentTreeSnapshot: WorktreeSnapshot | undefined;
     if (deps.captureWorktreeSnapshot) {
       try {
@@ -11271,7 +11275,7 @@ export async function runFixRung(opts: {
       currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
-      deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
+      undefined,
       opts.birthWorktreeSnapshot ? { round: strikes + retriggers + 1, branch: opts.branch, currentWorktreePath: opts.worktreePath, birthSnapshot: opts.birthWorktreeSnapshot, currentSnapshot: currentTreeSnapshot, registeredWorktrees } : undefined,
       // W1-T2799: the SIXTH source — has a human already been asked about this exact state? The
       // key is the escalation the false-block escape below would file if this strike changed
@@ -11306,9 +11310,6 @@ export async function runFixRung(opts: {
     // inert on every exit path and correct on the one path that loops back to the top. An
     // unreadable capture this round clears the record to `undefined` — exactly the documented
     // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
-    if (deps.captureWorktreeSnapshot) {
-      lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
-    }
     if (preStrikeStandDown) {
       const foreignTree = preStrikeStandDown.foreignTree;
       if (foreignTree) {
@@ -11446,6 +11447,33 @@ export async function runFixRung(opts: {
           error: String((e as Error)?.message ?? e),
         });
       }
+    }
+
+    if (roundRows.some(row => row.step === "fix.dispatch" || row.step === "fix.retrigger") || !opts.progressDecision) {
+      const persisted = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+      const input = buildFixProgressInput({ taskId: opts.taskId, prNumber,
+        headSha: review.headSha, currentRed: currentMergeConflict !== undefined
+          ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
+          : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
+          : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
+        ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
+          row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
+        operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: progressRoundReason });
+      const decision = await judgeFixProgress(input, progressJudge);
+      deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+        round_count: input.rounds.length, signals: input.signals, ...decision });
+      if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
+      if (decision.verdict === "escalate") {
+        const reason = `fix progress loop: ${decision.loop} — ${decision.reason}`;
+        const issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+          headSha: review.headSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+          summary: `${reason} — ${opts.prUrl}`, detail: JSON.stringify(input),
+          options: [{ label: "hand-fix", detail: reason }, { label: "close", detail: "re-scope the named loop" }],
+          recommendation: "hand-fix" },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
+        return { outcome: "escalated", review, strikes, retriggers, reason, issueUrl };
+      }
+      progressApproach = decision.verdict === "change-approach" ? decision.approach : undefined;
     }
 
     // W1-T2272 SITE — ACCEPTANCE-AUTHOR-GATE BODY REPAIR, BEFORE `strikes++`/any commit (design
@@ -12249,7 +12277,7 @@ export async function runFixRung(opts: {
     const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
     const evidence: FixEvidence =
       currentMergeConflict !== undefined
-        ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
+        ? { mergeConflict: currentMergeConflict, constraint: progressConstraint() }
         : noReviewYet
         ? // W1-T226: `?? []` — `currentCiFailures` can be `undefined` here (no
           // `deps.fetchCiFailures` dep, or one that threw) even though `noReviewYet`
@@ -12261,7 +12289,7 @@ export async function runFixRung(opts: {
           // through to a review-shaped mode despite `noReviewYet` being true, the
           // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
           // (below) locks against.
-          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: opts.constraint }
+          { ciFailures: ciFailurePromptEvidence(currentCiFailures ?? []), constraint: progressConstraint() }
         : // W1-T2236: `gateFailuresNow` — computed above, alongside the guard this evidence
           // shape already passed — is this round's structured gate-failure remedy (undefined for
           // a ci-log/merge-conflict round, which never reaches this branch anyway). Carried
@@ -12274,7 +12302,7 @@ export async function runFixRung(opts: {
             ) },
             actionableGateFailures: gateFailuresNow,
             proofDiscrimination: proofDiscriminationNow,
-            constraint: opts.constraint,
+            constraint: progressConstraint(),
           };
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
@@ -12644,6 +12672,11 @@ export async function runFixRung(opts: {
     }
     const roundIsRetrigger = (fixAction.kind === "legacy" || fixAction.kind === "commit") &&
       roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
+    const roundDiffEvidence = {
+      diff_stat: roundCommits.map(c => c.diffStat ?? { changed_files: c.changedFiles }),
+      ...(roundCommits.length > 0 && roundCommits.every(c => c.diffDigest !== undefined)
+        ? { diff_digest: createHash("sha256").update(JSON.stringify(roundCommits.map(c => c.diffDigest))).digest("hex") } : {}),
+    };
 
     if (roundIsRetrigger) {
       // Spends the SEPARATE, capped `retriggers` count instead of a strike — never a
@@ -12652,8 +12685,11 @@ export async function runFixRung(opts: {
       // history read back from the ledger either.
       retriggers += 1;
       deps.log("fix.retrigger", {
+        ...roundDiffEvidence,
+        round_id: roundId,
+        head_sha: priorHeadSha,
         retrigger: retriggers,
-        retrigger_cap: retriggerCap,
+        former_retrigger_cap: opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP,
         strike: strikes,
         round,
         mode: fixMode,
@@ -12662,7 +12698,7 @@ export async function runFixRung(opts: {
         elapsed_ms: spawnElapsedMs,
       });
       deps.say(
-        `fix rung: retrigger ${retriggers}/${retriggerCap} (${round}) — this round's own commit(s) are ` +
+        `fix rung: retrigger ${retriggers} (${round}) — this round's own commit(s) are ` +
           `RETRIGGER-SHAPED (W1-T2403: an empty commit, or a subject naming a known-flaky re-trigger) — not ` +
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
@@ -12679,6 +12715,7 @@ export async function runFixRung(opts: {
         mode: fixMode,
         verdict_regime: verdictRegime,
         head_sha: priorHeadSha,
+        ...roundDiffEvidence,
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
         // The ci-friction gardener prices a ci-log round against each check and failing test.
@@ -12996,66 +13033,12 @@ export async function runFixRung(opts: {
           currentFailures: currentCiFailures ?? [],
         });
         if (ciFalseBlockReason) {
-          // W1-T177 discipline extended to this NEW spending site, exactly like the review
-          // false-block escape does: a fresh terminal-state read before filing a needs-human
-          // issue, so a PR that went terminal between this round's push and here never gets a
-          // false-block escalation opened against it either.
-          const preCiFalseBlockStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.ci_false_block", deps.log);
-          if (preCiFalseBlockStandDown) {
-            deps.log("fix.stood_down", { site: "rung.ci_false_block", strikes, reason: preCiFalseBlockStandDown.reason });
-            deps.say(`fix rung: standing down before ci-log false-block escalation — ${preCiFalseBlockStandDown.reason}`);
-            return {
-              outcome: "stood_down",
-              review,
-              strikes,
-              retriggers,
-              reason: preCiFalseBlockStandDown.reason,
-              standDownReason: preCiFalseBlockStandDown.reason,
-            };
-          }
+          progressRoundReason = ciFalseBlockReason;
           deps.log("fix.ci_false_block", { strike: strikes, reason: ciFalseBlockReason });
-          deps.say(
-            `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${ciFalseBlockReason} — escalating for ` +
-              `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
-          );
-          const issueUrl = await escalateWithJudge(
-            {
-              class: "BLOCKED",
-              taskId: opts.taskId,
-              runId: opts.runId,
-              headSha: review.headSha,
-              cause: escalationCause(false, true),
-              summary: `ci-log false-block after ${strikes} strike(s) (${ciFalseBlockReason}) — ${opts.prUrl}`,
-              detail:
-                `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T2328) detected a CI-LOG FALSE-BLOCK it ` +
-                `cannot resolve by dispatching more code: ${ciFalseBlockReason}. Failing check(s):\n\n` +
-                renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
-                (() => {
-                  const trajectory = renderCiTrajectoryLine(everRedCiCheckNames, (currentCiFailures ?? []).map((f) => f.name));
-                  return trajectory ? `\n\n${trajectory}` : "";
-                })() +
-                `\n\nThis strike's push landed a real commit and the check(s) re-ran, but the annotation findings ` +
-                `are byte-identical to what the previous round already observed — a further strike could only ` +
-                `re-discover what this one already showed. Escalating for a HUMAN RE-JUDGMENT after ${strikes} ` +
-                `strike(s) instead of spending the remaining strike(s) confirming the same finding again.`,
-              options: [
-                {
-                  label: "hand-fix",
-                  detail: "resolve the failing check(s) on the same branch by hand, then push to re-trigger CI.",
-                },
-                { label: "close", detail: "close the PR and re-scope the task if the check itself cannot be satisfied." },
-              ],
-              recommendation: "hand-fix",
-            },
-            { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
-          );
-          deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block" });
-          deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
-          return { outcome: "escalated", review, strikes, retriggers, reason: "ci_false_block", issueUrl };
         }
       }
 
-      continue; // still failing — loop to the next strike (or exhaust below)
+      continue; // The next judgment sees the refreshed red set and this round's finding.
     }
 
     // W1-T106: CI reaching green at all means GitHub could compute a merge
@@ -13301,6 +13284,11 @@ export async function runFixRung(opts: {
     // deferred to the generic exhaustion escalate() below (which would file
     // the wrong summary even on the strike this fired on).
     const falseBlockReason = detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current: review });
+    if (falseBlockReason && review.floorState !== "success") {
+      progressRoundReason = falseBlockReason;
+      deps.log("fix.false_block", { strike: strikes, reason: falseBlockReason, head_sha: review.headSha });
+      continue;
+    }
     if (falseBlockReason) {
       // W1-T177 discipline extended to this NEW spending site: a fresh
       // terminal-state read before filing a needs-human issue, so a PR that
@@ -13383,157 +13371,7 @@ export async function runFixRung(opts: {
     return { outcome: "fixed", review, strikes, retriggers, reason: "review passed" };
   }
 
-  // W1-T2403 SITE — THE RETRIGGER-CAP EXHAUSTION, DISTINCT FROM THE STRIKE-CAP EXHAUSTION BELOW.
-  // The loop above can now stop for TWO different reasons: a real defect exhausting `strikeCap`
-  // (unchanged, below) or a PERMANENTLY FAILING CHECK exhausting `retriggerCap` with ZERO real
-  // strikes spent chasing it. Both escalate — nothing loops forever on either bound — but this
-  // one names the check(s) that stayed red rather than an "unmet criteria" list, because no
-  // criterion was ever judged unfixable; the check simply never turned green. The
-  // `strikes < opts.strikeCap` guard means this branch is skipped when BOTH caps trip on the same
-  // round — the ordinary strike-exhaustion escalate() below already covers that case correctly.
-  if (retriggers >= retriggerCap && strikes < opts.strikeCap) {
-    const preRetriggerStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.retrigger_exhaustion", deps.log);
-    if (preRetriggerStandDown) {
-      deps.log("fix.stood_down", { site: "rung.retrigger_exhaustion", strikes, retriggers, reason: preRetriggerStandDown.reason });
-      deps.say(`fix rung: standing down before retrigger-cap escalation — ${preRetriggerStandDown.reason}`);
-      return {
-        outcome: "stood_down",
-        review,
-        strikes,
-        retriggers,
-        reason: preRetriggerStandDown.reason,
-        standDownReason: preRetriggerStandDown.reason,
-      };
-    }
-    const staleCheckNames = Array.from(new Set([...everRedCiCheckNames, ...(currentCiFailures ?? []).map((f) => f.name)]));
-    const issueUrl = await escalateWithJudge(
-      {
-        class: "BLOCKED",
-        taskId: opts.taskId,
-        runId: opts.runId,
-        headSha: review.headSha,
-        cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
-        summary:
-          staleCheckNames.length > 0
-            ? `fix rung retrigger cap exhausted (${retriggers} retrigger(s), ${staleCheckNames.join(", ")} never went green) — ${opts.prUrl}`
-            : `fix rung retrigger cap exhausted (${retriggers} retrigger(s)) — ${opts.prUrl}`,
-        detail:
-          `The fix rung (W1-T2403) dispatched ${retriggers} RETRIGGER-SHAPED round(s) on ${opts.branch} — every ` +
-          `round's own new commit(s) either changed zero files or named a known-flaky re-trigger (see ` +
-          `isRetriggerShapedCommit's own doc) — and the check(s) below never went green. ZERO real strike(s) ` +
-          `were spent chasing this (of ${opts.strikeCap} available); the SEPARATE retrigger counter (cap ` +
-          `${retriggerCap}) stopped it rather than a timer or an unbounded loop. Check(s) that stayed red:\n\n` +
-          renderEscalationEvidence(staleCheckNames, (n) => `- ${n}`, staleCheckNames.length > 0),
-        options: [
-          {
-            label: "hand-fix",
-            detail: "investigate the named check directly — it is not a defect in this diff — and re-trigger it by hand once fixed.",
-          },
-          { label: "close", detail: "close the PR and re-scope the task if the check itself is permanently broken." },
-        ],
-        recommendation: "hand-fix",
-      },
-      { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
-    );
-    deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted" });
-    deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
-    return { outcome: "escalated", review, strikes, retriggers, reason: "retrigger_cap_exhausted", issueUrl };
-  }
-
-  // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
-  // exhaustion escalate() below, so a PR that went terminal MID-RUNG (after
-  // the last round's strike-top check, before this escalate) never files a
-  // BLOCKED "fix rung exhausted" needs-human issue on a PR that no longer
-  // carries a live block.
-  const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.exhaustion", deps.log);
-  if (preEscalateStandDown) {
-    deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
-    deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
-    return { outcome: "stood_down", review, strikes, retriggers, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
-  }
-
-  // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
-  // forever; the clarification rung (W1-T78) upgrades this route when it lands.
-  const unmet = review.criteria.filter((c) => !c.met);
-  // `noReviewYet` reflects whether the LAST strike ran with a real review
-  // verdict for its own head (W1-T100, extended by W1-T138 to keep re-checking
-  // every strike, not just the first — see the loop above). true here means
-  // no review ran for the FINAL push either, so the escalation names the
-  // failing checks it actually tried to fix (`currentCiFailures`, refreshed
-  // each non-green strike) rather than an empty/stale "Unmet criteria:" list.
-  // W1-T106: `currentMergeConflict` reflects whether the FINAL strike was
-  // still spent trying to resolve a dirty merge state — mirrors `noReviewYet`
-  // for the ci-log shape, checked first (mutually exclusive by construction).
-  const stillConflicted = currentMergeConflict !== undefined;
-  const issueUrl = await escalateWithJudge(
-    {
-      class: "BLOCKED",
-      taskId: opts.taskId,
-      runId: opts.runId,
-      // W1-T195: the composite dedup key's 2nd/3rd dimensions — the SAME headSha
-      // this escalation's own detail already names (`review.headSha`) and the SAME
-      // conflicted/checks-red signals the summary/detail above already branch on,
-      // normalized via the shared `escalationCause` classifier so the clarification
-      // rung's blocked-ambiguous escalate (buildSweepEffects, below) collapses into
-      // this ONE issue when it observes the identical (PR, head, cause).
-      headSha: review.headSha,
-      cause: escalationCause(stillConflicted, noReviewYet),
-      summary: stillConflicted
-        ? `conflicted fix rung exhausted (${strikes} strike(s), merge state never resolved) — ${opts.prUrl}`
-        : noReviewYet
-        ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
-        : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
-      detail: stillConflicted
-        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
-          `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
-          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined)
-        : noReviewYet
-        ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
-          `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
-          renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined) +
-          (() => {
-            const trajectory = renderCiTrajectoryLine(everRedCiCheckNames, (currentCiFailures ?? []).map((f) => f.name));
-            return trajectory ? `\n\n${trajectory}` : "";
-          })()
-        : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
-          `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
-          renderEscalationEvidence(unmet, (c) => `- ${c.claim}\n  reason: ${c.reason}`, review.criteria.length > 0),
-      options: stillConflicted
-        ? [
-            {
-              label: "hand-fix",
-              detail: "merge origin/main into the branch by hand, resolve the conflict, then push to re-trigger CI.",
-            },
-            { label: "close", detail: "close the PR and re-scope the task if the conflict cannot be safely resolved." },
-          ]
-        : noReviewYet
-        ? [
-            {
-              label: "hand-fix",
-              detail: "resolve the failing check(s) on the same branch by hand, then push to re-trigger CI.",
-            },
-            { label: "close", detail: "close the PR and re-scope the task if CI itself cannot be made to pass." },
-          ]
-        : [
-            {
-              label: "hand-fix",
-              detail:
-                "resolve the remaining criteria on the same branch by hand, then re-run `rmd review` to re-post the gate.",
-            },
-            { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
-          ],
-      recommendation: "hand-fix",
-    },
-    { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
-  );
-  const exhaustionReason = stillConflicted
-    ? "merge_conflict_unresolved"
-    : noReviewYet
-    ? "ci_never_green"
-    : "review_still_failing";
-  deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason });
-  deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
-  return { outcome: "escalated", review, strikes, retriggers, reason: exhaustionReason, issueUrl };
+  throw new Error("fix progress loop ended without a resolved review");
 }
 
 /**
@@ -42762,6 +42600,8 @@ export function buildFixRungDispatchArgs(args: {
     initialReview,
     initialCriterionIndices,
     constraint: pr.pendingAnswer?.constraint,
+    progressDecision: evidence.progressDecision,
+    progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
     ciEvidenceDisagreement: isCiLog
       ? ciEvidenceDisagreementObservation({
@@ -46371,19 +46211,6 @@ export async function routeFix(
   if (disposition === "refused-escalate") {
     // Same transport as the full sweep, but never through dispatchFix: a valid worker refusal is
     // an operator decision point, not an additional speculative strike.
-    const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
-    await deps.escalate(pr, reason, question);
-    return { outcome: "escalated", reason };
-  }
-  // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
-  // (failing review OR blocked_ci — a required check red, W1-T138 broadened this
-  // to fire regardless of the review verdict beside it — with strikes already
-  // at/over cap; W1-T100 generalizes this from review-only, one ladder, one
-  // exhaustion route) — rmd fix never bypasses it.
-  if ((pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap) {
-    // W1-T78: the SAME clarification-question rendering the sweep uses — one
-    // rung, one implementation, three callers now (drain live / sweep cold /
-    // rmd fix bootstrap).
     const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
     await deps.escalate(pr, reason, question);
     return { outcome: "escalated", reason };
