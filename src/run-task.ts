@@ -4798,6 +4798,7 @@ export function branchPrTitle(worktreePath: string): string | undefined {
     const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
     return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
   } catch (e) {
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
     void e;
     return lastCommitSubject(worktreePath);
   }
@@ -19183,6 +19184,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
       } catch (e) {
+        // An unreadable body only loses the remaining hint; the resume still runs with a generic prompt.
         void e;
       }
       const remaining = checkpointRemaining(tipBody);
