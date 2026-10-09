@@ -11519,19 +11519,23 @@ export const HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS = 30 * 60_000;
 /** W1-T5523 — one `pr@head` judgment started off the pass; `settled` is unset while it is in flight. */
 interface HandedOffHeadJudgmentFlight {
   settled?: HandedOffHeadJudgment;
+  done?: Promise<void>;
+  expire?: () => void;
   /** W1-T5659 — aborted when the pool's bound fires, BEFORE the flight settles, so the abandoned call stops spending
    *  and writes nothing a later pass could act on. */
   controller?: AbortController;
 }
 
 /** W1-T5523 — the judgments in flight, keyed `pr@head`, with the cap, the per-judgment bound and the
- *  timer seam (returns a cancel) that enforces it. A settled judgment leaves the map: across passes
- *  its ledgered `risk_judge.decision` row is the record, read back as before. */
+ *  timer seam (returns a cancel) that enforces it. Available outcomes survive stale ledger reads
+ *  in `settled` until a full open-set snapshot prunes their heads. */
 export interface HandedOffHeadJudgmentPool {
   readonly limit: number;
   readonly timeoutMs: number;
   readonly schedule: (ms: number, fire: () => void) => () => void;
   readonly flights: Map<string, HandedOffHeadJudgmentFlight>;
+  readonly settled: Map<string, Exclude<HandedOffHeadJudgment, { action: "unavailable" }>>;
+  openHeads?: ReadonlySet<string>;
 }
 
 export function handedOffHeadJudgmentPool(
@@ -11547,10 +11551,42 @@ export function handedOffHeadJudgmentPool(
     },
     ...over,
     flights: new Map(),
+    settled: new Map(),
   };
 }
 
+/** Keep a one-shot caller alive until its handed-off judgments settle or reach the pool's bound. */
+export async function awaitHandedOffHeadJudgments(pool: HandedOffHeadJudgmentPool): Promise<void> {
+  const flights = [...pool.flights.values()].filter((flight) => flight.done !== undefined);
+  if (flights.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.all(flights.map((flight) => flight.done)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          for (const flight of flights) flight.expire?.();
+          resolve();
+        }, pool.timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const sharedHandedOffHeadJudgments = handedOffHeadJudgmentPool();
+const handedOffHeadJudgmentsByLedger = new Map<string, HandedOffHeadJudgmentPool>();
+
+function sweepJudgmentPool(deps: SweepDeps): HandedOffHeadJudgmentPool {
+  if (deps.handedOffHeadJudgments !== undefined) return deps.handedOffHeadJudgments;
+  let pool = handedOffHeadJudgmentsByLedger.get(deps.ledgerPath);
+  if (pool === undefined) {
+    pool = { ...sharedHandedOffHeadJudgments, settled: new Map() };
+    handedOffHeadJudgmentsByLedger.set(deps.ledgerPath, pool);
+  }
+  return pool;
+}
 
 function logRiskJudgeUnavailable(
   pr: OpenPrView,
@@ -11580,7 +11616,10 @@ function startHandedOffHeadJudgment(
 ): HandedOffHeadJudgmentFlight {
   const key = `${pr.prNumber}@${pr.headSha}`;
   const controller = new AbortController();
-  const flight: HandedOffHeadJudgmentFlight = { controller };
+  let finished!: () => void;
+  const flight: HandedOffHeadJudgmentFlight = {
+    controller, done: new Promise<void>((resolve) => { finished = resolve; }),
+  };
   pool.flights.set(key, flight);
   let cancelBound = () => {};
   const settle = (judgment: HandedOffHeadJudgment): void => {
@@ -11588,15 +11627,21 @@ function startHandedOffHeadJudgment(
     flight.settled = judgment;
     pool.flights.delete(key);
     cancelBound();
+    if (judgment.action !== "unavailable" && (pool.openHeads === undefined || pool.openHeads.has(key))) {
+      pool.settled.set(key, judgment);
+    }
+    finished();
     if (judgment.action !== "unavailable") return;
     logRiskJudgeUnavailable(pr, handoff, judgment.reason, log);
   };
   const threw = (error: unknown): void =>
     settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
-  cancelBound = pool.schedule(pool.timeoutMs, () => {
+  flight.expire = () => {
+    if (flight.settled !== undefined) return;
     controller.abort(); // before settle: the aborted call's rejection then reaches `threw`, a no-op once settled
     settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` });
-  });
+  };
+  cancelBound = pool.schedule(pool.timeoutMs, flight.expire);
   try {
     judge(pr, controller.signal).then(settle, threw);
   } catch (error) {
@@ -11619,6 +11664,16 @@ async function holdHandedOffHeadForRiskJudgment(
   const head = pr.headSha.slice(0, 7);
   const unavailable = (reason: string) =>
     `risk judge unavailable for handed-off head ${head} (${reason}) — holding the arm; the next pass asks again`;
+  const settledHold = (judgment: HandedOffHeadJudgment): string | undefined => {
+    if (judgment.action === "proceed") return undefined;
+    if (judgment.action === "escalate") {
+      return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
+        (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
+    }
+    return unavailable(judgment.reason);
+  };
+  const settled = pool.settled.get(`${pr.prNumber}@${pr.headSha}`);
+  if (settled !== undefined) return settledHold(settled);
   if (judge === undefined) {
     const reason = "no risk judge is wired into this sweep";
     logRiskJudgeUnavailable(pr, handoff, reason, log);
@@ -11635,12 +11690,7 @@ async function holdHandedOffHeadForRiskJudgment(
   await new Promise<void>((resolve) => setImmediate(resolve));
   const judgment = flight.settled;
   if (judgment === undefined) return inFlight;
-  if (judgment.action === "proceed") return undefined;
-  if (judgment.action === "escalate") {
-    return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
-      (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
-  }
-  return unavailable(judgment.reason);
+  return settledHold(judgment);
 }
 
 /* W1-T5633 — A NEW HIGH CODEQL ALERT IS JUDGED AND NEVER HOLDS THE PR. GitHub's `CodeQL` results check
@@ -12833,10 +12883,13 @@ export async function runSweep(
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
+  const judgmentPool = sweepJudgmentPool(deps);
   const mergeBases = strikeLadderMergeBases.get(deps.ledgerPath) ?? new Map<string, string>();
   // Light passes see one PR; only a full open-set snapshot can evict absent heads (W1-T5673).
   if (deps.repairAdmissionSurface !== "light") {
     const openHeads = new Set(openPrs.map(mergeBaseKey));
+    judgmentPool.openHeads = openHeads;
+    for (const key of judgmentPool.settled.keys()) if (!openHeads.has(key)) judgmentPool.settled.delete(key);
     for (const key of mergeBases.keys()) if (!openHeads.has(key)) mergeBases.delete(key);
     if (mergeBases.size === 0) strikeLadderMergeBases.delete(deps.ledgerPath);
   }
@@ -14566,7 +14619,7 @@ export async function runSweep(
               }
               // W1-T5633: a head whose CodeQL check failed on a new high alert is judged before it arms.
               const codeScanning = await codeScanningGateForHead(
-                pr, armLines, deps, appendLine, log, deps.handedOffHeadJudgments ?? sharedHandedOffHeadJudgments,
+                pr, armLines, deps, appendLine, log, judgmentPool,
               );
               if (codeScanning.kind === "hold") {
                 acted = false;
@@ -14630,7 +14683,7 @@ export async function runSweep(
               const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
               if (handoff !== undefined) {
                 const riskHold = await holdHandedOffHeadForRiskJudgment(
-                  pr, handoff, deps.judgeHandedOffHead, log, deps.handedOffHeadJudgments ?? sharedHandedOffHeadJudgments,
+                  pr, handoff, deps.judgeHandedOffHead, log, judgmentPool,
                 );
                 if (riskHold !== undefined) {
                   acted = false;
