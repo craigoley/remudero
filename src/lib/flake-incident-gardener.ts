@@ -270,9 +270,10 @@ async function fileIncident(
       origin,
       files: [file],
       cost: prs.length,
+      // #10298: never `grep: <id> in <file>` — only a comment carries the id, and review caps a comment-only match.
       acceptance: [{
-        claim: `the cause of ${subject}'s intermittent failure is fixed in ${file} and recorded there by this task id`,
-        proof: `grep: ${taskId} in ${file}`,
+        claim: `the cause of ${subject}'s intermittent failure is fixed in ${file}, pinned by a test that forces the failing order`,
+        proof: `unit test: ${taskId} pins the cause of the intermittent failure`,
       }],
       note: `Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident.`,
       rationale: [
