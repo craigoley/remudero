@@ -167,13 +167,6 @@ function harnessTypescript(): { tsc: string; version: string; modules: string } 
   return { tsc: join(pkgDir, pkg.bin.tsc), version: pkg.version, modules: dirname(pkgDir) };
 }
 
-const canonicalOrUndefined = (wt: string): { root: string; buildInfo: string } | undefined => {
-  try {
-    return canonicalBuildInfo(wt);
-  } catch {
-    return undefined; // no readable seed location: every check in this probe runs cold, as before
-  }
-};
 const within = (path: string, root: string): boolean => path === root || path.startsWith(root + sep);
 const realOrUndefined = (path: string): string | undefined => (existsSync(path) ? realpathSync(path) : undefined);
 
@@ -291,7 +284,7 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     const root = mkdtempSync(join(tmpdir(), "rmd-merged-typecheck-"));
     scratch = root;
     const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn, {
-      canonical: canonicalOrUndefined(wt), tsVersion: harness.version,
+      canonical: canonicalBuildInfo(wt), tsVersion: harness.version,
     });
     const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
       const tar = join(root, `${name}.tar`);

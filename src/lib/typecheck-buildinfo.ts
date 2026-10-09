@@ -58,7 +58,13 @@ export function canonicalBuildInfo(root: string): { root: string; buildInfo: str
   if (gitDir === undefined) return undefined;
   const commondir = join(gitDir, "commondir");
   if (!existsSync(commondir)) return basename(gitDir) === ".git" ? { root, buildInfo: join(gitDir, TYPECHECK_BUILDINFO_NAME) } : undefined;
-  const common = resolve(gitDir, readFileSync(commondir, "utf8").trim());
+  let common: string;
+  try {
+    common = resolve(gitDir, readFileSync(commondir, "utf8").trim());
+  } catch {
+    // An unreadable commondir names no canonical checkout, so there is no seed to look for.
+    return undefined;
+  }
   if (basename(common) !== ".git") return undefined;
   return { root: dirname(common), buildInfo: join(common, TYPECHECK_BUILDINFO_NAME) };
 }
@@ -173,13 +179,7 @@ export function seedBuildInfo(
  * The canonical checkout's own check needs no seed: its buildinfo IS the seed.
  */
 export function seedFromCanonical(root: string, buildInfo: string): SeedOutcome {
-  let canonical: { root: string; buildInfo: string } | undefined;
-  try {
-    canonical = canonicalBuildInfo(root);
-  } catch {
-    // An unreadable commondir names no canonical checkout, so there is no seed to look for.
-    return "no-seed";
-  }
+  const canonical = canonicalBuildInfo(root);
   if (canonical === undefined || resolve(canonical.buildInfo) === resolve(buildInfo)) return "no-seed";
   return seedBuildInfo(canonical, { root, buildInfo }, installedTypescriptVersion(root));
 }

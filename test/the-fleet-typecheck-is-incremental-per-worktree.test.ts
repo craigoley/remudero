@@ -153,6 +153,10 @@ test("a tree with no git directory runs the plain, non-incremental check", () =>
   writeFileSync(join(dir, ".git"), "gitdir: ./gone\n");
   assert.equal(gitDirOf(dir), undefined, "a gitdir that no longer exists");
   assert.equal(canonicalBuildInfo(dir), undefined);
+  mkdirSync(join(dir, "linked", "commondir"), { recursive: true }); // a commondir that cannot be read as a file
+  writeFileSync(join(dir, ".git"), "gitdir: ./linked\n");
+  assert.equal(canonicalBuildInfo(dir), undefined, "an unreadable commondir names no canonical checkout");
+  assert.equal(prepareWorktreeTypecheck(dir).seed, "no-seed");
 });
 
 test("the open-weight typecheck keeps its buildinfo in the worker's home, never the worktree", () => {
