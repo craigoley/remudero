@@ -1500,7 +1500,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, feedbackStatusOnMain, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   decideDispatchClaim,
   releaseDispatchClaim,
@@ -38406,6 +38406,7 @@ export async function daemonCommand(
         // cached OPEN that has since merged/closed stands the guard down instead of parking a
         // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
         readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readFeedbackStatusOnMain: (feedbackId) => feedbackStatusOnMain(repoRoot, feedbackId),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
@@ -43397,6 +43398,9 @@ export function ciLogNamedSourcePaths(
 /** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
 export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
 
+/** W1-T5868: the reason prefix for a path left unmerged OUTSIDE the staged surface; it names the paths. */
+export const UNRESOLVED_CONFLICT_REFUSAL_PREFIX = "unresolved merge conflict outside the declared paths in";
+
 /**
  * W1-T5227: WHICH OF `paths` STILL HOLD A CONFLICT MARKER. Git's own detector, never a hand-rolled
  * regex: `git diff --check` prints `<path>:<line>: leftover conflict marker` for each one (plus
@@ -43525,6 +43529,15 @@ export function commitWorkerEdits(
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
     regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
+  // W1-T5868: a path still UNMERGED outside what this commit stages cannot be committed — `git commit`
+  // throws on it, and the guarded tree would carry its conflict stages. A merge of current main can
+  // conflict in files the task never declared. REFUSE by name (a strike), before anything is staged.
+  const unresolvedOutside = nulPaths(runGit(["diff", "--name-only", "--diff-filter=U", "-z"]))
+    .filter((path) => !declared.includes(path)).sort();
+  if (unresolvedOutside.length > 0) {
+    return { committed: false, undeclared, conflictMarkerFiles: unresolvedOutside,
+      reason: `${UNRESOLVED_CONFLICT_REFUSAL_PREFIX} ${unresolvedOutside.join(", ")}; nothing was staged` };
+  }
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
