@@ -421,6 +421,11 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(claimsCheck) && files.some((f) => claimsCheckEdges.includes(f))) {
     pathReaders.push(claimsCheck);
   }
+  const precheckParity = "test/every-ci-census-is-asked-before-the-push.test.ts";
+  const precheckParityEdges = ["scripts/affected-reach-baseline.json", "src/lib/affected-suites.ts", "test/the-affected-suite-reach-ratchet.test.ts"];
+  if (input.files.has(precheckParity) && files.some((f) => precheckParityEdges.includes(f))) {
+    pathReaders.push(precheckParity);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = "test/every-view-body-matches-its-schema.test.ts";
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
