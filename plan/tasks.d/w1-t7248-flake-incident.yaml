@@ -1,0 +1,34 @@
+- id: W1-T7248
+  title: "FLAKE INCIDENT — 'real package.json) over ONLY the census entries' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/fast-gate-admits-the-census-class.test.ts#real package.json) over ONLY the census entries"
+  files:
+    - test/fast-gate-admits-the-census-class.test.ts
+  acceptance:
+    - claim: "the cause of 'real package.json) over ONLY the census entries' (test/fast-gate-admits-the-census-class.test.ts)'s intermittent failure is fixed in test/fast-gate-admits-the-census-class.test.ts, pinned by a test that forces the failing order"
+      proof: 'grep: test("W1-T7248 pins the cause of the intermittent failure" in test/fast-gate-admits-the-census-class.test.ts'
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'real package.json) over ONLY the census entries' (test/fast-gate-admits-the-census-class.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10181, #10354, #10368.
+    CI runs: 37862576629, 37944299457, 37947872859.
+    Retry outcomes: 1 recovered on retry, 2 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Codex fix-round assessment: the task declares only test/fast-gate-admits-the-census-class.test.ts, which contains the named failing census test. The proposed test repair is reversible and remains subject to CI and review."
+      - "The declared work requests no privileged access, destructive operation, merge or deploy policy change, or operator-only decision. The deterministic escalation backstop reports no escalation reason for this record."
+      - "This ruling assesses the filed task, not a completed repair. The incident record names three PRs and CI runs; those remote runs and live family outcomes were not independently re-read in this round."
+    judged_at: "2026-10-09T16:09:37.501Z"
+    pin: "6b6c761c9e7a3da09627f2926d2f9f25fb8f93593b1aebab8bd522c4dbf10f1f"
