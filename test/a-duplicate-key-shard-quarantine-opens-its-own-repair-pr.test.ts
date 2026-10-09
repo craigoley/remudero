@@ -193,7 +193,7 @@ test("a duplicate-key quarantine opens exactly one repair PR per shard blob", as
   assert.equal(r.raised.length, 1, "the hand-repair escalation still stands");
   assert.equal(r.steps("plan.shard_repair_requested").length, 1, "the daemon's quarantine reporting asked for a repair");
   assert.equal(runTask.shardRepairsPending(stateDir), true, "the plan garden is due");
-  pass();
+  await pass();
   assert.equal(lane.calls.length, 1);
   assert.equal(lane.calls[0]!.rel, SHARD_REL);
   assert.equal(lane.calls[0]!.text, REPAIRED_BY_HAND, "the PR carries #8877's repair");
@@ -205,7 +205,7 @@ test("a duplicate-key quarantine opens exactly one repair PR per shard blob", as
 
   // A restarted daemon quarantines the same bytes again: nothing new opens.
   runTask.syncPlanFromOrigin(clone.dir, "plan/tasks.yaml", { quarantine: runTask.quarantineReporter(r.log, r.raise, requester) });
-  pass();
+  await pass();
   assert.equal(lane.calls.length, 1, "one PR per shard blob");
   assert.deepEqual(r.steps("plan.shard_repair_skipped").map((row) => row.extra.pr_url), ["https://github.com/o/r/pull/9001"]);
 });
@@ -216,7 +216,7 @@ test("a shard repair PR body carries the acceptance block its required gate dema
   const r = recorder();
   const lane = landRecorder();
   runTask.shardRepairRequester(stateDir, r.log)({ id: "W1-T5431", files: [`origin/main:${SHARD_REL}`], reason: "shard_invalid" });
-  runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
+  await runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
   assert.equal(lane.calls.length, 1, JSON.stringify(r.rows));
   assertRepairBodyIsJudgeable(lane.calls[0]!.body);
 });
@@ -228,7 +228,7 @@ test("an uncovered quarantine escalates and ledgers its refusal, and opens nothi
   const r = recorder();
   const lane = landRecorder();
   runTask.syncPlanFromOrigin(clone.dir, "plan/tasks.yaml", { quarantine: runTask.quarantineReporter(r.log, r.raise, runTask.shardRepairRequester(stateDir, r.log)) });
-  runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
+  await runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
   assert.equal(lane.calls.length, 0, "never a guess");
   assert.equal(r.raised.length, 1, "the escalation is left standing");
   assert.match(String(r.steps("plan.shard_repair_refused")[0]?.extra.reason), /matches the record's risk_ruling pin/);
@@ -239,7 +239,7 @@ test("the default plan-PR path really cuts the repair commit, and a refused push
   const stateDir = tempDir(t, "shard-repair-default");
   const r = recorder();
   runTask.shardRepairRequester(stateDir, r.log)({ id: "W1-T5431", files: [`origin/main:${SHARD_REL}`], reason: "shard_invalid" });
-  runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: join(stateDir, "wt"), owner: "o", repo: "r", log: r.log });
+  await runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: join(stateDir, "wt"), owner: "o", repo: "r", log: r.log });
   const failed = r.steps("plan.shard_repair_failed");
   assert.equal(failed.length, 1, JSON.stringify(r.rows));
   assert.equal(failed[0]!.extra.stage, "land");
@@ -261,15 +261,15 @@ test("every way a repair request fails is ledgered", async (t) => {
   assert.match(String(r.steps("plan.shard_repair_refused")[0]?.extra.reason), /not read from origin\/main/);
 
   request(q("origin/main:plan/tasks.d/absent.yaml"));
-  run();
+  await run();
   assert.equal(r.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "read");
 
   request(q(`origin/main:${SHARD_REL}`));
-  run(landRecorder(() => undefined).land);
+  await run(landRecorder(() => undefined).land);
   assert.equal(r.steps("plan.shard_repair_not_landed").length, 1, "a preflight refusal is not an opened PR");
 
   request(q(`origin/main:${SHARD_REL}`));
-  run(() => {
+  await run(() => {
     throw new Error("gh api: 502");
   });
   assert.deepEqual(r.steps("plan.shard_repair_failed").at(-1)?.extra, { id: "W1-T5431", file: `origin/main:${SHARD_REL}`, stage: "land", reason: "gh api: 502" });
@@ -277,12 +277,12 @@ test("every way a repair request fails is ledgered", async (t) => {
   writeFileSync(join(runTask.shardRepairDir(stateDir), "opened.json"), "{ torn");
   const lane = landRecorder();
   request(q(`origin/main:${SHARD_REL}`));
-  run(lane.land);
+  await run(lane.land);
   assert.equal(r.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "opened-record");
   assert.equal(lane.calls.length, 0, "an unreadable record never risks a second PR");
 
   writeFileSync(join(runTask.shardRepairDir(stateDir), "requests", "torn.json"), "{");
-  run();
+  await run();
   assert.equal(r.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "pass");
   assert.equal(runTask.shardRepairsPending(stateDir), false, "the torn request was consumed; each failed one backs off (W1-T5618)");
 
@@ -295,7 +295,7 @@ test("every way a repair request fails is ledgered", async (t) => {
   assert.equal(r.steps("plan.shard_repair_requested").length, 4, "a quarantine that is not a duplicate key asks for nothing");
 });
 
-test("the plan garden runs the repair lane first, is due while a request waits, and a lane failure never skips the garden", (t) => {
+test("the plan garden runs the repair lane first, is due while a request waits, and a lane failure never skips the garden", async (t) => {
   const stateDir = tempDir(t, "shard-repair-garden");
   const r = recorder();
   let gardened = 0;
@@ -306,7 +306,7 @@ test("the plan garden runs the repair lane first, is due while a request waits, 
   assert.equal(composed.due!(), false, "nothing waits and the garden is not due");
   runTask.shardRepairRequester(stateDir, r.log)({ id: "W1-T5431", files: [`origin/main:${SHARD_REL}`], reason: "shard_invalid" });
   assert.equal(composed.due!(), true);
-  composed();
+  await composed();
   assert.equal(gardened, 1);
   assert.deepEqual(r.steps("plan.shard_repair_failed").map((row) => row.extra), [{ stage: "pass", reason: "disk gone" }]);
   assert.equal(runTask.withShardRepairs(stateDir, () => {}, () => {}, r.log).due!(), true, "a garden with no probe of its own is due");

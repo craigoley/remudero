@@ -121,24 +121,24 @@ function seedOpened(stateDir: string, opened: Record<string, unknown>): void {
 
 const readOpened = (stateDir: string) => JSON.parse(readFileSync(join(runTask.shardRepairDir(stateDir), "opened.json"), "utf8")) as Record<string, unknown>;
 
-test("a not-landed shard repair keeps its request and is retried on a later pass without a restart", (t) => {
+test("a not-landed shard repair keeps its request and is retried on a later pass without a restart", async (t) => {
   const l = lane(t);
   l.request();
   l.setLand(() => undefined);
-  l.pass();
+  await l.pass();
   assert.equal(l.steps("plan.shard_repair_not_landed").length, 1);
   const retryAt = new Date(T0 + GARDEN_FILING_RETRY_BASE_MS).toISOString();
   assert.deepEqual(l.requests(), [{ id: "W1-T5431", file: FILE, attempts: 1, blob: BLOB, next_at: retryAt }], "the request outlives the pass");
   assert.deepEqual(l.steps("plan.shard_repair_retry_scheduled").map((r) => r.extra), [{ id: "W1-T5431", file: FILE, blob: BLOB, attempt: 1, next_at: retryAt }]);
   assert.equal(l.pending(), false, "a request backing off does not make the plan garden due, so it never spins");
 
-  l.pass();
+  await l.pass();
   assert.equal(l.landed.length, 1, "a pass before next_at leaves the request alone");
 
   l.time.at = T0 + GARDEN_FILING_RETRY_BASE_MS;
   assert.equal(l.pending(), true, "the request is due again at next_at, with no restart");
   l.setLand(() => FIRST_PR);
-  l.pass();
+  await l.pass();
   assert.equal(l.landed.length, 2);
   assert.deepEqual(l.steps("plan.shard_repair_opened").map((r) => r.extra.pr_url), [FIRST_PR]);
   assert.match(l.landed[1]!.body, /\n## Acceptance\n- no plan shard on main carries a duplicate key after this repair \| unit test: /, "#9046's block rides the retry");
@@ -146,21 +146,21 @@ test("a not-landed shard repair keeps its request and is retried on a later pass
   assert.equal(l.pending(), false);
 });
 
-test("a failed shard repair backs off, doubling, and abandons after its attempt cap with the escalation left standing", (t) => {
+test("a failed shard repair backs off, doubling, and abandons after its attempt cap with the escalation left standing", async (t) => {
   const l = lane(t);
   l.request();
   l.setLand(() => {
     throw new Error("gh api: 502");
   });
-  l.pass();
+  await l.pass();
   l.time.at += GARDEN_FILING_RETRY_BASE_MS;
-  l.pass();
+  await l.pass();
   assert.deepEqual(l.steps("plan.shard_repair_retry_scheduled").map((r) => [r.extra.attempt, r.extra.next_at]), [
     [1, new Date(T0 + GARDEN_FILING_RETRY_BASE_MS).toISOString()],
     [2, new Date(T0 + 3 * GARDEN_FILING_RETRY_BASE_MS).toISOString()],
   ]);
   l.time.at = T0 + 3 * GARDEN_FILING_RETRY_BASE_MS;
-  l.pass();
+  await l.pass();
   assert.equal(l.landed.length, 3);
   assert.deepEqual(l.steps("plan.shard_repair_failed").map((r) => r.extra.stage), ["land", "land", "land"]);
   assert.deepEqual(l.steps("plan.shard_repair_abandoned").map((r) => r.extra), [
@@ -174,20 +174,20 @@ test("a failed shard repair backs off, doubling, and abandons after its attempt 
   assert.deepEqual(l.requests(), [{ id: "W1-T5431", file: FILE }]);
 });
 
-test("a read that throws, an unreadable opened record and a torn request are each retried or consumed by name", (t) => {
+test("a read that throws, an unreadable opened record and a torn request are each retried or consumed by name", async (t) => {
   const l = lane(t);
   l.request();
   l.setBlob(() => {
     throw new Error("fatal: path not in origin/main");
   });
-  l.pass();
+  await l.pass();
   assert.equal(l.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "read");
   assert.deepEqual(l.requests(), [{ id: "W1-T5431", file: FILE, attempts: 1, next_at: new Date(T0 + GARDEN_FILING_RETRY_BASE_MS).toISOString() }], "a read failure names no blob");
 
   l.setBlob(() => BROKEN_SHARD);
   writeFileSync(join(runTask.shardRepairDir(l.stateDir), "opened.json"), "{ torn");
   l.time.at += GARDEN_FILING_RETRY_BASE_MS;
-  l.pass();
+  await l.pass();
   assert.equal(l.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "opened-record");
   assert.equal(l.landed.length, 0, "an unreadable record never risks a second PR");
   assert.equal(l.requests()[0]?.attempts, 2);
@@ -195,40 +195,40 @@ test("a read that throws, an unreadable opened record and a torn request are eac
   const torn = join(runTask.shardRepairDir(l.stateDir), "requests", "torn.json");
   writeFileSync(torn, "{");
   assert.equal(l.pending(), true, "a torn request is due, so the pass that consumes it runs");
-  l.pass();
+  await l.pass();
   assert.equal(l.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "pass");
   assert.equal(existsSync(torn), false, "a request that cannot be read is consumed, never retried");
   assert.equal(l.requests().length, 1, "the backing-off request is untouched");
 });
 
-test("a deterministic refusal and bytes that now parse are end states and consume the request", (t) => {
+test("a deterministic refusal and bytes that now parse are end states and consume the request", async (t) => {
   const l = lane(t);
   l.request();
   l.setBlob(() => BROKEN_SHARD.replace("  priority: 2.5\n", "  priority: 3\n"));
-  l.pass();
+  await l.pass();
   assert.match(String(l.steps("plan.shard_repair_refused")[0]?.extra.reason), /risk_ruling pin/);
   assert.deepEqual(l.requests(), []);
 
   l.request();
   l.setBlob(() => BROKEN_SHARD.replace("  priority: 4\n", ""));
-  l.pass();
+  await l.pass();
   assert.equal(l.steps("plan.shard_repair_refused")[1]?.extra.reason, "the shard has no duplicate key — it parses");
   assert.deepEqual(l.requests(), []);
   assert.equal(l.landed.length, 0);
 });
 
-test("bytes main changed since the last attempt start their own attempt count", (t) => {
+test("bytes main changed since the last attempt start their own attempt count", async (t) => {
   const l = lane(t);
   l.request();
   l.setLand(() => undefined);
-  l.pass();
+  await l.pass();
   l.time.at += GARDEN_FILING_RETRY_BASE_MS;
-  l.pass();
+  await l.pass();
   assert.equal(l.requests()[0]?.attempts, 2);
   const changed = BROKEN_SHARD.replace("  attempts: 0\n", "  attempts: 1\n");
   l.setBlob(() => changed);
   l.time.at += 2 * GARDEN_FILING_RETRY_BASE_MS;
-  l.pass();
+  await l.pass();
   assert.deepEqual(l.steps("plan.shard_repair_abandoned"), [], "the old bytes' failures are not charged to new ones");
   assert.deepEqual(
     l.requests().map((r) => [r.attempts, r.blob]),
@@ -236,12 +236,12 @@ test("bytes main changed since the last attempt start their own attempt count", 
   );
 });
 
-test("a blob whose recorded repair PR was closed unmerged gets one fresh PR, and a second close is respected", (t) => {
+test("a blob whose recorded repair PR was closed unmerged gets one fresh PR, and a second close is respected", async (t) => {
   const l = lane(t);
   seedOpened(l.stateDir, { [BLOB]: FIRST_PR });
   l.request();
   l.setLand(() => FRESH_PR);
-  l.pass(() => "closed");
+  await l.pass(() => "closed");
   assert.deepEqual(l.prStateReads, [FIRST_PR]);
   assert.equal(l.landed.length, 1, "one fresh PR for the same bytes");
   assert.match(l.landed[0]!.body, /\n## Acceptance\n- no plan shard on main carries a duplicate key after this repair \| unit test: /, "the fresh PR keeps #9046's block");
@@ -250,7 +250,7 @@ test("a blob whose recorded repair PR was closed unmerged gets one fresh PR, and
   assert.deepEqual(l.requests(), []);
 
   l.request();
-  l.pass(() => "closed");
+  await l.pass(() => "closed");
   assert.deepEqual(l.prStateReads, [FIRST_PR], "a reopened blob is not read again");
   assert.equal(l.landed.length, 1, "a second close is respected");
   assert.deepEqual(l.steps("plan.shard_repair_skipped").map((r) => [r.extra.pr_url, r.extra.reason]), [
@@ -259,12 +259,12 @@ test("a blob whose recorded repair PR was closed unmerged gets one fresh PR, and
   assert.deepEqual(l.requests(), []);
 });
 
-test("a blob whose recorded repair PR is open or merged is still skipped", (t) => {
+test("a blob whose recorded repair PR is open or merged is still skipped", async (t) => {
   for (const state of ["open", "merged"] as const) {
     const l = lane(t);
     seedOpened(l.stateDir, { [BLOB]: FIRST_PR });
     l.request();
-    l.pass(() => state);
+    await l.pass(() => state);
     assert.equal(l.landed.length, 0, state);
     assert.deepEqual(l.steps("plan.shard_repair_skipped").map((r) => r.extra), [
       { id: "W1-T5431", file: FILE, blob: BLOB, pr_url: FIRST_PR, pr_state: state, reason: "a repair PR was already opened for these bytes" },
@@ -274,12 +274,12 @@ test("a blob whose recorded repair PR is open or merged is still skipped", (t) =
 });
 
 /** Runs `body` with a PATH-shimmed `gh` answering each pull read, so the default prState seam really shells out. */
-function withGh(t: TestContext, routes: Parameters<typeof ghShim>[0], body: () => void): string[] {
+async function withGh(t: TestContext, routes: Parameters<typeof ghShim>[0], body: () => void | Promise<void>): Promise<string[]> {
   const gh = ghShim(routes, { kind: "shard-repair-gh" });
   const previous = process.env.PATH;
   process.env.PATH = `${gh.dir}:${previous}`;
   try {
-    body();
+    await body();
   } finally {
     process.env.PATH = previous;
   }
@@ -287,21 +287,21 @@ function withGh(t: TestContext, routes: Parameters<typeof ghShim>[0], body: () =
   return gh.calls();
 }
 
-const pullRow = (row: Record<string, unknown>) => `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(row)}\n`;
+const pullRow = (row: Record<string, unknown>) => `${JSON.stringify(row)}\n`;
 
-test("the default PR-state read shells gh: a closed unmerged PR reopens, and an unreadable one opens nothing and is retried", (t) => {
+test("the default PR-state read shells gh: a closed unmerged PR reopens, and an unreadable one opens nothing and is retried", async (t) => {
   const closed = lane(t);
   seedOpened(closed.stateDir, { [BLOB]: FIRST_PR });
   closed.request();
   closed.setLand(() => FRESH_PR);
-  const calls = withGh(t, [{ when: "repos/o/r/pulls/9001", stdout: pullRow({ number: 9001, state: "closed", merged: false }) }], () => closed.pass());
+  const calls = await withGh(t, [{ when: "repos/o/r/pulls/9001", stdout: pullRow({ number: 9001, state: "closed", merged: false }) }], () => closed.pass());
   assert.equal(calls.filter((c) => c.includes("repos/o/r/pulls/9001")).length, 1, "the default seam read the recorded PR");
   assert.deepEqual(closed.steps("plan.shard_repair_opened").map((r) => r.extra.reopened_from), [FIRST_PR]);
 
   const l = lane(t);
   seedOpened(l.stateDir, { [BLOB]: FIRST_PR });
   l.request();
-  withGh(t, [{ when: "repos/o/r/pulls/9001", stderr: "HTTP 502: Bad Gateway", exit: 1 }], () => l.pass());
+  await withGh(t, [{ when: "repos/o/r/pulls/9001", stderr: "HTTP 502: Bad Gateway", exit: 1 }], () => l.pass());
   assert.equal(l.landed.length, 0, "a duplicate PR is never opened on a guess");
   assert.deepEqual(l.steps("plan.shard_repair_skipped").map((r) => [r.extra.pr_state, r.extra.reason]), [
     ["unknown", "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR"],
