@@ -174,3 +174,47 @@ test("the sampler module references no heap snapshot, inspector or gc entry poin
   // The control: the same scan is live, not vacuous, and reaches the thread read.
   assert.match(text, /getHeapStatistics\(\)/);
 });
+
+test("a thread whose heap read rejects is named unsized with its reason, never read as 0 bytes", async () => {
+  const refusing: WorkerThread = {
+    threadId: 8,
+    once: (() => undefined) as unknown as WorkerThread["once"],
+    getHeapStatistics: (() => Promise.reject(new Error("worker exited"))) as unknown as WorkerThread["getHeapStatistics"],
+  };
+  const book = workerHeapReadings({ live: () => [{ kind: "board-worker:spawnBoard", thread: refusing }], timeoutMs: 1_000, nowMs: () => 0 });
+  book.refresh();
+  await settle(20);
+  const fields = book.fields(MAIN);
+  assert.deepEqual(fields.worker_heaps, { "board-worker:spawnBoard": { threads: 1, total_bytes: 0, used_bytes: 0, unsized: [8] } });
+  assert.equal(fields.native_remainder_kind, "inferred-upper-bound", "a refused read leaves its heap inside the remainder");
+});
+
+test("a registry that throws on listing carries error:<reason> on the next row instead of a reading", () => {
+  const book = workerHeapReadings({ live: () => { throw new Error("registry gone"); }, timeoutMs: 1_000 });
+  book.refresh();
+  assert.deepEqual(book.fields(MAIN), { mem_worker_heaps: "error:registry gone" });
+});
+
+test("an afterRow hook that throws is logged and never stops the heartbeat", async () => {
+  const steps: string[] = [];
+  const failures: Record<string, unknown>[] = [];
+  const readMemoryTelemetry = Object.assign(() => ({ ...MAIN }), { afterRow: () => { throw new Error("read could not start"); } });
+  let sleeps = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { await gate; return okResult(id); },
+      sweepLight: async () => {},
+      sleep: async () => { sleeps++; await settle(5); if (sleeps >= 3) release?.(); },
+      log: (step, e = {}) => { steps.push(step); if (step === "daemon.memory_read_failed") failures.push(e); },
+      readMemoryTelemetry,
+    },
+    { max: 1 },
+  );
+  assert.ok(steps.filter((s) => s === "daemon.alive").length >= 2, "heartbeats kept being written after the hook threw");
+  assert.ok(failures.length >= 1, "the throw is logged as daemon.memory_read_failed");
+  assert.equal(failures[0].error, "read could not start");
+});
