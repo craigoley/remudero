@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -27,3 +27,14 @@
     CI runs: 37941672866, 37941954001, 37943097615.
     Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan scopes a union type-check repair to one source file and one compiler regression test; the declared files align with that scope."
+      - "Acceptance requires coverage of both view kinds, failure on the original unguarded access, and continued rejection of omitted prerequisite arguments, providing concrete verification criteria."
+      - "The supplied scope requests no sensitive access, destructive action, policy change, or operator-only decision. Filing-time gates report no failed checks."
+      - "The family's 39 declines versus 23 merges warrant scrutiny, but the supplied record shows no specific drift; implementation and test results remain unverified at filing time."
+    judged_at: "2026-10-09T19:14:59.044Z"
+    pin: "06a191ec77afa1d05eef576d6c2c8dda293814d30f85be5d1fb1ccfdb91146b2"
