@@ -1,0 +1,46 @@
+- id: W1-T6639
+  title: "A HARNESS COMMIT THROWS ON A TEST PATH WHOSE DELETION IS ALREADY STAGED — commitWorkerEdits admits every changed test/ path (admitTests) into `git add -A -- <paths>`, including an index deletion that a merge already staged; that path exists in neither the index nor the worktree, so git refuses the whole pathspec and the fix round throws instead of committing the resolved merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — which already-staged entries the harness commit passes to `git add`
+  band_meaning: span
+  origin: "operator session 2026-10-09: isolated reproduction of the #10166 fix-rung stall"
+  plan_refs: [W1-T4450, W1-T5227, W1-T3696]
+  files: [src/run-task.ts, test/a-harness-commit-keeps-an-already-staged-test-deletion.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REPRODUCED in isolation (2026-10-09). The exact preserved conflict state of #10166's second fix attempt was restored
+    in a private clone and verified exact: status identical, the single unmerged path identical, and both patches
+    identical apart from abbreviated index ids; fsck clean. It ran in a throwaway container from the daemon image
+    (git 2.39.5, node 24.21.0) with no network and no credentials. The production harness was driven with the fix round's
+    arguments: the PR's four declared files, requireMergeHead, the round guard, the synthetic task's real acceptance, and
+    the fix worker's real report.
+    - On main 1bf453da (after #10176 fixed the proof-title spin), commitWorkerEdits deterministically throws in about
+      14 s: `git add -A -- docs/cli-reference.md ... test/fixtures/golden-verdicts/knowledge-retire/checkout/learnings/ci.yaml
+      ...` -> "fatal: pathspec '...ci.yaml' did not match any files". The same on 9ebada5e and on host git 2.43.
+    - The path is `D ` in the merge's status, already deleted in the index and absent on disk. It enters `declared` via
+      `admittedTests` (every changed test/ path when admitTests holds), and `git add -A -- <path>` matches nothing.
+    - Control: the same harness, arguments and acceptance on a clean state with one plain edit commits in about 4 s.
+    Any fix round whose merge of main deletes a test/ file hits this: the round throws (sweep.fix.error), and the
+    worker's resolution is never committed.
+  design: |
+    (1) The harness commit stages only paths that `git add` can match. An entry whose deletion is already staged (index
+    `D`, absent from the worktree) is not passed to `git add`; it stays in the index and is committed as the deletion it
+    already is.
+    (2) A deletion only in the worktree (` D`) of a declared or admitted path is still staged by `add -A`, exactly as today.
+    (3) Both commit branches (plain, and the guarded temporary-index tree) use the same filtered list. Nothing else about
+    declared, undeclared or admitted paths changes.
+  acceptance:
+    - claim: "in a merge state where a test/ path's deletion is already staged and admitTests holds, the harness commit succeeds and the commit records that deletion; a worktree-only deletion of a declared path is still staged; and with the unfiltered add restored the first case fails with git's pathspec error"
+      proof: "unit test: test/a-harness-commit-keeps-an-already-staged-test-deletion.test.ts"
+    - claim: "the harness filters already-staged deletions out of its add"
+      proof: "grep: alreadyStagedDeletion in src/run-task.ts"
+  falsifier: |
+    Pass every admitted path to `git add` again: the already-staged-deletion case fails with "pathspec ... did not match
+    any files". Drop worktree-only deletions too: the control case leaves the deletion unstaged and fails.

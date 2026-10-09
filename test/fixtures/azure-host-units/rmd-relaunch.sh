@@ -346,7 +346,9 @@ recycle_on_verdict() {
     echo "rmd-relaunch: progress-watchdog -- a recycle ran $((now - last))s ago; at most one per ${WATCHDOG_RECYCLE_GAP_S}s."
     return 1
   fi
-  # STAMPED BEFORE THE ATTEMPT: a refusal is retried on a later tick, never in this one.
+  # STAMPED BEFORE THE ATTEMPT: a refusal is retried on a later tick, never in this one. W1-T6598:
+  # and STAMPED AGAIN WHEN IT ENDS, ok or refused, so the gap runs from the end -- a drain wait
+  # longer than WATCHDOG_RECYCLE_GAP_S must not leave the just-booted generation unprotected.
   mkdir -p "$STATE_DIR/state" 2>/dev/null || true
   printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
   [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
@@ -368,6 +370,8 @@ recycle_on_verdict() {
     result=refused
     reason="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | tr -s '[:space:]' ' ' || true)"
   fi
+  # W1-T6598: the END stamp -- WATCHDOG_RECYCLE_GAP_S now runs from when this attempt finished.
+  date -u +%s > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
   printf '%s watchdog-recycle result=%s rc=%s reason=%s\n' "$(watchdog_stamp)" "$result" "$rc" "${reason:-none}" \
     >> "$REVIVAL_LOG" 2>/dev/null || true
   return 0
