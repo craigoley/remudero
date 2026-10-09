@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { daemonCommand } from "../src/run-task.js";
+import { daemonCommand } from "./helpers/run-task-daemon.js";
 import { readMemoryLedger } from "../src/lib/host-memory-ledger.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
