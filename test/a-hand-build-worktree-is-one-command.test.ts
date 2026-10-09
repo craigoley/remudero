@@ -190,14 +190,17 @@ test("an unreadable branch list or trailer history refuses rather than reading a
   assert.match(trailers.status === "refused" ? trailers.reason : "", /cannot read origin\/main's Remudero-Task trailers/);
 });
 
-test("hand-worktree usage errors exit 2 and the default parent is the checkout's own directory", () => {
+test("hand-worktree usage errors exit 2 and an absent fixture scratch root selects the checkout parent", () => {
   const f = fleet();
   assert.equal(command([], { repoDir: f.core.dir }).code, 2);
   assert.equal(command(["W1-T9", "--parent"], { repoDir: f.core.dir }).code, 2);
   assert.match(command(["W1-T9", "--bogus"], { repoDir: f.core.dir }).err, /unexpected argument '--bogus'/);
-  const r = command(["W1-T9"], { repoDir: f.core.dir, minFreeBytes: Number.MAX_SAFE_INTEGER });
+  const missingScratch = join(f.parent, "absent-scratch");
+  assert.equal(existsSync(missingScratch), false);
+  const r = command(["W1-T9"], { repoDir: f.core.dir, scratchRoot: missingScratch, minFreeBytes: Number.MAX_SAFE_INTEGER });
   assert.equal(r.code, 1);
   assert.match(r.err, new RegExp(`free under ${dirname(f.core.dir)},`));
+  assert.equal(existsSync(missingScratch), false, "the fallback must not create the absent fixture scratch root");
 });
 
 test("each donor and link failure is named, never read as a clean miss", () => {
