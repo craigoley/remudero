@@ -369,7 +369,7 @@ test("W1-T4075: the draft rung's readiness from a generation answers exactly as 
   assert.equal(accessors.depsUnobservable("NOT-IN-PLAN"), undefined, "a missing dependency is unmetDependencies' own case");
 });
 
-test("W1-T4075: the draft rung reads readiness from the generation it is handed", async () => {
+test("W1-T4075: the draft rung selects proposals without reading generation readiness", async () => {
   const { plan, options } = fixture();
   const root = options.config.root;
   mkdirSync(join(root, "state"), { recursive: true });
@@ -383,10 +383,20 @@ test("W1-T4075: the draft rung reads readiness from the generation it is handed"
   type DraftTickRead = NonNullable<Parameters<typeof hook>[0]>;
   await hook({ plan, projection: [["A", { merged: true }]] } as unknown as DraftTickRead);
   assert.deepEqual(drafted, [["P-GEN"]]);
-  assert.equal(rows.includes("inbox.draft_readiness_unavailable"), false, "a generation's projection serves readiness");
+  writeFileSync(join(root, "state", "inbox-draft-attempts.json"), "{}");
   await hook({ plan, projection: 5 } as unknown as DraftTickRead);
-  assert.equal(rows.filter((step) => step === "inbox.draft_readiness_unavailable").length, 1,
-    "an unreadable generation projection is what readiness read — not a re-derived one");
+  assert.deepEqual(drafted, [["P-GEN"], ["P-GEN"]], "an unreadable projection cannot change draft selection");
+  let readinessReads = 0;
+  const unreadable = {
+    get plan() { readinessReads++; throw new Error("draft selection read the plan"); },
+    get projection() { readinessReads++; throw new Error("draft selection read the projection"); },
+  } as unknown as DraftTickRead;
+  writeFileSync(join(root, "state", "inbox-draft-attempts.json"), "{}");
+  await hook(unreadable);
+  assert.equal(readinessReads, 0, "neither readiness field is accessed, even behind a catch");
+  assert.deepEqual(drafted, [["P-GEN"], ["P-GEN"], ["P-GEN"]]);
+  assert.equal(rows.includes("inbox.draft_readiness_unavailable"), false);
+  assert.equal(rows.includes("inbox.draft_rung.error"), false);
 });
 
 test("W1-T4075: a worker's log rows reach the daemon ledger and the main thread's logger is inert", async () => {
