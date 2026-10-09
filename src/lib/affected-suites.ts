@@ -432,6 +432,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(viewEtags) && files.some((f) => viewEtagsEdges.includes(f))) {
     pathReaders.push(viewEtags);
   }
+  const proofExecTmpHygiene = "test/proof-exec-tmp-hygiene.test.ts";
+  const proofExecTmpHygieneEdges = [
+    "src/lib/ci-parity.ts",
+    "test/the-coverage-entry-shards-the-way-ci-does.test.ts",
+    "test/the-local-coverage-shard-count-equals-cis.test.ts",
+  ];
+  if (input.files.has(proofExecTmpHygiene) && files.some((f) => proofExecTmpHygieneEdges.includes(f))) {
+    pathReaders.push(proofExecTmpHygiene);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
