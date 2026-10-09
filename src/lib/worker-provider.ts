@@ -41,6 +41,7 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
+import { seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -3652,6 +3653,16 @@ export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string
   return argv;
 }
 
+/** The typecheck runs incremental against a buildinfo in the worker's private home — the sandbox's one writable bind
+ *  besides the worktree, so it is never part of the diff — seeded from the canonical checkout's on first use. Same
+ *  diagnostics as a cold check at about half its peak memory (lib/typecheck-buildinfo.ts). Harness-built: the model
+ *  still supplies no argument. */
+export function openWeightIncrementalTypecheck(argv: readonly string[], cwd: string, workerHome: string): string[] {
+  const buildInfo = join(workerHome, TYPECHECK_BUILDINFO_NAME);
+  seedFromCanonical(cwd, buildInfo);
+  return [...argv, "--incremental", "--tsBuildInfoFile", buildInfo];
+}
+
 // ── W1-T6091: THE unit_test CHECK RUNS THE DIFF'S AFFECTED SUITES ────────────────────────────
 // MEASURED 2026-10-06: the whole suite is ~21 min against OPENWEIGHT_CHECK_TIMEOUT_MS's 10, so a
 // whole-tree unit_test always timed out, at ~70 core-minutes a call, and left no ledger row.
@@ -3948,6 +3959,7 @@ async function executeOpenWeightTool(
       // fresh network namespace before it runs.
       const startedAt = ledger.clock.now();
       let argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      if (args.check === "typecheck") argv = openWeightIncrementalTypecheck(argv, cwd, workerHome);
       // W1-T6091: in a tree carrying the selector, unit_test runs the HARNESS-derived affected
       // suites as explicit files, or nothing, or refuses — never the whole tree.
       let suites: number | null = null;
