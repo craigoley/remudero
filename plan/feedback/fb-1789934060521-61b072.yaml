@@ -10,10 +10,11 @@ raw: "Observed on 2026-09-20: console task API-T37 created worker branch b4ff0ce
   keeps Docker RestartCount unchanged."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
