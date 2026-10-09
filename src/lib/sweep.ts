@@ -17077,8 +17077,8 @@ export function checkQueueGovernor(
 }
 
 /** W1-T4465 design (ii) — the trailing flow {@link checkQueueGovernor}'s tiered admission compares:
- *  merges (`verdict.merged` rows, or a `verdict` row itself carrying `verdict: "merged"` — the SAME
- *  two-shape match `routeAdaptiveLifetimePressure`, run-task.ts, already uses) against opens
+ *  merges (`verdict.merged`, a `verdict` row reading `merged`, or a `pr.terminal` row reading
+ *  `merged`, one per PR) against opens
  *  (`pr.opened` rows) inside the trailing `policy.queueGovernorFlowWindowMinutes` window ending at
  *  `nowMs`. PURE over an already-read ledger array — never reads a file itself, mirroring every
  *  other sweep.ts window derivation (e.g. {@link deriveWindowCostUsd}). */
@@ -17088,16 +17088,24 @@ export function deriveQueueGovernorTrailingFlow(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): { trailingMergedCount: number; trailingOpenedCount: number } {
   const windowStartMs = nowMs - policy.queueGovernorFlowWindowMinutes * 60_000;
-  let trailingMergedCount = 0;
+  let unkeyedMerges = 0;
+  const mergedPrs = new Set<string>();
   let trailingOpenedCount = 0;
   for (const line of lines) {
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
-    if (line.step === "pr.opened") trailingOpenedCount++;
-    else if (line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")) trailingMergedCount++;
+    if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
+    // A sweep-observed merge is a `pr.terminal` row reading `merged`; most merges carry no
+    // `verdict.merged` row at all, so counting only that one read a draining queue as growing.
+    const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
+      || (line.step === "pr.terminal" && line.state === "merged");
+    if (!merged) continue;
+    const key = typeof line.pr_number === "number" ? `#${line.pr_number}` : typeof line.pr_url === "string" ? line.pr_url : undefined;
+    if (key === undefined) unkeyedMerges++;
+    else mergedPrs.add(key);
   }
-  return { trailingMergedCount, trailingOpenedCount };
+  return { trailingMergedCount: mergedPrs.size + unkeyedMerges, trailingOpenedCount };
 }
 
 /** A throttled pass is NOT silent: the dispatch path calls this exactly when
