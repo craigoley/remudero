@@ -503,7 +503,7 @@ export function checkServiceFreshness(
   return assessFetchedService(repoDir, git);
 }
 
-/** The same check with the network fetch awaited: a sync one stalled the daemon loop 49 s (E36). */
+/** The same check with fetch and local assessment awaited: a sync fetch stalled the loop 49 s (E36). */
 export async function checkServiceFreshnessAsync(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
@@ -519,7 +519,7 @@ export async function checkServiceFreshnessAsync(
     if (!deps.recentFetchFallback || !isStalledHandshake(err)) return { status: "degraded", reason };
     return retryStalledHandshake(repoDir, deps, fetchMain, reason);
   }
-  return assessFetchedService(repoDir, serviceGit(repoDir, deps));
+  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps));
 }
 
 const DAEMON_POLL_INTERVAL_MS = 60_000;
@@ -534,15 +534,15 @@ function isStalledHandshake(error: unknown): boolean {
 }
 
 async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchMain: () => Promise<void>, reason: string): Promise<ServiceFreshness> {
-  const git = serviceGit(repoDir, deps);
+  const git = serviceGitAsync(repoDir, deps);
   try {
     await fetchMain();
-    return assessFetchedService(repoDir, git);
+    return await assessFetchedServiceAsync(repoDir, git);
   } catch (retryErr) {
     const failed = `${reason}; retried once: ${String(retryErr)}`;
     let updated: RegExpExecArray | null;
     try {
-      updated = /@\{(\d+)\}$/.exec(git(["reflog", "show", "-n1", "--date=unix", "--format=%gd", "refs/remotes/origin/main"]).trim());
+      updated = /@\{(\d+)\}$/.exec((await git(["reflog", "show", "-n1", "--date=unix", "--format=%gd", "refs/remotes/origin/main"])).trim());
     } catch (error) {
       return { status: "degraded", reason: `${failed}; could not read origin/main's reflog: ${String(error)}` };
     }
@@ -551,13 +551,61 @@ async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchM
     if (refAgeMs < 0 || refAgeMs > RECENT_FETCH_MAX_AGE_MS) {
       return { status: "degraded", reason: `${failed}; origin/main was last updated ${refAgeMs} ms ago, outside ${RECENT_FETCH_MAX_AGE_MS} ms` };
     }
-    const assessed = assessFetchedService(repoDir, git);
+    const assessed = await assessFetchedServiceAsync(repoDir, git);
     return assessed.status === "assessed" ? { ...assessed, source: "recent-fetch", refAgeMs } : assessed;
   }
 }
 
 function serviceGit(repoDir: string, deps: SelfSyncDeps): GitRunner {
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+}
+
+function serviceGitAsync(repoDir: string, deps: SelfSyncDeps): AsyncGitRunner {
+  const localOverride = deps.git;
+  return localOverride ? async (args) => localOverride(args) : asyncGit(repoDir);
+}
+
+async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): Promise<ServiceFreshness> {
+  let headSha: string;
+  let originSha: string;
+  try {
+    headSha = (await git(["rev-parse", "HEAD"])).trim();
+    originSha = (await git(["rev-parse", "origin/main"])).trim();
+  } catch (err) {
+    return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
+  }
+  const dirty = (await git(["status", "--porcelain", "-uno"])).trim().length > 0;
+  if (headSha === originSha) return { status: "assessed", dirty, behind: null };
+  let changedPaths: string[] | undefined;
+  let diffUnreadable: string | undefined;
+  try {
+    changedPaths = (await git(["diff", "--name-only", `${headSha}..${originSha}`]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch (err) {
+    const unreadable = err instanceof Error ? err.message : String(err);
+    diffUnreadable = unreadable;
+  }
+  let changes: AdvanceCommit[] | undefined;
+  let logUnreadable: string | undefined;
+  try {
+    changes = parseAdvanceCommits(await git(["log", "--format=%x1e%H%x1f%s", "--name-only", `${headSha}..${originSha}`]));
+  } catch (err) {
+    const unreadable = err instanceof Error ? err.message : String(err);
+    logUnreadable = unreadable;
+  }
+  return {
+    status: "assessed",
+    dirty,
+    behind: {
+      oldSha: headSha,
+      newSha: originSha,
+      changedPaths,
+      diffUnreadable,
+      ...(changes ? { changes } : { logUnreadable }),
+    },
+  };
 }
 
 function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness {

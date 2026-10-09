@@ -10,7 +10,9 @@
   origin: feedback#fb-1789927308301-29a363
   plan_refs: ["W1-T3245", "W1-T2953", "W1-T3583", "W1-T6245", "W1-T6249", "W1-T2877"]
   files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-commissioning.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=eb47b44d87634676
   attempts: 0
   rationale: |
     GROUNDING. The controller topology is already decided: ONE level-triggered host controller,

@@ -1,0 +1,35 @@
+- id: W1-T6884
+  title: "FLAKE INCIDENT — 'runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/the-census-roster-is-named-not-numbered.test.ts#runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing"
+  files:
+    - test/the-census-roster-is-named-not-numbered.test.ts
+  acceptance:
+    - claim: "the cause of 'runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing' (test/the-census-roster-is-named-not-numbered.test.ts)'s intermittent failure is fixed in test/the-census-roster-is-named-not-numbered.test.ts and recorded there by this task id"
+      proof: "grep: W1-T6884 in test/the-census-roster-is-named-not-numbered.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing' (test/the-census-roster-is-named-not-numbered.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #10202, #10234, #10253.
+    CI runs: 37865412857, 37880084943, 37885650464.
+    Retry outcomes: 3 recovered on retry, 0 also failed on retry.
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "Codex fix-round assessment: the task declares only test/the-census-roster-is-named-not-numbered.test.ts, an existing test containing the named failing case. Its proposed test repair is reversible and remains subject to CI and review."
+      - "The task requests no privileged access, destructive operation, merge or deploy policy change, or operator-only decision. Its declared scope and acceptance criterion are unchanged by this release."
+      - "This judgement assesses the filed task, not a completed flake repair. The incident record supplies three PR and CI run identifiers with recovered retries; those remote runs were not independently re-read in this round."
+      - "Live family merge-credit and gardener state were unavailable in this fix round, so the judgement uses the neutral family prior and the current policy confidence threshold without claiming measured family outcomes."
+    judged_at: "2026-10-09T07:12:05.822Z"
+    pin: "672f481c9f69258db5722525ac55d00f63384e0e844d8ab9c452a102fc9c509e"

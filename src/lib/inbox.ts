@@ -422,6 +422,11 @@ export interface DraftExclusion {
   detail: string;
 }
 
+export type DraftSelectionContext = Pick<
+  ReadinessContext,
+  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds"
+>;
+
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
     return check();
@@ -433,7 +438,7 @@ function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclu
 
 /** The draft-independent reason a proposal can never render READY. Unreadable facts return
  *  `undefined`, so the daemon spends rather than silently dropping uncertain work. */
-export function draftExclusionForProposal(proposal: Proposal, ctx: ReadinessContext): DraftExclusion | undefined {
+export function draftExclusionForProposal(proposal: Proposal, ctx: DraftSelectionContext): DraftExclusion | undefined {
   const ratified = readDraftExclusion(() =>
     ctx.isRatified(proposal.id) ? { predicate: "ratified", detail: `${proposal.id} is already ratified` } : undefined,
   );
@@ -488,7 +493,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
 /** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
  *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
@@ -577,7 +582,7 @@ export function draftsDueOnDaemon(
   drafts: DraftCache,
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
-  ctx?: ReadinessContext,
+  ctx?: DraftSelectionContext,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
   const due = rankDraftSelection(
