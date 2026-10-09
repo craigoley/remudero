@@ -29,6 +29,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
@@ -383,7 +384,7 @@ export interface MachineJudgePorts {
 export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
   let plan: string;
   try {
-    plan = execFileSync("git", ["-C", repoRoot, "rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    plan = hostWorktreeGit(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
   } catch {
     // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
     plan = "unreadable";
