@@ -364,26 +364,32 @@ test("a throwing ledger write leaves the worker start unchanged", async () => {
 
 test("the real /proc seams bind a live child and release only after it exits", { skip: !existsSync("/proc/self/stat") }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-host-memory-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const exited = new Promise((resolve) => child.once("exit", resolve));
   try {
     const deps: HostMemoryLedgerOptions = { location: () => ({ dir, scope: "local" }), root: "/nonexistent/Remudero", log: () => undefined };
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    const exited = new Promise((resolve) => child.once("exit", resolve));
     const handle = openMemoryReservation({ workerClass: "review" }, deps);
     handle.bindRoot(child.pid!);
     handle.releaseOccupancy();
-    assert.equal(readdirSync(dir).length, 1, "a live child holds the reservation");
+    assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith(".json")), [`${handle.id}.json`], "a live child holds the reservation");
+    const sentinel = readFileSync(join(dir, ".ledger-id"), "utf8");
     const reading = readMemoryLedger(deps);
     assert.equal(reading?.entries[0]?.owner.startsWith("Remudero@"), true);
     child.kill("SIGKILL");
     await exited;
     assert.deepEqual(sweepMemoryReservations(deps)?.released.map((r) => r.rule), ["tree-gone"]);
-    assert.deepEqual(readdirSync(dir), []);
+    assert.deepEqual(readdirSync(dir), [".ledger-id"], "release removes the reservation and retains the ledger sentinel");
+    assert.equal(readFileSync(join(dir, ".ledger-id"), "utf8"), sentinel);
+    assert.equal(readMemoryLedger(deps)?.state, "present");
+    assert.equal(readMemoryLedger(deps)?.entries.length, 0);
     assert.deepEqual(defaultProbe(child.pid!), { state: "gone" });
     assert.equal(defaultProbe(process.pid).state, "alive");
     assert.equal(defaultProbe(-1).state, "unknown");
     assert.equal(defaultListProcesses({ maxEntries: 0, maxMs: 1_000 }).complete, false);
     assert.equal(defaultListProcesses({ maxEntries: 100_000, maxMs: 60_000 }).rows.some((row) => row.pid === process.pid), true);
   } finally {
+    child.kill("SIGKILL");
+    await exited;
     rmSync(dir, { recursive: true, force: true });
   }
 });

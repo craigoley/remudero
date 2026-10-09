@@ -12,6 +12,7 @@ import { daemonCommand } from "./helpers/run-task-daemon.js";
 import { readMemoryLedger } from "../src/lib/host-memory-ledger.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { appendGitConfigEnv } from "./setup/no-live-remote.js";
 
 const PLAN_YAML = `
 - id: A
@@ -50,7 +51,7 @@ test("W1-T7093 tick: each daemon.alive heartbeat runs the best-effort reservatio
       },
       sleep: async () => {
         sleeps++;
-        if (sleeps >= 3) releases?.();
+        if (rows.filter((step) => step === "daemon.alive").length >= 3 || sleeps >= 10) releases?.();
       },
       log: (step) => rows.push(step),
     } satisfies DaemonDeps, { max: 1 });
@@ -76,11 +77,15 @@ test("W1-T7093 wiring: daemonCommand connects the production tick to the shared 
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n");
 
-  const envKeys = ["HOME", TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV] as const;
+  const gitConfigIndex = Number(process.env.GIT_CONFIG_COUNT ?? "0");
+  const envKeys = ["HOME", TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV, "GIT_CONFIG_COUNT",
+    `GIT_CONFIG_KEY_${gitConfigIndex}`, `GIT_CONFIG_VALUE_${gitConfigIndex}`] as const;
   const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
   process.env.HOME = home;
   process.env[TEST_SLOT_DIR_ENV] = slot;
   delete process.env[TEST_SLOT_PARENT_ENV];
+  // The proof sandbox masks the checkout's git config. Give composition its own fixture origin.
+  appendGitConfigEnv("remote.origin.url", "https://github.com/fixture/memory-ledger.git");
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
