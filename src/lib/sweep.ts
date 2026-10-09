@@ -12729,6 +12729,7 @@ let lastReportedAnomalyGap: string | undefined;
 
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
 export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
@@ -12810,6 +12811,14 @@ export async function runSweep(
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
+  const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
+  const mergeBases = strikeLadderMergeBases.get(deps.ledgerPath) ?? new Map<string, string>();
+  // Light passes see one PR; only a full open-set snapshot can evict absent heads (W1-T5673).
+  if (deps.repairAdmissionSurface !== "light") {
+    const openHeads = new Set(openPrs.map(mergeBaseKey));
+    for (const key of mergeBases.keys()) if (!openHeads.has(key)) mergeBases.delete(key);
+    if (mergeBases.size === 0) strikeLadderMergeBases.delete(deps.ledgerPath);
+  }
   const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
   if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
       (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
@@ -13391,7 +13400,15 @@ export async function runSweep(
       const author = eligibleHead && effects ? await effects.readAuthor(pr) : undefined;
       const lastAttemptAt = latestStrikeLadderAttempt(strikeLadderRows, pr.taskId, pr.prNumber);
       // W1-T5635: `currentMergeBaseSha` is hydrated only for review-orphaned PRs; read the rest here.
-      const currentMergeBaseSha = pr.currentMergeBaseSha ?? await effects?.readMergeBase(pr);
+      const key = mergeBaseKey(pr);
+      let currentMergeBaseSha = pr.currentMergeBaseSha;
+      if (currentMergeBaseSha === undefined && mainRepair !== undefined) {
+        currentMergeBaseSha = mergeBases.get(key) ?? await effects?.readMergeBase(pr);
+        if (currentMergeBaseSha !== undefined) {
+          mergeBases.set(key, currentMergeBaseSha);
+          strikeLadderMergeBases.set(deps.ledgerPath, mergeBases);
+        }
+      }
       const input = {
         lastAttemptAt, mainTip: mainRepair, currentMergeBaseSha,
         rebuildsSoFar: effects ? rebuilds : undefined,
