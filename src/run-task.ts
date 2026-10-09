@@ -34324,7 +34324,7 @@ function queueGovernorGateFor(
           run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
           observed_open_count: owned, base_wip_limit: policy.wipLimit, wip_limit: result.wipLimit,
           stuck_owned_count: result.stuckOwnedCount ?? 0, headroom_fraction: result.headroomFraction ?? null,
-          headroom_unread: adaptive.headroomUnread, trailing_merged_count: flow.trailingMergedCount,
+          headroom_unread: adaptive.headroomUnread, headroom_error: adaptive.headroomError ?? null, trailing_merged_count: flow.trailingMergedCount,
           trailing_opened_count: flow.trailingOpenedCount, tier: result.tier,
         });
       }

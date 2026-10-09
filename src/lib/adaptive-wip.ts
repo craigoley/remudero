@@ -100,17 +100,19 @@ export interface AdaptiveQueueFlow {
   stuckOwnedCount: number;
   headroomFraction: number | undefined;
   headroomUnread: boolean;
+  /** Why the headroom read failed, when it did — ledgered, so an unscaled bound is never silent. */
+  headroomError?: string;
   adaptiveBound: number;
 }
 
 /** Everything the production dispatch gate hands {@link checkQueueGovernor} besides the counts. */
 export function assembleAdaptiveQueueFlow(inputs: AdaptiveQueueFlowInputs): AdaptiveQueueFlow {
   let headroomFraction: number | undefined;
-  let headroomUnread = false;
+  let headroomError: string | undefined;
   try {
     headroomFraction = inputs.readHeadroom();
-  } catch {
-    headroomUnread = true;
+  } catch (error) {
+    headroomError = error instanceof Error ? error.message : String(error);
   }
   const stuckOwnedCount = inputs.ownedPrNumbers === undefined
     ? 0
@@ -118,7 +120,8 @@ export function assembleAdaptiveQueueFlow(inputs: AdaptiveQueueFlowInputs): Adap
   return {
     stuckOwnedCount,
     headroomFraction,
-    headroomUnread,
+    headroomUnread: headroomError !== undefined,
+    ...(headroomError !== undefined ? { headroomError } : {}),
     adaptiveBound: adaptiveWipBound({
       baseLimit: inputs.baseLimit, trailingMergedCount: inputs.trailingMergedCount, headroomFraction,
     }),
