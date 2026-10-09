@@ -4,7 +4,7 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
@@ -17589,6 +17589,78 @@ export interface PrTerminalReconcileSummary {
   unionRead: boolean;
 }
 
+interface PrTerminalLiveCursor {
+  identity: string;
+  offset: number;
+  pending: Buffer;
+  named: Map<string, string>;
+  terminal: Set<string>;
+}
+
+const terminalLiveCursors = new Map<string, PrTerminalLiveCursor>();
+
+function newPrTerminalLiveCursor(identity = ""): PrTerminalLiveCursor {
+  return { identity, offset: 0, pending: Buffer.alloc(0), named: new Map(), terminal: new Set() };
+}
+
+function collectPrTerminalKeys(cursor: PrTerminalLiveCursor, rows: Iterable<Record<string, unknown>>): void {
+  for (const row of rows) {
+    const key = prUrlKey(row.pr_url);
+    if (key === undefined) continue;
+    if (row.step === PR_TERMINAL_STEP) cursor.terminal.add(key);
+    else if (!cursor.named.has(key)) cursor.named.set(key, row.pr_url as string);
+  }
+}
+
+function readPrTerminalLiveCursor(ledgerPath: string): PrTerminalLiveCursor {
+  let fd: number;
+  try {
+    fd = fs.openSync(ledgerPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    terminalLiveCursors.delete(ledgerPath);
+    return newPrTerminalLiveCursor();
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const identity = `${stat.dev}:${stat.ino}`;
+    let cursor = terminalLiveCursors.get(ledgerPath);
+    if (!cursor || cursor.identity !== identity || stat.size < cursor.offset) {
+      cursor = newPrTerminalLiveCursor(identity);
+      terminalLiveCursors.set(ledgerPath, cursor);
+    }
+    if (stat.size === cursor.offset) return cursor;
+    const bytes = Buffer.alloc(stat.size - cursor.offset);
+    let read = 0;
+    while (read < bytes.length) {
+      const count = fs.readSync(fd, bytes, read, bytes.length - read, cursor.offset + read);
+      if (count === 0) break;
+      read += count;
+    }
+    const text = Buffer.concat([cursor.pending, bytes.subarray(0, read)]);
+    let start = 0;
+    let end: number;
+    while ((end = text.indexOf(0x0a, start)) !== -1) {
+      const line = text.toString("utf8", start, end).trim();
+      start = end + 1;
+      if (!line) continue;
+      let row: Record<string, unknown>;
+      try {
+        row = JSON.parse(line) as Record<string, unknown>;
+      } catch (error) {
+        console.error(`ledger: dropping unparseable line in ${ledgerPath}: ${line} (${String(error)})`);
+        continue;
+      }
+      collectPrTerminalKeys(cursor, [row]);
+    }
+    cursor.pending = Buffer.from(text.subarray(start));
+    cursor.offset += read;
+    return cursor;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
  *  written once, so each is read once per process; only an archive that failed to open is re-read. */
 const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Set<string> }>();
@@ -17626,16 +17698,11 @@ export function runPrTerminalReconcile(
   lookup: (prUrl: string) => ClosedPrFact | undefined,
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "dryRun">,
 ): PrTerminalReconcileSummary {
-  // ledger-read-intent: live — the archive half is terminalKeysInArchives, read only for unresolved PRs.
-  const live = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
-  const named = new Map<string, string>();
-  const terminal = new Set<string>();
-  for (const row of live) {
-    const key = prUrlKey(row.pr_url);
-    if (key === undefined) continue;
-    if (row.step === PR_TERMINAL_STEP) terminal.add(key);
-    else if (!named.has(key)) named.set(key, row.pr_url as string);
+  const cursor = deps.readLedger ? newPrTerminalLiveCursor() : readPrTerminalLiveCursor(deps.ledgerPath);
+  if (deps.readLedger) {
+    collectPrTerminalKeys(cursor, deps.readLedger(deps.ledgerPath));
   }
+  const { named, terminal } = cursor;
   const pending: ClosedPrFact[] = [];
   for (const [key, prUrl] of named) {
     const fact = terminal.has(key) ? undefined : lookup(prUrl);
@@ -17656,6 +17723,7 @@ export function runPrTerminalReconcile(
       source: "sweep.pr_terminal",
       ...(archived?.unread ? { union_unread: archived.unread } : {}),
     });
+    terminal.add(prUrlKey(fact.prUrl)!);
     appended++;
   }
   return { named: named.size, appended, unionRead: archived !== undefined };

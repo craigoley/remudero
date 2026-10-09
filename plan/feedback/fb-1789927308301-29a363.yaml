@@ -19,10 +19,24 @@ raw: "Reconcile the deployed Azure control plane with the merged automatic
   existing units."
 attachments: []
 origin: cli
-status: grilling
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10255
+summary:
+  headline: Restore safe automatic deployment on the container host
+  what_happened: The running container is behind `origin/main`, and the host’s
+    existing heartbeat and reclaim-only crons do not deploy updates. W1-T3245 is
+    marked merged, but its supervisor is not commissioned on this host.
+  decision: Reconcile the controller with the merged deployment contract and
+    implement or file the smallest safe restoration, including proof that host
+    commissioning preserves stronger existing units.
+  options:
+    - label: Install a safe reconciler
+      consequence: Verified baked-image drift follows the existing idle, build, pull,
+        digest, health-check, rollback, and rate-limit process.
+    - label: File the restoration task
+      consequence: The deployment gap remains until the task is implemented and
+        commissioned.
 expansion: null
 submission_key: null
 thread_id: null
