@@ -110,6 +110,27 @@ const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
  * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
+/**
+ * A read-paced view ({@link ReadModelView.readPaced}) keeps its cost / share cadence while one of its
+ * readers was served within this. Past it, each build finished with no read doubles the wait to the next,
+ * and the next read puts the unit back on its unstretched schedule, so a stale unit is rebuilt on the next
+ * tick. MEASURED 2026-10-06 20:25Z to 10-08 18:38Z: `now@core` was rebuilt 5,320 times for 25,605 s of CPU,
+ * while `now`, `needs-you`, `nav-badge` and `/v1/status` were read in 20 of those 46 hours, and by the
+ * console in 7. An open console reads `nav-badge` about every minute, inside this window.
+ */
+export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
+/**
+ * BACKSTOP: the most an unread unit's interval stretches. `now@core` (cost ~4.8 s, interval ~12 s) is
+ * then rebuilt about every 6.4 min, at ~1/32 of its read cost. Each tier is reached by one more unread
+ * build, so a unit read now and then sits low on the ladder, and any read drops it back to the bottom.
+ */
+export const READ_MODEL_IDLE_STRETCH_MAX = 32;
+/** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
+export const READ_MODEL_READ_NOTE_MS = 5_000;
+/** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
+const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
+/** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
+const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you" };
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 /**
@@ -256,6 +277,12 @@ export interface ReadModelView {
   /** Its keys are built on demand (view-demand.ts): `materialize` returns only the keys the ticker's demand book holds live. */
   demand?: true;
   snapshotSourced?: true;
+  /**
+   * Its cadence follows its readers: kept while it or a view built from it was read within
+   * {@link READ_MODEL_READ_HOT_MS}, stretched while nobody reads it, restored by the next read. Serve
+   * judges every source at request time, so a body read before its rebuild says it is stale.
+   */
+  readPaced?: true;
 }
 
 export interface ReadModelViewFactory {
@@ -344,6 +371,28 @@ export function readModelViewBuilt(view: string, switches: ReadModelSwitches, re
   const mode = switches.views[view];
   if (mode !== undefined) return mode !== "off";
   return readModelViewRead(view, switches, readers, new Set());
+}
+
+/**
+ * The views a read of `path` reads, directly or through a view built from them ({@link READ_MODEL_VIEW_READERS}):
+ * `/v1/views/nav-badge` reads `nav-badge`, `needs-you` and `now`. A per-instance copy (`/v1/i/<x>/...`) reads what
+ * its core path does; `/v1/views/versions` reads every view in `names`; any other path reads none.
+ */
+export function viewsReadBy(path: string, names: readonly string[], readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): string[] {
+  const base = path.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  if (READ_MODEL_EVERY_VIEW_PATHS.has(base)) return [...names];
+  const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : READ_MODEL_LEGACY_VIEW_READS[base];
+  if (!direct) return [];
+  const read = new Set([direct]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [view, list] of Object.entries(readers)) {
+      if (read.has(view) || !list.some(({ view: consumer }) => consumer !== undefined && read.has(consumer))) continue;
+      read.add(view);
+      grew = true;
+    }
+  }
+  return [...read];
 }
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
@@ -599,6 +648,8 @@ export interface ReadModelTicker {
   want(view: string, key: string): boolean;
   /** Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms. */
   buildNow(view: string): void;
+  /** Serve answered a read of `path`: each read-paced view it reads ({@link viewsReadBy}) goes back on its unstretched cadence. */
+  read(path: string): void;
   lane(move: ReadModelLaneMove): void;
   peer(entry: ReadModelBodyEntry): void;
 }
@@ -610,8 +661,12 @@ interface ViewUnit {
   slot?: Slot;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
-  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
   dueAt: number;
+  /** A read-paced unit's multiplier on that wait: 1 while read, doubled by each build finished unread. */
+  stretch?: number;
+  /** When it would be due unstretched; a read pulls `dueAt` back to it. */
+  baseDueAt?: number;
   startedAt?: number;
   peakMs?: number;
   heavy?: boolean;
@@ -1091,6 +1146,19 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
+  /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
+  const readAt = new Map<string, number>();
+  const pacedFrom = clock.now();
+
+  /** A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. */
+  function paced(unit: ViewUnit, finished: number): number {
+    const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
+    unit.baseDueAt = finished + waitMs;
+    if (!unit.view.readPaced) return unit.baseDueAt;
+    const idleMs = finished - (readAt.get(unit.view.name) ?? pacedFrom);
+    unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
+    return finished + waitMs * unit.stretch;
+  }
 
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
@@ -1118,7 +1186,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
-    unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
+    unit.dueAt = ready ? paced(unit, finished) : finished;
     if (ready) {
       unit.startedAt = undefined;
       unit.peakMs = undefined;
@@ -1320,6 +1388,16 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const unit of units) if (unit.view.name === view && owns(unit) && built(view)) materialize(now, now, unit);
       postState(now);
     },
+    read(path: string): void {
+      const now = clock.now();
+      const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers));
+      for (const view of read) readAt.set(view, now);
+      for (const unit of units) {
+        if (!read.has(unit.view.name) || (unit.stretch ?? 1) === 1) continue;
+        unit.stretch = 1;
+        if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
+      }
+    },
     want(view: string, key: string): boolean {
       if (!opts.demand || !demandViews.includes(view)) return false;
       const fresh = opts.demand.want(view, key);
@@ -1406,6 +1484,7 @@ export type ReadModelViewsInput =
   | { type: "bodies"; built: SlowLaneBodies }
   | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
+  | { type: "read"; path: string }
   | ({ type: "lane" } & ReadModelLaneMove)
   | { type: "peer"; entry: ReadModelBodyEntry }
   | { type: "stop" };
@@ -1444,7 +1523,8 @@ export function runReadModelViewWorker(
       } catch (error) {
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }
-    } else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
+    } else if (msg.type === "read") ticker.read(msg.path);
+    else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
     else if (msg.type === "lane") ticker.lane(msg);
     else if (msg.type === "peer") ticker.peer(msg.entry);
     else ticker.accept(msg.built);
@@ -1512,6 +1592,8 @@ export interface ReadModelViewLane {
   snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
   want(view: string, key: string): void;
+  /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
+  read(path: string): void;
   close(): void;
 }
 
@@ -1603,6 +1685,7 @@ export function threadViews(opts: {
     accept: (built) => send({ type: "bodies", built }, [fast]),
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
+    read: (path) => send({ type: "read", path }),
     close: () => {
       closed = true;
       stopWatch();
@@ -1712,6 +1795,7 @@ export function runReadModelWorker(
     if (answerThreadHeaps(port, msg, threads)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
+    if (msg.type === "read") return void views.read((msg as unknown as { path: string }).path);
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -1797,6 +1881,8 @@ export interface ReadModelWorkerHandle {
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
   /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
   noteGithubRead?(): void;
+  /** Serve answered a read-scoped route: the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path). */
+  noteViewRead?(path: string): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -1885,6 +1971,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
   const clock = opts.clock ?? systemClock;
+  /** When each path's read was last posted to the worker ({@link READ_MODEL_READ_NOTE_MS}). */
+  const readNotedAt = new Map<string, number>();
   /** When the running worker last said anything; a worker that ticks posts its state four times a second. */
   let heardAt = clock.now();
   let silenceLogged = false;
@@ -2092,6 +2180,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
+    noteViewRead: (path) => {
+      const now = clock.now();
+      if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
+      readNotedAt.set(path, now);
+      worker.postMessage({ type: "read", path });
+    },
     start: () => {
       if (worker || stopping) return;
       spawn();
