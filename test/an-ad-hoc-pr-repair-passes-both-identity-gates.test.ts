@@ -40,7 +40,7 @@ function fixture(t: TestContext, commitMessage = message) {
 }
 
 function cli(script: string, path: string, base: string) {
-  const env = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_OPTIONS;
   delete env.NODE_V8_COVERAGE;
