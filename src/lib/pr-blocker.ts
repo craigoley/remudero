@@ -3,7 +3,7 @@ import { fixedClock } from "./clock.js";
 export const PR_BLOCKERS = [
   "awaiting-ci", "own-red", "base-red", "awaiting-review", "review-failed", "awaiting-arm",
   "armed-idle", "conflict", "strikes-exhausted", "escalated", "stale-reviewer-withheld",
-  "plan-proof-unrunnable", "held-draft", "other",
+  "plan-proof-unrunnable", "held-draft", "operator-hold", "other",
 ] as const;
 export type PrBlocker = typeof PR_BLOCKERS[number];
 
@@ -13,7 +13,7 @@ export const PR_BLOCKER_OWNERS = {
   "armed-idle": "armed-idle-merge", "conflict": "conflict-rebase",
   "strikes-exhausted": "strike-ladder", "escalated": "NONE",
   "stale-reviewer-withheld": "deploy-freshness", "plan-proof-unrunnable": "plan-repair",
-  "held-draft": "ready-draft", "other": "NONE",
+  "held-draft": "ready-draft", "operator-hold": "operator", "other": "NONE",
 } as const satisfies Record<PrBlocker, string>;
 
 export interface BlockerFacts {
@@ -26,6 +26,8 @@ export interface BlockerFacts {
   planProofUnrunnable?: boolean;
   strikesExhausted?: boolean;
   ownRed?: boolean;
+  /** A green, reviewed PR an operator merge hold stands over (W1-T1000002): it is waiting on a person, not on arming. */
+  operatorHold?: boolean;
 }
 
 export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlocker {
@@ -35,6 +37,7 @@ export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlo
   if (facts.planProofUnrunnable) return "plan-proof-unrunnable";
   if (facts.strikesExhausted) return "strikes-exhausted";
   if (facts.ownRed) return "own-red";
+  if (facts.mergeable && facts.operatorHold) return "operator-hold";
   if (facts.mergeable) return facts.autoMergeArmed ? "armed-idle" : "awaiting-arm";
   return ruleBlocker;
 }

@@ -10,7 +10,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
 /**
@@ -726,6 +726,8 @@ export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mint
   mkdirSync(shardDir, { recursive: true });
   writeFileSync(shardPath, contents);
   const relPath = relative(ws.root, shardPath);
+  const refused = machineShardLandingRefusal(ws.root, [relPath]);
+  if (refused !== undefined) throw new Error(`host-resource gardener: drafted record failed lint-plan's machine-filing admission (${refused})`);
   const body = [
     "The host-resource gardener (W1-T4804) attributes a falling host disk to the consumer whose growth explains it.",
     "",

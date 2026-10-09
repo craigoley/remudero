@@ -38,6 +38,11 @@ function mainJobs(runId: number) {
 
 function harness(main: { conclusion: string; failed?: readonly string[] }) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-main-red-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", gardener.SELECTOR_SHADOW_MISS_TEST_PATH]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   for (const dir of ["test", "state", join("plan", "tasks.d")]) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
   const nowMs = systemClock.now();
