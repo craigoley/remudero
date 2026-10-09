@@ -312,6 +312,40 @@ function resolve(from: string, spec: string, known: ReadonlySet<string>): string
   return candidates.find((c) => known.has(c));
 }
 
+export interface AffectedSuitesGraph {
+  dependencies: Map<string, Set<string>>;
+  importers: Map<string, Set<string>>;
+  directImports: Map<string, Set<string>>;
+  namedDependencies: Map<string, Set<string>>;
+}
+
+/** The selector's comment-free graph, shared with the reach census. Extra targets cover deletions. */
+export function buildAffectedSuitesGraph(
+  files: ReadonlyMap<string, string>, extraTargets: readonly string[] = [],
+): AffectedSuitesGraph {
+  const all = [...files.keys()].filter((f) => CODE_FILE.test(f));
+  const known = new Set([...all, ...extraTargets]);
+  const dependencies = new Map<string, Set<string>>();
+  const importers = new Map<string, Set<string>>();
+  const directImports = new Map<string, Set<string>>();
+  const namedDependencies = new Map<string, Set<string>>();
+  for (const file of all) {
+    const content = stripComments(files.get(file)!);
+    const imported = new Set(specifiers(content).map((s) => resolve(file, s, known))
+      .filter((dep): dep is string => dep !== undefined && dep !== file));
+    const named = new Set(namedEdges(file, content, known).filter((dep) => dep !== file));
+    directImports.set(file, imported);
+    namedDependencies.set(file, named);
+    const deps = new Set([...imported, ...named]);
+    dependencies.set(file, deps);
+    for (const dep of deps) {
+      if (!importers.has(dep)) importers.set(dep, new Set());
+      importers.get(dep)!.add(file);
+    }
+  }
+  return { dependencies, importers, directImports, namedDependencies };
+}
+
 /** THE SELECTOR — see the file header. Pure: it decides from `input` alone. */
 export function selectAffectedSuites(changed: readonly string[], input: AffectedSuitesInput): AffectedSelection {
   const files = changed.filter((f) => f.length > 0);
@@ -332,22 +366,12 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   for (const f of files) if (SUITE.test(f)) pick(f, "changed test");
 
   // The reverse import graph, walked breadth-first from every changed module.
-  const all = [...input.files.keys()].filter((f) => CODE_FILE.test(f));
-  const known = new Set([...all, ...files]);
-  const importers = new Map<string, Set<string>>();
+  const { importers, namedDependencies } = buildAffectedSuitesGraph(input.files, files);
   const changedSet = new Set(files);
   // Suites that name a changed file by path (spawn it, read it): a one-hop read the narrow arm keeps.
   const pathNamers = new Set<string>();
-  for (const file of all) {
-    const content = stripComments(input.files.get(file)!);
-    const named = namedEdges(file, content, known);
-    if (SUITE.test(file) && named.some((p) => changedSet.has(p))) pathNamers.add(file);
-    const deps_ = [...specifiers(content).map((s) => resolve(file, s, known)), ...named];
-    for (const dep of deps_) {
-      if (dep === undefined || dep === file) continue;
-      if (!importers.has(dep)) importers.set(dep, new Set());
-      importers.get(dep)!.add(file);
-    }
+  for (const [file, named] of namedDependencies) {
+    if (SUITE.test(file) && [...named].some((p) => changedSet.has(p))) pathNamers.add(file);
   }
   const seen = new Set<string>();
   const queue = files.filter((f) => CODE_FILE.test(f)).map((f) => ({ file: f, root: f }));
