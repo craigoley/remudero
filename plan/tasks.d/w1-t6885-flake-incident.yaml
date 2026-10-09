@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -22,3 +22,13 @@
     CI runs: 37865412857, 37880084943, 37885056481, 37885650464.
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared remedy is confined to test/the-census-roster-is-named-not-numbered.test.ts, where the named test exercises real census jobs under a runtime bound."
+      - "The incident record names four unrelated pull requests and four CI runs, with each failure recovered on retry; this supports investigating the intermittent test failure without asserting its cause is already known."
+      - "The task declares no privileged or irreversible action and no merge, deploy or operator policy change. This is a filing-time risk assessment; implementation correctness remains subject to CI and review."
+    judged_at: "2026-10-09T05:38:46.000Z"
+    pin: "2198e0ffe89976173f1a8752809449167a4f3966baa31faad7ef42ad0b1aec00"
