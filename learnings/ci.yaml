@@ -417,3 +417,31 @@
     verified per-PR cause.
   src: "ci-learning:9717:remudero-review"
   cited: "2026-10-08"
+
+- id: ci-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/comment-load-baseline.json"
+    - "scripts/source-size-baseline.json"
+    - "scripts/test-tier-manifest.json"
+    - "src/run-task.ts"
+    - "src/lib/policy.ts"
+    - "src/lib/dep-review.ts"
+    - "plan/tasks.d/**"
+    - "test/**"
+  fact: >-
+    The ci-gate gate refused 22 pull requests in one window, and each was repaired after the refusal.
+    Before the first push, a worker runs the two cheap ratchets over its own change,
+    `npm run --silent comment-load-signal` and `npm run --silent source-size-ratchet`, and records any
+    BLOCKED baseline line they print. A worker on a change that touches plan/ also runs
+    `npm run --silent rule15-precheck`, and a change that touches src/run-task.ts, src/lib/policy.ts,
+    src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and the suites it names.
+    Those are the steps a fix or implementation lane skips before its first push.
+  evidence: >-
+    The ci-gate refusals are recorded as ci-learning:6058:ci-gate (PRs 6058, 6062, 6077, 6078, 6088,
+    6092, 6093, 6096, 6098, 6099, 6105, 6107, 6113, 6135, 6138, 6140, 6148, 6154, 6156, 6171, 6172; 6077
+    appears twice in the source list). Recon did not establish each PR's failure log, merge status, or
+    shared refusal reason, so this entry names the shared pre-push steps, not a verified per-PR cause.
+  src: "ci-learning:6058:ci-gate"
+  cited: "2026-10-09"
