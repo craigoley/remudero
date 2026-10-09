@@ -1,0 +1,27 @@
+- id: W1-T7090
+  title: "REPAIR THE SELECTOR EDGE INTO test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 37919851949 for PR #10310 at 80aa617193a03c2fdc244b6e4f1e328e650cc4d0: src/run-task.ts, test/check-proof-grep-cause.test.ts, test/check-proof-warns-when-its-target-differs-from-head.test.ts -> test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts when this edge is exercised"
+      proof: "grep: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The description and declared files show a single-file change to src/lib/affected-suites.ts. It adds one test path to the narrow selector, which is a test-selection mapping and not a secrets, auth, deletion, merge, deploy or review-policy change."
+      - "The acceptance criterion is a grep that can be checked mechanically, so the finding can be verified from what is shown."
+      - "The family track record is 8 merged and 0 declined, and the gates state is clean (machine author, filingTime true). Nothing shown asks for an operator-only decision. The PR still goes through CI and review."
+    judged_at: "2026-10-09T11:59:08.270Z"
+    pin: "82bd5a1e56ed1f12a64039f82c185777e9eb5f37a6ecc48f46e3d785f60767b1"

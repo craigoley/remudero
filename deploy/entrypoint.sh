@@ -33,8 +33,18 @@ mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitcon
 if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
   log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
 else
-  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
-  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
+  # Under App auth the fallback is the fleet App's bot identity, which GitHub and Vercel map to an account;
+  # remudero-worker maps to none, so Vercel blocked every fleet preview once RMD_GIT_AUTHOR_* went missing
+  # (site #189, console #2030/#2032, 2026-10-08). Same identity as src/lib/feedback-landing.ts.
+  if [ -n "${GH_APP_ID:-}" ]; then
+    default_author_name="remudero-fleet[bot]"
+    default_author_email="318611788+remudero-fleet[bot]@users.noreply.github.com"
+  else
+    default_author_name="remudero-worker"
+    default_author_email="remudero-worker@users.noreply.github.com"
+  fi
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-$default_author_name}"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-$default_author_email}"
   # `git -C /` here too, for the reason the guard above uses it: a bare `git config --get` resolves
   # local config, so from inside a repository this would report THAT repo's identity, not the
   # global one just written. Why: docs/forensics/entrypoint.md#git-identity--the-report-vs-write-asymmetry.
