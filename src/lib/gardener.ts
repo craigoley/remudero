@@ -294,6 +294,9 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   clock?: Clock;
   /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
   escalate?: (escalation: Escalation) => string;
+  /** What a pending PR waits on, read from local files with no GitHub call ({@link gardenPendingSignal});
+   *  absent or undefined, a pending PR is paced on the clock alone. */
+  pendingSignal?: (prUrl: string) => string | undefined;
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -533,7 +536,146 @@ export function gardenFilingRetryAt(failures: GardenState<string>["filingFailure
   return Date.parse(failures.lastAt) + wait;
 }
 
-function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
+/**
+ * A pass whose inventory threw, and the cheap inputs it threw over. Without it a failing inventory left
+ * no `lastCheap`, so the garden was due on EVERY poll and re-read its whole corpus to fail the same way.
+ * OBSERVED 2026-10-09 10:52-11:54Z on the fleet host: ci-friction ran 47 passes for 1,505 s of child time,
+ * every one ending `ci-friction.gardener_failed` (workflow ownership ambiguous for ci-gate) after reading
+ * the full ledger union. Kept beside the state file, so a failed pass still leaves the prior receipt intact.
+ */
+export interface GardenInventoryFailure {
+  cheap: string;
+  /** When this streak of failures began; the retry wait grows with it. */
+  firstAt: string;
+  lastAt: string;
+  count: number;
+  reason: string;
+}
+
+export function gardenInventoryFailurePath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-inventory-failure.json`);
+}
+
+/** The first retry over unchanged inputs waits one daemon poll. */
+export const GARDEN_INVENTORY_RETRY_BASE_MS = 60_000;
+/** Each further retry also waits this fraction of the time the streak has been failing: proportional, not capped. */
+export const GARDEN_INVENTORY_RETRY_DIVISOR = 4;
+
+/** The recorded failure; an absent or damaged record is no failure, so the pass runs and reports itself. */
+export function readGardenInventoryFailure(stateDir: string, name: string): GardenInventoryFailure | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(gardenInventoryFailurePath(stateDir, name), "utf8"));
+    if (!isRecord(parsed) || typeof parsed.cheap !== "string" || typeof parsed.reason !== "string" || !isCount(parsed.count) ||
+        !Number.isFinite(Date.parse(String(parsed.firstAt))) || !Number.isFinite(Date.parse(String(parsed.lastAt)))) return undefined;
+    return parsed as unknown as GardenInventoryFailure;
+  } catch {
+    // deliberate: no readable failure record means nothing defers the pass.
+    return undefined;
+  }
+}
+
+/** When a garden whose inventory failed may read it again over the SAME cheap inputs. */
+export function gardenInventoryRetryAt(failure: GardenInventoryFailure): number {
+  const first = Date.parse(failure.firstAt);
+  const last = Date.parse(failure.lastAt);
+  return last + GARDEN_INVENTORY_RETRY_BASE_MS + Math.max(0, last - first) / GARDEN_INVENTORY_RETRY_DIVISOR;
+}
+
+/** A recorded failure defers the pass only while the cheap inputs are the ones it failed over. */
+function inventoryFailureHolds(failure: GardenInventoryFailure | undefined, cheap: string, nowMs: number): boolean {
+  return failure !== undefined && failure.cheap === cheap && nowMs < gardenInventoryRetryAt(failure);
+}
+
+/**
+ * PACING A PENDING PR. A pass over a pending PR asks GitHub for its state and, on unchanged cheap inputs, does
+ * nothing else, so it can only learn something when the PR could have moved: its head, its open row (a merge or
+ * a close drops it from the open list) or main. OBSERVED 2026-10-09 on the fleet host: gate and export were due
+ * on every poll while a PR was pending, about 55-60 passes an hour each and about 550 s of child CPU an hour.
+ * Each pending pass records what it saw here. The next one is due when that `signal` moves, when a release
+ * clock elapses, or after a growing share of the quiet time: no fixed ceiling, and any change snaps it back.
+ */
+export const GARDEN_PENDING_QUIET_DIVISOR = 4;
+
+export interface GardenPendingWatch {
+  prUrl: string;
+  /** What the pending PR waits on, read without a GitHub call ({@link gardenPendingSignal}); absent when unreadable. */
+  signal?: string;
+  lastPassAt: string;
+  /** When the signal last moved (or the watch began); the quiet span runs from here to `lastPassAt`. */
+  quietSince: string;
+}
+
+export function gardenPendingWatchPath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-pending-watch.json`);
+}
+
+/** The recorded watch; an absent or damaged record is none, so the next poll runs a pass. */
+export function readGardenPendingWatch(stateDir: string, name: string): GardenPendingWatch | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(gardenPendingWatchPath(stateDir, name), "utf8"));
+    if (!isRecord(parsed) || typeof parsed.prUrl !== "string" || (parsed.signal !== undefined && typeof parsed.signal !== "string") ||
+        !Number.isFinite(Date.parse(String(parsed.lastPassAt))) || !Number.isFinite(Date.parse(String(parsed.quietSince)))) return undefined;
+    return parsed as unknown as GardenPendingWatch;
+  } catch {
+    // deliberate: no readable watch means nothing has slowed the pending pass down yet.
+    return undefined;
+  }
+}
+
+/** What a pending PR waits on, from the board's persisted open-PR snapshot and origin/main's ref: the PR's
+ *  head and update stamp while it is open, `not-open` once it leaves the open list, and main's sha. */
+export function gardenPendingSignal(
+  prUrl: string,
+  openRows: ReadonlyArray<{ url: string; headRefOid: string; updatedAt: string }> | undefined,
+  mainSha: string | undefined,
+): string {
+  const row = openRows?.find((r) => r.url === prUrl);
+  const pr = openRows === undefined ? "pr:unknown" : row ? `pr:${row.headRefOid}@${row.updatedAt}` : "pr:not-open";
+  return `${pr} main:${mainSha ?? "unknown"}`;
+}
+
+/** When a pending PR's clock-driven release (a merged metric's, or the decision backstop) comes due; undefined for none. */
+function pendingReleaseAt<C extends string>(state: GardenState<C>): number | undefined {
+  const pending = state.pending;
+  if (pending?.mergeSeenAt !== undefined) return Date.parse(pending.mergeSeenAt) + GARDEN_PENDING_RELEASE_MS;
+  return state.pendingRecordedAt === undefined ? undefined : Date.parse(state.pendingRecordedAt) + GARDEN_DECISION_PENDING_RELEASE_MS;
+}
+
+/** Whether a pass over a pending PR could learn anything, reading only local files. A release clock is due once,
+ *  by the first pass after it elapses: a merged metric that keeps "waiting" past it re-reads the same inputs. */
+function pendingPassDue<C extends string>(state: GardenState<C>, name: string, deps: Pick<GardenerDeps, "stateDir" | "pendingSignal">, nowMs: number): boolean {
+  const prUrl = state.pending!.prUrl;
+  const watch = readGardenPendingWatch(deps.stateDir, name);
+  if (watch === undefined || watch.prUrl !== prUrl) return true;
+  const last = Date.parse(watch.lastPassAt);
+  const releaseAt = pendingReleaseAt(state);
+  if (releaseAt !== undefined && nowMs >= releaseAt && last < releaseAt) return true;
+  const signal = deps.pendingSignal?.(prUrl);
+  if (signal !== undefined && signal !== watch.signal) return true;
+  return nowMs - last >= Math.max(0, last - Date.parse(watch.quietSince)) / GARDEN_PENDING_QUIET_DIVISOR;
+}
+
+/** After a pass: record what a still-pending PR was seen waiting on, or drop the watch once nothing is pending. */
+function notePendingWatch(name: string, classes: readonly string[], deps: Pick<GardenerDeps, "stateDir" | "pendingSignal" | "clock">): void {
+  const path = gardenPendingWatchPath(deps.stateDir, name);
+  try {
+    const pending = readGardenState(gardenStatePath(deps.stateDir, name), classes).pending;
+    if (!pending) {
+      rmSync(path, { force: true });
+      return;
+    }
+    const at = (deps.clock ?? systemClock).iso();
+    const prior = readGardenPendingWatch(deps.stateDir, name);
+    const signal = deps.pendingSignal?.(pending.prUrl);
+    const moved = prior === undefined || prior.prUrl !== pending.prUrl || (signal !== undefined && signal !== prior.signal);
+    const watch: GardenPendingWatch = { prUrl: pending.prUrl, ...(signal === undefined ? {} : { signal }), lastPassAt: at, quietSince: moved ? at : prior.quietSince };
+    writeAtomic(path, JSON.stringify(watch) + "\n");
+  } catch {
+    // deliberate: an unwritable watch leaves the next poll due, which is the behaviour before pacing existed.
+  }
+}
+
+function gardenFilingEscalation(name: string,failures: NonNullable<GardenState<string>["filingFailures"]>): Escalation {
   return {
     class: "BLOCKED",
     taskId: `${name}-gardener`,
@@ -550,20 +692,23 @@ function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<
 
 /**
  * Whether a pass of `spec` would do anything, read the way {@link runGarden} reads it before its first
- * expensive step, and writing nothing. A pending PR or waiting overseer effects are always due (the pass
- * judges and folds them); a filing retry wait is not; otherwise only a changed cheap fingerprint is. A
+ * expensive step, and writing nothing. Waiting overseer effects are always due (the pass folds them); a
+ * pending PR is due when what it waits on moved or its paced wait elapsed ({@link GARDEN_PENDING_QUIET_DIVISOR});
+ * a filing retry wait is not; otherwise only a changed cheap fingerprint is. A
  * daemon spawning each pass as its own process asks this first, so an idle garden costs a file read
  * rather than a process boot. An unreadable state file throws, and the caller runs the pass, which logs it.
  */
 export function gardenPassDue<C extends string>(
   spec: Pick<GardenSpec<C, unknown, GardenAction<C>, GardenCheckout>, "name" | "classes" | "cheapFingerprint">,
-  deps: Pick<GardenerDeps, "stateDir" | "clock">,
+  deps: Pick<GardenerDeps, "stateDir" | "clock" | "pendingSignal">,
 ): boolean {
   const state = readGardenState(gardenStatePath(deps.stateDir, spec.name), spec.classes);
   if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return false;
-  if (state.pending) return true;
-  return state.lastCheap !== spec.cheapFingerprint();
+  if (state.pending && pendingPassDue(state, spec.name, deps, (deps.clock ?? systemClock).now())) return true;
+  const cheap = spec.cheapFingerprint();
+  if (inventoryFailureHolds(readGardenInventoryFailure(deps.stateDir, spec.name), cheap, (deps.clock ?? systemClock).now())) return false;
+  return state.lastCheap !== cheap;
 }
 
 /**
@@ -584,6 +729,8 @@ export function gardenNeedsInventory<C extends string>(
   if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
   const clock = deps.clock ?? systemClock;
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > clock.now()) return false;
+  const cheap = spec.cheapFingerprint();
+  if (inventoryFailureHolds(readGardenInventoryFailure(deps.stateDir, spec.name), cheap, clock.now())) return false;
   // A decision-judged merge or a closed PR is judged and, on an unchanged fingerprint, returns unread; neither
   // can be a merged metric-judged pending, so the terminal and release terms below are false for them.
   const metricPending = state.pending && !judgedByDecision(spec, state.pending.actionClass) && prState === "merged" ? state.pending : undefined;
@@ -592,7 +739,7 @@ export function gardenNeedsInventory<C extends string>(
     (!metricPending.mergeSeenAt || clock.now() - Date.parse(metricPending.mergeSeenAt) >= GARDEN_PENDING_RELEASE_MS);
   const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
     state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
-  return state.lastCheap !== spec.cheapFingerprint() || terminalMetric || releaseDue || Boolean(decisionReleaseDue);
+  return state.lastCheap !== cheap || terminalMetric || releaseDue || Boolean(decisionReleaseDue);
 }
 
 /** What one pass did. */
@@ -627,6 +774,17 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
+  spec: GardenSpec<C, I, A, W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
+): Steps<GardenPassResult<C, A>> {
+  try {
+    return yield* gardenPassBody(spec, deps);
+  } finally {
+    notePendingWatch(spec.name, spec.classes, deps);
+  }
+}
+
+function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Steps<GardenPassResult<C, A>> {
@@ -673,7 +831,22 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   const decisionReleaseDue = state.pending && judgedByDecision(spec, state.pending.actionClass) && prState === "open" &&
     state.pendingRecordedAt !== undefined && clock.now() - Date.parse(state.pendingRecordedAt) >= GARDEN_DECISION_PENDING_RELEASE_MS;
   if (state.lastCheap === cheap && !terminalMetric && !releaseDue && !decisionReleaseDue) return { ran: false };
-  const inventory = spec.inventory();
+  // An inventory that threw over these same inputs throws again; it is retried on a growing wait, and at
+  // once when an input changes.
+  const failure = readGardenInventoryFailure(deps.stateDir, spec.name);
+  if (inventoryFailureHolds(failure, cheap, clock.now())) return { ran: false };
+  const failurePath = gardenInventoryFailurePath(deps.stateDir, spec.name);
+  let inventory: I;
+  try {
+    inventory = spec.inventory();
+  } catch (e) {
+    const at = clock.iso();
+    const streak: GardenInventoryFailure = { cheap, firstAt: failure?.firstAt ?? at, lastAt: at, count: (failure?.count ?? 0) + 1,
+      reason: String((e as Error)?.message ?? e) };
+    writeAtomic(failurePath, JSON.stringify(streak, null, 2) + "\n");
+    throw e;
+  }
+  if (failure !== undefined) rmSync(failurePath, { force: true });
   const fingerprint = spec.fingerprint(inventory);
   if (state.pending) {
     const held = state.pending;

@@ -21,15 +21,18 @@ import {
   createReadModelTicker,
   createReadModelWorker,
   runReadModelViewWorker,
+  readModelLaneViews,
   runReadModelWorker,
   threadViews,
   viewsReadBy,
   type ReadModelInstanceState,
   type ReadModelView,
+  type ReadModelViewFactory,
   type ReadModelViewsInput,
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { createDemandBook } from "../src/lib/view-demand.js";
 import { VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
@@ -93,9 +96,10 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
     hand.advance(costMs);
     return [{ key: "", data: { at: hand.clock.now() }, sources: [] }];
   };
-  // "now" stands in for the real view: a read of nav-badge reaches it through READ_MODEL_VIEW_READERS.
-  const views: ReadModelView[] = [
-    { name: "now", version: 1, readPaced: true, materialize: built("now") },
+  // "now" stands in for the real view, in the lane's factory shape: a read of nav-badge reaches it through
+  // READ_MODEL_VIEW_READERS, and the factory's flag paces it although the view it makes carries none.
+  const views: Array<ReadModelView | ReadModelViewFactory> = [
+    { name: "now", readPaced: true, create: () => ({ name: "now", version: 1, materialize: built("now") }) },
     { name: "steady", version: 1, materialize: built("steady") },
   ];
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock, holder: "proj-holder", views, viewsOnly: true, oracle: "off", post: () => {} });
@@ -149,6 +153,11 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
   }
   const reading = count("now", readingFrom);
   assert.ok(Math.abs(reading - count("steady", readingFrom)) <= 2, `read every minute, it keeps the unpaced cadence: ${reading} vs ${count("steady", readingFrom)}`);
+});
+
+test("the lane's now view is read-paced and no other built-in view is", () => {
+  const lane = readModelLaneViews({ instances: [{ name: "core", ledgerDir: "/nonexistent" }] }, handClock(T0).clock, () => {}, createDemandBook());
+  assert.deepEqual(lane.filter((view) => view.readPaced).map((view) => view.name), ["now"]);
 });
 
 test("a read reaches the views it reads directly or through a view built from them", () => {

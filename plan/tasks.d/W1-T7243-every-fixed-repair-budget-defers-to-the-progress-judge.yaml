@@ -1,0 +1,79 @@
+- id: W1-T7243
+  title: "EVERY FIXED REPAIR BUDGET DEFERS TO THE PROGRESS JUDGE, NOT ONLY STRIKECAP — the capped-repair, plan-repair, retrigger, rebuild and re-arm counts and the refused-twice, rerun-still-red and amendment-closed waits become judge inputs, fix admission reads live occupancy and the queue governor bound follows measured throughput, so no repair path stops on a fixed number"
+  repo: remudero
+  depends_on: [W1-T7096]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the remaining fixed continue/stop budgets move behind the W1-T7096 judge
+  band_meaning: span
+  origin: "operator ruling 2026-10-09: 'I don't think 2 fix attempts is enough - an llm judge should determine if more fix attempts should be made or if we're in an endless loop that needs escalated. I hate hard ceilings'"
+  plan_refs: [W1-T7096, W1-T3306, W1-T3390, W1-T6353, W1-T5544, W1-T100, W1-T3202, W1-T4465, W1-T121]
+  files: [src/lib/fix-progress-judge.ts, src/lib/classify.ts, src/lib/pr-blocker.ts, src/lib/sweep.ts, src/run-task.ts, test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T7096 (build #10350, started 2026-10-09 ~12:50Z) replaces the blocked-fixable arm's POLICY_SWEEP.strikeCap
+    gate with judgeFixProgress and routes three parked states into it (the metadata "awaiting a fresh edited-event
+    verdict" wait, the "incomplete round history" refusal, proof-repair refusals past
+    MAX_PROOF_REPAIR_REFUSALS_PER_HEAD). Its build began before the #10341 amendment merged, and its acceptance
+    (the judge suite plus `judgeFixProgress(` in sweep.ts) is met without the rest, so the remaining fixed budgets
+    are still deciding on their own (W1-T100 shaped the fix evidence and is untouched here). Measured on #10350's head (18c2229 merged with main 98504c0b6):
+      - classify.ts MAX_PLAN_REPAIR_STRIKES = 2 and the capped body ceiling — #10298 read "the shared fix budget is
+        exhausted (2/2) — dispatching a plan-only repair of the offending shard (0/2)" (2026-10-09 13:47Z);
+      - classify.ts MAX_STRIKES = 2 and DIAGNOSE_AT_STRIKES = 2 (give_up after one diagnose-informed retry);
+      - run-task.ts DEFAULT_FIX_RETRIGGER_CAP = 2 and config fixStrikeCap (default 2) inside runFixRung;
+      - pr-blocker.ts MAX_SLO_REBUILDS = 2 ("lifetime cap of 2 rebuilds reached"; supersedes the 2026-10-03
+        "≤2 auto-rebuilds then digest" ruling for the same reason);
+      - sweep.ts MAX_REARMS_AFTER_DISARM_PER_HEAD = 3;
+      - sweep.ts createSweepFixAdmissionController: a fixed hostWorkerBudget (8) per full pass, measured once from
+        the live worker count and never credited back when a round ends. At 2026-10-09 14:54Z it logged "host worker
+        budget 8 exhausted for this full pass (1 active, 0 reserved for review, …)" with ONE worker live, and refused
+        #10344 on nine passes in a row. #10392 only reorders admission (oldest first); it leaves the count fixed;
+      - sweep.ts checkQueueGovernor: dispatch holds at a fixed policy.wipLimit (10). At 15:35Z it logged
+        observed_open_count 10, tier "growing", trailing_merged_count 0, and nothing had dispatched since 14:25Z.
+        The 0 is WRONG: deriveQueueGovernorTrailingFlow counts only `verdict.merged` / `verdict` rows with
+        verdict "merged", but merges in that window landed as `pr.terminal` rows with state "merged" (core ledger
+        14:00-15:59Z: 5 `pr.terminal` merged, 0 `verdict.merged`), so a queue that was draining read as growing;
+      - three parked states the amendment named that the build does not route: "fix rounds refused twice at this
+        head — no further round can add information" (the same-reason-twice bar), a head still red after its one
+        W1-T6353 failed-job rerun, and a scope amendment that closed without merging.
+  design: |
+    1. Each site above keeps its count as EVIDENCE and stops comparing it to a constant: on reaching what was the
+       bound it builds the W1-T7096 FixProgressInput (its own rounds, the former bound shown as formerCeiling, the
+       site named in parkedReason) and acts on judgeFixProgress: continue → the next attempt of that same remedy;
+       change-approach → the next attempt with the approach text in its evidence; escalate → the site's existing
+       escalation with the judge's named loop. An unavailable verdict holds and re-asks next pass, as in W1-T7096.
+    2. Export FIX_BUDGET_JUDGE_SITES from src/lib/fix-progress-judge.ts: one entry per site (name, file, former
+       bound), so the suite can assert every site is routed and a new fixed budget has a place to be listed.
+    3. The three unrouted parked states get the same treatment as W1-T7096's: wait once, then the judge.
+    4. Keep each site's existing ledger rows; add parked_reason and former_ceiling to the fix.progress_judged row.
+    5. Fix admission: replace the per-pass fixed budget in createSweepFixAdmissionController with LIVE occupancy plus
+       host pressure (the same signals the host-resource governor reads), re-read at each claim, and credit a slot
+       back when a round writes fix.done or fix.stood_down, so a pass never refuses work while workers sit idle.
+       Ledger the occupancy and pressure each claim read on sweep.fix_capacity.
+    6. Queue governor: (a) deriveQueueGovernorTrailingFlow also counts `pr.terminal` rows with state "merged",
+       once per PR, so a draining queue reads as draining; (b) the WIP bound follows measured throughput (trailing
+       merges per window) and host pressure instead of the constant policy.wipLimit — at or over the measured bound
+       it admits by the same tiered draining/growing rule, and the bound and its inputs are ledgered on the
+       governor row.
+    7. INVESTIGATE (report on the PR, fix if it is in these files): during that 14:54Z pass the admitted workers
+       started one after another (14:54:30 -> 14:58:38), which points at a synchronous step in fix dispatch on the
+       sweep loop. Name the step from a CPU profile or the per-dispatch timings, and say whether it serialises
+       starts.
+  acceptance:
+    - claim: "each listed fixed budget, once reached, asks the progress judge and continues past its former bound when the judge says continue; an escalate verdict uses that site's existing escalation with the named loop"
+      proof: 'unit test: test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts'
+    - claim: "the capped-repair budget in classify.ts asks the progress judge instead of stopping at MAX_PLAN_REPAIR_STRIKES"
+      proof: 'grep: judgeFixProgress( in src/lib/classify.ts'
+    - claim: "fix admission reads live occupancy at each claim and credits a slot back when a fix round ends, so a pass with one worker live admits the queued repair"
+      proof: 'unit test: a pass with one worker live admits the queued repair'
+    - claim: "the queue governor counts pr.terminal merges in its trailing flow, so a window whose merges landed only as pr.terminal rows reads as draining"
+      proof: 'unit test: a pr.terminal merge counts toward the queue governor trailing flow'
+    - claim: "the judge module lists every former fixed-budget site it now governs"
+      proof: 'grep: FIX_BUDGET_JUDGE_SITES in src/lib/fix-progress-judge.ts'
+  falsifier: |
+    Restore MAX_PLAN_REPAIR_STRIKES as a stop: a capped PR whose third plan-only repair would cure its proof is
+    escalated at 2/2, and the test asserting the third repair dispatch fails.

@@ -290,6 +290,8 @@ export interface ReadModelViewFactory {
   perInstance?: true;
   demand?: true;
   snapshotSourced?: true;
+  /** {@link ReadModelView.readPaced}: the unit is paced by the factory's flag, so a view made cold after a lane move keeps it. */
+  readPaced?: true;
   create(): ReadModelView;
 }
 
@@ -379,7 +381,7 @@ export function readModelViewBuilt(view: string, switches: ReadModelSwitches, re
  * its core path does; `/v1/views/versions` reads every view in `names`; any other path reads none.
  */
 export function viewsReadBy(path: string, names: readonly string[], readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): string[] {
-  const base = path.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  const base = path.split("?")[0]!.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
   if (READ_MODEL_EVERY_VIEW_PATHS.has(base)) return [...names];
   const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : READ_MODEL_LEGACY_VIEW_READS[base];
   if (!direct) return [];
@@ -393,6 +395,19 @@ export function viewsReadBy(path: string, names: readonly string[], readers: Rea
     }
   }
   return [...read];
+}
+
+/** The instance a read names (`?instance=` or a `/v1/i/<x>/` copy) and the view it reads directly: only that view's unit for that instance is warmed. */
+export function readScopeOf(path: string): { direct?: string; instance?: string } {
+  const [route = "", query = ""] = path.split("?");
+  const instance = new URLSearchParams(query).get("instance") ?? /^\/v1\/i\/([^/]+)\//.exec(route)?.[1];
+  const base = route.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : undefined;
+  return { ...(direct ? { direct } : {}), ...(instance ? { instance } : {}) };
+}
+
+export function scopedReadPath(path: string, instance: string | undefined): string {
+  return instance === undefined ? path : `${path}?instance=${encodeURIComponent(instance)}`;
 }
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
@@ -1149,13 +1164,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
   const readAt = new Map<string, number>();
   const pacedFrom = clock.now();
+  function lastReadOf(unit: ViewUnit): number {
+    const whole = readAt.get(unit.view.name);
+    const own = unit.slot ? readAt.get(`${unit.view.name}@${unit.slot.instance.name}`) : undefined;
+    return whole === undefined && own === undefined ? pacedFrom : Math.max(whole ?? Number.NEGATIVE_INFINITY, own ?? Number.NEGATIVE_INFINITY);
+  }
 
   /** A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. */
   function paced(unit: ViewUnit, finished: number): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
-    if (!unit.view.readPaced) return unit.baseDueAt;
-    const idleMs = finished - (readAt.get(unit.view.name) ?? pacedFrom);
+    if (unit.view.readPaced !== true) return unit.baseDueAt;
+    const idleMs = finished - lastReadOf(unit);
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     return finished + waitMs * unit.stretch;
   }
@@ -1391,9 +1411,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     read(path: string): void {
       const now = clock.now();
       const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers));
-      for (const view of read) readAt.set(view, now);
+      const { direct, instance } = readScopeOf(path);
+      const only = (name: string): string | undefined =>
+        instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
+      for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
       for (const unit of units) {
         if (!read.has(unit.view.name) || (unit.stretch ?? 1) === 1) continue;
+        const scope = only(unit.view.name);
+        if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
         unit.stretch = 1;
         if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
       }
@@ -1567,7 +1592,7 @@ export function readModelLaneViews(
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView() },
     readModelStatusView,
-    { name: NOW_VIEW_NAME, perInstance: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
@@ -1881,8 +1906,8 @@ export interface ReadModelWorkerHandle {
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
   /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
   noteGithubRead?(): void;
-  /** Serve answered a read-scoped route: the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path). */
-  noteViewRead?(path: string): void;
+  /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path and instance). */
+  noteViewRead?(path: string, instance?: string): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -2180,8 +2205,9 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
-    noteViewRead: (path) => {
+    noteViewRead: (route, instance) => {
       const now = clock.now();
+      const path = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
       if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
       readNotedAt.set(path, now);
       worker.postMessage({ type: "read", path });
