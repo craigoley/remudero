@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+import { threadId } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -185,27 +186,87 @@ export function readModelDirtyMarkerPath(path: string): string {
   return `${path}.dirty`;
 }
 
+function identifyLockFailure(error: unknown, path: string, connection: string, readOnly: boolean): void {
+  const code = sqliteErrcode(error);
+  if (error instanceof Error && code !== undefined && [5, 6].includes(code & 0xff)) {
+    error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}]`;
+  }
+}
+
 /** `marker`: the dirty marker this connection wrote and its close removes; only openReadModel's writer owns one. */
 function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
-  return {
+  let reader: DatabaseSync | undefined;
+  const connection = randomUUID();
+  const checked = <T>(target: DatabaseSync, operation: () => T): T => {
+    try {
+      return operation();
+    } catch (error) {
+      identifyLockFailure(error, path, connection, target !== raw || readOnly);
+      throw error;
+    }
+  };
+  const reading = (): DatabaseSync => readOnly || path === ":memory:" ? raw : (reader ??= connect(path, true));
+  const db: ReadModelDb = {
     path,
     schemaVersion,
     readOnly,
     ...(recoveredFrom ? { recoveredFrom } : {}),
     ...(marker?.unclean ? { uncleanShutdown: true } : {}),
-    exec: (sql) => raw.exec(sql),
-    prepare: (sql, opts = {}) => {
-      const statement: StatementSync = raw.prepare(sql);
-      if (opts.bigInts) statement.setReadBigInts(true);
-      return statement as unknown as ReadModelStatement;
+    exec: (sql) => {
+      const command = sql.trim().replace(/;$/, "").trim();
+      const beginRead = /^BEGIN(?: DEFERRED)?(?: TRANSACTION)?$/i.test(command);
+      const endRead = /^(?:COMMIT|END|ROLLBACK)(?: TRANSACTION)?$/i.test(command) && reader?.isTransaction && !raw.isTransaction;
+      const target = beginRead ? reading() : endRead ? reader! : raw;
+      checked(target, () => target.exec(sql));
     },
-    meta: (key) => raw.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
-    inTransaction: () => raw.isTransaction,
+    prepare: (sql, opts = {}) => {
+      const statement: StatementSync = checked(raw, () => raw.prepare(sql));
+      if (opts.bigInts) statement.setReadBigInts(true);
+      let readStatement: StatementSync | undefined;
+      // Transaction reads see their own writes; PRAGMAs describe the writer's configuration.
+      const forRead = (): { target: DatabaseSync; statement: StatementSync } => {
+        const target = raw.isTransaction || /^\s*PRAGMA\b/i.test(sql) ? raw : reading();
+        if (target === raw) return { target, statement };
+        if (!readStatement) {
+          readStatement = checked(target, () => target.prepare(sql));
+          if (opts.bigInts) readStatement.setReadBigInts(true);
+        }
+        return { target, statement: readStatement };
+      };
+      return {
+        run: (...params) => checked(raw, () => statement.run(...params)) as { changes: number },
+        get: (...params) => {
+          const read = forRead();
+          return checked(read.target, () => read.statement.get(...params)) as SqlRow | undefined;
+        },
+        all: (...params) => {
+          const read = forRead();
+          return checked(read.target, () => read.statement.all(...params)) as SqlRow[];
+        },
+        iterate: function* (...params) {
+          const read = forRead();
+          const iterator = checked(read.target, () => read.statement.iterate(...params));
+          try {
+            for (;;) {
+              const next = checked(read.target, () => iterator.next());
+              if (next.done) return;
+              yield next.value as SqlRow;
+            }
+          } finally {
+            checked(read.target, () => iterator.return?.());
+          }
+        },
+      };
+    },
+    meta: (key) => db.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
+    inTransaction: () => raw.isTransaction || (reader?.isTransaction ?? false),
     close: () => {
+      reader?.close();
       raw.close();
       if (marker) rmSync(marker.path, { force: true });
     },
   };
+  return db;
 }
 
 /**
@@ -215,14 +276,16 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
  */
 function connect(path: string, readOnly: boolean): DatabaseSync {
   const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
-  const raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
-  if (readOnly) return raw;
+  const connection = randomUUID();
+  let raw: DatabaseSync | undefined;
   try {
-    raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
+    raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
+    if (!readOnly) raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
       PRAGMA journal_size_limit=${READ_MODEL_JOURNAL_SIZE_LIMIT_BYTES};`);
     return raw;
   } catch (error) {
-    raw.close();
+    raw?.close();
+    identifyLockFailure(error, path, connection, readOnly);
     throw error;
   }
 }
