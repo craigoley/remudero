@@ -1,0 +1,263 @@
+// W1-T7093: a host memory reservation is released only when its whole tree is verified gone.
+//
+// Every case runs the ledger over an in-memory directory and a fake process table, so each outcome
+// is a state only the ledger writes (a file present or removed, a reading's status). The last cases
+// use the real /proc, filesystem and a real child process, so the default seams are exercised too.
+
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import {
+  defaultInstance,
+  defaultListProcesses,
+  defaultProbe,
+  openMemoryReservation,
+  parseProcStat,
+  readMemoryLedger,
+  sweepMemoryReservations,
+  UNVERIFIED_AFTER_MS,
+  type ContainerGeneration,
+  type HostMemoryLedgerDeps,
+  type LedgerInstance,
+} from "../src/lib/host-memory-ledger.js";
+import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
+
+const OWNER = 100;
+
+function world() {
+  const files = new Map<string, string>();
+  const procs = new Map<number, { start: string; parent: number }>([[OWNER, { start: "proc:10", parent: 1 }]]);
+  const clock = { now: Date.parse("2026-10-09T00:00:00Z") };
+  const logs: Array<Record<string, unknown>> = [];
+  const deps = (over: Partial<HostMemoryLedgerDeps> & { gen?: ContainerGeneration; inst?: LedgerInstance } = {}): HostMemoryLedgerDeps => ({
+    location: () => ({ dir: "/ledger", scope: "host" }),
+    instance: () => over.inst ?? { name: "core", hostUnique: true },
+    generation: () => over.gen ?? { containerId: "c1", initStart: "proc:1" },
+    probe: (pid) => {
+      const proc = procs.get(pid);
+      return proc ? { state: "alive", start: proc.start } : { state: "gone" };
+    },
+    listProcesses: () => ({ rows: [...procs].map(([pid, p]) => ({ pid, parent: p.parent, start: p.start })), complete: true }),
+    write: (path, content) => void files.set(path, content),
+    read: (path) => {
+      const content = files.get(path);
+      if (content === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+      return content;
+    },
+    list: (dir) => [...files.keys()].filter((key) => key.startsWith(`${dir}/`)).map((key) => key.slice(dir.length + 1)),
+    remove: (path) => void files.delete(path),
+    now: () => clock.now,
+    log: (event) => void logs.push(event),
+    ownerPid: OWNER,
+    ...over,
+  });
+  return { files, procs, clock, logs, deps };
+}
+
+test("a reservation survives its root's exit while a recorded descendant lives, and is released once every recorded (pid, start time) is gone", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  w.procs.set(300, { start: "proc:30", parent: 200 });
+  sweepMemoryReservations(w.deps()); // the walk records the grandchild as (300, proc:30)
+  const recorded = JSON.parse([...w.files.values()][0]!);
+  assert.deepEqual(recorded.tree, [{ pid: 200, start: "proc:20" }, { pid: 300, start: "proc:30" }]);
+  assert.equal(recorded.estimateMib, 2048);
+  assert.deepEqual(recorded.estimateSource, { kind: "default-unmeasured" });
+  assert.deepEqual(recorded.generation, { containerId: "c1", initStart: "proc:1" });
+
+  w.procs.delete(200);
+  w.procs.set(300, { start: "proc:30", parent: 1 }); // reparented to init: ancestry alone no longer attributes it
+  handle.releaseOccupancy();
+  assert.equal(w.files.size, 1, "a live recorded descendant holds the reservation after its root exits");
+
+  w.procs.delete(300);
+  const swept = sweepMemoryReservations(w.deps());
+  assert.deepEqual(swept?.released.map((r) => r.rule), ["tree-gone"]);
+  assert.equal(w.files.size, 0);
+});
+
+test("a reused pid with a new start time does not hold a reservation", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "review" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+  assert.equal(w.files.size, 1, "the root is still alive");
+  w.procs.set(200, { start: "proc:999", parent: 1 }); // the same pid, a different process
+  assert.deepEqual(sweepMemoryReservations(w.deps())?.released.map((r) => r.rule), ["tree-gone"]);
+  assert.equal(w.files.size, 0);
+});
+
+test("a crashed worker whose tree is gone is released by its owner", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "fix" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  w.procs.delete(OWNER); // the daemon crashes: releaseOccupancy is never called
+  const restarted = { ...w.deps(), ownerPid: 101 };
+  w.procs.set(101, { start: "proc:11", parent: 1 });
+  sweepMemoryReservations(restarted);
+  assert.equal(w.files.size, 1, "the crashed worker's root is still alive");
+  w.procs.delete(200);
+  assert.deepEqual(sweepMemoryReservations(restarted)?.released.map((r) => r.rule), ["tree-gone"]);
+});
+
+test("a new container generation releases the previous generation's entries", () => {
+  const w = world();
+  for (let i = 0; i < 2; i += 1) {
+    const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+    w.procs.set(200 + i, { start: `proc:2${i}`, parent: OWNER });
+    handle.bindRoot(200 + i);
+  }
+  // A sibling container whose name is not host-unique is never mistaken for a previous generation.
+  const sibling = sweepMemoryReservations(w.deps({ gen: { containerId: "c9", initStart: "proc:1" }, inst: { name: "core", hostUnique: false } }));
+  assert.equal(sibling?.released.length, 0);
+  const restarted = sweepMemoryReservations(w.deps({ gen: { containerId: "c1", initStart: "proc:2" } }));
+  assert.deepEqual(restarted?.released.map((r) => r.rule), ["generation-ended", "generation-ended"]);
+  assert.equal(w.files.size, 0);
+
+  const handle = openMemoryReservation({ workerClass: "review" }, w.deps());
+  handle.bindRoot(OWNER);
+  const recycled = sweepMemoryReservations(w.deps({ gen: { containerId: "c2", initStart: "proc:1" } }));
+  assert.deepEqual(recycled?.released.map((r) => r.rule), ["generation-ended"]);
+});
+
+test("a start that fails before spawning releases on occupancy release", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  sweepMemoryReservations(w.deps());
+  assert.equal(w.files.size, 1, "an unbound reservation is held while its occupancy is");
+  handle.releaseOccupancy();
+  assert.equal(w.files.size, 0);
+});
+
+test("two overlapping starts get two distinct entries", () => {
+  const w = world();
+  const first = openMemoryReservation({ workerClass: "review" }, w.deps());
+  const second = openMemoryReservation({ workerClass: "review" }, w.deps());
+  assert.notEqual(first.id, second.id);
+  assert.equal(w.files.size, 2);
+  first.releaseOccupancy();
+  assert.equal(w.files.size, 1, "releasing one start leaves the other in place");
+});
+
+test("a missed heartbeat or old mtime never releases", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement", measured: { estimateMib: 3000, samples: 7 } }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+  w.clock.now += 7 * 24 * 3_600_000; // a week of missed heartbeats
+  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0);
+  assert.equal(sweepMemoryReservations(w.deps({ gen: { containerId: "c2", initStart: "proc:1" }, inst: { name: "site", hostUnique: true } }))?.released.length, 0);
+  assert.equal(w.files.size, 1);
+  const reading = readMemoryLedger(w.deps());
+  assert.deepEqual(reading?.entries[0]?.estimateSource, { kind: "measured", samples: 7 });
+  assert.equal(reading?.reservedMib, 3000);
+});
+
+test("another instance reports an unverifiable entry as uncertain and leaves it in place", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  const site = w.deps({ gen: { containerId: "c2", initStart: "proc:1" }, inst: { name: "site", hostUnique: true } });
+  assert.equal(readMemoryLedger(site)?.entries[0]?.status, "owner-verified");
+  w.clock.now += UNVERIFIED_AFTER_MS + 1;
+  const swept = sweepMemoryReservations(site);
+  assert.equal(swept?.released.length, 0);
+  assert.equal(w.files.size, 1);
+  const entry = swept?.reading.entries[0];
+  assert.equal(entry?.status, "uncertain");
+  assert.equal(entry?.owner, "core@c1");
+  assert.equal(entry?.ageMs, UNVERIFIED_AFTER_MS + 1);
+  assert.equal(swept?.reading.counts.uncertain, 1);
+  assert.equal(readMemoryLedger(w.deps())?.entries[0]?.status, "owned");
+});
+
+test("an owner that cannot read a recorded identity holds it as uncertain", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  w.procs.set(200, { start: "proc:20", parent: OWNER });
+  handle.bindRoot(200);
+  handle.releaseOccupancy();
+  const blind = w.deps({ probe: (pid) => (pid === 200 ? { state: "unknown", reason: "EACCES" } : { state: "alive", start: "proc:10" }) });
+  const swept = sweepMemoryReservations(blind);
+  assert.equal(swept?.released.length, 0);
+  assert.equal(swept?.reading.entries[0]?.status, "uncertain");
+});
+
+test("an incomplete walk is reported as incomplete, and a local directory as local scope", () => {
+  const w = world();
+  const local = w.deps({ location: () => ({ dir: "/ledger", scope: "local" }), listProcesses: () => ({ rows: [], complete: false, reason: "time bound 250ms" }) });
+  openMemoryReservation({ workerClass: "review" }, local);
+  const reading = sweepMemoryReservations(local)?.reading;
+  assert.equal(reading?.scope, "local");
+  assert.deepEqual(reading?.counts, { live: 1, uncertain: 0, incompleteWalk: 1, localScope: 1, unreadable: 0 });
+  w.files.set("/ledger/torn.json", "{");
+  assert.equal(readMemoryLedger(local)?.counts.unreadable, 1);
+  assert.equal(w.files.has("/ledger/torn.json"), true, "an unreadable entry is never released");
+});
+
+test("a throwing ledger write leaves the worker start unchanged", async () => {
+  const w = world();
+  const throwing = w.deps({ write: () => { throw new Error("EROFS: ledger read-only"); } });
+  const before = activeWorkerCount();
+  const result = await withWorkerOccupancy(async () => {
+    assert.equal(activeWorkerCount(), before + 1);
+    return "worker-result";
+  }, { workerClass: "implement", ledger: throwing });
+  assert.equal(result, "worker-result");
+  assert.equal(activeWorkerCount(), before);
+  assert.ok(w.logs.some((log) => log.event === "host_memory_ledger.diagnostic" && log.op === "open-write"));
+
+  const broken = w.deps({ location: () => { throw new Error("no slot dir"); } });
+  const handle = openMemoryReservation({ workerClass: "review" }, broken);
+  assert.equal(handle.id, undefined);
+  assert.doesNotThrow(() => { handle.bindRoot(1); handle.releaseOccupancy(); });
+  assert.equal(sweepMemoryReservations(broken), undefined);
+  assert.equal(readMemoryLedger(broken), undefined);
+  const failure = await withWorkerOccupancy(async () => { throw new Error("worker boom"); }, { ledger: throwing }).catch((error: Error) => error.message);
+  assert.equal(failure, "worker boom");
+});
+
+test("the real /proc seams bind a live child and release only after it exits", { skip: !existsSync("/proc/self/stat") }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-host-memory-"));
+  try {
+    const deps: HostMemoryLedgerDeps = { location: () => ({ dir, scope: "local" }), root: "/nonexistent/Remudero", log: () => undefined };
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    const handle = openMemoryReservation({ workerClass: "review" }, deps);
+    handle.bindRoot(child.pid!);
+    handle.releaseOccupancy();
+    assert.equal(readdirSync(dir).length, 1, "a live child holds the reservation");
+    const reading = readMemoryLedger(deps);
+    assert.equal(reading?.entries[0]?.owner.startsWith("Remudero@"), true);
+    child.kill("SIGKILL");
+    await exited;
+    assert.deepEqual(sweepMemoryReservations(deps)?.released.map((r) => r.rule), ["tree-gone"]);
+    assert.deepEqual(readdirSync(dir), []);
+    assert.deepEqual(defaultProbe(child.pid!), { state: "gone" });
+    assert.equal(defaultProbe(process.pid).state, "alive");
+    assert.equal(defaultProbe(-1).state, "unknown");
+    assert.equal(defaultListProcesses({ maxEntries: 0, maxMs: 1_000 }).complete, false);
+    assert.equal(defaultListProcesses({ maxEntries: 100_000, maxMs: 60_000 }).rows.some((row) => row.pid === process.pid), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("process identity and instance parsing", () => {
+  assert.deepEqual(parseProcStat("42 (a) b) S 7 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0"), { parent: 7, start: "proc:98765", zombie: false });
+  assert.equal(parseProcStat("42 (x) Z 7 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0")?.zombie, true);
+  assert.equal(parseProcStat("garbage"), undefined);
+  const mountinfo = "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n36 1 8:1 /rmd/state-core /home/node/Remudero rw - ext4 /dev/sda1 rw";
+  assert.deepEqual(defaultInstance("/home/node/Remudero", () => mountinfo), { name: "state-core", hostUnique: true });
+  assert.deepEqual(defaultInstance("/home/node/Remudero", () => { throw new Error("ENOENT"); }), { name: "Remudero", hostUnique: false });
+});
