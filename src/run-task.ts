@@ -27,6 +27,7 @@ import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
+import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
@@ -12583,6 +12584,20 @@ export async function runFixRung(opts: {
     } catch {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
+    // #10470: guard and lease the tip the worker builds on when it merely advanced from the snapshot.
+    const roundBase = fixRoundBaseHead({
+      snapshotHeadSha: priorHeadSha,
+      startedFromSha: roundStartSha,
+      isAncestor: (ancestor, descendant) => {
+        try {
+          hostWorktreeGit(opts.worktreePath, ["merge-base", "--is-ancestor", ancestor, descendant]);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
@@ -12682,7 +12697,7 @@ export async function runFixRung(opts: {
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
-        ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? priorHeadSha : priorHeadSha, branch: opts.branch } : {}),
+        ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? roundBase.baseSha : roundBase.baseSha, branch: opts.branch } : {}),
         report,
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
@@ -13073,7 +13088,7 @@ export async function runFixRung(opts: {
       if (harnessCommitCount > 0) {
         let pushedHead: string | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
           if (pushed === undefined) pushedHead = expectedHeadShaForPush;
           if (pushed && pushed !== "refused") return pushed;
         } finally { logFixDone(pushedHead); }
@@ -13123,7 +13138,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let pushedHeadSha: string | undefined;
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
       if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
     } finally {
       logFixDone(pushedHeadSha);
