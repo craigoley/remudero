@@ -40,7 +40,9 @@ export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; r
 
 const sorted = (values: string[]) => [...new Set(values)].sort();
 const stringValue = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
-const redSet = (row: Record<string, unknown>): string[] => sorted([
+const redSet = (row: Record<string, unknown>): string[] => row.mode === "merge-conflict" && Array.isArray(row.conflicted_files)
+  ? sorted(row.conflicted_files.filter((p): p is string => typeof p === "string").map(p => `conflict:${p}`))
+  : sorted([
   ...(Array.isArray(row.ci_failures) ? row.ci_failures.flatMap((f: unknown) => {
     if (typeof f === "string") return [f];
     const name = f && typeof f === "object" ? stringValue((f as Record<string, unknown>).check) : undefined;

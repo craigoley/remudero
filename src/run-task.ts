@@ -1430,6 +1430,7 @@ import {
   claimReviewDecision,
   reviewDecisionDigest,
   reviewTaskIdEvidenceAsync,
+  bodyReviewContractDigest,
   reviewContractDigest,
   reviewInputDigest,
   cappedReason,
@@ -11130,6 +11131,7 @@ export async function runFixRung(opts: {
   // resolved enough for GitHub to compute the merge ref, so every later
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
+  const consecutiveMergeRefusalReasons: string[] = [];
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -11458,7 +11460,9 @@ export async function runFixRung(opts: {
           : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
         ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
           row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
-        operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap, parkedReason: progressRoundReason });
+        operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap,
+        parkedReason: consecutiveMergeRefusalReasons.length > 0
+          ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
       const decision = await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         round_count: input.rounds.length, signals: input.signals, ...decision });
@@ -12402,12 +12406,20 @@ export async function runFixRung(opts: {
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
       if (!merged.started) {
+        const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
+        consecutiveMergeRefusalReasons.push(refusal);
+        const refusedRoundId = `${opts.runId}:merge-refused:${attempt}:${systemClock.now()}`;
         strikes = attempt;
         deps.log("fix.dispatch", {
+          round_id: refusedRoundId,
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
-          verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: merged.reason,
+          verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: refusal,
           conflicted_files: conflictedFilePaths(currentMergeConflict),
         });
+        deps.log("fix.commit_refused", { round_id: refusedRoundId, head_sha: priorHeadSha,
+          strike: attempt, mode: fixMode, reason: refusal });
+        deps.log("fix.done", { round_id: refusedRoundId, head_sha: priorHeadSha,
+          strike: attempt, mode: fixMode, subtype: "commit_refused" });
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
         continue;
       }
@@ -12621,6 +12633,8 @@ export async function runFixRung(opts: {
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
     const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
+    if (mergeCommitRefused) consecutiveMergeRefusalReasons.push(MERGE_HEAD_ABSENT_REASON);
+    else consecutiveMergeRefusalReasons.length = 0;
     // W1-T5227: a refusal for leftover conflict markers IS an unresolved conflict. The merge stays pending
     // (nothing was staged), so the next strike is a merge-conflict round on those files; exhaustion then
     // reports the existing merge_conflict_unresolved. No new outcome, no new escalation path.
@@ -12705,7 +12719,7 @@ export async function runFixRung(opts: {
     } else {
       if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
-        ...(mergeCommitRefused ? {} : { round_id: roundId }),
+        round_id: roundId,
         ...fixReceipt.joinFields(),
         strike: attempt,
         strike_cap: opts.strikeCap,
@@ -41551,10 +41565,20 @@ function* openPrViewSteps(
   const reviewOrphanedPrs = raw
     .filter((pr) => {
       const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-      return reviewOrphansFor(ledger, t && reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
+      return reviewOrphansFor(ledger, reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(owner, repo, "main", reviewOrphanedPrs, fetch);
+  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(
+    owner, repo, "main", reviewOrphanedPrs, fetch, undefined,
+    (prNumber, reason) => {
+      const pr = raw.find((candidate) => candidate.number === prNumber)!;
+      appendLedger(ledgerPath, {
+        run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
+        step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
+        head_sha: pr.headRefOid, reason,
+      });
+    },
+  );
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
@@ -41633,13 +41657,13 @@ function* openPrViewSteps(
     const ciFailures = ciFailuresByPr.get(pr.number);
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId && reviewLedgerKey, pr.headRefOid, undefined, pr.url);
+    const reviewOrphans = reviewOrphansFor(ledger, reviewLedgerKey, pr.headRefOid, undefined, pr.url);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
+    const priorReviewForReuse = priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url);
     const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
@@ -41648,7 +41672,14 @@ function* openPrViewSteps(
           risk: taskRecord.risk,
           budgetUsd: taskRecord.budget_usd,
         })
-      : undefined;
+      : taskRecord
+        ? undefined
+        : bodyReviewContractDigest({
+            reviewLedgerKey, body: pr.body ?? "",
+            unfiled: taskId === undefined || taskId === UNFILED_RUN_SENTINEL,
+            recordedDigest: priorReviewForReuse?.reviewContractDigest,
+            semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
+          });
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
