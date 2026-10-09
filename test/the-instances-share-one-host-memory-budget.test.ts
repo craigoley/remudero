@@ -111,6 +111,7 @@ test("a container whose memory.high differs from the policy is due a recycle nam
     assert.deepEqual(resourcePolicyDriftFrom(expectedArgs, JSON.stringify({ ...limits, Annotations: { [MEMORY_HIGH_ANNOTATION]: `uint64 ${high}` } })), []);
     // An annotation in a shape the launcher never writes is UNKNOWN — never a recycle storm.
     assert.equal(resourcePolicyDriftFrom(expectedArgs, JSON.stringify({ ...limits, Annotations: { [MEMORY_HIGH_ANNOTATION]: "5G" } })), undefined);
+    assert.equal(resourcePolicyDriftFrom(expectedArgs, JSON.stringify({ ...limits, Annotations: "MemoryHigh" })), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -197,7 +197,7 @@ function fixture(primary = true): { root: string; env: NodeJS.ProcessEnv } {
 test("the shipped serve wiring reads the serve role against remudero-serve and replaces through serve-container.sh", () => {
   const { root, env } = fixture();
   const calls: string[][] = [];
-  let hostConfig = OLD_LIMITS;
+  let hostConfig: object = OLD_LIMITS;
   let running = "true false";
   const created: string[] = [];
   const gateway: IssueGateway = { create: (title) => (created.push(title), "https://github.com/o/r/issues/1"), listOpen: () => [] };

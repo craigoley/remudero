@@ -615,7 +615,7 @@ if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
 fi
 
 RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
-RESOURCE_POLICY_SERVE_HIGH_MIB=""
+RESOURCE_POLICY_SERVE_HIGH_MIB="" # read back from the cgroup after start; see resource_policy_probe_memory_high
 if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
   resource_policy_serve_args
@@ -746,8 +746,6 @@ if [ "${RUNNING}" != "true" ]; then
   echo "serve-container: FAILED — ${CONTAINER_NAME} is not running." >&2
   FAIL=1
 fi
-# memory.high rides as an annotation Docker accepts without proving it reached the cgroup; read the
-# kernel's value back and name a miss (never fatal). See deploy/resource-policy.sh.
 if [ "${RUNNING}" = "true" ] && [ -n "${RESOURCE_POLICY_SERVE_HIGH_MIB}" ]; then
   resource_policy_probe_memory_high "${CONTAINER_NAME}" "${RESOURCE_POLICY_SERVE_HIGH_MIB}" || true
 fi
