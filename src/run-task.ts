@@ -12592,8 +12592,11 @@ export async function runFixRung(opts: {
         try {
           hostWorktreeGit(opts.worktreePath, ["merge-base", "--is-ancestor", ancestor, descendant]);
           return true;
-        } catch {
-          return false;
+        } catch (error) {
+          // git exits 1 for "not an ancestor"; any other failure is unreadable ancestry, which
+          // fixRoundBaseHead turns into the snapshot guard with its own reason.
+          if ((error as { status?: unknown }).status === 1) return false;
+          throw error;
         }
       },
     });
