@@ -40,7 +40,7 @@ const okResult = (id: string): Awaited<ReturnType<DaemonDeps["runOne"]>> =>
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** One dispatch held open across `ticks` ticker sleeps; `events` records the row and read order. */
-async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; settleMs: number; events?: string[] }): Promise<Record<string, unknown>[]> {
+async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; settleMs: number; events?: string[]; others?: { step: string; e: Record<string, unknown> }[] }): Promise<Record<string, unknown>[]> {
   const merged = new Set<string>();
   const rows: Record<string, unknown>[] = [];
   let sleeps = 0;
@@ -54,7 +54,7 @@ async function heartbeat(extra: Partial<DaemonDeps>, opts: { ticks: number; sett
       sweepLight: async () => {},
       sleep: async () => { sleeps++; await settle(opts.settleMs); if (sleeps >= opts.ticks) release?.(); },
       log: (step, e = {}) => {
-        if (step !== "daemon.alive") return;
+        if (step !== "daemon.alive") { opts.others?.push({ step, e }); return; }
         rows.push(e);
         opts.events?.push("row");
       },
@@ -127,6 +127,53 @@ test("an unanswered thread is named unsized and makes the remainder a bound, nev
   assert.equal(read.native_remainder_bytes, 4_600_000_000 + 400_000_000 - 550_000_000 - 50_000_000 - 300_000_000);
   assert.equal(read.native_remainder_kind, "inferred-upper-bound",
     "the unsized heaps are still inside the remainder, so it is marked a bound rather than read as exact");
+});
+
+test("a thread whose read rejects is named unsized with its failure, never read as 0 bytes", async () => {
+  const refusing: WorkerThread = {
+    threadId: 8,
+    once: (() => undefined) as unknown as WorkerThread["once"],
+    getHeapStatistics: (() => Promise.reject(new Error("isolate gone"))) as unknown as WorkerThread["getHeapStatistics"],
+  };
+  const live: TrackedWorker[] = [
+    { kind: "read-plane:startReadPlane", thread: fakeThread(9, { total: 300_000_000, used: 200_000_000 }) },
+    { kind: "read-plane:startReadPlane", thread: refusing },
+  ];
+  const book = workerHeapReadings({ live: () => live, timeoutMs: 1_000 });
+  book.refresh();
+  await settle(50);
+  const out = book.fields(MAIN);
+  assert.deepEqual(out.worker_heaps, {
+    "read-plane:startReadPlane": { threads: 2, total_bytes: 300_000_000, used_bytes: 200_000_000, unsized: [8] },
+  });
+  assert.equal(out.worker_heap_total_bytes, 300_000_000);
+  assert.equal(out.native_remainder_kind, "inferred-upper-bound");
+});
+
+test("a registry that throws rides the next row as an error, and the next refresh recovers", async () => {
+  let broken = true;
+  const live: TrackedWorker[] = [{ kind: "read-plane:startReadPlane", thread: fakeThread(10, { total: 10_000_000, used: 5_000_000 }) }];
+  const book = workerHeapReadings({ live: () => { if (broken) throw new Error("registry offline"); return live; }, timeoutMs: 1_000 });
+  book.refresh();
+  assert.deepEqual(book.fields(MAIN), { mem_worker_heaps: "error:registry offline" });
+  broken = false;
+  book.refresh();
+  await settle(50);
+  const out = book.fields(MAIN);
+  assert.equal(out.mem_worker_heaps, undefined, "a later successful read clears the error");
+  assert.equal(out.worker_heap_total_bytes, 10_000_000);
+});
+
+test("an afterRow hook that throws is logged and does not cost the heartbeat", async () => {
+  const others: { step: string; e: Record<string, unknown> }[] = [];
+  const readMemoryTelemetry = Object.assign(() => ({ ...MAIN }), {
+    afterRow: () => { throw new Error("afterRow boom"); },
+  });
+  const rows = await heartbeat({ readMemoryTelemetry }, { ticks: 2, settleMs: 10, others });
+  assert.ok(rows.length >= 1, "daemon.alive is still written");
+  const failed = others.find((o) => o.step === "daemon.memory_read_failed");
+  assert.ok(failed, "the failure is logged as daemon.memory_read_failed");
+  assert.equal(failed.e.error, "afterRow boom");
 });
 
 test("the heartbeat is written without awaiting the read", { timeout: 20_000 }, async () => {
