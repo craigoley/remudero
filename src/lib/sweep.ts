@@ -17096,8 +17096,7 @@ export function deriveQueueGovernorTrailingFlow(
     const parsed = ts ? Date.parse(ts) : NaN;
     if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed > nowMs) continue;
     if (line.step === "pr.opened") { trailingOpenedCount++; continue; }
-    // A sweep-observed merge is a `pr.terminal` row reading `merged`; most merges carry no
-    // `verdict.merged` row at all, so counting only that one read a draining queue as growing.
+    // Most merges are ledgered only as a sweep `pr.terminal` row, never as `verdict.merged`.
     const merged = line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged")
       || (line.step === "pr.terminal" && line.state === "merged");
     if (!merged) continue;
