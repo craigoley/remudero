@@ -182,13 +182,13 @@ export interface LandFeedbackResult {
    * Why: docs/forensics/feedback-landing.md#landfeedbackresult_pushed.
    */
   pushed?: boolean;
-  /** Present only when this call removed redundant, untracked queue copies once fetched
-   *  origin/main proved their bytes durable at the same paths. `paths` is bounded. */
+  /** Removed untracked checkout copies whose bytes match fetched origin/main; paths are bounded. */
   acknowledgement?: {
     count: number;
     paths: string[];
     truncated: boolean;
   };
+  keptForCheckout?: number;
   /** Present only when this call REFUSED to stage one or more feedback records because the local
    *  copy sat at an earlier §7B lifecycle position than `origin/main`'s (W1-T3561) — never
    *  silently dropped. A refused record is excluded from `files`/the pushed tree entirely, so it
@@ -1054,6 +1054,7 @@ function* finishLanding(
 
 /** Land untracked or modified inbox writes, never clean PR files; scanning disk preserves offline captures. */
 interface LandPendingOpts extends LandFeedbackOpts {
+  servedRoot?: string;
   /** Internal compatibility seam: only the named sweep publishes acknowledgement evidence. */
   reportAcknowledgement?: boolean;
   /** Only the named sweep drains the `stateRoot` queue, into the SAME tree and preflight. */
@@ -1072,10 +1073,14 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
   const gh = opts.gh ?? defaultGh();
   let scratchDir: string | undefined;
   let acknowledgement: LandFeedbackResult["acknowledgement"];
-  const withAcknowledgement = (result: LandFeedbackResult): LandFeedbackResult =>
-    acknowledgement && opts.reportAcknowledgement ? { ...result, acknowledgement } : result;
-
   const queueRoot = opts.drainQueue ? opts.stateRoot : undefined;
+  let keptForCheckout = queueRoot === undefined ? undefined : 0;
+  const withAcknowledgement = (result: LandFeedbackResult): LandFeedbackResult => ({
+    ...result,
+    ...(keptForCheckout === undefined ? {} : { keptForCheckout }),
+    ...(acknowledgement && opts.reportAcknowledgement ? { acknowledgement } : {}),
+  });
+
   const net = landingNet(git, gh, opts);
 
   try {
@@ -1091,7 +1096,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
 
     yield* net.git(["fetch", "origin", "--quiet"]);
     acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
-    if (queueRoot) acknowledgeLandedFeedbackQueue(queueRoot, git);
+    if (queueRoot) keptForCheckout = acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, git);
 
     // W1-T3561: a byte inequality alone no longer decides a feedback record's fate. `new
     // remoteSha => local wins trivially (nothing upstream yet); identical bytes => nothing to
@@ -1192,6 +1197,8 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
 }
 
 export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
+  /** Checkout serve reads; defaults to the sweep root when both share a checkout. */
+  servedRoot?: string;
   /** One ledger line per call (acting/quiet split: the function's doc); omitted, none is emitted. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -1245,13 +1252,16 @@ function sweepLandingSteps(
 function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedbackResult): LandFeedbackResult {
   if (log) {
     const acknowledgement = result.acknowledgement;
-    const acknowledgementEvidence = acknowledgement
-      ? {
-          acknowledged_count: acknowledgement.count,
-          acknowledged_paths: acknowledgement.paths,
-          acknowledged_paths_truncated: acknowledgement.truncated,
-        }
-      : { acknowledged_count: 0 };
+    const acknowledgementEvidence = {
+      kept_for_checkout_count: result.keptForCheckout ?? 0,
+      ...(acknowledgement
+        ? {
+            acknowledged_count: acknowledgement.count,
+            acknowledged_paths: acknowledgement.paths,
+            acknowledged_paths_truncated: acknowledgement.truncated,
+          }
+        : { acknowledged_count: 0 }),
+    };
     // W1-T3561: a refused, backward-moving feedback record rides along on EITHER branch below —
     // never swallowed into just `acknowledgementEvidence`'s silence, regardless of whether this
     // pass also happened to push something else.
@@ -1583,16 +1593,22 @@ function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, st
   return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
 }
 
-/** Drop a queued record once fetched origin/main already carries it (`keep-upstream`); anything else stays queued. */
-function acknowledgeLandedFeedbackQueue(stateRoot: string, git: GitExec): void {
+/** Drop a landed queued record only once the served checkout holds the upstream bytes. */
+function acknowledgeLandedFeedbackQueue(root: string, stateRoot: string, git: GitExec): number {
+  let keptForCheckout = 0;
   for (const [rel, abs] of queuedFeedbackSources(stateRoot)) {
     try {
       const remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
-      if (decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8")).kind === "keep-upstream") unlinkSync(abs);
+      if (decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8")).kind !== "keep-upstream") continue;
+      keptForCheckout++;
+      if (git(["hash-object", join(root, rel)]).trim() !== remoteSha) continue;
+      unlinkSync(abs);
+      keptForCheckout--;
     } catch {
-      // Not on origin/main yet (or unreadable): the queue is durable, so the record stays for the build.
+      // Unproved upstream or checkout bytes never authorize discarding the queued record.
     }
   }
+  return keptForCheckout;
 }
 
 function ciLearningPendingRoot(stateRoot: string): string {
