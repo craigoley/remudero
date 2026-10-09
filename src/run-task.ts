@@ -37058,9 +37058,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
 type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
 
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
-  tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
+  tickRead?: Pick<TickReadFacts, "closedPrs">, dryRun = false): PrTerminalReconcileSummary {
   const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
-  return runPrTerminalReconcile(lookup, { ledgerPath, runId });
+  return runPrTerminalReconcile(lookup, { ledgerPath, runId, dryRun });
 }
 
 export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
@@ -44571,6 +44571,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
   // runs ledgered a merge while GitHub showed 28) this rung exists to close.
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
+  const terminalSummary = sweepPrTerminalRung(buildBatchedGithub(owner, repo, { log }), ledgerPath, runId, undefined, dryRun);
 
   // fb-1784756088300-6a481e — the escalation-lifecycle reconciler rung: close stale
   // needs-human issues whose referenced task has since resolved (the missing third leg
@@ -44601,6 +44602,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       renderSweepSummary(summary) +
       `\npost-fix re-verification: ${reverifySummary.total} open PR(s) checked · ${reverifySummary.redriven} redriven` +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
+      `\npr terminal: ${terminalSummary.named} named PR(s) · ${terminalSummary.appended} appended` +
       `\n${renderEscalationReconcileSummary(reconcileSummary)}` +
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
