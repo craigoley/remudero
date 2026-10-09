@@ -22,7 +22,7 @@ import {
 } from "../src/lib/sweep.js";
 import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 // W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
@@ -257,6 +257,7 @@ test("a first or changed Rule-25 cause remains fixable", () => {
 
 test("the first entanglement records its structured cause but opens a prerequisite with zero ordinary strikes", async () => {
   const lines: Array<Record<string, unknown>> = [];
+  let prerequisiteBranch = "";
   const outcome = await runFixRung({
     taskId: TASK_ID,
     runId: "W1-T3309-entangled",
@@ -273,7 +274,13 @@ test("the first entanglement records its structured cause but opens a prerequisi
     initialReview: entangledReview(),
     reviewBase: { owner: "craigoley", repo: "remudero", headCheckoutDir: process.cwd(), reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 20_000 } },
     deps: {
-      spawn: async () => workerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/9001"),
+      spawn: async (args: SpawnWorkerArgs) => {
+        const mintedBranch = args.prompt.match(/run-unfiled-\d+/)?.[0];
+        assert.ok(mintedBranch, "the prerequisite worker receives its minted branch");
+        prerequisiteBranch = mintedBranch;
+        return workerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/9001");
+      },
+      readLiveHead: () => ({ ok: true, headSha: "prerequisite-head", headRefName: prerequisiteBranch }),
       waitForCiGreen: async () => "green",
       // W1-T5809: the opened prerequisite's body — trailer-free with an Acceptance block, or admission refuses it.
       fetchPrBody: async () => "Splits the instrument half.\n\n## Acceptance\n- it reads | grep: newField in scripts/diff-coverage.mjs",
