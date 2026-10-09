@@ -119,6 +119,8 @@ function strikesExhaustedPr(): OpenPrView {
     reviewState: "failure",
     checksState: "red",
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, // exhausted
+    // W1-T7096: the progress judge ruled these rounds a loop — the count alone only makes judgment due.
+    progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true },
     unmetCriteria: [{ claim: "still unmet", proof: "unit test", met: false, reason: "not done", proof_exec: "executed_fail" } as never],
     lastActivityAt: "2026-08-12T09:00:00Z",
     headSha: "aaaa111",
@@ -130,8 +132,13 @@ function strikesExhaustedPr(): OpenPrView {
 const NOW = Date.parse("2026-08-12T12:00:00Z");
 
 test("FALSIFIER 1: a wrong-verdict-with-note fixture RE-ARMS the fix rung — unanswered it escalates, with the note quoted it re-arms to blocked-fixable", () => {
+  // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+  // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
   const baseline = deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(baseline.disposition, "blocked-ambiguous", "an exhausted PR with no operator signal must still escalate");
+  const { progressEscalation: _judged, ...unjudged } = strikesExhaustedPr();
+  assert.equal(deriveDisposition(unjudged, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable",
+    "before the judge rules, the former ceiling only makes judgment due");
 
   const note = "the assertion is checking the wrong field — compare status, not code";
   const pendingAnswer = operatorVerdictEvidence(TASK, [feedbackLine({ verdict: "wrong", note })], []);

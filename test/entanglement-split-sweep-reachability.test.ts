@@ -363,7 +363,9 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
 test("strike exhaustion precedes the split route", () => {
   const { view, cleanup } = boardView([reviewRow()]);
   try {
-    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
+    // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+    // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(exhausted.disposition, "blocked-ambiguous");
     assert.match(exhausted.reason, /strikes exhausted/);
     assert.doesNotMatch(exhausted.reason, /W1-T2436/);

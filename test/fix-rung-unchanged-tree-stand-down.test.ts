@@ -31,7 +31,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  runFixRung,
+  runFixRungJudged as runFixRung,
   worktreeSnapshotsEqual,
   unchangedTreeStandDownReason,
   captureWorktreeSnapshotViaGit,

@@ -89,6 +89,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   runTask,
   buildOpenPrViews,
   STALL_WINDOW, resolveAlreadySatisfiedWithRetry, ALREADY_SATISFIED_VERIFY_ATTEMPTS, type AlreadySatisfiedClaim, type AlreadySatisfiedResolution,
+  runFixRungJudged,
 } from "./helpers/run-task-test.js";
 import { DAEMON_DRAFT_BATCH_CAP, draftAttemptKey, resolvedInboxDraftLane } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
@@ -4272,7 +4273,7 @@ test("runFixRung: a conflicted dispatch the progress judge stops without the mer
     theirsLog: "def5678 add entry B",
   };
 
-  const outcome = await runFixRung({
+  const outcome = await runFixRungJudged({
     ...fixRungBaseOpts(),
     strikeCap: 2,
     initialReview: noReviewYet,

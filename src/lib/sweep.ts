@@ -5650,6 +5650,9 @@ export interface OpenPrView {
   repeatedFixRefusal?: string;
   /** W1-T7096: the progress judge ruled this exhausted PR a loop — it enters the strikes-exhausted route. */
   progressEscalation?: { loop: string; reason: string; judged: boolean };
+  /** W1-T7096: the progress judge ruled another round (or deferred the ruling to the fixable path). Absent,
+   *  a PR whose judgment is due takes the strikes-exhausted route — exactly the stand-in's former bound. */
+  progressContinue?: { reason: string; unavailable?: boolean };
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
@@ -8557,7 +8560,19 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
  */
 /** W1-T7096: exhausted rounds the progress judge (or the announced stand-in) ruled a loop. */
 export function isFixStrikeJudgedExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
-  return pr.progressEscalation !== undefined && isFixStrikeExhausted(pr, policy);
+  // The judge (or the announced stand-in) ruled the rounds a loop. A repeated identical refusal keeps its
+  // former stop until a judge rules otherwise — that bar is W1-T7243's budget, not this task's strike cap.
+  return isFixStrikeExhausted(pr, policy) && (pr.progressEscalation !== undefined ||
+    (pr.repeatedFixRefusal !== undefined && pr.progressContinue === undefined));
+}
+
+/** W1-T7096: every spot where the former fixed rung stopped a PR makes a progress JUDGMENT due instead —
+ *  the reached ceiling or a repeated refusal, a repeat of the identical unmet criteria, and a CodeQL
+ *  repair at the ceiling. The judge (or, unwired, the stand-in) rules each one. */
+export function fixProgressJudgmentDue(pr: OpenPrView, policy: SweepPolicy): boolean {
+  return isFixStrikeExhausted(pr, policy) ||
+    (pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)) ||
+    (repairableCodeqlBlocker(pr) !== undefined && pr.priorStrikes >= policy.strikeCap);
 }
 
 export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
@@ -8714,11 +8729,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T7096: an operator answer is new evidence for the judge, not a fixed extra allowance.
     disposition: "blocked-fixable",
     blocker: "review-failed",
-    when: (pr) => {
+    when: (pr, policy) => {
       if (!pr.pendingAnswer) return false;
       const reviewShape = pr.reviewState === "failure" && pr.unmetCriteria.length > 0;
       if (!reviewShape && !isBlockedCi(pr)) return false;
-      return true;
+      if (pr.progressEscalation === undefined) return true;
+      const clarify: ClarifyPolicy = {
+        resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
+      };
+      return pr.repeatedFixRefusal === undefined && pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
@@ -8820,7 +8839,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T7096: reaching the former cap or repeating a refusal routes to judgment, never stops a round.
     disposition: "blocked-fixable",
-    when: isFixStrikeExhausted,
+    when: (pr, policy) => isFixStrikeExhausted(pr, policy) && !isFixStrikeJudgedExhausted(pr, policy),
     blocker: "review-failed",
     reason: (pr, policy) => {
       if (pr.repeatedFixRefusal !== undefined) return `fix progress judgment due after repeated refusal: ${pr.repeatedFixRefusal}`;
@@ -8862,6 +8881,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       }
       return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
     },
+  },
+  {
+    // W1-T1269 + W1-T7096 — a repeat of the identical unmet criteria makes a progress judgment due; absent a
+    // "continue" ruling it takes the former earlier stop (escalating before the cap).
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr) && pr.progressEscalation !== undefined,
+    blocker: "escalated",
+    reason: (pr, policy) =>
+      `fix strike repeated the identical unmet criteria (strike ${pr.priorStrikes}/${policy.strikeCap}) — ` +
+      `no further strike can add information — escalating before the cap` +
+      (pr.progressEscalation?.judged ? ` — judged loop: ${pr.progressEscalation.loop}` : ""),
   },
   {
     // W1-T3172 — Rule 25's refusal is structurally fixable only through W1-T2436's prerequisite
@@ -9115,7 +9145,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // routes to the existing fix rung, inside the shared strike cap; W1-T3920 still owns a
     // positive-distance PR, which never reaches here.
     disposition: "blocked-fixable",
-    when: (pr) => repairableCodeqlBlocker(pr) !== undefined,
+    when: (pr, policy) => repairableCodeqlBlocker(pr) !== undefined &&
+      (pr.priorStrikes < policy.strikeCap || pr.progressEscalation === undefined),
     blocker: "own-red",
     reason: (pr) => {
       const alert = repairableCodeqlBlocker(pr);
@@ -9759,6 +9790,7 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
   if (blocker.kind === "ambiguous") return `${blocker.cause}: ${blocker.detail}`;
   if (blocker.headSha !== pr.headSha) return "stale: the CodeQL alert was observed at a different head";
   if (repairableCodeqlBlocker(pr) === undefined) return "foreign-branch: the head is not this PR task's rmd-owned run branch";
+  if (pr.priorStrikes >= policy.strikeCap && pr.progressEscalation !== undefined) return `exhausted: fix strikes ${pr.priorStrikes}/${policy.strikeCap}`;
   return undefined;
 }
 
@@ -13155,7 +13187,7 @@ export async function runSweep(
       log("sweep.progress_judge_stand_in", { judge: "former_bound_stand_in" });
     }
     const pr = openPrs.find((candidate) => candidate.prNumber === input.prNumber);
-    return pr !== undefined && isFixStrikeExhausted(pr, policy)
+    return pr !== undefined && fixProgressJudgmentDue(pr, policy)
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
   });
@@ -13166,13 +13198,23 @@ export async function runSweep(
       // A repeated refusal is judged later, with its parked reason; only a reached ceiling is judged here.
       // The parked waits W1-T7096 owns (a refused commit at this head, a metadata or proof repair in
       // flight) are judged later on the fixable path, which supplies their parked reason.
-      if (!isFixStrikeExhausted(pr, policy) || pr.repeatedFixRefusal !== undefined ||
-          sameHeadRedFixRefusal(ledgerLines, pr) !== undefined || metadataOnlyRed(pr) !== undefined ||
-          proofRepairRouteEvidence(pr) !== undefined) { next.push(pr); continue; }
+      // A wired judge rules a reached ceiling or a repeated refusal here; an identical unmet set and a CodeQL
+      // repair at the ceiling reach it on the fixable path, with their own evidence. The unwired stand-in rules
+      // every former stop here, so a fixture keeps the pre-judge dispositions exactly.
+      const due = judged ? isFixStrikeExhausted(pr, policy) : fixProgressJudgmentDue(pr, policy);
+      if (!due) { next.push(pr); continue; }
+      if (pr.repeatedFixRefusal === undefined && (sameHeadRedFixRefusal(ledgerLines, pr) !== undefined ||
+          metadataOnlyRed(pr) !== undefined || proofRepairRouteEvidence(pr) !== undefined)) {
+        next.push({ ...pr, progressContinue: { reason: "judged on the fixable path with its parked reason" } });
+        continue;
+      }
+      const parkedReason = pr.repeatedFixRefusal ??
+        (!isFixStrikeExhausted(pr, policy) && pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)
+          ? "fix strike repeated the identical unmet criteria" : undefined);
       const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
-        formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: pr.repeatedFixRefusal });
+        formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
       const result = await judgeFixProgress(input, progressJudge);
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha, site: "exhaustion",
@@ -13181,9 +13223,13 @@ export async function runSweep(
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
       }
-      if (result.verdict === "continue" || result.verdict === "change-approach") judgedContinue.set(pr.prNumber, result);
-      else judgedUnavailable.set(pr.prNumber, result.reason);
-      next.push(pr);
+      if (result.verdict === "continue" || result.verdict === "change-approach") {
+        judgedContinue.set(pr.prNumber, result);
+        next.push({ ...pr, progressContinue: { reason: result.reason } });
+      } else {
+        judgedUnavailable.set(pr.prNumber, result.reason);
+        next.push({ ...pr, progressContinue: { reason: result.reason, unavailable: true } });
+      }
     }
     openPrs = next;
   }
@@ -13860,6 +13906,20 @@ export async function runSweep(
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
     const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
+    // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
+    // repeated refusal, was never ruled by the progress judge — refuse it here exactly as before; a PR
+    // the judge ruled "continue" this pass (`progressContinue`) is allowed its next round.
+    const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+    if (pr.progressContinue === undefined &&
+        (freshTally.strikes >= ceiling || (freshTally.repeatedRefusal !== undefined && !planFlagRung))) {
+      inFlightFixKeys.delete(fixKey);
+      return {
+        ok: false,
+        reason: freshTally.repeatedRefusal !== undefined
+          ? repeatedFixRefusalReason(freshTally.repeatedRefusal)
+          : `fix strikes exhausted under the claim (${freshTally.strikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+      };
+    }
     const history = (lines: readonly Record<string, unknown>[]) => JSON.stringify(lines.filter(row =>
       row.task_id === pr.taskId && ["fix.dispatch", "fix.retrigger", "fix.done", "fix.commit_refused"].includes(String(row.step))));
     if (history(freshLines) !== history(ledgerLines)) {
@@ -15550,14 +15610,11 @@ export async function runSweep(
                 standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
                 break;
               }
-              let proofRepairActive =
+              // MAX_PROOF_REPAIR_REFUSALS_PER_HEAD is W1-T7243's budget, not this task's strike cap: past it the
+              // ladder's rung two (the plan-shard flag) still takes over, unchanged.
+              const proofRepairActive =
                 proofRepairRoute !== undefined && proofRepairState !== undefined &&
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
-              if (proofRepairRoute && proofRepairState && !proofRepairActive) {
-                progressParkedReason = `proof-repair refused ${proofRepairState.refusals} rounds at this head`;
-                if (!await askProgress()) break;
-                proofRepairActive = true;
-              }
               const fixEvidence: FixDispatchEvidence = proofRepairActive
                 ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
                 : isBlockedCi(pr)
@@ -15683,7 +15740,9 @@ export async function runSweep(
               }
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
               // dispatch, including one beyond its former strike ceiling, remains judge-gated.
-              if (!planShardRepairDue && !await askProgress()) break;
+              // W1-T5544's rung two (the plan-shard flag after refused proof-repair rounds) is not a round either.
+              const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
+              if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
               if (progressDecision?.verdict === "change-approach") fixEvidence.progressApproach = progressDecision.approach;
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim

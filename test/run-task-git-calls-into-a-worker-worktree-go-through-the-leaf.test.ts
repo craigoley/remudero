@@ -344,7 +344,9 @@ describe("W1-T6121: a fix-round commit through run-task's own functions runs no 
     const sha = ops.gitCommit(wt, "chore(plan): amend a proof");
     assert.equal(sha, raw(wt, "rev-parse", "HEAD").trim());
     assert.equal(raw(wt, "status", "--porcelain"), "");
-    assert.deepEqual(runTask.readFixRoundCommitsViaGit(wt, start), [
+    // W1-T7096 adds each round's diff evidence (diffStat/diffDigest) for the progress judge; this test pins
+    // the commits themselves, so it compares the fields it always pinned.
+    assert.deepEqual(runTask.readFixRoundCommitsViaGit(wt, start).map(({ subject, changedFiles }) => ({ subject, changedFiles })), [
       { subject: "chore: generator output", changedFiles: 1 }, { subject: "chore(plan): amend a proof", changedFiles: 1 }]);
     assert.deepEqual(trackedHooksThatRan(n), [], "no tracked hook ran");
   });
