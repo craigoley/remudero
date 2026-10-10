@@ -1655,7 +1655,6 @@ export function ciLearningMergedOrigins(checkoutRoot: string, git: GitExec = def
   }
 }
 
-/** {@link ciLearningMergedOrigins} as an awaited child, for the daemon's rung. */
 export async function ciLearningMergedOriginsAsync(checkoutRoot: string, gitAsync: GitExecAsync = defaultGitAsync(checkoutRoot)): Promise<string[]> {
   try {
     return [...ciLearningOriginsOf(await gitAsync(ciLearningMainOriginsArgs(ciLearningShardRelDir(checkoutRoot))))].sort();
@@ -1771,7 +1770,6 @@ export function landCiLearningShards(
 
 export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
-  /** The reservation as an awaited child; absent, `mintTaskId` runs on the thread as in the sync lander. */
   mintTaskIdAsync?: (filingBranch: string) => Promise<string>;
 }
 
