@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: follow-up from W1-T6123's widened census (PR #9792), which records these sites as WORKTREE with no owner task; verified read-only on origin/main and the #9792 head before filing"
   plan_refs: [W1-T6106, W1-T6123, W1-T6091, W1-T2627, W1-T2754]
   files: [src/lib/worker-provider.ts, src/lib/report-commands.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/worker-provider-and-doctor-git-calls-into-a-worktree-go-through-the-leaf.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

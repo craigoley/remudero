@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: targeting the daemon baseline from W1-T6782's production rows before any replay"
   plan_refs: [W1-T6782, W1-T5355, W1-T5480, W1-T3335, W1-T147]
   files: [src/lib/daemon-memory-telemetry.ts, src/lib/worker-heaps.ts, src/lib/daemon.ts, src/run-task.ts, test/the-daemon-heartbeat-names-its-worker-thread-heaps.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
