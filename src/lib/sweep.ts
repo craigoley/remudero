@@ -2758,11 +2758,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           headSha: pr.headSha,
           cause: "ci",
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
-          detail:
-            `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
-            `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
-            `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
-            `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+          detail: cancelledCheckEscalationDetail(kind, check.name, pr.headSha, reason),
           options: [
             {
               label: "investigate",
@@ -6553,6 +6549,30 @@ const CANCELLED_CHECK_ESCALATION_SUMMARY: Record<CancelledCheckEscalationKind, s
   "cancelled-twice": "cancelled twice on the same head",
   "requeue-deferral-backstop": `requeue refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times while its run was in flight`,
 };
+
+/** W1-T5978 — the issue body's detail, keyed by kind so a backstop never claims a second cancellation. */
+const CANCELLED_CHECK_ESCALATION_DETAIL: Record<
+  CancelledCheckEscalationKind,
+  (checkName: string, headSha: string, reason: string) => string
+> = {
+  "cancelled-twice": (checkName, headSha, reason) =>
+    `The gate-reconciliation lane (W1-T1223) re-queued required check "${checkName}"'s job once ` +
+    `on head ${headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
+    `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
+    `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+  "requeue-deferral-backstop": (checkName, headSha, reason) =>
+    `The gate-reconciliation lane (W1-T1223) tried to re-queue required check "${checkName}"'s job on ` +
+    `head ${headSha}, but GitHub refused the rerun ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times because the ` +
+    `check's run was still in flight — ${reason}. The check was not cancelled a second time; the requeue ` +
+    `never took effect. Look at why that run stays in flight (a stuck or long-running workflow run) ` +
+    `rather than at a repeat cancellation.`,
+};
+const cancelledCheckEscalationDetail = (
+  kind: CancelledCheckEscalationKind,
+  checkName: string,
+  headSha: string,
+  reason: string,
+): string => CANCELLED_CHECK_ESCALATION_DETAIL[kind](checkName, headSha, reason);
 
 export type JobRerunRefusal = "already_running" | "not_current_attempt";
 export type JobRequeueOutcome =
