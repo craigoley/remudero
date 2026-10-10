@@ -178,4 +178,25 @@ test("a garden pass reuses each head's evidence and an unreadable head stops mea
     readHeadSource: () => { throw new Error("head source unavailable"); },
   });
   assert.throws(() => unavailable.inventory(), /head source unavailable/);
+  const withoutReaders = fixLaneGardenSpec({ repoRoot: ".", stateDir: ".", clock: fixedClock(NOW), log: () => {},
+    openWorkspace: () => { throw new Error("unexpected workspace"); } }, {
+    owner: "acme", repo: "remudero", mintTaskId: () => "W1-T9001", ledgerRecords: rows,
+    planState: () => ({ tasks: [] }),
+  });
+  assert.throws(() => withoutReaders.inventory(), /requires asynchronous inventory or injected evidence readers/);
+});
+
+test("async garden inventory reads injected exact-head evidence before pricing", async () => {
+  let logReads = 0, sourceReads = 0;
+  const spec = fixLaneGardenSpec({ repoRoot: ".", stateDir: ".", clock: fixedClock(NOW), log: () => {},
+    openWorkspace: () => { throw new Error("unexpected workspace"); } }, {
+    owner: "acme", repo: "remudero", mintTaskId: () => "W1-T9001", ledgerRecords: rows,
+    planState: () => ({ tasks: [] }), prOutcomes: () => new Map(), interventions: () => ({ ok: true, interventions: [] }),
+    readCoverageLog: head => { assert.equal(head, "old"); logReads++; return coverage; },
+    readHeadSource: (head, file) => { assert.equal(head, "old"); assert.equal(file, "src/lib/reader.ts"); sourceReads++; return source; },
+  });
+  const inventory = await spec.inventoryAsync!();
+  assert.deepEqual(inventory.priced.map(item => item.key), ["coverage-unseamed-catch", "fix-swapped-red-for-census"]);
+  assert.equal(logReads, 1);
+  assert.equal(sourceReads, 1);
 });
