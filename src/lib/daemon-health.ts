@@ -125,7 +125,6 @@ function nativeStatfs(path: string): StatfsLike {
   return statfsSync(path, { bigint: true });
 }
 
-/** Convert only validated integers; privileged free blocks never stand in for user-available blocks. */
 function diskBlockBytes(blocks: number | bigint | undefined, size: number | bigint): number | undefined {
   if (blocks === undefined || (typeof blocks === "number" && !Number.isSafeInteger(blocks)) ||
       (typeof size === "number" && !Number.isSafeInteger(size))) return undefined;
