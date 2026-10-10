@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 23:06Z (#9178 shard 1, coverage JSON truncated at 65536, 0 test failures)"
   plan_refs: [W1-T4398, W1-T4112, W1-T2276]
   files: [scripts/test-with-retry.mjs, test/a-coverage-shard-that-cannot-report-names-the-truncated-raw-file.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

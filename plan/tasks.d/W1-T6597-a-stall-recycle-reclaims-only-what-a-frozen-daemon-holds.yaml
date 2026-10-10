@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: the 18:27Z core daemon wedge that blocked every review for about 3 h"
   plan_refs: [W1-T5688, W1-T5687, W1-T5651, W1-T3611, W1-T2556, W1-T3628]
   files: [deploy/recycle-container.sh, deploy/install-host-units.sh, test/fixtures/azure-host-units/rmd-relaunch.sh, test/a-stall-recycle-reclaims-only-what-a-frozen-daemon-holds.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

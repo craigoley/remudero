@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, the batch-9 timing-flake family"
   plan_refs: [W1-T2811, W1-T5521, W1-T2913, W1-T4113, W1-T3408, W1-T5632]
   files: [test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/detached-sweep-drain-is-bounded.test.ts, test/worker-config-tends-itself.test.ts, test/the-gates-tend-themselves.test.ts, test/read-model-worker.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
