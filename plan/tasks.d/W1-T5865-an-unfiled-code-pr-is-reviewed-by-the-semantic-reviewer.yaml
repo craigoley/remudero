@@ -11,8 +11,9 @@
   origin: "operator session 2026-10-05: W1-T5839 (#9320) builder's follow-up"
   plan_refs: [W1-T3387, W1-T5839, W1-T3535]
   files: [src/run-task.ts, test/an-unfiled-code-pr-is-reviewed-by-the-semantic-reviewer.test.ts]
-  status: queued
-  priority: 2
+  status: blocked
+  retirement: closed
+  # backlog gardener: retirement evidence=0c60d15b6c502d9a
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main 10f3aca0. In `reviewCommand` (src/run-task.ts), semantic mode
