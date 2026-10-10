@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
-import { canonicalBuildInfo, hasUsableTypecheckBuildInfo, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync, type TestSlotOptions } from "./test-slot.js";
+import {
+  canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
+} from "./typecheck-buildinfo.js";
+import { acquireTestSlotAsync, readMemoryHeadroom, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -232,7 +234,8 @@ function harnessTypecheck(
           resolveRun({ status, output: output + extra, timedOut });
         };
         try {
-          const child = spawnChild(process.execPath, mergedTypecheckArgv(tsc, self.buildInfo, config), {
+          const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+          const child = spawnChild(process.execPath, [...mergedTypecheckArgv(tsc, self.buildInfo, config), ...tight], {
             cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
           });
           timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
