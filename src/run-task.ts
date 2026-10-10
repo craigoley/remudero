@@ -2119,7 +2119,8 @@ export function buildBaseReproductionProbe(
     clock?: Clock;
   } = {},
 ): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
-  return (_pr, files, mainSha) => {
+  return (_pr, candidates, mainSha) => {
+    const files = [...new Set(candidates.filter((file) => file.endsWith(".test.ts")))];
     const pending = baseReproductionQueue.then(async () => {
       if (files.length > BASE_REPRODUCTION_MAX_FILES) return Object.assign([], { reason: "too many test files" });
       const results = new Map<string, BaseProbeFile>();
