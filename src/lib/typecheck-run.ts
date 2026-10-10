@@ -21,14 +21,16 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { acquireTestSlot, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, readMemoryHeadroom, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
   installedTypescriptVersion,
+  lowMemoryTypecheckArgs,
   prepareWorktreeTypecheck,
   seedBuildInfo,
   TYPECHECK_COLD_PEAK_BYTES,
+  TYPECHECK_WARM_PEAK_BYTES,
   typecheckArgs,
   worktreeBuildInfoPath,
   type SeedOutcome,
@@ -101,7 +103,11 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
         : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...opts.testSlot });
       log(JSON.stringify({ step: "typecheck.cold", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     }
-    const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...extraArgs], root);
+    // Read after any wait for a slot: a tight container runs tsc with fewer checkers, same diagnostics.
+    const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
+    const tight = lowMemoryTypecheckArgs(headroom, cold ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+    if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
+    const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root);
     if (res.error) {
       log(`typecheck: could not run tsc: ${res.error.message}`);
       return 127;

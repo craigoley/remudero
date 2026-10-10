@@ -65,7 +65,9 @@ test("npm run typecheck's wrapper passes --incremental and the worktree's own bu
   t.after(() => rmSync(lane.dir, { recursive: true, force: true }));
   symlinkSync(join(REPO_ROOT, "node_modules"), join(lane.dir, "node_modules"));
   const seen: string[][] = [];
-  const code = runTypecheck(lane.dir, ["--pretty", "false"], { spawn: (_file, args) => { seen.push([...args]); return { status: 0 }; }, log: () => {} });
+  const code = runTypecheck(lane.dir, ["--pretty", "false"], {
+    spawn: (_file, args) => { seen.push([...args]); return { status: 0 }; }, testSlot: { memoryHeadroom: () => undefined }, log: () => {},
+  });
   assert.equal(code, 0);
   const laneGitDir = realpathSync(spawnSync("git", ["-C", lane.dir, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim());
   assert.notEqual(laneGitDir, realpathSync(join(tree.dir, ".git")), "per worktree, not the canonical checkout's");

@@ -14,7 +14,7 @@ import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
-import { acquireTestSlot, lowPriorityCommand, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -1156,7 +1156,7 @@ export function testWithCoverageLeaf(
     }
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
     // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
-    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", testSlot);
+    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", { perFileBytes: TEST_FILE_PEAK_BYTES, ...testSlot });
     const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
     // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
     return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
