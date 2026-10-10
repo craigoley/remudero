@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -368,6 +368,8 @@ function mutate(find: string, replace: string): string {
   const p = join(dir, "host-update.sh");
   writeFileSync(p, src.replace(find, replace), { mode: 0o755 });
   chmodSync(p, 0o755);
+  // The reclaim sources its sibling host-recycle-lock.sh, so a relocated copy needs it beside it.
+  copyFileSync(join(REPO_ROOT, "deploy", "host-recycle-lock.sh"), join(dir, "host-recycle-lock.sh"));
   return p;
 }
 
@@ -412,6 +414,7 @@ test("MUTANT: collapsing the per-tree report into one combined total is caught b
   const mutant = join(dir, "host-update.sh");
   writeFileSync(mutant, withTotal, { mode: 0o755 });
   chmodSync(mutant, 0o755);
+  copyFileSync(join(REPO_ROOT, "deploy", "host-recycle-lock.sh"), join(dir, "host-recycle-lock.sh"));
 
   const codex = codexFixture();
   const claude = claudeFixture();

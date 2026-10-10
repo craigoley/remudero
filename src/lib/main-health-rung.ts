@@ -17,6 +17,7 @@ import {
   enrichMainHealthObservation,
   failedMainGuardRuns,
   MAIN_HEALTH_FALLBACK_WINDOW_COMMITS,
+  mainGuardFailureCandidates,
   mainHealthEscalationDecision,
   mainHealthFallbackCandidates,
   mainHealthFallbackRuns,
@@ -835,7 +836,9 @@ export function buildMainHealthRung(
       // W1-T6023: and only a run whose head is one of main's newest first-parent commits may decide.
       // A window that was not read, or a history holding only older runs, leaves main undetermined.
       let recentShas = runHistoryCache?.recentShas;
-      if (runHistory && mainHealthHeadInconclusive(observation) && mainHealthFallbackCandidates(runHistory).length > 0 && !recentShas) {
+      const guardNeedsWindow = runHistory && mainGuardFailureCandidates(runHistory).length > 0;
+      if (runHistory && !recentShas && (guardNeedsWindow ||
+        (mainHealthHeadInconclusive(observation) && mainHealthFallbackCandidates(runHistory).length > 0))) {
         try {
           recentShas = await readMainFirstParentWindow(owner, repo, sha, deps.fetch);
           if (runHistoryCache) runHistoryCache.recentShas = recentShas;
@@ -893,14 +896,23 @@ export function buildMainHealthRung(
         }
       }
       // W1-T5490 (a): a failed guard workflow reads main red even beside green required checks.
-      const guardFailures = runHistory ? failedMainGuardRuns(runHistory) : [];
+      const { runs: guardFailures, skipped: skippedGuards } = runHistory && recentShas
+        ? failedMainGuardRuns(runHistory, recentShas)
+        : { runs: [], skipped: [] };
+      if (skippedGuards.length > 0) {
+        observation = {
+          ...observation,
+          reason: `${observation.reason}; main guard verdict for ${skippedGuards[0]!.headSha} skipped outside ` +
+            `main's last ${MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits`,
+        };
+      }
       if (guardFailures.length > 0) {
         const guardNames = guardFailures.map((run) => run.workflowName!);
         if (observation.state !== "red") decidedBySha = guardFailures[0]!.headSha;
         observation = {
           ...observation,
           state: "red",
-          reason: `main guard workflow(s) failed on main: ${guardNames.join(", ")}${observation.state === "red" ? `; ${observation.reason}` : ""}`,
+          reason: `main guard workflow(s) failed on main: ${guardNames.join(", ")}${observation.state === "red" || skippedGuards.length > 0 ? `; ${observation.reason}` : ""}`,
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
       }

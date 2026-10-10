@@ -27,6 +27,7 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   "implement.done": "produced",
   "implement.resumed": "produced",
   "implement.continued": "produced",
+  "implement.preopen_continued": "produced",
   "recon.done": "produced",
   "diagnose.worker_done": "produced",
   "fix.done": "produced",

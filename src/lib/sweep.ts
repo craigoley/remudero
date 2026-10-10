@@ -5783,6 +5783,8 @@ export interface OpenPrView {
   progressEscalation?: { loop: string; reason: string; judged: boolean };
   /** W1-T7096: the progress judge ruled another round, or deferred the ruling to the fixable path. */
   progressContinue?: { reason: string; unavailable?: boolean };
+  /** The newest `fix.progress_judged` row for this PR; set by runSweep, absent when no judge has ruled. */
+  lastProgressJudgement?: ProgressJudgementLabel;
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
@@ -5891,7 +5893,7 @@ export interface OpenPrView {
    *  next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
    *  at cap, so the answer re-arms the rung rather than immediately re-exhausting it. Wired
    *  end-to-end and tested, but nothing populates it today. */
-  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true };
   /** W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
    *  input. It separates a FIRST-SEEN zero-runs required check, which still routes to post-review,
    *  from a SECOND absence for the unchanged input, which escalates. A transient `gh` error
@@ -6736,17 +6738,30 @@ function isMainGuardRun(run: MainHealthRunHistoryEntry): boolean {
   return run.workflowName !== undefined && MAIN_GUARD_WORKFLOWS.has(run.workflowName);
 }
 
-/** The latest real verdict of each {@link MAIN_GUARD_WORKFLOWS} member, newest-first history in,
- *  only the failed ones out. A newer success supersedes an older failure; a cancelled run never does. */
-export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+export function mainGuardFailureCandidates(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => isMainGuardRun(run) && mainRunIsVerdict(run) && mainHealthFailureConclusion(run.conclusion));
+}
+
+/** The newest in-window guard verdict decides; older verdicts are returned separately as skipped.
+ *  A newer in-window success supersedes an older failure; a cancelled run never does. W1-T6077. */
+export function failedMainGuardRuns(
+  history: readonly MainHealthRunHistoryEntry[],
+  recentShas: ReadonlySet<string>,
+): { runs: MainHealthRunHistoryEntry[]; skipped: MainHealthRunHistoryEntry[] } {
   const decided = new Set<string>();
   const failed: MainHealthRunHistoryEntry[] = [];
+  const skipped: MainHealthRunHistoryEntry[] = [];
   for (const run of history) {
-    if (!isMainGuardRun(run) || decided.has(run.workflowName!) || !mainRunIsVerdict(run)) continue;
+    if (!isMainGuardRun(run) || !mainRunIsVerdict(run)) continue;
+    if (!recentShas.has(run.headSha)) {
+      skipped.push(run);
+      continue;
+    }
+    if (decided.has(run.workflowName!)) continue;
     decided.add(run.workflowName!);
     if (mainHealthFailureConclusion(run.conclusion)) failed.push(run);
   }
-  return failed;
+  return { runs: failed, skipped };
 }
 
 /** W1-T6023 — PRIMARY CONTROL: how many of main's newest first-parent commits (the head included)
@@ -8890,7 +8905,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-fixable",
     blocker: "review-failed",
     when: (pr, policy) => {
-      if (!pr.pendingAnswer) return false;
+      if (!pr.pendingAnswer || pr.pendingAnswer.spent) return false;
       const reviewShape = pr.reviewState === "failure" && pr.unmetCriteria.length > 0;
       if (!reviewShape && !isBlockedCi(pr)) return false;
       if (pr.progressEscalation === undefined) return true;
@@ -9037,10 +9052,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           `${base} — every red check is a RECORDABLE ratchet whose remedy is a recorded number (${how}) — ` +
           (taken
             ? "repairing deterministically instead of spending a fix round"
-            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`)
+            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`)
         );
       }
-      return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
+      return `${base} — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`; // W1-T2504: "red" is byte-identical; else names the specific check.
     },
   },
   {
@@ -9086,10 +9101,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy) => {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       if (pr.unmetCriteria.length > 0) {
-        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${ceiling}`;
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — ${fixRoundLabel(pr, ceiling)}`;
       }
       const n = pr.actionableGateFailures!.length;
-      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${ceiling}`;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — ${fixRoundLabel(pr, ceiling)}`;
     },
   },
   {
@@ -10372,6 +10387,31 @@ export function fixCeilingInForce(
   return strikeCap + strikeCapForAnswer(strikeCap, clarify);
 }
 
+/** What a disposition reason shows for a judged fix lane: the round the judge ruled on and its verdict. */
+export interface ProgressJudgementLabel { round: number; verdict: string; reason: string }
+
+/** The newest `fix.progress_judged` row for `prNumber`, or undefined when the judge never ruled on it. */
+export function lastProgressJudgementFor(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+): ProgressJudgementLabel | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = lines[i]!;
+    if (row.step !== "fix.progress_judged" || row.pr_number !== prNumber) continue;
+    if (typeof row.verdict !== "string" || typeof row.round_count !== "number") continue;
+    return { round: row.round_count, verdict: row.verdict, reason: typeof row.reason === "string" ? row.reason : "" };
+  }
+  return undefined;
+}
+
+/** The fix-lane progress label: the judge's round and verdict once it has ruled, else the former strike ratio. */
+export function fixRoundLabel(pr: Pick<OpenPrView, "priorStrikes" | "lastProgressJudgement">, ceiling: number): string {
+  const judged = pr.lastProgressJudgement;
+  if (judged === undefined) return `strike ${pr.priorStrikes + 1}/${ceiling}`;
+  const why = judged.reason.length > 80 ? `${judged.reason.slice(0, 77)}...` : judged.reason;
+  return `fix round ${judged.round + 1} — judge: ${judged.verdict}${why ? ` (${why})` : ""}`;
+}
+
 /** W1-T2452 — THE STRIKE BUDGET TO DISPATCH: the REMAINDER against {@link fixCeilingInForce}, NEVER
  *  a fresh full cap, because `runFixRung` counts each new call from 0 and a fresh cap let the
  *  cumulative ledger count exceed the ceiling. Returns `null` when the remainder is non-positive,
@@ -10538,27 +10578,31 @@ export function operatorVerdictEvidence(
   taskId: string,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   questionLines: ReadonlyArray<Record<string, unknown>>,
-): { constraint: string; resetStrikeCounter?: boolean } | undefined {
+): { constraint: string; resetStrikeCounter?: boolean; spent?: true } | undefined {
   const parts: string[] = [];
+  const evidenceTimes: string[] = [];
 
   const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
   const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
   const note = typeof feedback?.note === "string" ? feedback.note : undefined;
   if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
     parts.push(`Operator marked this run "${verdict}": ${note}`);
+    evidenceTimes.push(typeof feedback?.ts === "string" ? feedback.ts : "");
   }
 
-  const answers = [
-    ...new Set(
-      questionLines
-        .filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "")
-        .map((l) => (l.answer as string).trim()),
-    ),
-  ];
+  const answerLines = questionLines.filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "");
+  const answers = [...new Set(answerLines.map((l) => (l.answer as string).trim()))];
   if (answers.length === 1) parts.push(answers[0]!);
   else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
+  for (const l of answerLines) evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
 
-  return parts.length > 0 ? { constraint: parts.join("\n\n") } : undefined;
+  if (parts.length === 0) return undefined;
+  // A fix round dispatched after the newest answer already carried it; the answer still steers later rounds as
+  // their constraint, but it must not re-arm the rung on every pass forever.
+  const lastDispatch = lastMatching(ledgerLines, (l) => l.step === "fix.dispatch" && l.task_id === taskId);
+  const newestEvidence = evidenceTimes.reduce((a, b) => (b > a ? b : a), "");
+  const spent = typeof lastDispatch?.ts === "string" && newestEvidence !== "" && lastDispatch.ts > newestEvidence;
+  return spent ? { constraint: parts.join("\n\n"), spent: true } : { constraint: parts.join("\n\n") };
 }
 
 /** The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
@@ -13431,6 +13475,10 @@ export async function runSweep(
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
     : pr);
+  openPrs = openPrs.map((pr) => {
+    const judged = lastProgressJudgementFor(ledgerLines, pr.prNumber);
+    return judged === undefined ? pr : { ...pr, lastProgressJudgement: judged };
+  });
   // W1-T7096: judge every PR whose rounds reached the former ceiling BEFORE dispositions derive, so an
   // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
   const judgedContinue = new Map<number, FixProgressVerdict>();
@@ -13619,7 +13667,7 @@ export async function runSweep(
   try {
     mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
   } catch (error) {
-    if (!openPrs.some(pr => isFixStrikeExhausted(pr, policy) && !pr.pendingAnswer)) throw error;
+    if (!openPrs.some(pr => isFixStrikeExhausted(pr, policy) && !(pr.pendingAnswer && !pr.pendingAnswer.spent))) throw error;
     log("sweep.strike_ladder.main_read_failed", { reason: String(error) });
   }
   const mainTipSha = mainRepair?.sha ?? (deps.readMainTip ? await deps.readMainTip() : undefined);
@@ -14665,7 +14713,7 @@ export async function runSweep(
       reason = `superseded — this PR's diff against main is empty, so nothing is left to merge (was ${derived.blocker}: ${reason})`;
       disposition = "stale";
     }
-    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
@@ -14675,7 +14723,7 @@ export async function runSweep(
       noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,
       strikeOwned: strikeLadderDue,
     };
-    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
       !deps.dryRun && pr.isPlanFiling !== true &&
       decideSloRung({
         blocker: sloContext.blocker, owner: sloContext.owner, blockerAgeMs: sloContext.ageMs, nowMs: now,
@@ -17145,6 +17193,87 @@ export async function runSweep(
     }
   }
   return summary;
+}
+
+let lightPassReadyRefreshInFlight = false;
+
+export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
+  openPrs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
+    "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
+    "appendLine" | "dryRun">,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): Promise<number | undefined> {
+  const updateBranch = deps.updateBranch;
+  if (deps.dryRun || !updateBranch || deps.baseChangedFilesByPr === undefined || lightPassReadyRefreshInFlight) return undefined;
+  lightPassReadyRefreshInFlight = true;
+  try {
+    const appendLine = deps.appendLine ?? appendLedger;
+    const now = clockFromMillisFn(deps.now).now();
+    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const spentHeads = new Set<string>();
+    for (const l of ledgerLines) {
+      if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
+        spentHeads.add(`${String(l.pr_number)}@${String(l.head_sha)}`);
+      }
+    }
+    const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    const select = (ready: ReadyRefreshFacts): ArmedStalledPr[] =>
+      openPrsBehindMain(openPrs, behindMainByPr, policy, new Set(), deps.baseChangedFilesByPr, ready)
+        .filter((c) => c.updateReason === "ready-overlap");
+    const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
+    let candidates = select(facts);
+    if (candidates.length === 0) return undefined;
+    if (deps.readActionsStatusSummary !== undefined) {
+      const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
+        .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
+      if (actionsIncidentHoldDecision(incident, undefined, now) === "hold") return undefined;
+    }
+    const mergeQueue = deps.mergeQueue;
+    if (mergeQueue) {
+      candidates = candidates.filter((c) => {
+        let queued: boolean;
+        try {
+          queued = mergeQueue(c.prUrl) === true;
+        } catch {
+          queued = false; // an unread queue is "no queue", as in the full sweep
+        }
+        if (queued && !ledgerLines.some((l) => l.step === "sweep.update_branch.skipped_queue" &&
+          l.pr_number === c.prNumber && l.head_sha === c.headSha)) {
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: c.taskId ?? "SWEEP",
+            step: "sweep.update_branch.skipped_queue", pr_number: c.prNumber, head_sha: c.headSha,
+            ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }), source: "light_pass" });
+        }
+        return !queued;
+      });
+    }
+    const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
+    const inFlight = deps.inFlightTaskIds ?? new Set<string>();
+    const eligible = candidates.filter((c) => {
+      const view = byNumber.get(c.prNumber)!;
+      const runTaskId = taskIdFromRunBranch(view.headRefName);
+      return view.checksState !== "pending" && (runTaskId === undefined || !inFlight.has(runTaskId));
+    });
+    const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
+    const target = eligible.find((c) => c.prNumber === winner?.prNumber);
+    if (!target) return undefined;
+    const row = {
+      run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
+      head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
+      update_reason: target.updateReason,
+      ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+      source: "light_pass",
+    };
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
+    try {
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${await updateBranch(target)}` });
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
+    }
+    return target.prNumber;
+  } finally {
+    lightPassReadyRefreshInFlight = false;
+  }
 }
 
 /**

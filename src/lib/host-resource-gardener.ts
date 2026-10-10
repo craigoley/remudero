@@ -634,9 +634,11 @@ export const MEMORY_CEILING_PCT = 95;
  * The tiers a SUSTAINED page-cache churn earns while pinned. Churn is the file pages a container read
  * back in five minutes as a fraction of its whole page cache: at 0.1 a tenth of the cache is evicted
  * and re-read every five minutes, at 0.5 half of it, at 1 all of it. A beat where the container is not
- * pinned (the tuner still had room) or not throttled counts as 0, so the median only rises while the
- * squeeze is one the tuner cannot answer. Recorded first, then handed to the SRE lane; it blocks
- * nothing, and the episode ends on its own once the median falls.
+ * pinned (the tuner still had room) counts as 0, so the median only rises while the squeeze is one the
+ * tuner cannot answer. Throttling is required of the WINDOW, never of each beat: a refault lands a
+ * beat or more after the throttle that evicted the page, so on 2026-10-10 core's heaviest refault
+ * beats (up to 1.5 GB in 5 min) carried 0 high events, and a per-beat gate zeroed them. Recorded
+ * first, then handed to the SRE lane; it blocks nothing, and the episode ends once the median falls.
  */
 export const MEMORY_TIERS: ReadonlyArray<{ tier: Tier; windowHours: number; churn: number }> = [
   { tier: "projected", windowHours: 1, churn: 0.5 },
@@ -668,11 +670,10 @@ export function memoryPinned(r: MemoryReading): boolean {
 }
 
 /** The churn of one beat, or undefined when the beat could not measure it (never a guessed 0). */
-function memoryChurn(r: MemoryReading | undefined): { churn: number; refaultMibPer5Min: number } | undefined {
+function memoryChurn(r: MemoryReading | undefined): { churn: number; refaultMibPer5Min: number; highEvents: number } | undefined {
   if (!r || r.refaultFilePages === undefined || r.highEvents === undefined || !r.intervalS || r.highMib === undefined || r.maxMib === undefined || !r.fileMib) return undefined;
   const refaultMibPer5Min = (r.refaultFilePages * PAGE_KIB * 300) / 1024 / r.intervalS;
-  const squeezed = memoryPinned(r) && r.highEvents > 0;
-  return { churn: squeezed ? refaultMibPer5Min / r.fileMib : 0, refaultMibPer5Min };
+  return { churn: memoryPinned(r) ? refaultMibPer5Min / r.fileMib : 0, refaultMibPer5Min, highEvents: r.highEvents };
 }
 
 /** Every daemon container of one host held at its memory.high ceiling while refaulting, sustained across a tier's window. */
@@ -695,6 +696,8 @@ export function evaluateMemory(host: string, allSamples: readonly HostSample[], 
       });
       if (inWindow.length < MIN_POINTS) continue;
       if (inWindow[inWindow.length - 1]!.tsMs - inWindow[0]!.tsMs < IO_MIN_COVERAGE * rule.windowHours * HOUR_MS) continue;
+      // Never throttled at memory.high across the whole window: its refaults are not this squeeze.
+      if (!inWindow.some((p) => p.highEvents > 0)) continue;
       const churn = median(inWindow.map((p) => p.churn));
       if (churn < rule.churn) continue;
       if (best && TIER_RANK[best.tier] >= TIER_RANK[rule.tier]) continue;

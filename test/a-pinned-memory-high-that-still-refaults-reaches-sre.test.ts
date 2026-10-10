@@ -146,3 +146,12 @@ test("a stale heartbeat produces no memory finding", () => {
   assert.deepEqual(evaluateMemory("azure", samples, START + 61 * MIN).map((f) => [f.container, f.tier]), [["remudero-daemon", "projected"]]);
   assert.deepEqual(evaluateMemory("azure", samples, START + 6 * 60 * MIN), [], "a squeeze read hours ago describes the past");
 });
+
+test("refaults that land in a beat after the throttle still count: throttling is asked of the window, not of each beat", () => {
+  // Shaped like core on 2026-10-10: pinned, refaulting every beat, but the high events that evicted the
+  // pages show up only in every third beat — the refault arrives after the throttle that caused it.
+  const lagged = drive((m) => ({ refaultMib: 800, highEvents: m % 15 === 0 ? 3000 : 0 }), 90);
+  assert.equal(lagged.handoffs.length, 1, "80% churn in every beat for an hour is handed to SRE");
+  assert.match(lagged.handoffs[0]!.raw, /refaulted a median 800 MiB per 5 min/);
+  assert.equal(drive(() => ({ refaultMib: 800, highEvents: 0 }), 90).steps.some((s) => s.step === "host_resource.memory_pinned"), false, "a window with no throttling at all is still not this squeeze");
+});
