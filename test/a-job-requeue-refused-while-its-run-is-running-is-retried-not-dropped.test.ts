@@ -357,7 +357,7 @@ test("a FLAKE round whose requeue was refused while running records requeue_defe
   await runFixRung(f.run);
   assert.deepEqual(calls, ["123"]);
   assert.equal(f.rows.filter((r) => r.step === "fix.done").at(-1)?.flake_claim, "refuted");
-  assert.equal(fixRungStalledWithoutNewHead(f.rows, TASK), false, "an accepted requeue keeps today's accounting");
+  assert.equal(fixRungStalledWithoutNewHead(f.rows, TASK), true, "the rerun reproduced the red and releases the head");
 });
 
 test("a FLAKE round with an accepted requeue keeps confirmed/refuted accounting", async () => {
@@ -367,7 +367,7 @@ test("a FLAKE round with an accepted requeue keeps confirmed/refuted accounting"
     assert.equal(result.strikes, green ? 0 : 1);
     assert.equal(f.rows.find((r) => r.step === "fix.done")?.flake_claim, green ? "confirmed" : "refuted");
     assert.equal(f.rows.some((r) => r.step === CHECK_REQUEUE_DEFERRED_STEP), false);
-    assert.equal(fixRungStalledWithoutNewHead(f.rows, TASK), false);
+    assert.equal(fixRungStalledWithoutNewHead(f.rows, TASK), !green);
   }
   const thrown = flakeRound(() => { throw new Error("queue offline"); });
   await runFixRung(thrown.run);
@@ -465,13 +465,14 @@ test("a FLAKE outcome whose requeue never landed does not hold the head under fi
   assert.equal(next.row.acted, false);
   assert.match(String(next.row.stand_down_reason), /deferred requeue/);
 
-  // Accepted requeues keep the dedup: confirmed or refuted, the head stays held.
-  for (const claim of ["refuted", "confirmed"]) {
-    const held = await pass(flakeView(), ledger(), () => true, seeded(flakeHistory(claim)));
-    assert.match(String(held.row.stand_down_reason), DEDUPED, claim);
-    assert.equal(held.requeued.length, 0);
-    assert.equal(held.dispatched, 0);
-  }
+  const held = await pass(flakeView(), ledger(), () => true, seeded(flakeHistory("confirmed")));
+  assert.match(String(held.row.stand_down_reason), DEDUPED);
+  assert.equal(held.requeued.length, 0);
+  assert.equal(held.dispatched, 0);
+  const released = await pass(flakeView(), ledger(), () => true, seeded(flakeHistory("refuted")));
+  assert.doesNotMatch(String(released.row.stand_down_reason), DEDUPED);
+  assert.equal(released.requeued.length, 0);
+  assert.equal(released.dispatched, 1);
 });
 
 test("a FLAKE check's deferrals at the bound escalate once, and a new head starts from zero", async () => {
