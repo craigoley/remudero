@@ -228,6 +228,46 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     assert.equal(f.dispatched.length, 1);
   });
 
+  test("a metadata escalation is not asked or delivered twice for the same parked input", async () => {
+    const rows: Record<string, unknown>[] = [{ task_id: TASK, step: "sweep.disposed", pr_number: 7096, head_sha: "head-3",
+      metadata_red_checks: ["commitlint"], metadata_repair_outcome: "repaired", disposition: "blocked-fixable", acted: false }];
+    let judged = 0;
+    const f = sweepFixture(rows, async input => {
+      judged++;
+      assert.match(input.parkedReason!, /edited-event verdict/);
+      return { verdict: "escalate", loop: "metadata repair did not clear the red", reason: "await new evidence" };
+    });
+    const metadataRed = pr({ priorStrikes: 0, ciFailures: [{ name: "commitlint", logTail: "header invalid" }] });
+
+    await runSweep([metadataRed], f.deps);
+    assert.equal(judged, 1);
+    assert.equal(f.escalated.length, 1);
+    assert.equal(typeof rows.findLast(row => row.step === "sweep.disposed")?.progress_escalated_key, "string");
+
+    await runSweep([metadataRed], f.deps);
+    assert.equal(judged, 1, "the identical parked input reuses its delivered escalation instead of asking again");
+    assert.equal(f.escalated.length, 1, "an unchanged escalation is delivered only once");
+    assert.equal(f.dispatched.length, 0);
+  });
+
+  test("an unavailable parked-path judgment stands down without dispatching or escalating", async () => {
+    const rows: Record<string, unknown>[] = [{ task_id: TASK, step: "sweep.disposed", pr_number: 7096, head_sha: "head-3",
+      metadata_red_checks: ["commitlint"], metadata_repair_outcome: "repaired", disposition: "blocked-fixable", acted: false }];
+    let judged = 0;
+    const f = sweepFixture(rows, async input => {
+      judged++;
+      assert.match(input.parkedReason!, /edited-event verdict/);
+      return undefined;
+    });
+
+    await runSweep([pr({ priorStrikes: 0, ciFailures: [{ name: "commitlint", logTail: "header invalid" }] })], f.deps);
+
+    assert.equal(judged, 1);
+    assert.equal(rows.findLast(row => row.step === "fix.progress_judged")?.verdict, "unavailable");
+    assert.equal(f.dispatched.length, 0);
+    assert.equal(f.escalated.length, 0);
+  });
+
   test("incomplete refused history waits once then returns to the judge", async () => {
     const rows: Record<string, unknown>[] = [
       { task_id: TASK, step: "sweep.disposed", pr_number: 7096, head_sha: "head-3",
