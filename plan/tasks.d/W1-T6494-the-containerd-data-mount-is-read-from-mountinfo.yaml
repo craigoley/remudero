@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: PR #10123 build (scratch runtime roots)"
   plan_refs: [W1-T2856]
   files: [deploy/install-container-runtime-mount-order.sh, test/container-runtime-mount-order-install.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator ruling 2026-10-09: 'We should never be left with stuck prs. lean into automated flow and self improvement'"
   plan_refs: [W1-T7421, W1-T3388, W1-T3510, W1-T3707]
   files: [src/lib/head-rehome.ts, src/lib/sweep.ts, test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

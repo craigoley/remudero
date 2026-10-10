@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: preflight-author on #9346, #9355 and an inbox fix each selected the full suite"
   plan_refs: [W1-T4404, W1-T5705]
   files: [src/lib/affected-suites.ts, test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

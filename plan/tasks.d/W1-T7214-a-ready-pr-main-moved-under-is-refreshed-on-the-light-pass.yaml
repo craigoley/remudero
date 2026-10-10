@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: main red 13:52-14:47Z (#10349 x #10353 typecheck clash), root-caused while fixing stuck PRs"
   plan_refs: [W1-T6022, W1-T5922, W1-T528, W1-T5921, W1-T5903, W1-T5940]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-ready-pr-main-moved-under-is-refreshed-on-the-light-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

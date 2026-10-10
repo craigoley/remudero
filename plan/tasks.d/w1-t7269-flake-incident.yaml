@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"

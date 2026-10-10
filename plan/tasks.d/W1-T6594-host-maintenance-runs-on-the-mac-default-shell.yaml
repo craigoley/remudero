@@ -12,7 +12,7 @@
   origin: "operator-authorized follow-ups 2026-10-08; real Mac Bash 3.2 host-maintenance fixtures"
   plan_refs: [W1-T3837, W1-T6002, W1-T5513]
   files: [deploy/host-update.sh, deploy/rmd-host-cleanup.sh, test/host-maintenance-shell-portability.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED with the real /bin/bash 3.2.57, a task-local flock executable and canonical
