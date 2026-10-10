@@ -2855,6 +2855,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
@@ -17264,6 +17265,8 @@ async function runTask(
     const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
     return recordBenchmarkWorkerAttempt(() => rawSpawn({
       ...effectiveSpawnArgs,
+      // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
+      workerClass: effectiveSpawnArgs.workerClass ?? "implement",
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
       // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
       runId: effectiveSpawnArgs.runId ?? runId,
@@ -55921,7 +55924,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["proof-queue-audit", async (rest) => await proofQueueAuditCommand(rest)],
   ["preflight", async (rest) => await preflightCommand(rest)],
   ["emissions", (rest) => emissionsCommand(rest)],
-  ["check-proof", (rest) => checkProofCommand(rest)],
+  // A daemon-owned check-proof reserves host memory for itself while it runs (250-290 MB measured 2026-10-10).
+  ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],

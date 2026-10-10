@@ -45,7 +45,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { coalesceFreshnessRestart, decideFreshnessRestart, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -3271,10 +3271,11 @@ export async function runDaemon(
     freshnessPressure = decision.state;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
-      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS,
+      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
     });
     const action = coalesced.action === "hold" ? "defer" : coalesced.action;
-    if (coalesced.action === "hold" || freshnessHeld || coalesced.reason === "window_quiet" || coalesced.reason === "upper_age") {
+    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE].includes(coalesced.reason);
+    if (coalesced.action === "hold" || freshnessHeld || released) {
       log("daemon.freshness_coalesced", {
         action: coalesced.action,
         new_sha: freshness.newSha,
@@ -3293,8 +3294,7 @@ export async function runDaemon(
       weight: decision.weight,
       age_pressure: decision.agePressure,
       pressure: decision.pressure,
-      reason: coalesced.action === "hold" || coalesced.reason === "window_quiet" || coalesced.reason === "upper_age"
-        ? coalesced.reason : decision.reason,
+      reason: coalesced.action === "hold" || released ? coalesced.reason : decision.reason,
       old_sha: freshness.oldSha,
       new_sha: freshness.newSha,
       ...withheldEvidence,

@@ -466,6 +466,16 @@ export const FRESHNESS_COALESCE_WINDOW_MS: RecordedDeployRestartThreshold = {
   reason: "All eight measured follow-on daemon boots on 2026-10-06 came 1–10 minutes after the previous boot.",
 };
 
+/**
+ * 2026-10-10: a package.json or package-lock.json advance leaves the install root every implement worktree links behind
+ * main, so W1-T4193 refuses every implement dispatch until the restart reinstalls it: nine runs at 18:08-18:17Z while
+ * the window held #10700's restart to 18:21Z. Such an advance is never held for a quiet window.
+ */
+export const INSTALL_INPUTS_RELEASE = "install_inputs_changed";
+export function changesInstallInputs(changes: readonly DeployWorthChange[] | undefined): boolean {
+  return (changes ?? []).some((change) => change.files.some((file) => file === "package.json" || file === "package-lock.json"));
+}
+
 export function coalesceFreshnessRestart(input: {
   decision: FreshnessDecision;
   newSha: string;
@@ -475,6 +485,7 @@ export function coalesceFreshnessRestart(input: {
   window: RecordedDeployRestartThreshold;
   threshold?: RecordedDeployRestartThreshold;
   ageHorizonMs?: number;
+  installInputsChanged?: boolean;
 }): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number } {
   const { decision } = input;
   if (decision.action === "defer") return decision;
@@ -485,6 +496,7 @@ export function coalesceFreshnessRestart(input: {
     return { action: "restart", reason, heldMs: 0, windowEndsAtMs };
   }
   const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
+  if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
   const agePressure = Math.floor((threshold.value * heldMs) / horizonMs);
