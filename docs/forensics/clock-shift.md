@@ -11,6 +11,14 @@ still matters.
 
 ---
 
+> **Superseded (2026-10-10, W1-T6078).** The module header quoted below says the probe shifts only
+> `Date` and that mtimes are not shiftable (the `test/prune-liveness.test.ts` entry). W1-T6035
+> (#9669) made `scripts/clock-shift.mjs` shift fs stat times as well, so that mtime mechanism ended;
+> the `prune-liveness` exclusion in `CLOCK_ARTIFACTS` stays only until a completed sweep measures
+> it. A child process's clock and a browser's still do not move. The block is kept verbatim.
+
+---
+
 ## module header
 
 `scripts/clock-shift.mjs:1-42` at `f148a1303173cb5789e36cc70aee8b78d90ca57f`, 42 comment lines.

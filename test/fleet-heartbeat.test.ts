@@ -54,8 +54,8 @@ function sub(call: Call): string {
 // `fleet-heartbeat.sh` runs as a REAL bash subprocess (`spawnSync("bash", ...)`, `runBeat` below)
 // and computes its own "now" through a REAL `date -u` call (`epoch_of`'s GNU/BSD branches, and
 // every stub above that falls through to the platform `date` binary) — a syscall the probe
-// cannot reach, since `scripts/clock-shift.mjs` monkeypatches only THIS process's global `Date`,
-// never a child process's. Building these fixtures from `new Date()` under a shift stamped every
+// cannot reach, since `scripts/clock-shift.mjs` shifts only THIS process's clocks (`Date` and, since W1-T6035,
+// fs stat times), never a child process's. Building these fixtures from `new Date()` under a shift stamped every
 // ledger row's `ts` days into the FUTURE relative to the script's own real clock, so
 // `now_epoch - epoch_of(ts)` went NEGATIVE (measured: `-604739` at +7d) instead of a real age —
 // the ledger-`ts`-vs-reader-clock mismatch #2250 fixed, except here the reader is a subprocess no
