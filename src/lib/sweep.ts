@@ -2349,7 +2349,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
     arm: async (pr, mode) => {
-      await observePr(pr, "auto-merge");
+      if (config.contributorAdmission !== undefined || deps.contributorAdmissionImpl !== undefined) await observePr(pr, "auto-merge");
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,

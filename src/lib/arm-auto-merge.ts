@@ -587,8 +587,12 @@ export function realArmDeps(
   // `ledgerLines` below is the whole reason arming survives a host that cannot resolve a config.
   loadConfigImpl: typeof loadConfig = loadConfig,
 ): ArmDeps {
+  // One existing synchronous CLI transport port; daemon actions replace these methods with
+  // awaited ports in realArmDepsAsync, including contributor admission.
+  const runGh = ghExec;
   return {
-    contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl, readAdmissionRest)),
+    contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
+      (path) => readAdmissionRest(path, runGh))),
     [REAL_ARM_DEPS_MARKER]: true,
     headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => {
@@ -602,7 +606,7 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      ghExec(["pr", "merge", prUrl, "--auto", "--squash"], {
+      runGh(["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -613,7 +617,7 @@ export function realArmDeps(
     },
     disableAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
-      ghExec(["pr", "merge", prUrl, "--disable-auto"], {
+      runGh(["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -639,7 +643,7 @@ export function realArmDeps(
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      ghExec(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
+      runGh(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
     say: (msg) => console.log(msg),
@@ -716,7 +720,7 @@ export async function observeContributorAdmission(
 
 export function observeContributorAdmissionSync(
   settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
-  read: AdmissionRead = readAdmissionRest, classify?: typeof classifyContribution,
+  read: AdmissionRead, classify?: typeof classifyContribution,
 ): void {
   runStepsSync(contributorAdmissionSteps(settings, target, action, log, read, undefined, classify));
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
-import { ghExec, ghTextAsync, splitGhHeaderBlock } from "./github-transport.js";
+import { ghTextAsync, splitGhHeaderBlock } from "./github-transport.js";
 
 export interface ContributionActor { id?: number; type?: string; login?: string }
 export interface ContributionRepository { id?: number; fullName?: string }
@@ -81,8 +81,12 @@ function failedAdmissionResponse(error: unknown): AdmissionResponse {
     ? admissionResponse(String(stdout)) : { status: 0, body: undefined };
 }
 
-export function readAdmissionRest(path: string): AdmissionResponse {
-  try { return admissionResponse(ghExec(["api", path, "-i"], { encoding: "utf8", timeout: ADMISSION_READ_TIMEOUT_MS, maxBuffer: 1 << 20 })); }
+// The synchronous CLI boundary supplies its existing transport explicitly. The shared resolver
+// owns HTTP interpretation and read bounds, not a new synchronous daemon transport default.
+export function readAdmissionRest(path: string,
+  run: (args: string[], options: { encoding: "utf8"; timeout: number; maxBuffer: number }) => string | Buffer,
+): AdmissionResponse {
+  try { return admissionResponse(String(run(["api", path, "-i"], { encoding: "utf8", timeout: ADMISSION_READ_TIMEOUT_MS, maxBuffer: 1 << 20 }))); }
   catch (error) {
     // Preserve an HTTP response from the failed child; absent response bytes remain unreadable.
     return failedAdmissionResponse(error);

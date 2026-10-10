@@ -14,6 +14,7 @@ import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView, buildSweepEffects as libSweepEffects } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { ghExec } from "../src/lib/github-transport.js";
 
 const sha = "a".repeat(40);
 const checkoutSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: join(import.meta.dirname, ".."), encoding: "utf8" }).trim();
@@ -128,6 +129,19 @@ test("shadow config has no default identities and cannot opt into enforcement", 
   await observeContributorAdmission(undefined, target, "repair", () => assert.fail("disabled means no records"), () => assert.fail("disabled means no reads"));
 });
 
+test("unconfigured sweep admission preserves the existing immediate arm effect", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-admission-immediate-arm-"));
+  const calls: string[] = [];
+  try {
+    const effects = buildSweepEffects({ owner: "example", repo: "core", config: { root, claudeBin: "/bin/true" } as Config,
+      ledgerPath: join(root, "ledger.ndjson"), runId: "test", plan: { tasks: [], byId: new Map() } as Plan,
+      policy: DEFAULT_SWEEP_POLICY, log: () => {}, armImpl: () => { calls.push("arm"); return "armed"; } });
+    const outcome = effects.arm!(pr());
+    assert.deepEqual(calls, ["arm"], "disabled observation must not add a microtask ahead of the existing arm");
+    assert.equal(await outcome, "armed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("repeated organization policy ids cannot multiply admission reads", async () => {
   let membershipReads = 0;
   const repeated = { ...settings, policy: { ...settings.policy, version: "bounded-repeat", organizationIds: [9, 9, 9] } };
@@ -171,6 +185,29 @@ test("real synchronous and asynchronous arm defaults observe configured shadow p
     await realArmDepsAsync(() => config).contributorAdmission!(pr().prUrl, sha);
     assert.ok(shim.calls().some((args) => args.includes("repos/example/core/pulls/42")));
   } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
+test("daemon admission reads keep the event loop responsive while the actual transport is in flight", async () => {
+  const shim = ghShim([{ when: "", delaySeconds: 0.15,
+    stdout: `HTTP/2 200 OK\ncontent-type: application/json\n\n${JSON.stringify(row())}` }], { kind: "admission-off-loop" });
+  const oldPath = process.env.PATH;
+  const inFlight = new Set<number>();
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  const timer = setInterval(() => {
+    const events = shim.events();
+    for (const started of events.filter((event) => event.phase === "start")) {
+      if (!events.some((ended) => ended.id === started.id && ended.phase === "end")) inFlight.add(started.id);
+    }
+  }, 5);
+  try {
+    const policy = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 5_000 } };
+    await realArmDepsAsync(() => ({ root: "/tmp", claudeBin: "/bin/true", contributorAdmission: policy }))
+      .contributorAdmission!(pr().prUrl, sha);
+    await observeContributorAdmission(policy, target, "review", () => {});
+    const started = shim.events().filter((event) => event.phase === "start");
+    assert.equal(started.length, 4, "both daemon entrypoints reread origin before and after resolution");
+    assert.equal(inFlight.size, started.length, "every actual admission read permits a loop tick before its child ends");
+  } finally { clearInterval(timer); process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
 });
 
 test("membership cache is positive-only, expires, and never caches PR heads or other policy versions", async () => {
@@ -261,11 +298,11 @@ test("default REST adapters retain real HTTP errors and distinguish unreadable r
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath}`;
   try {
-    for (const reader of [readAdmissionRest, readAdmissionRestAsync]) {
+    for (const reader of [(path: string) => readAdmissionRest(path, ghExec), readAdmissionRestAsync]) {
       assert.equal((await reader("not-found")).status, 404);
       for (const path of ["malformed", "unavailable", "missing-header"]) assert.equal((await reader(path)).status, 0);
     }
-    observeContributorAdmissionSync(undefined, target, "review", () => assert.fail("disabled"));
+    observeContributorAdmissionSync(undefined, target, "review", () => assert.fail("disabled"), () => assert.fail("disabled means no reads"));
     observeContributorAdmissionSync(settings, target, "review", (_s, f) => assert.equal(f.reason, "origin-unreadable"), () => ({ status: 0, body: undefined }));
     realArmDeps(() => { throw Error("missing config"); }).contributorAdmission!(pr().prUrl);
     await realArmDepsAsync(() => { throw Error("missing config"); }).contributorAdmission!(pr().prUrl);
