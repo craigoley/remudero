@@ -1,0 +1,29 @@
+- id: W1-T7739
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — fix-outcome:unstated cost 341.79 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:fix-outcome:unstated"
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - test/fix-lane-fix-outcome-unstated.test.ts
+  acceptance:
+    - claim: "fix-outcome:unstated no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T7739: fix-lane-fix-outcome-unstated clears without a person\" in test/fix-lane-fix-outcome-unstated.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    fix-outcome:unstated cost 341.79 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/lib/fix-lane-gardener.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9929: 69.05 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
+    - PR #10350: 64.01 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
+    - PR #10339: 60.68 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider claude, selected_model claude-opus-5-5, model opus, effort high]
+    - PR #10234: 24.76 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
+    - PR #10311: 8.19 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
