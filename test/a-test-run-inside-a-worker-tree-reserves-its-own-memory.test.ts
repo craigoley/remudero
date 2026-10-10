@@ -218,7 +218,11 @@ test("a test run whose estimate store fails still opens, at the test class's pri
   resetLearnedEstimateCacheForTests();
   const ledger = reservationSpace();
   const logs: string[] = [];
-  const brokenClock = { now: (): number => { throw new Error("clock"); }, iso: (): string => { throw new Error("clock"); } };
+  const brokenClock = {
+    now: (): number => { throw new Error("clock"); },
+    date: (): Date => { throw new Error("clock"); },
+    iso: (): string => { throw new Error("clock"); },
+  };
   const store = { list: () => [] as string[], append: () => undefined, size: () => 0, clock: brokenClock, log: (e: Record<string, unknown>) => void logs.push(String(e.op)) };
   const sampler = createTreePeakSampler(samplerPorts(procTable(), [], []));
   const worker = openLearnedReservation({ workerClass: "fix" }, { ledger, store, sampler });
