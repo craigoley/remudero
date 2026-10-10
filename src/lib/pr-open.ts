@@ -287,6 +287,10 @@ const runnableProof = (proof: string, target?: SuiteRegistryTarget): boolean =>
   proof.length > 0 && parseWhitelistedProof(proof, target) !== null;
 
 const proofFailed = (result: OpenPullRequestProofResult): boolean => result.status !== 0 || Boolean(result.error);
+// `rmd check-proof` exits 1 only after an executed proof failed. Exit 2/3/4 is a
+// refusal, missing test, or execution error; exit 5 means the proof is stale at base.
+const EXECUTED_PROOF_FAILURE = 1;
+const STALE_PROOF = 5;
 
 /**
  * Prepare the exact body an existing PR opener will send. Filed task branches resolve their
@@ -344,11 +348,13 @@ export function openPullRequestChecked(
     const result = runProof(proof, mergeBase, repoRoot, target);
     if (proofFailed(result)) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-      const stale = /\bexecuted_stale\b/.test(detail);
+      const stale = result.status === STALE_PROOF || /\bexecuted_stale\b/.test(detail);
       return reject(
         `${taskId} proof did not pass against merge base (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
         stale ? "stale-proof" : "branch-gap",
-        stale ? undefined : { proof, detail, checkedBody },
+        result.status !== EXECUTED_PROOF_FAILURE || result.error || result.signal || stale
+          ? undefined
+          : { proof, detail, checkedBody },
       );
     }
   }

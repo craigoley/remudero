@@ -16111,6 +16111,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
   otherOpenPrReader?: OpenPrJsonReader;
   prCreateExec?: Parameters<typeof runGhPrCreate>[4];
+  prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -17111,6 +17112,7 @@ async function runTask(
     /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
     otherOpenPrReader?: OpenPrJsonReader;
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
+    prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -20064,7 +20066,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), undefined, true);
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.

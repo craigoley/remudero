@@ -143,6 +143,7 @@ test("a build whose filed proof fails at open opens its PR with that proof named
   const fx = buildRun("grep: NEVER_WRITTEN_MARK in README.md");
   try {
     const created: string[][] = [];
+    const proofRuns: string[] = [];
     const result = await withLiveWritesAllowed(() =>
       runTask(TASK_ID, {
         skipGitSync: true,
@@ -153,6 +154,10 @@ test("a build whose filed proof fails at open opens its PR with that proof named
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
         otherOpenPrReader: async () => [],
+        prOpenProofRunner: async (proof) => {
+          proofRuns.push(proof);
+          return { status: 1, stdout: "verdict:    fail\ncause:      grep finds no match" };
+        },
         prCreateExec: (_command, args) => {
           created.push(args);
           return "";
@@ -160,11 +165,13 @@ test("a build whose filed proof fails at open opens its PR with that proof named
       }),
     );
     const ledger = readLedger(fx.root);
+    assert.deepEqual(proofRuns, ["grep: NEVER_WRITTEN_MARK in README.md"], "the filed proof ran once and failed cleanly");
     assert.equal(ledger.filter((row) => row.step === "pr.open_refused").length, 0, "a failing proof no longer refuses the open");
     const opened = ledger.filter((row) => row.step === "pr.opened_with_failing_proof");
     assert.equal(opened.length, 1, "the open names the failing proof");
     assert.equal(opened[0]?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
     assert.equal(created.length, 1, "the PR create ran for the built branch");
+    assert.deepEqual(created[0]?.slice(0, 4), ["api", "--method", "POST", "repos/craigoley/remudero/pulls"]);
     const body = created[0]?.find((arg) => arg.startsWith("body=")) ?? "";
     assert.match(body, /## Pre-open proof failure/);
     assert.match(body, /NEVER_WRITTEN_MARK/);
@@ -239,7 +246,7 @@ test("the opener classifies a proof that already passes at the merge base as a s
     repo.git("add", "-A");
     repo.git("commit", "-q", "-m", "seed");
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
-    const refuse = (stdout: string) => () => ({ status: 5, stdout, stderr: "" });
+    const refuse = (stdout: string) => () => ({ status: stdout.includes("executed_stale") ? 5 : 1, stdout, stderr: "" });
     const classOf = (stdout: string): string => {
       try {
         openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", refuse(stdout));
@@ -293,7 +300,11 @@ test("a branch-gap proof refusal carries the checked body and the failing proof;
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
     const refusalFor = (stdout: string): PrOpenRefusedError => {
       try {
-        openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", () => ({ status: 5, stdout, stderr: "" }));
+        openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", () => ({
+          status: stdout.includes("executed_stale") ? 5 : 1,
+          stdout,
+          stderr: "",
+        }));
       } catch (err) {
         assert.ok(err instanceof PrOpenRefusedError);
         return err;
@@ -304,6 +315,22 @@ test("a branch-gap proof refusal carries the checked body and the failing proof;
     assert.equal(gap.failingProof?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
     assert.match(gap.failingProof?.checkedBody ?? "", /Remudero-Task: W1-T990071/);
     assert.equal(refusalFor("discrimination: executed_stale — matches BOTH head and base").failingProof, undefined);
+    assert.throws(
+      () => openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", () => ({
+        status: null,
+        error: "proof runner unavailable",
+      })),
+      (err) => err instanceof PrOpenRefusedError && err.failingProof === undefined,
+      "an unavailable runner is a refusal, not a proof failure eligible to open",
+    );
+    assert.throws(
+      () => openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", () => ({
+        status: 4,
+        stdout: "verdict:    exec_error",
+      })),
+      (err) => err instanceof PrOpenRefusedError && err.failingProof === undefined,
+      "a completed check-proof execution error cannot open as a failed proof",
+    );
   } finally {
     repo.cleanup();
   }
