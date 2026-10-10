@@ -68,7 +68,7 @@ const errors = (detail: string): string[] => detail.split("\n").filter((l) => /e
 test("the fleet typecheck is incremental: preflight's tsc argv carries --incremental and a buildinfo in the worktree's own git dir", () => {
   const fx = fleetLayout();
   const seen: string[][] = [];
-  assert.equal(typecheckStep(fx.wt, realSpawn(seen)).ok, true);
+  assert.equal(typecheckStep(fx.wt, realSpawn(seen), { memoryHeadroom: () => undefined }).ok, true);
   const wtGitDir = realpathSync(spawnSync("git", ["-C", fx.wt, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim());
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", join(wtGitDir, TYPECHECK_BUILDINFO_NAME)]]);
   assert.ok(existsSync(join(wtGitDir, TYPECHECK_BUILDINFO_NAME)), "the check wrote its buildinfo where it said it would");

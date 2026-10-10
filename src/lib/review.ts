@@ -7958,6 +7958,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/typecheck.mjs":
     "local dev/worker convenience (`npm run typecheck`, and `npm run check`'s tsc), never invoked by any CI workflow — " +
     "CI's ci job runs its own `npx tsc -p tsconfig.json --noEmit`, so no edit to this wrapper changes what a gate measures",
+  "scripts/test-run.mjs":
+    "local dev/worker convenience (`npm test`), never invoked by any CI workflow — CI runs `npm run test:ci` — and it " +
+    "only sets --test-concurrency on the caller's own node --test argv and returns node's exit code, so it cannot turn a red suite green",
   "scripts/test-duration-reporter.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
     "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +

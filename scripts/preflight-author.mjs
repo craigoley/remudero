@@ -6,7 +6,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, symbollessSourceFiles }
   from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
-import { acquireTestSlot, lowPriorityCommand, testRunArgv } from '../src/lib/test-slot.ts';
+import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv } from '../src/lib/test-slot.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
@@ -220,7 +220,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (censusOk) {
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
-        const slot = acquireTestSlot('preflight-author:static-and-affected');
+        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
