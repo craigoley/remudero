@@ -75,7 +75,7 @@ The sample includes the ledger's expensive tail. A failed or interrupted sample 
 Use the returned profile path with
 `node --import tsx scripts/preflight-author.mjs --deadline <fixed-ISO-time> --runtime-profile <path>`.
 The gate checks the exact source, corpus, lock/setup hashes, Node/V8/tsx, platform and
-nonsecret environment fingerprint, then independently rereads every closed sample artifact.
+host/kernel/CPU identity and nonsecret environment fingerprint, then independently rereads every closed sample artifact.
 Stale/future, corrupt, incomplete or mismatched profiles cannot price admission.
 
 After acquiring the actual slot, fit the conservative sample-calibrated estimate, static

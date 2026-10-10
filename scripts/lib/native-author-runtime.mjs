@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
+import { availableParallelism, cpus, hostname, release } from 'node:os';
 import { listTestFiles, medianMeasuredDurationMs, predictMakespanMs, weightedDurationMs } from '../test-tier-manifest.mjs';
 
 export const RUNTIME_PROFILE_FORMAT = 'rmd-native-author-runtime-v1';
@@ -23,6 +24,7 @@ export function runtimeBindings(root, head, env = process.env) {
   const environmentSha256 = digest(JSON.stringify(Object.fromEntries(['TZ', 'LANG', 'LC_ALL', 'NODE_ENV']
     .map((key) => [key, env[key] ?? null]))));
   return { head, platform: process.platform, arch: process.arch, node: process.version,
+    host: hostname(), kernel: release(), cores: availableParallelism(), cpuModel: cpus()[0]?.model ?? 'unavailable',
     v8: process.versions.v8, loader: `tsx@${tsx}`, instrumentation: 'none',
     testIsolation: 'process', setup: './test/setup/tmp-hygiene.ts', environmentSha256,
     corpusSha256, corpusFiles: files.length, hashes };
