@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
-import { canonicalBuildInfo, hasUsableTypecheckBuildInfo, publishBuildInfo, seedBuildInfo } from "./typecheck-buildinfo.js";
+import { canonicalBuildInfo, hasUsableTypecheckBuildInfo, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
@@ -211,7 +211,7 @@ function harnessTypecheck(
     const self = { root: dir, buildInfo: join(scratch, `typecheck-${n}.tsbuildinfo`) };
     if (previous !== undefined) seedBuildInfo(previous, self, state.tsVersion);
     const slot = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion)
-      ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", testSlot);
+      ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
     try {
       return await new Promise<TypecheckRun>((resolveRun) => {
         let output = "";

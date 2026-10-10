@@ -90,6 +90,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
@@ -5505,6 +5506,10 @@ function finishWorktreeAdd(
       incomplete: workspaceNodeModulesIncomplete(workspaceLinkResults),
     });
   }
+  // The clone this tree hangs off runs no typecheck of its own: refresh its seed from the linked install's, so the
+  // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
+  const seed = refreshCanonicalSeed(worktreePath);
+  if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
 }
 
 const execFilePromise = promisify(execFile);
