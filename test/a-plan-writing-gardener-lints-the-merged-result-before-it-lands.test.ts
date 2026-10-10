@@ -110,6 +110,38 @@ test("W1-T5457: async default lint sees a duplicate added to fresh origin/main",
   assert.match(refusal?.message ?? "", /duplicate task id 'W1-T1'/);
 });
 
+test("W1-T5457: both default lints three-way merge a record edited on both sides, and tolerate a new file", async () => {
+  const origin = gitRepo({ bare: true, branch: "main", kind: "merged-plan-origin" });
+  const repo = gitRepo({ kind: "merged-plan-client" });
+  repo.addRemote("origin", origin.dir);
+  repo.git("push", "--quiet", "--set-upstream", "origin", "main");
+
+  const shared = "plan/tasks.d/W1-T1-shared.yaml";
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, shared), task("W1-T1", "  priority: 2\n"));
+  repo.git("add", shared);
+  repo.git("commit", "--quiet", "-m", "add shared plan task");
+  repo.git("push", "--quiet", "origin", "main");
+
+  const feature = repo.addWorktree(join(makeTempDir("merged-plan-feature"), "tree"), "feature");
+  // Fresh main edits the title; the feature edits the priority: distant hunks, so the merge is clean.
+  writeFileSync(join(repo.dir, shared), task("W1-T1", "  priority: 2\n").replace("title: t", "title: from-main"));
+  repo.git("add", shared);
+  repo.git("commit", "--quiet", "-m", "retitle on fresh main");
+  repo.git("push", "--quiet", "origin", "main");
+  writeFileSync(join(feature.dir, shared), task("W1-T1", "  priority: 3\n"));
+  const fresh = "plan/tasks.d/W1-T9-new.yaml";
+  writeFileSync(join(feature.dir, fresh), task("W1-T9"));
+
+  assert.equal(freshMergedPlanLint(feature.dir, [shared, fresh]), undefined);
+  assert.equal(await freshMergedPlanLintAsync(feature.dir, [shared, fresh]), undefined);
+
+  // A conflicting edit of the same line is reported as a merge conflict by both.
+  writeFileSync(join(feature.dir, shared), task("W1-T1", "  priority: 2\n").replace("title: t", "title: from-feature"));
+  assert.match(freshMergedPlanLint(feature.dir, [shared])?.message ?? "", /merge conflict/);
+  assert.match((await freshMergedPlanLintAsync(feature.dir, [shared]))?.message ?? "", /merge conflict/);
+});
+
 test("W1-T5457: a path outside the plan is not checked", (t) => {
   const outside = { "src/lib/x.ts": "this: is: not [yaml", "docs/a.md": "- id: a\n  id: b\n" };
   assert.equal(lintMergedPlanChange({ base: BASE, changes: outside }), undefined);
