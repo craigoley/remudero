@@ -14042,7 +14042,20 @@ export async function runSweep(
         });
       });
     } catch (error) {
-      log("reconcile.unreadable", { reason: String((error as Error)?.message ?? error) });
+      // W1-T5996 — the refusal is right, the silence was the defect: the first refusal for a
+      // reason (its unread/unclassified path list) raises ONE incident naming the remedy; a
+      // repeat, found by fingerprint in this pass's ledger read, logs only.
+      const reason = String((error as Error)?.message ?? error);
+      log("reconcile.unreadable", { reason });
+      const fingerprint = createHash("sha256").update(reason).digest("hex");
+      if (!ledgerLines.some((e) => e.step === "incident.event" && e.name === "reconcile.unreadable" && e.fingerprint === fingerprint)) {
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId, task_id: "INCIDENT", step: "incident.event", source: "daemon", kind: "invariant",
+          name: "reconcile.unreadable", fingerprint,
+          message: `${reason} — the fleet reconciler repairs nothing until it can read its history; ` +
+            `move the named file out of the state dir (${dirname(deps.ledgerPath)})`,
+        });
+      }
     }
   } else if (!deps.readFleetState && deps.reconcileMainRunGaps && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
     try {
