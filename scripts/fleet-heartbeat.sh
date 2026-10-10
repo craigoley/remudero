@@ -911,16 +911,17 @@ fi
 #   mem_<c>_current_mib / _anon_mib / _file_mib    memory.current and memory.stat anon / file
 #   mem_<c>_high_events_delta         memory.events `high` over the beat (mem_interval_s)
 #   mem_<c>_refault_file_pages_delta  memory.stat workingset_refault_file over the beat (pages)
-#   mem_<c>_tuner_action/_reason/_ts  the tuner's last adjustment, from
-#                                     <config.root>/state/memory-high-tuned-<c>.json, else the
-#                                     latest ledger row; `none` when it has never adjusted.
+#   mem_<c>_tuner_action/_reason/_ts  the tuner's last adjustment, from <its instance's state_dir,
+#                                     as the launchers resolve the registry>/state/memory-high-tuned-<c>.json,
+#                                     else that ledger's row; `none` only when live high is not above policy.
 # A first beat, a recycled container (new cgroup, counters from zero) or a counter that went
 # backwards publishes `unknown` for the deltas; any unreadable file publishes `unknown`. Never 0.
 #
 # READ-ONLY AND CHEAP: one `docker ps`, one `docker inspect`, a few small cgroup files per container
 # and one bounded tail of the ledger. Nothing walks a filesystem.
 #
-# Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER.
+# Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER, RMD_INSTANCE_REGISTRY.
+MEM_REGISTRY="${RMD_INSTANCE_REGISTRY:-${INSTALL_DIR}/.remudero/daemon-instances.yaml}"
 MEM_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
 MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
 MEM_LINES=""
@@ -931,6 +932,9 @@ if [ -n "$MEM_CONTAINERS" ]; then
   # shellcheck disable=SC2046 # one argument per container name, by design
   MEM_ANNOTATIONS="$("$MEM_RUNTIME" inspect $(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}') \
     --format '{{.Name}} {{index .HostConfig.Annotations "org.systemd.property.MemoryHigh"}}' 2>/dev/null)" || MEM_ANNOTATIONS=""
+  MEM_STATE_DIRS="$(awk '{ sub(/[[:space:]]+#.*/, "") } /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { if (c != "" && d != "") print c, d; c = d = ""; next }
+    /^    container_name:/ { c = $2; gsub(/"/, "", c) } /^    state_dir:/ { d = $2; gsub(/"/, "", d) }
+    END { if (c != "" && d != "") print c, d }' "$MEM_REGISTRY" 2>/dev/null)" # container_name state_dir, recycle-container.sh's grammar
   MEM_PREV_EPOCH=""; MEM_PREV=""
   if [ -r "$MEM_STATE_FILE" ]; then
     MEM_PREV_EPOCH="$(awk '$1 == "epoch" {print $2; exit}' "$MEM_STATE_FILE" 2>/dev/null)"
@@ -979,7 +983,9 @@ EOF_MEM_PREV
     [ "$_mem_ev" != unknown ] && [ "$_mem_rf" != unknown ] && MEM_SNAPSHOT="${MEM_SNAPSHOT}
 cg ${_mem_name} ${_mem_id} ${_mem_ev} ${_mem_rf}"
     # The tuner's word: its state file first (written with every adjustment), else the latest ledger row.
-    _mem_tuned="${RMD_ROOT}/state/memory-high-tuned-${_mem_name}.json"
+    _mem_root="$(printf '%s\n' "$MEM_STATE_DIRS" | awk -v n="$_mem_name" '$1 == n {print $2; exit}')"
+    _mem_tuned="${_mem_root:-$RMD_ROOT}/state/memory-high-tuned-${_mem_name}.json"
+    _mem_ledger="${_mem_root:-$RMD_ROOT}/state/ledger.ndjson"
     _mem_policy="unknown"; _mem_policy_src="unknown"; _mem_act="none"; _mem_why="none"; _mem_ts="none"
     if [ -r "$_mem_tuned" ] && grep -q "\"container\":\"${_mem_name}\"" "$_mem_tuned" 2>/dev/null; then
       _mem_policy="$(mem_num "$(sed -n 's/.*"policy_mib":\([0-9][0-9]*\).*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)")"
@@ -988,8 +994,8 @@ cg ${_mem_name} ${_mem_id} ${_mem_ev} ${_mem_rf}"
       _mem_why="$(sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)"
       # mht_record writes the reason as "<action>: <why>".
       case "$_mem_why" in grow:*|shrink:*|restore:*|floor:*) _mem_act="${_mem_why%%:*}"; _mem_why="${_mem_why#*: }" ;; *) _mem_act="unknown" ;; esac
-    elif [ -r "$LEDGER" ]; then
-      _mem_row="$(tail -c 4000000 "$LEDGER" 2>/dev/null | grep -F '"step":"host.memory_high.adjusted"' | grep -F "\"container\":\"${_mem_name}\"" | tail -n 1)"
+    elif [ -r "$_mem_ledger" ]; then
+      _mem_row="$(tail -c 4000000 "$_mem_ledger" 2>/dev/null | grep -F '"step":"host.memory_high.adjusted"' | grep -F "\"container\":\"${_mem_name}\"" | tail -n 1)"
       if [ -n "$_mem_row" ]; then
         _mem_act="$(printf '%s' "$_mem_row" | sed -n 's/.*"action":"\([a-z]*\)".*/\1/p')"; [ -n "$_mem_act" ] || _mem_act="unknown"
         _mem_ts="$(printf '%s' "$_mem_row" | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p')"
@@ -1002,6 +1008,10 @@ cg ${_mem_name} ${_mem_id} ${_mem_ev} ${_mem_rf}"
       # Never tuned: the launcher started it at the policy value, which rides as its annotation.
       _mem_ann="$(printf '%s\n' "$MEM_ANNOTATIONS" | awk -v n="/${_mem_name}" '$1 == n && $NF ~ /^[0-9]+$/ {print $NF; exit}')"
       if [ -n "$_mem_ann" ]; then _mem_policy="$(mem_mib "$_mem_ann")"; _mem_policy_src="launch_annotation"; fi
+    fi
+    _mem_live="$(mem_mib "$_mem_high")"
+    if [ "$_mem_act" = none ] && { [ "$_mem_policy" = unknown ] || [ "$_mem_live" = unknown ] || [ "$_mem_live" = max ] || [ "$_mem_live" -gt "$_mem_policy" ] 2>/dev/null; }; then
+      _mem_act="unknown"; _mem_why="unknown"; _mem_ts="unknown" # above policy (or unmeasured) with no record found
     fi
     MEM_LINES="${MEM_LINES}
 mem_${_mem_name}_policy_high_mib=${_mem_policy}
