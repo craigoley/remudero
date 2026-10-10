@@ -129,6 +129,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -1199,6 +1200,9 @@ export interface DaemonDeps {
   /** W1-T3335 — V8 heap accounting, injectable so the pressure arm is testable without allocating
    *  gigabytes. Defaults to {@link v8HeapStatistics}. */
   heapStatistics?: () => { used_heap_size: number; heap_size_limit: number };
+  /** The memory governor (daemon-memory-policy.ts): RSS plus swap as a share of the container's budget,
+   *  read once per tick. Defaults to one on the default policy and the real /proc and cgroup readings. */
+  memoryGovernor?: DaemonMemoryGovernor;
   /** Fleet control: a defined return means a graceful PAUSE, a drain-and-hold. Checked between
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
@@ -2937,6 +2941,7 @@ export async function runDaemon(
   let dailyCostCeilingUsd: number | undefined;
   let costUsd = 0;
   let ticks = 0;
+  const memoryGovernor = deps.memoryGovernor ?? createDaemonMemoryGovernor({});
   // W1-T2965 — cycles this LIFETIME has entered past both operator holds and the freshness read.
   // Not `ticks`: those are incremented on many completion paths, and the deferral below must be
   // bounded by the loop's own control flow. Incremented BELOW the freshness read, so paused
@@ -3262,33 +3267,16 @@ export async function runDaemon(
     return action;
   };
 
-  // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
-  // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
-  const stopForFreshness = async (
-    freshness: Extract<DaemonFreshness, { stale: true }>,
-  ): Promise<DaemonSummary> => {
-    // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
-    // matching the new sha rather than the stale tree this process is still running (W1-T151).
-    if (freshness.installNeeded) {
-      deps.runInstall?.();
-    }
-    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
-    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
-    if (backgroundSweep) {
-      await backgroundSweep;
-    } else if (deps.sweep) {
-      sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
-    }
-    // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
-    // The caller stops its interphase clock before the final pass (W1-T2865).
+  // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
+  // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
+  // and the memory-pressure exit so neither restart can kill work the other would have waited for.
+  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain"): Promise<void> => {
     const detachedAtFreshness = detachedSweepActionCount();
     // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
     const reviewsAtFreshness = inFlightReviewCount();
     if (detachedAtFreshness > 0 || reviewsAtFreshness > 0) {
       const drainStartedAtMs = daemonClock.now();
-      log("daemon.freshness_drain.started", {
+      log(`${stepPrefix}.started`, {
         detached_sweep_actions: detachedAtFreshness,
         in_flight_reviews: reviewsAtFreshness,
       });
@@ -3327,7 +3315,7 @@ export async function runDaemon(
           bound_ms: sweepWallClockBoundMs,
         });
       }
-      log("daemon.freshness_drain.completed", {
+      log(`${stepPrefix}.completed`, {
         detached_sweep_actions: detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
@@ -3337,6 +3325,30 @@ export async function runDaemon(
         duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
       });
     }
+  };
+
+  // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
+  // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
+  const stopForFreshness = async (
+    freshness: Extract<DaemonFreshness, { stale: true }>,
+  ): Promise<DaemonSummary> => {
+    // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
+    // matching the new sha rather than the stale tree this process is still running (W1-T151).
+    if (freshness.installNeeded) {
+      deps.runInstall?.();
+    }
+    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
+    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
+    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    if (backgroundSweep) {
+      await backgroundSweep;
+    } else if (deps.sweep) {
+      sweepRetriggerState.lastRunAtMs = daemonClock.now();
+      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+    }
+    // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
+    // The caller stops its interphase clock before the final pass (W1-T2865).
+    await drainBeforeRestart("daemon.freshness_drain");
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
@@ -3673,15 +3685,36 @@ export async function runDaemon(
     //
     // IT DOES NOT FIX THE LEAK and must not be read as fixing it. The growth is still there and
     // still unexplained; this only stops it costing a crash and 120 seconds each time.
+    //
+    // 2026-10-10: the V8 fraction never fired (75% of 8.4 GB of one isolate, at 4.5 GB RSS + 3 GB swap).
+    // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
+    // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
+    const memoryStep = memoryGovernor.step();
+    if (memoryStep.changed) {
+      log("daemon.memory_pressure", {
+        tier: memoryStep.tier,
+        previous_tier: memoryStep.previousTier,
+        share: memoryStep.share,
+        heap_growing_percent: memoryStep.heapGrowingPercent,
+        rss_bytes: memoryStep.reading.rss_bytes,
+        swap_bytes: memoryStep.reading.swap_bytes,
+        budget_bytes: memoryStep.reading.budget_bytes,
+        budget_source: memoryStep.reading.budget_source,
+      });
+    }
     const heapStats = deps.heapStatistics?.() ?? v8HeapStatistics();
-    const heapPressure = heapPressureDetail(heapStats);
+    const heapPressure = memoryStep.tier === "restart" ? memoryStep.detail : heapPressureDetail(heapStats);
     if (heapPressure !== undefined) {
       log("daemon.heap_pressure_exit", {
+        basis: memoryStep.tier === "restart" ? "cgroup_share" : "v8_limit",
         used_heap_size: heapStats.used_heap_size,
         heap_size_limit: heapStats.heap_size_limit,
         threshold: HEAP_PRESSURE_RESTART_FRACTION,
+        ...(memoryStep.tier === "restart" ? { share: memoryStep.share, budget_bytes: memoryStep.reading.budget_bytes } : {}),
         ticks,
       });
+      // The same bounded drain a freshness restart takes: live fix workers and reviews finish first.
+      await drainBeforeRestart("daemon.memory_drain");
       return summary("heap_pressure", heapPressure);
     }
 
