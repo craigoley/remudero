@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -350,10 +350,15 @@ export function lintMergedPlanChange(input: { base: Record<string, string>; chan
 export function freshMergedPlanLint(root: string, paths: readonly string[]): MergedPlanLintFailure | undefined {
   const planPaths = paths.filter((p) => isPlanShard(p));
   if (planPaths.length === 0) return undefined;
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
+  const git = (...args: string[]) => hostWorktreeGit(root, args, { maxBuffer: 1 << 26 });
   const show = (ref: string, p: string): string | undefined => {
-    const r = spawnSync("git", ["-C", root, "show", `${ref}:${p}`], { encoding: "utf8", maxBuffer: 1 << 26 });
-    return r.status === 0 ? r.stdout : undefined;
+    try {
+      return git("show", `${ref}:${p}`);
+    } catch (e) {
+      // A path absent at that ref is the "no such blob" answer, not a failure.
+      void e;
+      return undefined;
+    }
   };
   git("fetch", "-q", "origin", "main");
   const base: Record<string, string> = {};
@@ -370,9 +375,12 @@ export function freshMergedPlanLint(root: string, paths: readonly string[]): Mer
         continue;
       }
       const f = (n: string, text: string) => (writeFileSync(join(dir, n), text), join(dir, n));
-      const r = spawnSync("git", ["merge-file", "-p", f("ours", ours), f("ancestor", ancestor), f("theirs", theirs)], { encoding: "utf8", maxBuffer: 1 << 26 });
-      if (r.status !== 0) return { file: p, message: r.status === null ? "git merge-file failed" : "merge conflict against fresh origin/main" };
-      changes[p] = r.stdout;
+      try {
+        changes[p] = git("merge-file", "-p", f("ours", ours), f("ancestor", ancestor), f("theirs", theirs));
+      } catch (e) {
+        void e;
+        return { file: p, message: "merge conflict against fresh origin/main" };
+      }
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
