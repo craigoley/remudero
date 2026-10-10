@@ -291,7 +291,6 @@ export interface OpenPrRest {
   updatedAt: string;
   body: string;
   autoMergeRequest: unknown;
-  /** Original authenticated contributor/repository evidence, not a trust decision. */
   contributionOrigin?: ContributionOrigin;
   statusCheckRollup?: RestRollupEntry[];
   /** W1-T521: true when this PR's rollup fetch threw — exhaustion, a 404 on a head deleted mid-pass, a

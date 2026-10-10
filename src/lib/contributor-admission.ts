@@ -80,11 +80,16 @@ export function classifyContribution(
     || !/^[a-f0-9]{40}$/i.test(subject.headSha)) return decision("unknown", "invalid-context");
   if (!fresh(subject.observedAtMs, nowMs, policy.maxEvidenceAgeMs)) return decision("unknown", "stale-origin");
   const origin = subject.origin;
-  const actor = origin?.actor;
-  if (!validId(actor?.id) || (actor?.type !== "User" && actor?.type !== "Bot")
-    || !validId(origin?.headRepository?.id) || origin?.targetRepository?.id !== subject.repositoryId) {
-    return decision("unknown", "incomplete-origin");
-  }
+  if (origin === undefined) return decision("unknown", "missing-origin");
+  const actor = origin.actor;
+  if (actor == null) return decision("unknown", "missing-actor");
+  if (!validId(actor.id) || (actor.type !== "User" && actor.type !== "Bot")) return decision("unknown", "invalid-actor");
+  const headRepository = origin.headRepository;
+  if (headRepository == null) return decision("unknown", "missing-head-repository");
+  if (!validId(headRepository.id)) return decision("unknown", "invalid-head-repository");
+  const targetRepository = origin.targetRepository;
+  if (targetRepository == null) return decision("unknown", "missing-target-repository");
+  if (targetRepository.id !== subject.repositoryId) return decision("unknown", "target-mismatch");
   if ((actor.type === "Bot" && policy.ownerIds.includes(actor.id))
     || (actor.type === "User" && policy.services.some((service) => service.id === actor.id))) {
     return decision("unknown", "identity-type-mismatch");

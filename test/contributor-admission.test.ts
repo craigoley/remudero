@@ -104,6 +104,13 @@ test("W1-T7752: malformed or stale identity remains unknown", () => {
     { ...subject(), origin: { ...subject().origin, targetRepository: { id: 99 } } },
   ];
   for (const s of cases) assert.equal(decide(s).outcome, "unknown", JSON.stringify(s));
+  assert.equal(decide({ ...subject(), origin: undefined }).reason, "missing-origin");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, actor: null } }).reason, "missing-actor");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, actor: { id: 0 } } }).reason, "invalid-actor");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, headRepository: null } }).reason, "missing-head-repository");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, headRepository: { id: 0 } } }).reason, "invalid-head-repository");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, targetRepository: null } }).reason, "missing-target-repository");
+  assert.equal(decide({ ...subject(), origin: { ...subject().origin, targetRepository: { id: 99 } } }).reason, "target-mismatch");
   for (const evidence of [[], [membership("unknown")], [{ ...membership(), observedAtMs: NOW - 1_001 }],
     [{ ...membership(), observedAtMs: NOW + 1 }], [{ ...membership(), actorId: 999 }],
     [{ ...membership(), organizationId: 999 }], [{ ...membership(), observedAtMs: NaN }]]) {
