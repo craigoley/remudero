@@ -15,6 +15,7 @@ import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView, buildSweepEffects as libSweepEffects } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { ghExec } from "../src/lib/github-transport.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const sha = "a".repeat(40);
 const checkoutSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: join(import.meta.dirname, ".."), encoding: "utf8" }).trim();
@@ -208,6 +209,22 @@ test("daemon admission reads keep the event loop responsive while the actual tra
     assert.equal(started.length, 4, "both daemon entrypoints reread origin before and after resolution");
     assert.equal(inFlight.size, started.length, "every actual admission read permits a loop tick before its child ends");
   } finally { clearInterval(timer); process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
+test("the existing synchronous CLI transport preserves guarded arm disarm and queue arguments", async () => {
+  const shim = ghShim([], { kind: "admission-cli-transport" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    const deps = realArmDeps();
+    await withLiveWritesAllowed(async () => {
+      deps.armAuto(pr().prUrl);
+      deps.disableAuto(pr().prUrl);
+      deps.enqueue!(pr().prUrl);
+    });
+    assert.deepEqual(shim.calls(), [`pr merge ${pr().prUrl} --auto --squash`,
+      `pr merge ${pr().prUrl} --disable-auto`, `pr merge ${pr().prUrl}`]);
+  } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
 });
 
 test("membership cache is positive-only, expires, and never caches PR heads or other policy versions", async () => {
