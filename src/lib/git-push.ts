@@ -529,8 +529,7 @@ export function createPrePushSandboxRunner(cwd: string, {
   };
 }
 
-/** Runs `run` with `gate.env.HOME` a fresh empty directory, removed once `run` (or the promise it returns) settles. In
- *  a daemon-owned process the gate also holds a "push-gate" host-memory reservation until it settles. */
+/** Runs `run` with a fresh empty `gate.env.HOME` (and, in the daemon, a push-gate memory reservation) until it settles. */
 function withGateHome<T>(gate: PrePushGate, run: (env: NodeJS.ProcessEnv) => T): T {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prepush-home-`));
   const reservation = daemonOwnedProcess() ? openLearnedReservation({ workerClass: "push-gate" }) : undefined;

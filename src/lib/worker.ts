@@ -127,7 +127,7 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
-import { openLearnedReservation, type LearnedReservation, type LearnedReservationDeps } from "./host-memory-learning.js";
+import { openLearnedReservation, type LearnedReservation, type LearnedReservationOptions } from "./host-memory-learning.js";
 import type { HostMemoryLedgerOptions, MemoryReservationHandle, WorkerClass } from "./host-memory-ledger.js";
 import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import {
@@ -2071,7 +2071,7 @@ export interface WorkerOccupancyReservation {
   root?: string;
   ledger?: HostMemoryLedgerOptions;
   /** The learned-estimate store and the tree sampler (host-memory-learning.ts). Default: the shared ones. */
-  learning?: Omit<LearnedReservationDeps, "ledger">;
+  learning?: Omit<LearnedReservationOptions, "ledger">;
 }
 
 function claimWorkerOccupancy(): () => void {

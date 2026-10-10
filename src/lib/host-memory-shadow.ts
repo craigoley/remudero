@@ -869,6 +869,7 @@ function ownDaemonGrowth(
       }
       procReason = `proc ${pid}: no VmHWM/VmRSS`;
     } catch (error) {
+      // The pid exited or /proc is unreadable: named below, and the row series is tried instead.
       procReason = `proc ${pid}: ${reasonOf(error)}`;
     }
   }

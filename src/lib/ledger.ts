@@ -148,8 +148,6 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
  *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
-/** The daemon main process's pid, inherited by every process it starts, so a child (a review lane, a garden) can read
- *  the daemon's own /proc status for its memory growth (host-memory-shadow.ts). Set only by {@link markDaemonProcessActor}. */
 export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
 
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
@@ -160,7 +158,7 @@ export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
 export function markDaemonProcessActor(): void {
   markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
-  process.env[DAEMON_PID_ENV] = String(process.pid);
+  process.env[DAEMON_PID_ENV] = String(process.pid); // children read the daemon's /proc growth (host-memory-shadow.ts)
 }
 
 /**

@@ -23,7 +23,7 @@ import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import {
   DEFAULT_ESTIMATE_MIB,
@@ -140,7 +140,7 @@ export interface PeakStoreOptions {
 
 const diagnosticsSeen = new Set<string>();
 
-function diagnose(opts: PeakStoreOptions, op: string, error: unknown): void {
+function recordError(opts: PeakStoreOptions, op: string, error: unknown): void {
   const reason = (error as NodeJS.ErrnoException | undefined)?.code ?? String((error as Error)?.message ?? error).slice(0, 120);
   const key = `${op}:${reason}`;
   if (diagnosticsSeen.has(key)) return;
@@ -204,7 +204,7 @@ export function compactSamples(samples: readonly PeakSample[], keep: number): Pe
 }
 
 const lineOf = (s: PeakSample): string =>
-  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: new Date(s.at).toISOString() })}\n`;
+  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso() })}\n`;
 
 /** Record one measured tree peak for this instance. NEVER throws. */
 export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}): boolean {
@@ -225,7 +225,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
     }
     return true;
   } catch (error) {
-    diagnose(opts, "record", error);
+    recordError(opts, "record", error);
     return false;
   }
 }
@@ -245,7 +245,7 @@ export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions
   try {
     names = (opts.list ?? ((dir: string) => readdirSync(dir)))(storeDir(opts)).filter((name) => name.endsWith(".ndjson"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") diagnose(opts, "list", error);
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") recordError(opts, "list", error);
     return [];
   }
   const out: PeakSample[] = [];
@@ -254,7 +254,7 @@ export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions
       const text = (opts.readTail ?? readFileTail)(join(storeDir(opts), name), PEAK_TAIL_BYTES);
       out.push(...parseSamples(text).filter((s) => s.workerClass === workerClass));
     } catch (error) {
-      diagnose(opts, "read", error);
+      recordError(opts, "read", error);
     }
   }
   return out;
@@ -417,7 +417,7 @@ export interface LearnedReservation extends MemoryReservationHandle {
   readonly estimateSource: EstimateSource;
 }
 
-export interface LearnedReservationDeps {
+export interface LearnedReservationOptions {
   ledger?: HostMemoryLedgerOptions;
   store?: PeakStoreOptions;
   sampler?: TreePeakSampler;
@@ -429,7 +429,7 @@ export interface LearnedReservationDeps {
  */
 export function openLearnedReservation(
   input: { workerClass: WorkerClass; root?: string },
-  deps: LearnedReservationDeps = {},
+  deps: LearnedReservationOptions = {},
 ): LearnedReservation {
   // The store lives beside the ledger it learns for: a caller that moved the ledger moved the store with it.
   const store: PeakStoreOptions = {
@@ -442,7 +442,7 @@ export function openLearnedReservation(
   try {
     estimate = classEstimate(input.workerClass, store);
   } catch (error) {
-    diagnose(store, "estimate", error);
+    recordError(store, "estimate", error);
   }
   const handle = openMemoryReservation({
     workerClass: input.workerClass,
@@ -462,7 +462,7 @@ export function openLearnedReservation(
       try {
         sampler.track(key, pid);
       } catch (error) {
-        diagnose(store, "track", error);
+        recordError(store, "track", error);
       }
     },
     releaseOccupancy(): void {
@@ -472,7 +472,7 @@ export function openLearnedReservation(
           const peak = sampler.finish(key);
           if (peak !== undefined) recordPeak(input.workerClass, peak, store);
         } catch (error) {
-          diagnose(store, "finish", error);
+          recordError(store, "finish", error);
         }
       }
       handle.releaseOccupancy();
@@ -489,7 +489,7 @@ export function openLearnedReservation(
 export function withSyncChildReservation<T>(
   workerClass: WorkerClass,
   run: () => T,
-  deps: LearnedReservationDeps & { enabled?: () => boolean; root?: string; bindSelf?: boolean } = {},
+  deps: LearnedReservationOptions & { enabled?: () => boolean; root?: string; bindSelf?: boolean } = {},
 ): T {
   const enabled = (deps.enabled ?? daemonOwnedProcess)();
   const reservation = enabled ? openLearnedReservation({ workerClass, ...(deps.root ? { root: deps.root } : {}) }, deps) : undefined;
