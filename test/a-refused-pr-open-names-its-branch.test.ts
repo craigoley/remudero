@@ -26,6 +26,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TASK_ID = "W1-T990071";
+const FIXTURE_OWNER = "acme";
 
 function planFor(proof: string): string {
   return [
@@ -147,6 +148,9 @@ test("a build whose filed proof fails at open opens its PR with that proof named
     const result = await withLiveWritesAllowed(() =>
       runTask(TASK_ID, {
         skipGitSync: true,
+        // Named, not read from the checkout's origin: a fresh checkout with no `remote.origin.url` (the
+        // reviewer's sandbox) would otherwise make runTask throw OwnerRepoUnresolvableError before any open.
+        owner: FIXTURE_OWNER,
         planPath: fx.planPath,
         config: fx.config,
         github: OFFLINE_GITHUB,
@@ -171,7 +175,7 @@ test("a build whose filed proof fails at open opens its PR with that proof named
     assert.equal(opened.length, 1, "the open names the failing proof");
     assert.equal(opened[0]?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
     assert.equal(created.length, 1, "the PR create ran for the built branch");
-    assert.deepEqual(created[0]?.slice(0, 4), ["api", "--method", "POST", "repos/craigoley/remudero/pulls"]);
+    assert.deepEqual(created[0]?.slice(0, 4), ["api", "--method", "POST", `repos/${FIXTURE_OWNER}/remudero/pulls`]);
     const body = created[0]?.find((arg) => arg.startsWith("body=")) ?? "";
     assert.match(body, /## Pre-open proof failure/);
     assert.match(body, /NEVER_WRITTEN_MARK/);
