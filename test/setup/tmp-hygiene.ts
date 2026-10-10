@@ -34,6 +34,7 @@ import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-li
 // #7598: pin TMPDIR to its real path before any fixture builds a temp path (macOS /var -> /private/var).
 import "./canonical-tmpdir.js";
 import { installReadMapFromEnv } from "./read-map.js";
+import { admitTestFile } from "../../src/lib/test-file-admission.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -80,6 +81,14 @@ function refuseSelfSyncEscape(): void {
 }
 
 refuseSelfSyncEscape();
+
+// A hand-typed `node --test <many files>` starts cores − 1 file children whatever memory is left (2.8 GB in one worker's
+// run, 2026-10-10); each waits here, before its test file loads, until the headroom holds it. Off Linux, and in any
+// process that is not a runner's own file child, this returns at once (src/lib/test-file-admission.ts).
+if (isMainThread) {
+  const admission = await admitTestFile();
+  process.on("exit", admission.release);
+}
 
 // W1-T6084: record the non-code files this test file reads, when main's full run asks for it
 // (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.

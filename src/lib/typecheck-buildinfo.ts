@@ -25,6 +25,23 @@ export const TYPECHECK_BUILDINFO_NAME = "rmd-typecheck.tsbuildinfo";
 /** The peak a COLD full check is expected to reach: the memory one typecheck slot asks the host for. OBSERVED
  *  2026-10-10: two worker `npm run typecheck` runs held 2.4 and 2.2 GB RSS. An estimate of the run, not a limit. */
 export const TYPECHECK_COLD_PEAK_BYTES = 2.5 * 1024 ** 3;
+/** A warm check's expected peak: about half the cold one (this module's header). An estimate, not a limit. */
+export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES / 2;
+
+/** tsc 7's own checker count when no `--checkers` is passed. */
+export const TSC_DEFAULT_CHECKERS = 4;
+/** The fewest checkers a tight check drops to: MEASURED 2026-10-10 (this repo, cold, 5 runs each), `--checkers 2` peaked
+ *  7–10% below the default's Go heap while one checker and `--singleThreaded` peaked no lower; `GOGC=50` changed nothing. */
+export const TSC_LOW_MEMORY_MIN_CHECKERS = 2;
+
+/** Extra tsc argv for a check expected to peak at `peakBytes` with `headroom` bytes left: none while the headroom holds
+ *  the peak (or reads nothing), else fewer checkers in proportion to the shortfall. Diagnostics are the same; a
+ *  buildinfo stays warm across checker counts (tsc keys it by compiler options, which `--checkers` is not). */
+export function lowMemoryTypecheckArgs(headroom: number | undefined, peakBytes: number): string[] {
+  if (headroom === undefined || !Number.isFinite(headroom) || headroom >= peakBytes) return [];
+  const checkers = Math.max(TSC_LOW_MEMORY_MIN_CHECKERS, Math.floor((TSC_DEFAULT_CHECKERS * Math.max(0, headroom)) / peakBytes));
+  return checkers >= TSC_DEFAULT_CHECKERS ? [] : ["--checkers", String(checkers)];
+}
 
 /** The argv tail of the fleet's full type-check. `buildInfo` undefined is the plain, non-incremental check. */
 export function typecheckArgs(buildInfo: string | undefined): string[] {
