@@ -570,6 +570,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
+  "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
   "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
