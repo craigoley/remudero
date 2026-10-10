@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixWorkerReceipt, harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { fixWorkerReceipt, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import { benchmarkNonDispatchSpawn } from "../src/lib/benchmark-run.js";
 import { ledgerPathFor } from "../src/lib/ledger-path.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";

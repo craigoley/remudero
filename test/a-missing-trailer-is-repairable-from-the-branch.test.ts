@@ -13,7 +13,7 @@ import {
   type MissingTaskTrailerRepair,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-10T12:00:00.000Z");
 const RECENT = "2026-09-10T11:00:00.000Z";

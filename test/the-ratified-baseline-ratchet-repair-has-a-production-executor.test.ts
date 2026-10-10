@@ -18,7 +18,7 @@ import {
   type BuildSweepEffectsDeps,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildSweepEffects as buildEntrypointSweepEffects } from "../src/run-task.js";
 
 const HEAD = "a".repeat(40);

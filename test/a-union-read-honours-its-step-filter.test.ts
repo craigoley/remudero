@@ -16,7 +16,7 @@ import {
   resolveLedgerUnion,
 } from "../src/lib/ledger-union.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T4710 — `resolveLedgerUnion` accepted `LedgerUnionOptions.step` and its raw-line reader never

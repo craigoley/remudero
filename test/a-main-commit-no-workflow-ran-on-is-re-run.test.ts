@@ -14,7 +14,7 @@ import {
   type MainCommitRef,
   type MainRunGapDispatch,
 } from "../src/lib/main-run-gaps.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "./helpers/sweep-test.js";
 
 // ── W1-T4817: a main commit NO workflow ran on ─────────────────────────────────────────────
 //

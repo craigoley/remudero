@@ -30,7 +30,7 @@ import {
   buildProofAmendmentWritePorts,
   checkProofCommand,
   dispatchProofAmendmentWrite,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation

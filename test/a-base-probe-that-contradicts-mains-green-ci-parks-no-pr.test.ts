@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ciContradictedProbeFiles } from "../src/lib/base-reproduction.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.now();
 const MAIN = "b".repeat(40);
@@ -32,8 +32,13 @@ function peer(): OpenPrView {
 
 function harness(rows: Row[], tip: string) {
   const fixed: number[] = [];
+  const judged: string[][] = [];
   const deps: SweepDeps = {
     arm: () => {}, close: () => {}, escalate: () => {}, postReview: async () => {},
+    fixProgressJudge: async (input) => {
+      judged.push(input.currentRed);
+      return { verdict: "continue", reason: "main's CI clears base attribution; diagnose this head" };
+    },
     dispatchFix: (pr) => {
       fixed.push(pr.prNumber);
       rows.push({ step: "fix.dispatch", task_id: pr.taskId, head_sha: pr.headSha, strike: 1 });
@@ -43,13 +48,14 @@ function harness(rows: Row[], tip: string) {
     readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => tip,
     reproduceFailingTestsOnMain: async (_pr, files) => files.map((file) => ({ file, outcome: "fails", duration_ms: 1, cached: false })),
   };
-  return { rows, fixed, sweep: () => runSweep([redPr(), peer()], deps, DEFAULT_SWEEP_POLICY) };
+  return { rows, fixed, judged, sweep: () => runSweep([redPr(), peer()], deps, DEFAULT_SWEEP_POLICY) };
 }
 
 test("a probe failing at a main sha whose CI is green dispatches the fix instead of parking the PR", async () => {
   const h = harness([{ step: "main.health.observed", sha: MAIN, state: "green" }], MAIN);
   await h.sweep();
   assert.deepEqual(h.fixed, [10296]);
+  assert.deepEqual(h.judged, [["test-slow-shard (2/2)"]]);
   const contradicted = h.rows.find((r) => r.step === "sweep.base_reproduction.contradicted");
   assert.equal(contradicted?.main_sha, MAIN);
   const disposed = h.rows.find((r) => r.step === "sweep.disposed" && r.pr_number === 10296);
@@ -64,6 +70,7 @@ test("an earlier probe contradicted by green CI still frees the PR at a newer, n
   ], "d".repeat(40));
   await h.sweep();
   assert.deepEqual(h.fixed, [10296]);
+  assert.deepEqual(h.judged, [["test-slow-shard (2/2)"]]);
 });
 
 test("a probe failing where main's CI is not green still stands the PR down as base red", async () => {
@@ -71,6 +78,7 @@ test("a probe failing where main's CI is not green still stands the PR down as b
     { step: "main.health.observed", sha: NEXT, state: "green" }], MAIN);
   await h.sweep();
   assert.deepEqual(h.fixed, []);
+  assert.deepEqual(h.judged, []);
   assert.equal(h.rows.some((r) => r.step === "sweep.base_reproduction.contradicted"), false);
 });
 

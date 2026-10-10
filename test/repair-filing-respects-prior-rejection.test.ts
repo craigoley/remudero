@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 import { renderDigest, summarize } from "../src/lib/digest.js";
 import { feedbackDir, feedbackEntryPath, readFeedbackEntry, type FeedbackEntry, type FeedbackStatus } from "../src/lib/feedback.js";
-import type { RepairFilingCapture } from "../src/lib/sweep.js";
+import type { RepairFilingCapture } from "./helpers/sweep-test.js";
 import { captureRepairFeedbackWithPriorVerdict, latestPriorVerdictSuppresses } from "../src/run-task.js";
 
 /**

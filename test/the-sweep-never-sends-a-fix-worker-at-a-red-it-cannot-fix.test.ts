@@ -10,7 +10,7 @@ import {
   type CiFailure,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // W1-T4351 — the sweep spent its one thread on ci-log fix workers that could never commit: plan-only
 // PRs (refused "the task declares no files") and reds main itself carried. Each test drives the real
