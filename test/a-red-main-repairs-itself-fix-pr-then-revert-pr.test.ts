@@ -138,7 +138,16 @@ function rig(w: World, lane: MainRepairLane | undefined, ledgerPath: string, ove
     }
     if (path === `repos/${OWNER}/${REPO}/commits/${RED_MERGE}`) {
       if (w.commitUnreadable) throw new Error("HTTP 502");
-      return { files: [{ filename: "test/a-wall-clock-bound-declares-itself.test.ts", additions: 1, deletions: 1 }] };
+      return {
+        parents: [{ sha: GREEN }],
+        files: [{ filename: "test/a-wall-clock-bound-declares-itself.test.ts", additions: 1, deletions: 1 }],
+      };
+    }
+    // A revert needs a PROVEN culprit: the red merge's own run is red and its first parent's is green.
+    const runJobs = /^repos\/craigoley\/remudero\/actions\/runs\/(\d+)\/jobs\?per_page=100$/.exec(path)?.[1];
+    if (runJobs) {
+      const conclusion = runJobs === "1" ? "success" : runJobs === "2" ? "failure" : w.ci;
+      return { jobs: [{ id: Number(runJobs) * 100, name: "ci", status: "completed", conclusion }] };
     }
     const pull = /^repos\/craigoley\/remudero\/pulls\/(\d+)$/.exec(path)?.[1];
     if (pull && w.prs.has(pull)) {

@@ -38757,6 +38757,8 @@ export async function daemonCommand(
     freshMs: policy.values.githubEventWake.checkSettleMs,
     readCiFailures: (rollup) => fetchCiFailuresAsync(target.owner, target.repo, [...(rollup ?? [])]),
     requeueCheck: (failure) => requeueActionsJobAsync(target.owner, target.repo, failure, log),
+    // An attempt at a red that ended without a fix asks this judge for another; the dedupe is the red.
+    judgeRepairProgress: productionFixProgressJudge({ cwd: effectiveRepoRoot, settingsFile: join(effectiveRepoRoot, "settings", "worker.json") }),
     // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
     // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
     // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.

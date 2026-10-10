@@ -10,6 +10,7 @@ import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
+import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
   CHECK_REQUEUE_STEP,
   classifyCiInfrastructureFailure,
@@ -23,6 +24,8 @@ import {
   mainHealthFallbackRuns,
   mainHealthFromRollup,
   mainHealthHeadInconclusive,
+  earlyRedEvidenceRollup,
+  REQUIRED_CHECK_FAIL,
   requeuedCheckKeysFromLedger,
   type CiFailure,
   type MainHealthObservation,
@@ -212,6 +215,9 @@ export interface MainHealthRungDeps {
   ) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
   readMainRunHistory?: (branch: string) => MainHealthRunHistoryEntry[] | undefined | Promise<MainHealthRunHistoryEntry[] | undefined>;
   requeueCheck?: (failure: CiFailure) => boolean | void | Promise<boolean | void>;
+  /** Rules whether another fix attempt at a red is warranted once one ended without a fix. Absent,
+   *  an ended attempt goes straight to the proven-culprit revert check, as before. */
+  judgeRepairProgress?: FixProgressJudge;
   readRequiredChecks?: () => readonly string[];
   /** W1-T5806: the git reads that name the merges a red met in; defaults to GitHub's over `fetch`. */
   mergeReader?: MainHealthMergeReader;
@@ -284,12 +290,82 @@ export interface MainRepairRecord {
   offendingSha: string;
   offendingPr?: number;
   failingChecks: string[];
+  /** The red this repair is for; absent on a row written before the lane recorded one. */
+  red?: MainRedSignature;
   fixDispatched: boolean;
+  /** Every fix run dispatched for this red, oldest first, and how each ended. */
+  attempts: MainRepairAttempt[];
   fixPrUrl?: string;
   fixRefused?: string;
+  /** The fix-progress judge's ruling on the newest ended attempt, if it was asked. */
+  judgement?: { attempt: number; verdict: FixProgressVerdict };
   revertPrUrl?: string;
   revertRefused?: string;
+  /** Why the revert was withheld: the located merge was not proven to be the culprit. */
+  revertWithheld?: string;
   resolved: boolean;
+}
+
+export interface MainRepairAttempt {
+  headSha?: string;
+  outcome?: "opened" | "no_pr";
+  reason?: string;
+}
+
+/**
+ * The red a repair is for, independent of which merge the locator names: the failing checks (a
+ * matrix shard's index folded away) and what the failing logs said — the gates they named BLOCKED
+ * and the tests they reported `not ok`. `detail` is absent when no failing log was readable, and
+ * the signature is then the failing check set alone.
+ */
+export interface MainRedSignature {
+  readonly checks: readonly string[];
+  readonly detail?: readonly string[];
+}
+
+const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const SHARD_INDEX = / \(\d+\/\d+\)$/;
+const BLOCKED_GATE = [/^main-ceiling-drift: (\S+) BLOCKED\b/, /^([A-Za-z0-9_.-]+): BLOCKED\b/];
+const NOT_OK_TITLE = /^\s*not ok\s+\d+\s+-\s+(.+?)\s*$/i;
+
+/** The {@link MainRedSignature} of failing checks `failingChecks` whose logs `failures` were read. */
+export function mainRedSignature(failingChecks: readonly string[], failures: readonly CiFailure[] | undefined): MainRedSignature {
+  const checks = [...new Set(failingChecks.map((name) => name.replace(SHARD_INDEX, "")))].sort();
+  const readable = (failures ?? []).filter((failure) => !failure.logUnavailable && failure.logTail.trim() !== "");
+  if (readable.length === 0) return { checks };
+  const detail = new Set<string>();
+  for (const failure of readable) {
+    for (const raw of failure.logTail.split("\n")) {
+      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const gate = BLOCKED_GATE.map((pattern) => pattern.exec(line)?.[1]).find((name) => name !== undefined);
+      if (gate !== undefined) detail.add(`BLOCKED ${gate}`);
+      const title = NOT_OK_TITLE.exec(line)?.[1];
+      if (title !== undefined) detail.add(`not ok ${title}`);
+    }
+  }
+  return { checks, detail: [...detail].sort() };
+}
+
+/** One red, or not: the same failing checks, and the same log detail wherever both sides read one. */
+export function mainRedSignaturesMatch(a: MainRedSignature, b: MainRedSignature): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return same(a.checks, b.checks) && (a.detail === undefined || b.detail === undefined || same(a.detail, b.detail));
+}
+
+export function describeMainRed(red: MainRedSignature): string {
+  return `${red.checks.join(", ")}${red.detail ? ` [${red.detail.join("; ") || "no gate or test named"}]` : " [no log read]"}`;
+}
+
+function redOfRow(line: Record<string, unknown>): MainRedSignature | undefined {
+  if (!Array.isArray(line.red_checks)) return undefined;
+  return {
+    checks: line.red_checks.map(String),
+    ...(Array.isArray(line.red_detail) ? { detail: line.red_detail.map(String) } : {}),
+  };
+}
+
+function redFields(red: MainRedSignature): Record<string, unknown> {
+  return { red_signature: describeMainRed(red), red_checks: [...red.checks], red_detail: red.detail ? [...red.detail] : null };
 }
 
 /** W1-T6403 — every offending merge this lane has acted on, keyed by its sha. The ledger, not
@@ -302,25 +378,50 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     const record = records.get(sha);
     if (line.step === "main.repair.located") {
       if (!record || record.resolved) {
+        const red = redOfRow(line);
         records.set(sha, {
           offendingSha: sha,
           ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}),
           failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+          ...(red ? { red } : {}),
           fixDispatched: false,
+          attempts: [],
           resolved: false,
         });
       }
       continue;
     }
     if (!record) continue;
-    if (line.step === "main.repair.fix_dispatched") record.fixDispatched = true;
-    else if (line.step === "main.repair.fix_opened") record.fixPrUrl = String(line.pr_url);
-    else if (line.step === "main.repair.fix_refused") record.fixRefused = String(line.reason);
-    else if (line.step === "main.repair.revert_opened") record.revertPrUrl = String(line.pr_url);
+    const attempt = record.attempts.at(-1);
+    if (line.step === "main.repair.fix_dispatched") {
+      // A further attempt at the same red starts clean: the last one's PR or refusal is history.
+      record.fixDispatched = true;
+      record.attempts.push(typeof line.head_sha === "string" ? { headSha: line.head_sha } : {});
+      delete record.fixPrUrl;
+      delete record.fixRefused;
+    } else if (line.step === "main.repair.fix_opened") {
+      record.fixPrUrl = String(line.pr_url);
+      if (attempt) attempt.outcome = "opened";
+    } else if (line.step === "main.repair.fix_refused") {
+      record.fixRefused = String(line.reason);
+      if (attempt) Object.assign(attempt, { outcome: "no_pr", reason: String(line.reason) });
+    } else if (line.step === "main.repair.progress_judged") {
+      const verdict = progressVerdictOfRow(line);
+      if (verdict) record.judgement = { attempt: Number(line.attempt), verdict };
+    } else if (line.step === "main.repair.revert_opened") record.revertPrUrl = String(line.pr_url);
     else if (line.step === "main.repair.revert_refused") record.revertRefused = String(line.reason);
+    else if (line.step === "main.repair.revert_withheld") record.revertWithheld = String(line.reason);
     else if (line.step === "main.repair.resolved") record.resolved = true;
   }
   return records;
+}
+
+function progressVerdictOfRow(line: Record<string, unknown>): FixProgressVerdict | undefined {
+  const reason = String(line.reason ?? "");
+  if (line.verdict === "continue") return { verdict: "continue", reason };
+  if (line.verdict === "change-approach") return { verdict: "change-approach", approach: String(line.approach ?? ""), reason };
+  if (line.verdict === "escalate") return { verdict: "escalate", loop: String(line.loop ?? ""), reason };
+  return undefined;
 }
 
 function pullNumberOf(prUrl: string): string {
@@ -654,6 +755,23 @@ export function escalationFor(observation: MainHealthObservation, branch: string
   };
 }
 
+/** What a revert's culprit is proven against: main's push run history and ci-gate's required checks. */
+interface RepairEvidence {
+  readonly runHistory?: readonly MainHealthRunHistoryEntry[];
+  readonly required: ReadonlySet<string>;
+}
+
+/** One red observation, as the repair lane acts on it. */
+interface RepairContext {
+  readonly observation: MainHealthObservation;
+  readonly sha: string;
+  readonly branch: string;
+  readonly failures: readonly CiFailure[];
+  readonly atMs: number;
+  readonly red: MainRedSignature;
+  readonly evidence?: RepairEvidence;
+}
+
 function isMainHealthIssue(issue: OpenIssue): boolean {
   return /^\*\*Task:\*\*\s+MAIN-HEALTH\s*$/m.test(issue.body ?? "");
 }
@@ -697,6 +815,12 @@ export function buildMainHealthRung(
   // revert PR if main stays red, then close out once main is green on its own head. The ledger rows
   // are the dedupe across daemon restarts; the stall counters below are this process's own.
   let repairedSignature: string | undefined;
+  // The red this observation repairs, and the run history a culprit is proven against: set on each
+  // red observation before the lane runs, so a repair the lane already owns is advanced on them too.
+  let currentRed: MainRedSignature | undefined;
+  let repairEvidence: RepairEvidence | undefined;
+  // Why the lane handed this red back without a revert, for the escalation it then raises.
+  let withheldNote: string | undefined;
   let repairsMayBeActive = true;
   const fixInFlight = new Set<string>();
   const fixProgress = new Map<string, { marker: string; ticks: number; sinceMs: number }>();
@@ -739,9 +863,14 @@ export function buildMainHealthRung(
     }
   };
   /** The fix worker runs for minutes, so it is never awaited here: its outcome lands as a ledger row. */
-  const dispatchFix = (lane: MainRepairLane, request: MainRepairFixRequest): void => {
+  const dispatchFix = (lane: MainRepairLane, request: MainRepairFixRequest, red?: MainRedSignature): void => {
     const at = { offending_sha: request.offendingSha, offending_pr: request.offendingPr };
-    repairRow("main.repair.fix_dispatched", { ...at, head_sha: request.headSha, failing_checks: request.failingChecks });
+    repairRow("main.repair.fix_dispatched", {
+      ...at,
+      head_sha: request.headSha,
+      failing_checks: request.failingChecks,
+      ...(red ? redFields(red) : {}),
+    });
     fixInFlight.add(request.offendingSha);
     void Promise.resolve()
       .then(() => lane.openFixPr(request))
@@ -755,6 +884,27 @@ export function buildMainHealthRung(
       .catch((error) => deps.log("main.repair.error", { ...at, error: String((error as Error)?.message ?? error) }))
       .finally(() => fixInFlight.delete(request.offendingSha));
   };
+  /** The fix request for `offendingSha`, built from what this observation read. */
+  const fixRequestFor = async (
+    observation: MainHealthObservation,
+    sha: string,
+    branch: string,
+    offendingSha: string,
+    offendingPr: number | undefined,
+    failures: readonly CiFailure[],
+    reason: string,
+  ): Promise<MainRepairFixRequest> => ({
+    branch,
+    headSha: sha,
+    offendingSha,
+    ...(offendingPr !== undefined ? { offendingPr } : {}),
+    diffStat: await diffStatOf(offendingSha),
+    failingChecks: [...observation.failingChecks],
+    failingTestTitles: [...(observation.failingTestTitles ?? [])],
+    testFiles: baseReproductionFiles(failures),
+    logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
+    reason,
+  });
   /** A stall reason once the same fix-PR marker has held for the tick and time windows, else undefined. */
   const stallOf = (sha: string, marker: string, atMs: number, what: string): string | undefined => {
     const prior = fixProgress.get(sha);
@@ -767,26 +917,175 @@ export function buildMainHealthRung(
     if (prior.ticks < MAIN_REPAIR_STALL_TICKS || quietMs < MAIN_REPAIR_STALL_MS) return undefined;
     return `${what} made no progress (no new head, no merge) across ${prior.ticks} red observations and ${Math.round(quietMs / 60_000)} minutes`;
   };
+  /** One completed run of `commitSha` that carries ci-gate's required checks and concluded, read from
+   *  its jobs; undefined when main's push run history holds none (a cancelled run concluded nothing). */
+  const concludedRunOf = async (
+    commitSha: string,
+    history: readonly MainHealthRunHistoryEntry[],
+    required: ReadonlySet<string>,
+  ): Promise<{ run: MainHealthRunHistoryEntry; jobs: RollupCheckEntry[]; verdict: MainHealthObservation } | undefined> => {
+    for (const run of mainHealthFallbackCandidates(history).filter((candidate) => candidate.headSha === commitSha)) {
+      const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
+      const jobs =
+        runHistoryCache?.jobsByRunId.get(jobsKey) ??
+        rollupFromJobs(
+          (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+        );
+      runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+      if (judgedRollup(jobs, required).length === 0) continue;
+      const verdict = mainHealthFromRollup(commitSha, jobs, required.size > 0 ? required : undefined, undefined, { cancelledIsPending: true });
+      if (verdict.state === "red" || verdict.state === "green") return { run, jobs, verdict };
+    }
+    return undefined;
+  };
+  /**
+   * A located merge is the culprit only when that is PROVEN: its own completed run is red on this
+   * repair's red, and its first parent's completed run is green. The locator's answer alone is not
+   * proof — on 2026-10-10 it named a different merge on each of seven passes. `unreadable` means a
+   * read failed, which decides nothing: the next observation asks again.
+   */
+  const proveCulprit = async (
+    record: MainRepairRecord,
+    red: MainRedSignature,
+    evidence: RepairEvidence | undefined,
+  ): Promise<{ proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string }> => {
+    const sha = record.offendingSha;
+    if (!evidence?.runHistory) return { proven: false, reason: "main's push run history was not read" };
+    try {
+      const own = await concludedRunOf(sha, evidence.runHistory, evidence.required);
+      if (!own) {
+        return { proven: false, reason: `\`${sha}\` has no completed run carrying the required checks in main's push run history (a cancelled run concluded nothing)` };
+      }
+      if (own.verdict.state !== "red") return { proven: false, reason: `\`${sha}\`'s own completed run ${own.run.runId} is ${own.verdict.state}, not red` };
+      const failingShards = earlyRedEvidenceRollup(own.jobs, own.verdict.failingChecks).filter(
+        (entry) =>
+          !own.verdict.failingChecks.includes(entry.name ?? "") &&
+          REQUIRED_CHECK_FAIL.has(String(entry.conclusion ?? entry.state ?? "").toUpperCase()) &&
+          String(entry.conclusion ?? "").toUpperCase() !== "CANCELLED",
+      );
+      const read = [...judgedRollup(own.jobs, new Set(own.verdict.failingChecks)), ...failingShards];
+      const failures = deps.readCiFailures ? await deps.readCiFailures(read) : undefined;
+      const ownRed = mainRedSignature([...own.verdict.failingChecks, ...failingShards.map((entry) => entry.name ?? "")], failures);
+      if (!mainRedSignaturesMatch(ownRed, red)) {
+        return { proven: false, reason: `\`${sha}\`'s own completed run ${own.run.runId} is red on ${describeMainRed(ownRed)}, not on this repair's ${describeMainRed(red)}` };
+      }
+      const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as { parents?: ReadonlyArray<{ sha?: unknown }> };
+      const parent = commit?.parents?.[0]?.sha;
+      if (typeof parent !== "string") return { unreadable: `GitHub's read of \`${sha}\` named no first parent` };
+      const before = await concludedRunOf(parent, evidence.runHistory, evidence.required);
+      if (!before) {
+        return { proven: false, reason: `its first parent \`${parent}\` has no completed run carrying the required checks (cancelled, or outside the run-history window)` };
+      }
+      if (before.verdict.state !== "green") return { proven: false, reason: `its first parent \`${parent}\`'s completed run ${before.run.runId} is ${before.verdict.state}, not green` };
+      return { proven: true, detail: `\`${sha}\`'s run ${own.run.runId} is red on ${describeMainRed(red)} and its first parent \`${parent}\`'s run ${before.run.runId} is green` };
+    } catch (error) {
+      return { unreadable: String((error as Error)?.message ?? error) };
+    }
+  };
+  /** The fix-progress judge's ruling on whether another attempt at this red is warranted, recorded
+   *  once per ended attempt; undefined when it could not rule this pass (asked again next pass). */
+  const judgeAnotherAttempt = async (record: MainRepairRecord, red: MainRedSignature, sha: string, why: string): Promise<FixProgressVerdict | undefined> => {
+    const attempt = record.attempts.length;
+    if (record.judgement?.attempt === attempt) return record.judgement.verdict;
+    const redList = (r: MainRedSignature) => [...r.checks, ...(r.detail ?? [])];
+    const current = redList(red);
+    const noPr = record.attempts.filter((a) => a.outcome === "no_pr").length;
+    const input: FixProgressInput = {
+      taskId: MAIN_HEALTH_TASK_ID,
+      headSha: sha,
+      strikesSpent: attempt,
+      currentRed: current,
+      rounds: record.attempts.map((a, index) => ({
+        id: `${record.offendingSha}#${index + 1}`,
+        ...(a.headSha ? { dispatchedHead: a.headSha } : {}),
+        ...(a.outcome ? { fixOutcome: a.outcome === "no_pr" ? "NO_PR" : "PR_OPENED" } : {}),
+        ...(a.reason ? { refusal: a.reason } : {}),
+        redBefore: current,
+        redAfter: current,
+        completed: a.outcome !== undefined,
+      })),
+      parkedReason: `red main ${describeMainRed(red)}, located at merge ${record.offendingSha}: ${why}`,
+      signals: {
+        noOpRounds: noPr,
+        identicalRedSets: record.attempts.length,
+        identicalDiffs: 0,
+        oscillating: false,
+        refusedRounds: noPr,
+        incompleteRounds: record.attempts.filter((a) => a.outcome === undefined).length,
+        reviewerOnlyFailurePersists: 0,
+      },
+    };
+    const result = await judgeFixProgress(input, deps.judgeRepairProgress);
+    if (result.verdict === "unavailable") {
+      deps.log("main.repair.progress_unjudged", { offending_sha: record.offendingSha, attempt, reason: result.reason });
+      return undefined;
+    }
+    repairRow("main.repair.progress_judged", {
+      offending_sha: record.offendingSha,
+      head_sha: sha,
+      attempt,
+      verdict: result.verdict,
+      reason: result.reason,
+      ...(result.verdict === "change-approach" ? { approach: result.approach } : {}),
+      ...(result.verdict === "escalate" ? { loop: result.loop } : {}),
+    });
+    return result;
+  };
   /** One step of an existing repair. True while the lane still owns this red; false when it was refused. */
-  const advanceRepair = async (lane: MainRepairLane, record: MainRepairRecord, sha: string, branch: string, atMs: number): Promise<boolean> => {
+  const advanceRepair = async (lane: MainRepairLane, record: MainRepairRecord, ctx: RepairContext): Promise<boolean> => {
+    const { sha, branch, atMs } = ctx;
+    if (record.revertWithheld) {
+      withheldNote = `the repair lane withheld its revert of \`${record.offendingSha}\`: ${record.revertWithheld}`;
+      return false;
+    }
     if (record.revertRefused) return false;
     if (record.revertPrUrl) return (await readRepairPr(record.revertPrUrl))?.state !== "closed";
     if (fixInFlight.has(record.offendingSha)) return true;
     let stalled: string | undefined;
+    let attemptEnded = false;
     if (record.fixPrUrl) {
       const fix = await readRepairPr(record.fixPrUrl);
       if (!fix) return true;
+      attemptEnded = fix.state === "closed";
       stalled =
         fix.state === "closed"
           ? `fix PR ${record.fixPrUrl} closed unmerged while main stayed red`
           : stallOf(record.offendingSha, `${fix.state}:${fix.headSha ?? ""}`, atMs, `fix PR ${record.fixPrUrl}`);
     } else if (record.fixRefused) {
+      attemptEnded = true;
       stalled = `the fix run opened no fix PR: ${record.fixRefused}`;
     } else {
       stalled = stallOf(record.offendingSha, "no-pr", atMs, "the fix run, dispatched before this daemon process started,");
     }
     if (!stalled) return true;
+    const red = record.red ?? ctx.red;
+    // An attempt that ended without a fix is not re-dispatched by rote, and not reverted over by rote:
+    // the fix-progress judge rules whether another attempt at this same red is warranted.
+    if (attemptEnded && deps.judgeRepairProgress) {
+      const ruling = await judgeAnotherAttempt(record, red, sha, stalled);
+      if (!ruling) return true;
+      if (ruling.verdict !== "escalate") {
+        fixProgress.delete(record.offendingSha);
+        const approach = ruling.verdict === "change-approach" ? ` Take this approach: ${ruling.approach}` : "";
+        const reason =
+          `${ctx.observation.reason}. Attempt ${record.attempts.length + 1} at this red: the last one ended without a fix ` +
+          `(${stalled}); the fix-progress judge ruled another attempt warranted: ${ruling.reason}.${approach}`;
+        dispatchFix(lane, await fixRequestFor(ctx.observation, sha, branch, record.offendingSha, record.offendingPr, ctx.failures, reason), red);
+        return true;
+      }
+      stalled = `${stalled}; the fix-progress judge ruled no further attempt: ${ruling.reason}`;
+    }
     const at = { offending_sha: record.offendingSha, offending_pr: record.offendingPr, head_sha: sha };
+    const proof = await proveCulprit(record, red, ctx.evidence);
+    if ("unreadable" in proof) {
+      deps.log("main.repair.proof_unreadable", { ...at, error: proof.unreadable });
+      return true;
+    }
+    if (!proof.proven) {
+      repairRow("main.repair.revert_withheld", { ...at, reason: proof.reason, why_fix_insufficient: stalled, ...redFields(red) });
+      withheldNote = `the repair lane withheld its revert of \`${record.offendingSha}\`: ${proof.reason}`;
+      return false;
+    }
     let outcome: MainRepairRevertOutcome;
     try {
       outcome = await lane.openRevertPr({
@@ -796,19 +1095,21 @@ export function buildMainHealthRung(
         ...(record.offendingPr !== undefined ? { offendingPr: record.offendingPr } : {}),
         failingChecks: record.failingChecks,
         ...(record.fixPrUrl ? { fixPrUrl: record.fixPrUrl } : {}),
-        whyFixInsufficient: stalled,
+        whyFixInsufficient: `${stalled}; culprit proven: ${proof.detail}`,
       });
     } catch (error) {
       outcome = { refused: String((error as Error)?.message ?? error) };
     }
     if ("prUrl" in outcome) {
-      repairRow("main.repair.revert_opened", { ...at, pr_url: outcome.prUrl, fix_pr_url: record.fixPrUrl, reason: stalled });
+      repairRow("main.repair.revert_opened", { ...at, pr_url: outcome.prUrl, fix_pr_url: record.fixPrUrl, reason: stalled, proof: proof.detail });
       return true;
     }
     repairRow("main.repair.revert_refused", { ...at, reason: outcome.refused, conflict_paths: outcome.conflictPaths ?? [] });
     return false;
   };
-  /** Locate the offending merge and open its fix PR, or advance the repair already under way. */
+  /** Locate the offending merge and open its fix PR, or advance the repair already under way. A red
+   *  the lane already owns is the SAME repair whichever merge the locator names this pass: the
+   *  dedupe is the red's signature, never the located sha. */
   const repairRedMain = async (
     lane: MainRepairLane,
     observation: MainHealthObservation,
@@ -817,11 +1118,19 @@ export function buildMainHealthRung(
     failures: readonly CiFailure[],
     atMs: number,
   ): Promise<boolean> => {
+    const red = currentRed ?? mainRedSignature(observation.failingChecks, failures);
+    const ctx: RepairContext = { observation, sha, branch, failures, atMs, red, evidence: repairEvidence };
     const records = mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath));
     const first = observation.firstRedCommit;
     const active = [...records.values()].filter((record) => !record.resolved);
-    const record = first ? active.find((r) => r.offendingSha === first.headSha) : active[active.length - 1];
-    if (record) return advanceRepair(lane, record, sha, branch, atMs);
+    const owning = active.findLast((r) => r.red !== undefined && mainRedSignaturesMatch(r.red, red));
+    const record = first ? (active.find((r) => r.offendingSha === first.headSha) ?? owning) : (owning ?? active[active.length - 1]);
+    if (record) {
+      if (first && record.offendingSha !== first.headSha) {
+        deps.log("main.repair.same_red", { head_sha: sha, offending_sha: record.offendingSha, located_sha: first.headSha, ...redFields(red) });
+      }
+      return advanceRepair(lane, record, ctx);
+    }
     if (!first) {
       repairRow("main.repair.unlocated", {
         head_sha: sha,
@@ -833,27 +1142,17 @@ export function buildMainHealthRung(
       return false;
     }
     const offendingPr = first.pullRequest?.number;
-    const testFiles = baseReproductionFiles(failures);
+    const request = await fixRequestFor(observation, sha, branch, first.headSha, offendingPr, failures, observation.reason);
     repairRow("main.repair.located", {
       head_sha: sha,
       offending_sha: first.headSha,
       offending_pr: offendingPr,
       failing_checks: observation.failingChecks,
-      test_files: testFiles,
+      test_files: request.testFiles,
       method: "first-red-run",
+      ...redFields(red),
     });
-    dispatchFix(lane, {
-      branch,
-      headSha: sha,
-      offendingSha: first.headSha,
-      ...(offendingPr !== undefined ? { offendingPr } : {}),
-      diffStat: await diffStatOf(first.headSha),
-      failingChecks: [...observation.failingChecks],
-      failingTestTitles: [...(observation.failingTestTitles ?? [])],
-      testFiles,
-      logExcerpt: logExcerptOf(failures, observation.failingChecks),
-      reason: observation.reason,
-    });
+    dispatchFix(lane, request, red);
     return true;
   };
   /** Main is green on its own head: every open repair is resolved, and its still-open PRs closed. */
@@ -1107,6 +1406,7 @@ export function buildMainHealthRung(
         metPrCache = { sha: decidedBySha, lookup };
       }
       const metLookup = observation.state === "red" ? metPrCache?.lookup : undefined;
+      repairEvidence = { ...(runHistory ? { runHistory } : {}), required };
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -1135,6 +1435,7 @@ export function buildMainHealthRung(
 
       if (observation.state === "red") {
         resolvedSignature = undefined;
+        withheldNote = undefined;
         const signature = `${sha}:${[...observation.failingChecks].sort().join(",")}`;
         if (signature === escalatedSignature) {
           lastSuccessfulObservationAtMs = startedAtMs;
@@ -1250,11 +1551,37 @@ export function buildMainHealthRung(
         }
         // W1-T6403: a red the lane locates is repaired through PRs; MAIN-HEALTH is raised only once
         // locating, fixing and reverting were all refused.
-        if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, failures ?? [], startedAtMs))) {
+        let repairFailures: readonly CiFailure[] = failures ?? [];
+        if (deps.repair) {
+          // The aggregator's log only points at its failing shard, so the shard's own log is read too:
+          // it names the failing tests and BLOCKED gates the red's signature is made of.
+          const shards = earlyRedEvidenceRollup(dedupeRollupByLatestAttempt([...evidenceRollup]), observation.failingChecks).filter(
+            (entry) =>
+              !observation.failingChecks.includes(entry.name ?? "") &&
+              REQUIRED_CHECK_FAIL.has(String(entry.conclusion ?? entry.state ?? "").toUpperCase()) &&
+              String(entry.conclusion ?? "").toUpperCase() !== "CANCELLED",
+          );
+          let shardFailures: readonly CiFailure[] = [];
+          if (shards.length > 0 && deps.readCiFailures) {
+            try {
+              shardFailures = (await deps.readCiFailures(shards)) ?? [];
+            } catch (error) {
+              deps.log("main.repair.shard_log_unreadable", { head_sha: sha, error: String((error as Error)?.message ?? error) });
+            }
+          }
+          const shardNames = shards.map((entry) => entry.name ?? entry.context ?? "unknown");
+          repairFailures = [...repairFailures, ...shardFailures];
+          currentRed = mainRedSignature(
+            [...observation.failingChecks, ...shardNames],
+            shards.length > 0 && shardFailures.length > 0 ? shardFailures : failures,
+          );
+        }
+        if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, repairFailures, startedAtMs))) {
           repairedSignature = signature;
           lastSuccessfulObservationAtMs = startedAtMs;
           return;
         }
+        if (withheldNote) observation = { ...observation, reason: `${observation.reason}; ${withheldNote}` };
         const issueUrl = await tryEscalateAsync(escalationFor(observation, branch, metLookup?.met), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
