@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import { ciFrictionRecordVerdict } from "../src/lib/ci-friction-gardener.js";
 import {
   defectEventsOf, FIXLANE_REPORT_FILE, FIXLANE_REPORT_STEP, fixLaneGardenSpec, interventionsFromPullRequest, OPERATOR_INTERVENTION_HOURS,
-  type FixLaneSources, type InterventionRead, type OperatorIntervention,
+  readOperatorInterventions, type FixLaneSources, type InterventionRead, type OperatorIntervention,
 } from "../src/lib/fix-lane-gardener.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { gardenSchedule, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
@@ -204,4 +205,50 @@ test("a PR node whose author or commit author is unreadable is unknown, never an
   assert.throws(() => interventionsFromPullRequest(41, { author: { login: "remudero-fleet" }, commits: { nodes: [{ commit: { oid: "9999999999", committedDate: iso(-1), author: null } }] } }, 0),
     /author unreadable/);
   assert.deepEqual(interventionsFromPullRequest(42, { author: null }, 0), [], "a deleted account's PR is not a fleet PR");
+});
+
+/** Runs `fn` with a PATH-stubbed `gh` answering from `routes`; any call no route scripted fails loudly. */
+function withGh<T>(t: TestContext, routes: GhShimRoute[], fn: (calls: () => string[]) => T): T {
+  const shim = ghShim([...routes, { when: "", stderr: "fix-lane test: unexpected gh call", exit: 1 }], { kind: "fix-lane-gh" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const saved = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${saved}`;
+  try { return fn(() => shim.calls()); } finally { process.env.PATH = saved; }
+}
+
+test("the real intervention reader batches its GraphQL reads 25 PRs at a time and counts operator run-unfiled PRs on fix-lane code", (t) => {
+  const since = NOW - 14 * 24 * HOUR;
+  const prs = Array.from({ length: 26 }, (_, i) => i + 1);
+  const fleetNode = { author: { login: "remudero-fleet" }, state: "OPEN", commits: { nodes: [] }, timelineItems: { nodes: [] } };
+  const nodes: Record<string, unknown> = Object.fromEntries(prs.map(pr => [`p${pr}`, fleetNode]));
+  nodes.p26 = { ...fleetNode, commits: { nodes: [{ commit: { oid: "abcdef0123456", committedDate: iso(-2), author: { name: "Craig", user: { login: "craigoley" } } } }] } };
+  const listed = [
+    { number: 90, headRefName: "run-unfiled-1791000000000", author: { login: "craigoley" }, createdAt: iso(-1), files: [{ path: "src/lib/sweep.ts" }, { path: "README.md" }] },
+    { number: 91, headRefName: "run-unfiled-1791000000001", author: { login: "craigoley" }, createdAt: iso(-1), files: [{ path: "README.md" }] },
+    { number: 92, headRefName: "run-unfiled-1791000000002", author: { login: "remudero-fleet" }, createdAt: iso(-1), files: [{ path: "src/run-task.ts" }] },
+    { number: 93, headRefName: "run-W1-T1-1791000000003", author: { login: "craigoley" }, createdAt: iso(-1), files: [{ path: "src/run-task.ts" }] },
+    { number: 94, headRefName: "run-unfiled-1791000000004", author: { login: "craigoley" }, createdAt: iso(-24 * 30), files: [{ path: "src/run-task.ts" }] },
+  ];
+  const read = withGh(t, [
+    { when: "api graphql", stdout: JSON.stringify({ data: { repository: nodes } }) },
+    { when: "pr list", stdout: JSON.stringify(listed) },
+  ], calls => {
+    const r = readOperatorInterventions({ owner: "acme", repo: "remudero" }, prs, since);
+    assert.equal(calls().filter(c => c.startsWith("api graphql")).length, 2, "26 PRs are read in two batches of at most 25");
+    assert.match(calls().find(c => c.startsWith("pr list"))!, /--repo acme\/remudero --state all/);
+    return r;
+  });
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.ok && read.interventions.map(i => [i.pr, i.kind, i.actor]), [[26, "push", "craigoley"], [90, "unfiled-pr", "craigoley"]],
+    "a fleet PR's operator push and an operator run-unfiled PR on fix-lane code; not README-only, fleet-authored, filed or out-of-window PRs");
+  assert.match(read.ok ? read.interventions[1]!.detail : "", /touches fix-lane code \(src\/lib\/sweep\.ts\)$/);
+});
+
+test("the real intervention reader reports a GraphQL error or a missing PR node as unknown, never zero", (t) => {
+  const errored = withGh(t, [{ when: "api graphql", stdout: JSON.stringify({ errors: [{ message: "rate limited" }] }) }],
+    () => readOperatorInterventions({ owner: "acme", repo: "remudero" }, [7], 0));
+  assert.deepEqual(errored, { ok: false, reason: "fix-lane PR interventions unreadable: GraphQL errors or no repository" });
+  const missing = withGh(t, [{ when: "api graphql", stdout: JSON.stringify({ data: { repository: { p7: null } } }) }],
+    () => readOperatorInterventions({ owner: "acme", repo: "remudero" }, [7], 0));
+  assert.deepEqual(missing, { ok: false, reason: "fix-lane PR #7 missing from the GraphQL answer" });
 });
