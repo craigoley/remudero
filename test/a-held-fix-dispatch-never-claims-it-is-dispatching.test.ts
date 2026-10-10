@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FIX_CLAIM_DECLINE_BACKSTOP,
-  fixDispatchHoldAtHead,
   runSweep,
   type OpenPrView,
   type SweepDeps,
@@ -114,18 +113,19 @@ test("a conflicted PR held at the claim-decline backstop never records dispatchi
 
 test("the claim-decline hold lifts once the declined owner worktree is gone, and the claim is re-attempted", async () => {
   const owner = ownerDir();
-  const atBound = fixDispatchHoldAtHead(conflicted(), declines(owner));
-  assert.ok(atBound, "an existing owner worktree holds at the backstop");
+  // Control: while the owner exists the backstop holds.
+  const held = await pass(declines(owner));
+  assert.equal(held.dispatched, 0, "an existing owner worktree holds at the backstop");
   rmSync(owner, { recursive: true, force: true });
-  assert.equal(fixDispatchHoldAtHead(conflicted(), declines(owner)), undefined);
   const after = await pass(declines(owner));
   assert.equal(after.dispatched, 1, "the cleared owner no longer blocks the dispatch");
   assert.equal(after.row.acted, true);
   assert.equal(after.row.blocker_owner, "conflict-rebase");
   assert.deepEqual(after.escalations, []);
-  // A decline that named no path cannot be re-probed, so it still holds.
-  const unnamed = declines(owner).map((row) => ({ ...row, worktree_path: undefined }));
-  assert.match(String(fixDispatchHoldAtHead(conflicted(), unnamed)?.reason), /path unread/);
+  // A decline that named no path cannot be re-probed, so it still holds — and says so.
+  const unnamed = await pass(declines(owner).map((row) => ({ ...row, worktree_path: undefined })));
+  assert.equal(unnamed.dispatched, 0);
+  assert.match(String(unnamed.row.reason), /NOT DISPATCHED this pass: .*path unread/);
 });
 
 test("finalBlocker routes a held dispatch to escalated, below a strikes-exhausted ruling", () => {
