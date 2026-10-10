@@ -15,7 +15,7 @@ import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedge
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
@@ -338,6 +338,10 @@ function causeFromDispatchMode(mode: unknown): CiFrictionCause {
  *  removed so two rounds of the same failure share one signature. `undefined` when neither exists. */
 export function ciFailureSignature(logTail: string): string | undefined {
   const lines = logTail.split("\n");
+  // A test runner's log speaks only through its own failure markers: a line a passing test printed
+  // on purpose (a fixture's "worktree materialization failed", #10392) is never its failure.
+  const runner = testRunnerFailureSignature(lines);
+  if (runner !== undefined) return runner;
   const failing = lines.filter((l) => /not ok|✖|FAIL|fail(?:ed|ure)?\b|Error|refused|BLOCKED/.test(l));
   // The file a failure line names, else (a stack frame under it) the first file the tail names.
   for (const l of failing.length > 0 ? [...failing, ...lines] : []) {
@@ -351,6 +355,43 @@ export function ciFailureSignature(logTail: string): string | undefined {
     .replace(/\d+/g, "N")
     .trim();
   return first ? first.slice(0, 120) : undefined;
+}
+
+/** The signature of a red check whose log is a test runner's but names no failing test. */
+export const RED_WITH_NO_FAILING_TEST = "red with no failing test";
+
+/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
+ *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
+ *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
+  if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
+  const named: string[] = [];
+  let firstNamedAt = -1;
+  for (const [i, b] of bodies.entries()) {
+    const name = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]
+      ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(b)?.[1]
+      ?? /^FLAKE-RETRY: .* — (?!\(no test name)(.+)$/.exec(b)?.[1]
+      ?? /COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
+    if (name !== undefined && !/^failing tests:?$/.test(name.trim())) {
+      if (firstNamedAt < 0) firstNamedAt = i;
+      named.push(name.trim());
+    }
+  }
+  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
+  const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
+  if (file !== undefined) return file;
+  // A failing test named only by its title: the stack frame under the failure names its file. Only
+  // lines FROM the first failure on are read, and never a passing `ok`/`# Subtest` line.
+  if (firstNamedAt >= 0) {
+    for (const b of bodies.slice(firstNamedAt)) {
+      if (/^\s*(?:ok \d+ - |# Subtest: )/.test(b)) continue;
+      const frameFile = testFileRe.exec(b)?.[1];
+      if (frameFile !== undefined) return frameFile;
+    }
+  }
+  const first = named[0]?.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
+  return first ? first.slice(0, 120) : RED_WITH_NO_FAILING_TEST;
 }
 
 /** A refused commit's reason, stripped of its volatile parts, so every round refused the same way
@@ -661,8 +702,74 @@ export function runsOnMergeGroup(on: unknown, jobIf: unknown): boolean {
   return /==\s*['"]merge_group['"]/.test(jobIf);
 }
 
+/** Why a check's declared workflow owner was not resolved, as a suffix for its escalation; undefined when it was not a gap. */
+function workflowGap(search: OwnerSearch, key: string, details: readonly string[]): string | undefined {
+  const family = key.startsWith("check:") ? ownerSearchTerms(key, details).at(-1) : undefined;
+  const gap = family === undefined ? undefined : search.workflowGaps?.().find(entry => entry.family === family);
+  return gap ? `; ${gap.reason}` : undefined;
+}
+
+/** GitHub's matrix expansion, as far as naming checks needs it: the product of each key's list, less
+ *  `exclude`, plus `include` (extending each original combination it does not contradict, else a new one). */
+export function expandWorkflowMatrix(matrix: unknown): Array<Record<string, unknown>> | string {
+  if (matrix === undefined) return [{}];
+  if (!matrix || typeof matrix !== "object" || Array.isArray(matrix)) return "matrix is not a literal mapping";
+  const spec = matrix as Record<string, unknown>;
+  const keys = Object.keys(spec).filter(key => key !== "include" && key !== "exclude");
+  let rows: Array<Record<string, unknown>> = keys.length > 0 ? [{}] : [];
+  for (const key of keys) {
+    const values = spec[key];
+    if (!Array.isArray(values)) return `matrix.${key} is not a literal list`;
+    rows = rows.flatMap(row => values.map(value => ({ ...row, [key]: value })));
+  }
+  const entries = (field: "include" | "exclude"): Array<Record<string, unknown>> | string => {
+    const list = spec[field] ?? [];
+    return Array.isArray(list) && list.every(item => item && typeof item === "object" && !Array.isArray(item))
+      ? list as Array<Record<string, unknown>> : `matrix.${field} is not a literal list of mappings`;
+  };
+  const exclude = entries("exclude");
+  const include = entries("include");
+  if (typeof exclude === "string") return exclude;
+  if (typeof include === "string") return include;
+  rows = rows.filter(row => !exclude.some(entry => Object.entries(entry).every(([key, value]) => row[key] === value)));
+  const originals = rows.length;
+  for (const entry of include) {
+    let extended = false;
+    for (const row of rows.slice(0, originals)) {
+      if (Object.entries(entry).every(([key, value]) => !keys.includes(key) || row[key] === value)) {
+        Object.assign(row, entry);
+        extended = true;
+      }
+    }
+    if (!extended) rows.push({ ...entry });
+  }
+  return rows;
+}
+
+/** The check names one job reports: its `name` rendered over each matrix combination, or why it cannot be. */
+export function workflowJobCheckNames(name: string, matrix: unknown): string[] | string {
+  if (!name.includes("${{")) return [name];
+  const rows = expandWorkflowMatrix(matrix);
+  if (typeof rows === "string") return rows;
+  const names = new Set<string>();
+  for (const row of rows) {
+    let failure: string | undefined;
+    const rendered = name.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression: string) => {
+      const key = /^matrix\.([\w-]+)$/.exec(expression)?.[1];
+      const value = key === undefined ? undefined : row[key];
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+      failure ??= `\${{ ${expression} }} has no literal value`;
+      return "";
+    });
+    if (failure !== undefined) return failure;
+    names.add(rendered);
+  }
+  return names.size > 0 ? [...names] : "matrix expands to no combination";
+}
+
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
- *  Missing paths are absence; failed git reads or unsupported identities refuse the pass. */
+ *  Missing paths are absence and failed git reads refuse the pass; a workflow shape it cannot name, or two
+ *  owners it cannot tell apart, is a gap for that check alone ({@link OwnerSearch.workflowGaps}). */
 export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
   let revision: string | undefined;
   const pinned = (): string => {
@@ -675,50 +782,72 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   };
   const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
   const workflowWitnesses = new Map<string, unknown>();
+  const workflowGaps = new Map<string, string>();
+  let workflowDocs: Array<{ file: string; document: ReturnType<typeof parseDocument> }> | undefined;
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
+    workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
-      const paths = git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
-        .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort();
+      // The revision is pinned, so each workflow is read and parsed once per search, not once per check.
+      workflowDocs ??= git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
+        .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort()
+        .map(file => ({ file, document: parseDocument(git(["show", `${source}:${file}`])) }));
       const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean }> = [];
-      const unsupported: string[] = [];
-      for (const file of paths) {
-        const document = parseDocument(git(["show", `${source}:${file}`]));
-        if (document.errors.length > 0) throw new Error(`ci-friction workflow ${file} at ${source}: ${document.errors.map(error => error.message).join("; ")}`);
+      // A workflow shape this reader cannot name is a gap for the checks it might own, never a failed pass:
+      // `related` gaps are jobs whose unexpandable name could be this check; `unread` ones are whole files.
+      const related: string[] = [];
+      const unread: string[] = [];
+      for (const { file, document } of workflowDocs) {
+        if (document.errors.length > 0) {
+          unread.push(`${file}: ${document.errors.map(error => error.message.split("\n")[0]).join("; ")}`);
+          continue;
+        }
         const workflow = document.toJS();
-        if (!workflow || typeof workflow !== "object" || !workflow.jobs || typeof workflow.jobs !== "object" || Array.isArray(workflow.jobs))
-          throw new Error(`ci-friction workflow ${file} at ${source}: unsupported jobs input`);
+        if (!workflow || typeof workflow !== "object" || !workflow.jobs || typeof workflow.jobs !== "object" || Array.isArray(workflow.jobs)) {
+          unread.push(`${file}: unsupported jobs input`);
+          continue;
+        }
         for (const [jobId, raw] of Object.entries(workflow.jobs)) {
-          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`ci-friction workflow ${file}: unsupported job ${jobId}`);
-          const job = raw as { name?: unknown; if?: unknown; strategy?: { matrix?: Record<string, unknown> } };
-          const name = job.name === undefined ? jobId : job.name;
-          if (typeof name !== "string") throw new Error(`ci-friction workflow ${file}: unsupported name for ${jobId}`);
-          const matrixName = /^(.*?)\s*\(\$\{\{\s*matrix\.([\w-]+)\s*\}\}\/(\d+)\)$/.exec(name);
-          let declared = name;
-          if (name.includes("${{")) {
-            const values = matrixName ? job.strategy?.matrix?.[matrixName[2]!] : undefined;
-            if (!matrixName || !Array.isArray(values) || values.length === 0 || !values.every(value => Number.isSafeInteger(value) && Number(value) > 0)) {
-              const prefix = name.split("${{")[0]!.replace(/[ (/-]+$/, "");
-              if (!prefix || identity(prefix) === identity(family) || identity(family).startsWith(`${identity(prefix)}-`) || identity(jobId) === identity(family)) unsupported.push(`${file}:${jobId}`);
-              continue;
-            }
-            declared = matrixName[1]!;
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            unread.push(`${file}: unsupported job ${jobId}`);
+            continue;
           }
-          if (identity(declared) !== identity(family)) continue;
-          matches.push({ file, jobId, witness: { file, jobId, name, matrix: matrixName ? job.strategy?.matrix : undefined },
+          const job = raw as { name?: unknown; if?: unknown; uses?: unknown; strategy?: { matrix?: unknown } };
+          const name = job.name === undefined ? jobId : job.name;
+          if (typeof name !== "string") {
+            unread.push(`${file}: unsupported name for ${jobId}`);
+            continue;
+          }
+          const declared = workflowJobCheckNames(name, job.strategy?.matrix);
+          if (typeof declared === "string") {
+            const prefix = name.split("${{")[0]!.replace(/[ (/-]+$/, "");
+            if (!prefix || identity(prefix) === identity(family) || identity(family).startsWith(`${identity(prefix)}-`) || identity(jobId) === identity(family))
+              related.push(`${file}:${jobId}: ${declared}`);
+            continue;
+          }
+          // A reusable-workflow caller (`uses:`) never reports its own name: its checks are `<name> / <called job>`.
+          const caller = typeof job.uses === "string";
+          if (!declared.some(check => caller ? family.toLowerCase().startsWith(`${check.toLowerCase()} / `) : identity(check) === identity(family))) continue;
+          matches.push({ file, jobId, witness: { file, jobId, name, matrix: name.includes("${{") ? job.strategy?.matrix : undefined },
             queued: runsOnMergeGroup(workflow.on, job.if) });
         }
       }
-      if (unsupported.length > 0) throw new Error(`ci-friction workflow ownership unsupported for ${family} at ${source}: ${unsupported.join(", ")}`);
       // Two jobs may report one check name: ci.yml's `ci-gate` produces the required context on every PR
       // push and on the merge queue's group commit, while ci-gate.yml's `ci-gate` only re-aggregates on a
       // body `edited` event. The producer the merge queue gates on owns the check; the others are re-run
       // variants of it. Throwing here instead (2026-10-09) failed every ci-friction inventory.
       const queued = matches.filter(match => match.queued);
       const owners = matches.length > 1 && queued.length === 1 ? queued : matches;
-      if (owners.length > 1) throw new Error(`ci-friction workflow ownership ambiguous for ${family} at ${source}: ${owners.map(match => `${match.file}:${match.jobId}`).join(", ")}`);
+      const gap = related.length > 0 ? `workflow ownership unsupported for ${family} at ${source}: ${related.join(", ")}`
+        : owners.length > 1 ? `workflow ownership ambiguous for ${family} at ${source}: ${owners.map(match => `${match.file}:${match.jobId}`).join(", ")}`
+        : owners.length === 0 && unread.length > 0 ? `workflow ownership unreadable for ${family} at ${source}: ${unread.join(", ")}`
+        : undefined;
+      if (gap !== undefined) {
+        workflowGaps.set(family, gap);
+        return undefined;
+      }
       const match = owners[0];
       if (!match) return undefined;
       const variants = matches.filter(other => other !== match).map(other => `${other.file}:${other.jobId}`);
@@ -921,6 +1050,8 @@ export interface CiFrictionInventory {
   handFixState?: { state: "observed" | "unmeasured"; count: number };
   /** Legacy field kept for the overseer's filing receipts: the cause (and rung) this pass acts on. */
   untracked?: CiFrictionCausePrice;
+  /** Checks whose declared workflow owner could not be resolved, and why; each resolved to no owner. */
+  workflowGaps?: Array<{ family: string; reason: string }>;
 }
 
 export interface CiFrictionGardenSources {
@@ -1010,7 +1141,8 @@ export function ciFrictionLadder(input: {
     }
     next = owner
       ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior, ...(reconsideration ? { reconsideration } : {}) } }
-      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : ""), prior: s.prior, holdReason: "no-owner", evidence } };
+      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
+        + (workflowGap(input.ownerSearch, key, details) ?? ""), prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";
   }
   return { next, ladder };
@@ -1064,6 +1196,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "ci-friction",
+    landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch.fileExists),
     classes: CI_FRICTION_GARDEN_CLASSES,
     review: { draft: "filing a new task from priced friction is a judgement call — the machine-filing judge or a person decides the remedy." },
     cheapFingerprint: () => {
@@ -1113,9 +1246,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ownerSearch,
         nowMs: clock.now(),
       });
+      const workflowGaps = ownerSearch.workflowGaps?.() ?? [];
+      if (workflowGaps.length > 0) deps.log("ci-friction.workflow_ownership_unresolved", { gaps: workflowGaps });
       const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
       const preventionSources = { registrations, unavailable: plan.tasks.length - registrations.length };
-      return { priced, rounds, ladder, preventionSources, ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+      return { priced, rounds, ladder, preventionSources, ...(workflowGaps.length > 0 ? { workflowGaps } : {}), ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
     },
     // The ladder decides whether work remains — never a recorded fingerprint alone, which a pass that
     // drew no action or failed to land could have left behind.
@@ -1137,6 +1272,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ladder: inv.ladder,
         hand_fixes: inv.handFixState ?? { state: "unmeasured", count: null },
         priced: inv.priced,
+        ...(inv.workflowGaps ? { workflow_ownership_unresolved: inv.workflowGaps } : {}),
         ...(inv.degraded ? { degraded: inv.degraded } : {}),
       };
     },
@@ -1167,6 +1303,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
       const relPath = relative(ws.root, shardPath);
+      // lint-plan's verdict before the draft reaches disk (#10446); the spec's `landingRefusal` re-reads the landing.
+      const refused = machineShardFilingRefusal(contents, relPath, {
+        pathExists: (path) => existsSync(join(ws.root, path)), pathExistsAtBase: sources.ownerSearch.fileExists,
+      });
+      if (refused !== undefined) throw new Error(`ci-friction gardener: drafted record failed machine-filing admission (${refused})`);
       mkdirSync(shardDir, { recursive: true });
       writeFileSync(shardPath, contents);
 

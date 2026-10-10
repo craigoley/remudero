@@ -8,9 +8,16 @@ export type FixOutcomeAction =
   | { kind: "scope-needed"; testPaths: string[]; paths: string[] }
   | { kind: "hand-off"; reason: string };
 
+// The prompt lists each outcome as "FIX_OUTCOME: FLAKE — <what it means>", and workers echo that shape back.
+// A dash/colon gloss after the keyword is commentary, not a different outcome: before this, every glossed
+// FLAKE/BASE_RED parsed as no outcome, so the rerun and base-verify arms never fired (2026-10-09, #10234).
+const OUTCOME_GLOSS = /[ \t]*(?:—|–|--?|:)[ \t].*$/;
+
 export function anchoredFixOutcome(report: string): FixOutcome | undefined {
   const lines = [...report.matchAll(/^[ \t]*FIX_OUTCOME:[ \t]*(.*)$/gm)];
-  const value = lines.at(-1)?.[1].trim();
+  const raw = lines.at(-1)?.[1].trim();
+  const glossed = raw !== undefined && /^(?:FIXED|BASE_RED|FLAKE|NEEDS_SCOPE[ \t])/.test(raw) && OUTCOME_GLOSS.test(raw);
+  const value = glossed ? raw.replace(OUTCOME_GLOSS, "") : raw;
   if (value === "FIXED" || value === "BASE_RED" || value === "FLAKE") return { kind: value };
   if (value?.startsWith("NEEDS_DESIGN ")) {
     const reason = value.slice("NEEDS_DESIGN ".length).trim();
@@ -19,7 +26,7 @@ export function anchoredFixOutcome(report: string): FixOutcome | undefined {
   if (value?.startsWith("NEEDS_SCOPE ")) {
     const paths = value.slice("NEEDS_SCOPE ".length).split(",").map((path) => path.trim());
     if (paths.every((path) => path.length > 0 && !/^(?:\/|[A-Za-z]:)/.test(path) &&
-      !/[\\\x00-\x1f\x7f]/.test(path) &&
+      !/[\\\s\x00-\x1f\x7f]/.test(path) &&
       !path.split("/").some((part) => part === ".." || part === "." || part === ""))) {
       return { kind: "NEEDS_SCOPE", paths: [...new Set(paths)] };
     }

@@ -617,6 +617,18 @@ BEAT_N=0
 if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)"; fi
 case "$BEAT_N" in ''|*[!0-9]*) BEAT_N=0 ;; esac
 CONSUMER_LINES=""
+# A whole filesystem's root reads its used KB from statfs: `du -sk /mnt/rmd` walked every inode at
+# the data disk's IOPS cap for minutes (2026-10-09). A bind of a subdirectory still walks.
+mount_root_used_kb() {
+  [ "$(findmnt -n -o FSROOT -M "$1" 2>/dev/null)" = "/" ] || return 1
+  df_field "$1" 3
+}
+# ionice -c3 is kept for hosts whose block scheduler is BFQ. It is a NO-OP under `none` and
+# `mq-deadline` (the Azure host's nvme0n1 reads `[none] mq-deadline`), so it never protects that disk:
+# the adaptive schedule below is what keeps the walk off a busy data disk.
+du_idle() {
+  if command -v ionice >/dev/null 2>&1; then ionice -c3 -t nice -n 19 du -sk "$1"; else nice -n 19 du -sk "$1"; fi
+}
 consumer_kb() {
   local name="$1" total=0 seen=0 failed=0 p kb device devices="" paths=""
   shift
@@ -630,7 +642,9 @@ $p
     paths="${paths}
 ${p}"
     seen=1
-    if kb="$(du -sk "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
+    if kb="$(mount_root_used_kb "$p")" && [[ "$kb" =~ ^[0-9]+$ ]]; then
+      total=$((total + kb))
+    elif kb="$(du_idle "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
       case "$kb" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + kb)) ;; esac
     else
       failed=1
@@ -656,7 +670,47 @@ live_consumer_path() {
   source="$(printf '%s\n' "$CONSUMER_MOUNTS" | awk -F '\t' -v p="$path" -v d="$destination" '$2==p || $2==d {print $1; exit}')"
   case "$source" in /*) printf '%s' "$source" ;; *) printf '%s' "$path" ;; esac
 }
+# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct
+# filesystems (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat
+# noise, which decays by a quarter each scheduled beat so a one-off swing does not suppress walks for
+# long. A falling disk drifts every beat and keeps walking; a quiet one stops paying a multi-minute
+# metadata walk at the data disk's IOPS cap (2026-10-09: 94% util ~470 r/s for ~1 min per walk).
+# No state, an unreadable signature or a walk older than the backstop always walks.
+CONSUMER_STATE_FILE="${RMD_ROOT}/state/consumer-probe.state"
+CONSUMER_BACKSTOP_S="${RMD_CONSUMER_BACKSTOP_S:-21600}"
+case "$CONSUMER_BACKSTOP_S" in ''|*[!0-9]*) CONSUMER_BACKSTOP_S=21600 ;; esac
+consumer_state() { awk -F= -v k="$1" '$1==k {print $2; exit}' "$CONSUMER_STATE_FILE" 2>/dev/null; }
+consumer_signature_kb() {
+  local root line device used seen="" total=0 any=0
+  for root in "$RMD_ROOT" "$HOME" "${TMPDIR:-/tmp}" /mnt/rmd /var/lib/containerd /var/lib/docker; do
+    line="$(df -Pk "$root" 2>/dev/null | awk 'NR==2 {print $1, $3}')" || continue
+    device="${line%% *}"; used="${line##* }"
+    [ -n "$device" ] && [[ "$used" =~ ^[0-9]+$ ]] || continue
+    case " $seen " in *" $device "*) continue ;; esac
+    seen="$seen $device"; total=$((total + used)); any=1
+  done
+  [ "$any" = 1 ] && printf '%s' "$total"
+}
+CONSUMER_PROBE=""
 if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
+  CONSUMER_NOW_S="$(date +%s)"
+  CONSUMER_USED_KB="$(consumer_signature_kb)"
+  WALK_USED_KB="$(consumer_state walk_used_kb)"; WALK_EPOCH="$(consumer_state walk_epoch)"
+  PREV_USED_KB="$(consumer_state prev_used_kb)"; NOISE_KB="$(consumer_state noise_kb)"
+  CONSUMER_PROBE="walked"
+  if [[ "$CONSUMER_USED_KB" =~ ^[0-9]+$ ]] && [[ "$WALK_USED_KB" =~ ^[0-9]+$ ]] && [[ "$WALK_EPOCH" =~ ^[0-9]+$ ]] \
+    && [[ "$PREV_USED_KB" =~ ^[0-9]+$ ]] && [[ "$NOISE_KB" =~ ^[0-9]+$ ]]; then
+    step=$((CONSUMER_USED_KB - PREV_USED_KB)); step=${step#-}
+    decayed=$((NOISE_KB * 3 / 4)); NOISE_KB=$(( step > decayed ? step : decayed ))
+    drift=$((CONSUMER_USED_KB - WALK_USED_KB)); drift=${drift#-}
+    if [ "$drift" -le $((2 * NOISE_KB)) ] && [ $((CONSUMER_NOW_S - WALK_EPOCH)) -lt "$CONSUMER_BACKSTOP_S" ]; then
+      CONSUMER_PROBE="unchanged"
+    fi
+  else
+    NOISE_KB=0
+  fi
+fi
+if [ "$CONSUMER_PROBE" = "walked" ]; then
   CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
   CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
     --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
@@ -683,7 +737,301 @@ if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
     "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
+  WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
 fi
+if [ -n "$CONSUMER_PROBE" ]; then
+  CONSUMER_LINES="${CONSUMER_LINES}
+consumer_walk_state=${CONSUMER_PROBE}
+consumer_walk_signature=${CONSUMER_USED_KB:-unknown}"
+  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_CONSUMER_STATE_WRITE:-}" = "1" ]; then
+    mkdir -p "$(dirname "$CONSUMER_STATE_FILE")" 2>/dev/null && printf 'walk_used_kb=%s\nwalk_epoch=%s\nprev_used_kb=%s\nnoise_kb=%s\n' \
+      "${WALK_USED_KB:-}" "${WALK_EPOCH:-}" "${CONSUMER_USED_KB:-}" "${NOISE_KB:-0}" > "$CONSUMER_STATE_FILE" 2>/dev/null
+  fi
+fi
+# The pacing counter advances on every real beat, published or not: advanced only after a confirmed
+# push, a failing push left it on a measuring beat and every 5-minute beat re-walked the disks.
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+  mkdir -p "$(dirname "$BEAT_N_FILE")" 2>/dev/null && printf '%s\n' "$((BEAT_N + 1))" > "$BEAT_N_FILE" 2>/dev/null
+fi
+
+# ── probe: block-device pressure, as deltas between beats ──────────────────────────────────────
+# WHY: on 2026-10-09 the daemon's checkout, node_modules, state and ledger sat on /mnt/rmd, a
+# StandardSSD E10 data disk (500 IOPS, no host caching). It ran at 42% util on average with 100 ms
+# await, and peaked at 90% and 190 ms. NOTHING in the fleet could see this. `sar` saw it, and only
+# when someone thought to ssh in and run it. Free space (above) says nothing about a disk that is
+# full of WAITING. So the beat publishes each backing device's own util, await and tps. The
+# host-resource gardener (src/lib/host-resource-gardener.ts) tiers a sustained saturation into an
+# incident and then an escalation, and names the cgroups that read the most.
+#
+# DELTAS BETWEEN BEATS: /proc/diskstats and cgroup io.stat are counters since boot. Each beat
+# keeps its raw counters in state/heartbeat-io.txt, and the next beat divides the difference by the
+# real elapsed seconds. So every number is an average over the beat interval, and the interval is
+# published too. A first beat, a counter that went backwards (a reboot, or a container's new
+# cgroup) and an unreadable file all publish `unknown` or nothing. None of them publishes a 0.
+#
+# WHICH DEVICES: the whole disks behind `/`, config.root, the scratch root and every bind mount of
+# each running `remudero-*daemon` container. A partition is folded into its disk, because the IOPS
+# cap and the cgroup io.stat key both belong to the disk. A path on a non-block filesystem
+# (overlay, tmpfs) maps to no device and is skipped.
+#
+# READ-ONLY AND CHEAP: a handful of small procfs/sysfs reads, one `docker ps`, one `docker inspect`
+# and one `findmnt` per distinct path. Nothing walks a filesystem.
+#
+# Seams for the fixtures: RMD_DISKSTATS, RMD_SYS_DEV_BLOCK, RMD_CGROUP_ROOT.
+IO_DISKSTATS="${RMD_DISKSTATS:-/proc/diskstats}"
+IO_SYS_DEV_BLOCK="${RMD_SYS_DEV_BLOCK:-/sys/dev/block}"
+IO_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
+IO_STATE_FILE="${RMD_ROOT}/state/heartbeat-io.txt"
+IO_LINES=""
+if [ -r "$IO_DISKSTATS" ] && command -v findmnt >/dev/null 2>&1; then
+  IO_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+  IO_CONTAINERS="$("$IO_RUNTIME" ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null)" || IO_CONTAINERS=""
+  IO_DAEMONS="$(printf '%s\n' "$IO_CONTAINERS" | awk 'NF == 2 && $2 ~ /^remudero-.*daemon$/ {print $2}')"
+  IO_ROLE_PATHS="$(printf 'root\t/\nstate\t%s\nscratch\t%s\n' "$RMD_ROOT" "$SCRATCH_ROOT")"
+  if [ -n "$IO_DAEMONS" ]; then
+    # shellcheck disable=SC2086 # one argument per container name, by design
+    _io_mounts="$("$IO_RUNTIME" inspect $IO_DAEMONS --format '{{range .Mounts}}{{printf "%s\n" .Source}}{{end}}' 2>/dev/null)" || _io_mounts=""
+    IO_ROLE_PATHS="${IO_ROLE_PATHS}
+$(printf '%s\n' "$_io_mounts" | awk 'NF && !seen[$0]++ {print "daemon\t" $0}')"
+  fi
+  # path -> whole-disk major:minor, one `findmnt` per distinct path.
+  IO_DEV_ROLES=""
+  _tab="$(printf '\t')"
+  while IFS="$_tab" read -r _role _path; do
+    [ -n "$_path" ] || continue
+    _mm="$(findmnt -n -o MAJ:MIN -T "$_path" 2>/dev/null | head -n 1 | tr -d ' ')"
+    case "$_mm" in *:*) : ;; *) continue ;; esac
+    [ -e "$IO_SYS_DEV_BLOCK/$_mm" ] || continue
+    if [ -e "$IO_SYS_DEV_BLOCK/$_mm/partition" ]; then
+      _mm="$(cd -P "$IO_SYS_DEV_BLOCK/$_mm/.." 2>/dev/null && cat dev 2>/dev/null | tr -d ' ')"
+      case "$_mm" in *:*) : ;; *) continue ;; esac
+    fi
+    IO_DEV_ROLES="${IO_DEV_ROLES}${_mm} ${_role}
+"
+  done <<EOF_IO_PATHS
+$IO_ROLE_PATHS
+EOF_IO_PATHS
+
+  if [ -n "$IO_DEV_ROLES" ]; then
+    _io_now="$(mktemp "${TMPDIR:-/tmp}/rmd-heartbeat-io.XXXXXX" 2>/dev/null)" || _io_now=""
+  else
+    _io_now=""
+  fi
+  if [ -n "$_io_now" ]; then
+    {
+      printf 'epoch %s\n' "$NOW_EPOCH"
+      printf '%s' "$IO_DEV_ROLES" | awk 'NF == 2 {print "role", $1, $2}'
+      # disk <mm> <name> <reads> <writes> <read ms> <write ms> <io ticks ms>
+      printf '%s' "$IO_DEV_ROLES" | awk -v f="$IO_DISKSTATS" '
+        NF == 2 { want[$1] = 1 }
+        END { while ((getline line < f) > 0) { n = split(line, a, " "); if (n >= 13 && ((a[1] ":" a[2]) in want)) print "disk", a[1] ":" a[2], a[3], a[4], a[8], a[7], a[11], a[13] } }'
+      # cg <cgroup dir> <label> <mm> <rbytes> <wbytes> <rios> <wios>
+      for _io_stat in "$IO_CGROUP_ROOT"/*.slice/*/io.stat "$IO_CGROUP_ROOT"/*.scope/io.stat; do
+        [ -r "$_io_stat" ] || continue
+        _io_dir="$(basename "$(dirname "$_io_stat")")"
+        _io_label="$_io_dir"
+        case "$_io_dir" in
+          docker-*.scope)
+            _io_id="${_io_dir#docker-}"; _io_id="${_io_id%.scope}"
+            _io_name="$(printf '%s\n' "$IO_CONTAINERS" | awk -v id="$_io_id" '$1 == id {print $2; exit}')"
+            if [ -n "$_io_name" ]; then _io_label="$_io_name"; else _io_label="docker-$(printf '%s' "$_io_id" | cut -c1-12)"; fi ;;
+        esac
+        _io_label="$(printf '%s' "$_io_label" | tr -c 'A-Za-z0-9_.-' '_')"
+        awk -v dir="$_io_dir" -v label="$_io_label" '
+          { rb = wb = ri = wi = ""
+            for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "rbytes") rb = kv[2]; else if (kv[1] == "wbytes") wb = kv[2]; else if (kv[1] == "rios") ri = kv[2]; else if (kv[1] == "wios") wi = kv[2] }
+            if (rb != "" && wb != "" && ri != "" && wi != "") print "cg", dir, label, $1, rb, wb, ri, wi }' "$_io_stat" 2>/dev/null
+      done
+    } > "$_io_now"
+
+    IO_PREV="$IO_STATE_FILE"; [ -r "$IO_PREV" ] || IO_PREV=/dev/null
+    # One pass over (previous, current). Rates: util = busy ms / elapsed ms, await = (read ms +
+    # write ms) / completed ios, tps = completed ios / s. Top readers by read bytes per device.
+    _io_rows="$(awk -v daemons=" $(printf '%s' "$IO_DAEMONS" | tr '\n' ' ') " '
+      function r1(x) { return sprintf("%.1f", x) }
+      FILENAME == ARGV[1] {
+        if ($1 == "epoch") pe = $2
+        else if ($1 == "disk") { pr[$2] = $4; pw[$2] = $5; prm[$2] = $6; pwm[$2] = $7; pt[$2] = $8 }
+        else if ($1 == "cg") { k = $2 SUBSEP $4; prb[k] = $5; pwb[k] = $6; pri[k] = $7; pwi[k] = $8; pseen[k] = 1 }
+        next
+      }
+      $1 == "epoch" { ce = $2; dt = (pe != "" && ce > pe) ? ce - pe : 0; next }
+      $1 == "role" { if (!((($2) SUBSEP ($3)) in rs)) { rs[$2 SUBSEP $3] = 1; roles[$2] = (roles[$2] == "" ? $3 : roles[$2] "," $3) }; next }
+      $1 == "disk" {
+        name[$2] = $3; devs = (devs == "" ? $3 : devs "," $3)
+        print "L", "io_" $3 "_roles=" roles[$2]
+        dr = $4 - pr[$2]; dw = $5 - pw[$2]; dms = ($6 - prm[$2]) + ($7 - pwm[$2]); dtk = $8 - pt[$2]
+        if (dt > 0 && ($2 in pt) && dr >= 0 && dw >= 0 && dms >= 0 && dtk >= 0) {
+          u = dtk / (dt * 10); if (u > 100) u = 100
+          ios = dr + dw
+          print "L", "io_" $3 "_util_pct=" sprintf("%d", u + 0.5)
+          print "L", "io_" $3 "_await_ms=" (ios > 0 ? r1(dms / ios) : "0.0")
+          print "L", "io_" $3 "_tps=" r1(ios / dt)
+        } else {
+          print "L", "io_" $3 "_util_pct=unknown"
+        }
+        next
+      }
+      $1 == "cg" {
+        k = $2 SUBSEP $4
+        if (dt <= 0 || !(k in pseen) || !($4 in name)) next
+        drb = $5 - prb[k]; dwb = $6 - pwb[k]; dri = $7 - pri[k]; dwi = $8 - pwi[k]
+        if (drb < 0 || dwb < 0 || dri < 0 || dwi < 0) next
+        if (drb > 0) print "R", name[$4], $3, sprintf("%d", drb / dt + 0.5), r1(dri / dt)
+        if (index(daemons, " " $3 " ") > 0)
+          print "L", "io_cg_" $3 "_" name[$4] "=rbps=" sprintf("%d", drb / dt + 0.5) " wbps=" sprintf("%d", dwb / dt + 0.5) " riops=" r1(dri / dt) " wiops=" r1(dwi / dt)
+        next
+      }
+      END {
+        print "L", "io_devices=" devs
+        print "L", "io_interval_s=" (dt > 0 ? dt : "unknown")
+      }' "$IO_PREV" "$_io_now" 2>/dev/null)"
+    IO_LINES="$(printf '%s\n' "$_io_rows" | awk '$1 == "L" {sub(/^L /, ""); print}')"
+    _io_readers="$(printf '%s\n' "$_io_rows" | awk '$1 == "R"' | sort -k4,4nr | awk '
+      { if (++n[$2] <= 5) top[$2] = (top[$2] == "" ? "" : top[$2] ",") $3 ":" $4 ":" $5 }
+      END { for (d in top) print "io_" d "_readers=" top[d] }' | sort)"
+    [ -n "$_io_readers" ] && IO_LINES="${IO_LINES}
+${_io_readers}"
+    if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+      mkdir -p "$(dirname "$IO_STATE_FILE")" 2>/dev/null && mv -f "$_io_now" "$IO_STATE_FILE" 2>/dev/null
+    fi
+    rm -f "$_io_now" 2>/dev/null
+  fi
+fi
+[ -n "$IO_LINES" ] || IO_LINES="io_source=unreadable"
+
+# ── probe: each daemon container's memory.high and the tuner's last word (deltas between beats) ──
+# WHY: deploy/memory-high-tuner.sh (#10486) moves each daemon's memory.high, visible until now only in
+# archived ledger rows and the launcher journal. On 2026-10-10 core sat AT its ceiling (8379 MiB = 95%
+# of its 8820 MiB memory.max) still refaulting ~1 GB of page cache per 5 min. Per daemon container:
+#   mem_<c>_high_mib / _max_mib       the live cgroup memory.high and memory.max (`max` = no limit)
+#   mem_<c>_policy_high_mib           the policy floor: the tuner's recorded policy_mib, else the
+#                                     launch annotation (no learned value existed at launch), with
+#                                     mem_<c>_policy_source naming which
+#   mem_<c>_current_mib / _anon_mib / _file_mib    memory.current and memory.stat anon / file
+#   mem_<c>_high_events_delta         memory.events `high` over the beat (mem_interval_s)
+#   mem_<c>_refault_file_pages_delta  memory.stat workingset_refault_file over the beat (pages)
+#   mem_<c>_tuner_action/_reason/_ts  the tuner's last adjustment, from <its instance's state_dir,
+#                                     as the launchers resolve the registry>/state/memory-high-tuned-<c>.json,
+#                                     else that ledger's row; `none` only when live high is not above policy.
+# A first beat, a recycled container (new cgroup, counters from zero) or a counter that went
+# backwards publishes `unknown` for the deltas; any unreadable file publishes `unknown`. Never 0.
+#
+# READ-ONLY AND CHEAP: one `docker ps`, one `docker inspect`, a few small cgroup files per container
+# and one bounded tail of the ledger. Nothing walks a filesystem.
+#
+# Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER, RMD_INSTANCE_REGISTRY.
+MEM_REGISTRY="${RMD_INSTANCE_REGISTRY:-${INSTALL_DIR}/.remudero/daemon-instances.yaml}"
+MEM_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
+MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
+MEM_LINES=""
+MEM_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+MEM_CONTAINERS="$("$MEM_RUNTIME" ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | awk 'NF == 2 && $2 ~ /^remudero-.*daemon$/')" || MEM_CONTAINERS=""
+if [ -n "$MEM_CONTAINERS" ]; then
+  # name -> the MemoryHigh annotation the launcher started it with ("uint64 <bytes>").
+  # shellcheck disable=SC2046 # one argument per container name, by design
+  MEM_ANNOTATIONS="$("$MEM_RUNTIME" inspect $(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}') \
+    --format '{{.Name}} {{index .HostConfig.Annotations "org.systemd.property.MemoryHigh"}}' 2>/dev/null)" || MEM_ANNOTATIONS=""
+  MEM_STATE_DIRS="$(awk '{ sub(/[[:space:]]+#.*/, "") } /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { if (c != "" && d != "") print c, d; c = d = ""; next }
+    /^    container_name:/ { c = $2; gsub(/"/, "", c) } /^    state_dir:/ { d = $2; gsub(/"/, "", d) }
+    END { if (c != "" && d != "") print c, d }' "$MEM_REGISTRY" 2>/dev/null)" # container_name state_dir, recycle-container.sh's grammar
+  MEM_PREV_EPOCH=""; MEM_PREV=""
+  if [ -r "$MEM_STATE_FILE" ]; then
+    MEM_PREV_EPOCH="$(awk '$1 == "epoch" {print $2; exit}' "$MEM_STATE_FILE" 2>/dev/null)"
+    MEM_PREV="$(awk '$1 == "cg"' "$MEM_STATE_FILE" 2>/dev/null)"
+  fi
+  MEM_DT=""
+  case "$MEM_PREV_EPOCH" in ''|*[!0-9]*) : ;; *) [ "$NOW_EPOCH" -gt "$MEM_PREV_EPOCH" ] && MEM_DT=$((NOW_EPOCH - MEM_PREV_EPOCH)) ;; esac
+  MEM_SNAPSHOT="epoch ${NOW_EPOCH}"
+  mem_mib() { case "$1" in max) printf 'max' ;; ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' $(($1 / 1048576)) ;; esac; }
+  mem_num() { case "$1" in ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' "$1" ;; esac; }
+  mem_one_line() { printf '%s' "$1" | tr '\n\r' '  ' | cut -c1-400; }
+  while read -r _mem_id _mem_name; do
+    [ -n "$_mem_name" ] || continue
+    _mem_cg=""
+    for _d in "$MEM_CGROUP_ROOT/system.slice/docker-${_mem_id}.scope" "$MEM_CGROUP_ROOT/docker/${_mem_id}"; do
+      [ -r "$_d/memory.high" ] && { _mem_cg="$_d"; break; }
+    done
+    _mem_high=""; _mem_max=""; _mem_cur=""; _mem_anon=""; _mem_file=""; _mem_ev=""; _mem_rf=""
+    if [ -n "$_mem_cg" ]; then
+      _mem_high="$(cat "$_mem_cg/memory.high" 2>/dev/null)"
+      _mem_max="$(cat "$_mem_cg/memory.max" 2>/dev/null)"
+      _mem_cur="$(cat "$_mem_cg/memory.current" 2>/dev/null)"
+      _mem_ev="$(awk '$1 == "high" {print $2; exit}' "$_mem_cg/memory.events" 2>/dev/null)"
+      read -r _mem_anon _mem_file _mem_rf <<EOF_MEM_STAT
+$(awk '$1 == "anon" {a = $2} $1 == "file" {f = $2} $1 == "workingset_refault_file" {r = $2}
+       END {print (a == "" ? "-" : a), (f == "" ? "-" : f), (r == "" ? "-" : r)}' "$_mem_cg/memory.stat" 2>/dev/null)
+EOF_MEM_STAT
+    fi
+    _mem_ev="$(mem_num "$_mem_ev")"; _mem_rf="$(mem_num "$_mem_rf")"
+    MEM_LINES="${MEM_LINES}
+mem_${_mem_name}_high_mib=$(mem_mib "$_mem_high")
+mem_${_mem_name}_max_mib=$(mem_mib "$_mem_max")
+mem_${_mem_name}_current_mib=$(mem_mib "$_mem_cur")
+mem_${_mem_name}_anon_mib=$(mem_mib "$_mem_anon")
+mem_${_mem_name}_file_mib=$(mem_mib "$_mem_file")"
+    # Deltas only against the SAME container id: a recycle starts its counters from zero.
+    _mem_dev="unknown"; _mem_drf="unknown"
+    _mem_prev_line="$(printf '%s\n' "$MEM_PREV" | awk -v n="$_mem_name" -v id="$_mem_id" '$2 == n && $3 == id {print; exit}')"
+    if [ -n "$MEM_DT" ] && [ -n "$_mem_prev_line" ]; then
+      read -r _ _ _ _mem_pev _mem_prf <<EOF_MEM_PREV
+$_mem_prev_line
+EOF_MEM_PREV
+      if [ "$_mem_ev" != unknown ] && [ "$(mem_num "$_mem_pev")" != unknown ] && [ "$_mem_ev" -ge "$_mem_pev" ]; then _mem_dev=$((_mem_ev - _mem_pev)); fi
+      if [ "$_mem_rf" != unknown ] && [ "$(mem_num "$_mem_prf")" != unknown ] && [ "$_mem_rf" -ge "$_mem_prf" ]; then _mem_drf=$((_mem_rf - _mem_prf)); fi
+    fi
+    [ "$_mem_ev" != unknown ] && [ "$_mem_rf" != unknown ] && MEM_SNAPSHOT="${MEM_SNAPSHOT}
+cg ${_mem_name} ${_mem_id} ${_mem_ev} ${_mem_rf}"
+    # The tuner's word: its state file first (written with every adjustment), else the latest ledger row.
+    _mem_root="$(printf '%s\n' "$MEM_STATE_DIRS" | awk -v n="$_mem_name" '$1 == n {print $2; exit}')"
+    _mem_tuned="${_mem_root:-$RMD_ROOT}/state/memory-high-tuned-${_mem_name}.json"
+    _mem_ledger="${_mem_root:-$RMD_ROOT}/state/ledger.ndjson"
+    _mem_policy="unknown"; _mem_policy_src="unknown"; _mem_act="none"; _mem_why="none"; _mem_ts="none"
+    if [ -r "$_mem_tuned" ] && grep -q "\"container\":\"${_mem_name}\"" "$_mem_tuned" 2>/dev/null; then
+      _mem_policy="$(mem_num "$(sed -n 's/.*"policy_mib":\([0-9][0-9]*\).*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)")"
+      [ "$_mem_policy" = unknown ] || _mem_policy_src="tuned_state"
+      _mem_ts="$(sed -n 's/.*"updated_at":"\([^"]*\)".*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)"
+      _mem_why="$(sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)"
+      # mht_record writes the reason as "<action>: <why>".
+      case "$_mem_why" in grow:*|shrink:*|restore:*|floor:*) _mem_act="${_mem_why%%:*}"; _mem_why="${_mem_why#*: }" ;; *) _mem_act="unknown" ;; esac
+    elif [ -r "$_mem_ledger" ]; then
+      _mem_row="$(tail -c 4000000 "$_mem_ledger" 2>/dev/null | grep -F '"step":"host.memory_high.adjusted"' | grep -F "\"container\":\"${_mem_name}\"" | tail -n 1)"
+      if [ -n "$_mem_row" ]; then
+        _mem_act="$(printf '%s' "$_mem_row" | sed -n 's/.*"action":"\([a-z]*\)".*/\1/p')"; [ -n "$_mem_act" ] || _mem_act="unknown"
+        _mem_ts="$(printf '%s' "$_mem_row" | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p')"
+        _mem_why="$(printf '%s' "$_mem_row" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+        _mem_policy="$(mem_num "$(printf '%s' "$_mem_row" | sed -n 's/.*"policy_mib":\([0-9][0-9]*\).*/\1/p')")"
+        [ "$_mem_policy" = unknown ] || _mem_policy_src="ledger"
+      fi
+    fi
+    if [ "$_mem_policy" = unknown ]; then
+      # Never tuned: the launcher started it at the policy value, which rides as its annotation.
+      _mem_ann="$(printf '%s\n' "$MEM_ANNOTATIONS" | awk -v n="/${_mem_name}" '$1 == n && $NF ~ /^[0-9]+$/ {print $NF; exit}')"
+      if [ -n "$_mem_ann" ]; then _mem_policy="$(mem_mib "$_mem_ann")"; _mem_policy_src="launch_annotation"; fi
+    fi
+    _mem_live="$(mem_mib "$_mem_high")"
+    if [ "$_mem_act" = none ] && { [ "$_mem_policy" = unknown ] || [ "$_mem_live" = unknown ] || [ "$_mem_live" = max ] || [ "$_mem_live" -gt "$_mem_policy" ] 2>/dev/null; }; then
+      _mem_act="unknown"; _mem_why="unknown"; _mem_ts="unknown" # above policy (or unmeasured) with no record found
+    fi
+    MEM_LINES="${MEM_LINES}
+mem_${_mem_name}_policy_high_mib=${_mem_policy}
+mem_${_mem_name}_policy_source=${_mem_policy_src}
+mem_${_mem_name}_high_events_delta=${_mem_dev}
+mem_${_mem_name}_refault_file_pages_delta=${_mem_drf}
+mem_${_mem_name}_tuner_action=${_mem_act}
+mem_${_mem_name}_tuner_ts=${_mem_ts:-unknown}
+mem_${_mem_name}_tuner_reason=$(mem_one_line "${_mem_why:-unknown}")"
+  done <<EOF_MEM_CONTAINERS
+$MEM_CONTAINERS
+EOF_MEM_CONTAINERS
+  MEM_LINES="mem_containers=$(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}' | paste -sd, -)
+mem_interval_s=${MEM_DT:-unknown}${MEM_LINES}"
+  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+    mkdir -p "$(dirname "$MEM_STATE_FILE")" 2>/dev/null && printf '%s\n' "$MEM_SNAPSHOT" > "${MEM_STATE_FILE}.tmp.$$" 2>/dev/null &&
+      mv -f "${MEM_STATE_FILE}.tmp.$$" "$MEM_STATE_FILE" 2>/dev/null
+  fi
+fi
+[ -n "$MEM_LINES" ] || MEM_LINES="mem_source=unreadable"
 
 LEDGER_BYTES="unknown"
 if [ -r "$LEDGER" ]; then
@@ -1031,6 +1379,14 @@ if [ -n "$CONSUMER_LINES" ]; then
   PAYLOAD="${PAYLOAD}${CONSUMER_LINES}"
 fi
 
+# Device pressure is APPENDED: absent device keys mean nothing was measured, never an idle disk.
+PAYLOAD="${PAYLOAD}
+${IO_LINES}"
+
+# Memory is APPENDED the same way: absent mem_ keys mean nothing was measured, never an idle cgroup.
+PAYLOAD="${PAYLOAD}
+${MEM_LINES}"
+
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
 # opening anything. Both verdicts ride in it, because the two failures it separates (a dead
 # daemon on a healthy host, a broken install on a healthy host) call for different responses.
@@ -1074,7 +1430,5 @@ git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/
 # Only after a CONFIRMED push, so `since_prev_beat_s` measures published beats rather than
 # attempts. Best-effort: a state file that cannot be written must not fail a beat that landed.
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null && printf '%s\n' "$NOW_ISO" > "$STATE_FILE" 2>/dev/null
-# The beat counter that paces the consumer-size probe; advanced only after a confirmed push too.
-printf '%s\n' "$((BEAT_N + 1))" > "$BEAT_N_FILE" 2>/dev/null
 
 printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"

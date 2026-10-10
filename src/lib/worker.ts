@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -124,6 +125,8 @@ import {
   type WorkerHomeReapResult,
   type WorkerKeychainSummary,
 } from "./worker-home.js";
+import { openMemoryReservation, type HostMemoryLedgerOptions, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
+import { recordShadowMemoryVerdict, type ShadowMemoryPorts } from "./host-memory-shadow.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -1066,6 +1069,10 @@ export interface SpawnWorkerArgs {
     checkVersion?: (bin: string) => string;
     startProxy?: (policy: unknown) => Promise<WorkerEgressProxy>;
   };
+  /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
+  workerClass?: WorkerClass;
+  /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
+  memoryShadow?: Partial<ShadowMemoryPorts>;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2055,6 +2062,13 @@ export function activeWorkerCount(): number {
   return activeWorkerSpawns;
 }
 
+/** What a claim records in the host memory ledger (W1-T7093). Bookkeeping only: nothing reads it to admit work. */
+export interface WorkerOccupancyReservation {
+  workerClass?: WorkerClass;
+  root?: string;
+  ledger?: HostMemoryLedgerOptions;
+}
+
 function claimWorkerOccupancy(): () => void {
   activeWorkerSpawns += 1;
   let released = false;
@@ -2065,14 +2079,50 @@ function claimWorkerOccupancy(): () => void {
   };
 }
 
+/** The host memory reservation a claim opens beside its counter. `openMemoryReservation` never throws, and its
+ * `releaseOccupancy` never throws either, so neither the claim nor its release can fail on the ledger's account. */
+function openOccupancyReservation(reservation: WorkerOccupancyReservation): MemoryReservationHandle {
+  return openMemoryReservation({ workerClass: reservation.workerClass ?? "unclassified", root: reservation.root }, reservation.ledger);
+}
+
+/** The class a spawn records when its caller names none: a disposable review sandbox is a review, a spawn carrying the
+ * implement lane's rule lookup is an implement, and anything else says "unclassified" rather than guessing. */
+function workerClassOf(args: Pick<SpawnWorkerArgs, "workerClass" | "sandboxIntent" | "ruleLookup">): WorkerClass {
+  if (args.workerClass) return args.workerClass;
+  if (args.sandboxIntent === "disposable-review") return "review";
+  return args.ruleLookup ? "implement" : "unclassified";
+}
+
+/** The contained spawn, wrapped so each process it starts is bound to the claim's reservation as (pid, start time). */
+function reservationBoundContainment(
+  containment: SpawnWorkerArgs["containment"],
+  memory: MemoryReservationHandle,
+): NonNullable<SpawnWorkerArgs["containment"]> {
+  const spawn = containment?.spawn ?? spawnDetachedGroup;
+  return {
+    ...containment,
+    spawn: (opts, onStderr, onSpawnError) => {
+      const spawned = spawn(opts, onStderr, onSpawnError);
+      memory.bindRoot(spawned.pid);
+      return spawned;
+    },
+  };
+}
+
 /** Claim one process-wide worker slot for the complete async operation and release it on every settlement, including an
- * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. */
-export async function withWorkerOccupancy<T>(operation: () => Promise<T>): Promise<T> {
+ * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. The claim
+ * also opens a host memory ledger reservation, released only once its whole tree is verified gone (W1-T7093). */
+export async function withWorkerOccupancy<T>(
+  operation: () => Promise<T>,
+  reservation: WorkerOccupancyReservation = {},
+): Promise<T> {
   const release = claimWorkerOccupancy();
+  const memory = openOccupancyReservation(reservation);
   try {
     return await operation();
   } finally {
     release();
+    memory.releaseOccupancy();
   }
 }
 
@@ -2240,6 +2290,8 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const releaseWorkerOccupancy = claimWorkerOccupancy();
+  const memoryReservation = openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+  const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
@@ -2250,6 +2302,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // one worker's advisory status read must not switch another's home.
   const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
+  // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
+  // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
+  recordShadowMemoryVerdict({
+    runId: args.runId,
+    taskId: args.taskId,
+    workerClass: workerClassOf(args),
+    reservationId: memoryReservation.id,
+    root: config.root,
+  }, args.memoryShadow);
   // HOISTED ABOVE PROVIDER SELECTION so the Codex branch cannot return past the HOME redirection the Claude path has had
   // since W1-T18. Below the early return, `codexSpawnEnv` fell back to the operator's real HOME, and a worker shell sourcing
   // an rc file from it re-exported ANTHROPIC_API_KEY past both of Codex's process-boundary exclusions. Computing the path
@@ -2565,8 +2627,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }),
     );
     if (selection.provider === "codex") {
-      const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+      const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+        spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2651,8 +2715,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     routedClaudePreferenceBypass = preferenceBypass;
   }
   if (args.mountProvider === "codex") {
-    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+    const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+      spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2765,7 +2831,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
@@ -2930,7 +2996,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
-    const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
+    const spawnContained = boundContainment.spawn ?? spawnDetachedGroup;
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
@@ -3098,6 +3164,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // Forwarded verbatim, wrapped with the watchdog's observer above when a clock bound is configured. See
             // SpawnWorkerArgs.streamObserver's doc (W1-T942).
             streamObserver,
+            root: config.root,
+            runId: args.runId,
+            taskId: args.taskId,
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -3149,6 +3218,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   }
   } finally {
     releaseWorkerOccupancy();
+    memoryReservation.releaseOccupancy();
   }
 }
 
@@ -3521,6 +3591,9 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    root?: string;
+    runId?: string;
+    taskId?: string;
     stderrChunks?: string[];
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
@@ -3549,6 +3622,8 @@ export async function collectWorkerResult(
   // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
   // synthetic streams (W1-T477).
   const startedAtMs = Date.now();
+  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
 
@@ -3584,6 +3659,7 @@ export async function collectWorkerResult(
 
   try {
     for await (const raw of messages) {
+      observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -3712,6 +3788,7 @@ export async function collectWorkerResult(
         );
       }
     }
+    lineageEnd = "stream-ended";
   } catch (err) {
     // No result envelope was seen ⇒ this is a real failure (bad binary, network, aborted spawn), not an error-subtype result.
     // Re-raise it.
@@ -3733,6 +3810,8 @@ export async function collectWorkerResult(
         ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }),
       };
     }
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 
   const finalStopReason = envelopeStopReason ?? assistantStopReason;

@@ -24,7 +24,7 @@ import {
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { lightPassActionable } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-10-05T12:00:00Z");

@@ -1,0 +1,54 @@
+- id: W1-T7445
+  title: "A DIFF-COVERAGE RED ON THE PR'S OWN LINES TAKES A STRIKE, NOT A BASE REFRESH — decideRedBaseRefresh refreshes whenever main changed a file the diff-coverage report names, but a refresh can never cover a line the PR itself added, so on a hot file it refreshes again every CI cycle and no strike ever runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: #10250 and #10441 sat in zero-strike base refreshes on src/lib/affected-suites.ts until a hand fix"
+  plan_refs: [W1-T2671, W1-T2782, W1-T2789]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-diff-coverage-red-on-the-prs-own-lines-takes-a-strike-not-a-refresh.test.ts]
+  status: queued
+  priority: 1 # operator-2026-10-09: fix-lane loop: #10250 and #10441 sat in zero-strike base refreshes until hand commits; flow value above the serve prewarm
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09 (PR commit lists, `gh api repos/craigoley/remudero/pulls/<n>/commits`):
+    #10250 (run-W1-T6751) added a selector edge to src/lib/affected-suites.ts at 04:40Z and went red on
+    diff-coverage for that new line. The fix lane merged main into it at 05:17:08Z and again at 05:57:49Z, spending
+    no strike either time, and the uncovered line was covered only by a hand commit at 06:29Z. #10441 (run-W1-T7212)
+    had the same shape: a main merge at 19:44:01Z with no worker, then a hand test commit at 19:47Z.
+    MECHANISM: the fix rung's W1-T2671 site in src/run-task.ts (the `decideRedBaseRefresh(currentCiFailures, facts)`
+    call before `strikes++`) asks `decideRedBaseRefresh` (src/lib/sweep.ts). Since W1-T2782,
+    `failingSourceFilesFromCiFailures` turns every diff-coverage `path:line` into a path, and the decision refreshes
+    when the head is behind and the base changed any of those paths. It returns `base_refreshed` with ZERO strikes.
+    The comment there assumes the next pass finds `behindBy` at zero and falls through to a strike. That does not
+    hold on a hot file: affected-suites.ts changes on main several times an hour, and CI takes ~30 min, so every
+    pass sees the head behind again with the same file changed, and refreshes again. A refresh merges main's
+    lines, never the PR's: a line the PR's own diff added stays uncovered whatever main does, so the refresh
+    cannot clear that red. The sweep-level pre-exhaustion release (W1-T2789, the `decideRedBaseRefresh` call
+    in the stale-base release pick in sweep.ts) uses the same decision and inherits the defect.
+    `redBaseRefreshFactsFromRest` (src/run-task.ts) reads only the reversed compare (`behindBy`, the base's
+    changed files), so the decision has no way to tell a PR-added line from a base-touched one.
+  design: |
+    Give `RedBaseRefreshFacts` one more independently observed fact: the head-side line numbers the PR's own diff
+    added, per path, read by `redBaseRefreshFactsFromRest` from `GET repos/<o>/<r>/pulls/<n>/files` (paginated;
+    parse each file's `patch` hunk headers and `+` lines). Absent or unparseable (a file with no `patch`, a failed
+    read) is undefined, never empty, matching the existing "unreadable is not zero" rule of these facts.
+    In `decideRedBaseRefresh`, a diff-coverage source path supports a refresh only when at least one of its
+    uncovered `path:line` entries is NOT among the PR's added lines for that path. When every uncovered line is
+    PR-added, the diff-coverage evidence supports no refresh, and the round goes straight to a strike. Failing TEST
+    paths keep their current behaviour, and so does undefined added-line evidence (the current refresh), so
+    nothing that refreshes correctly today stops doing so. Record the count of PR-added uncovered lines on the
+    existing `fix.base_refresh_checked` row so a skipped refresh is visible in the ledger.
+  acceptance:
+    - claim: "a diff-coverage red whose every uncovered line the PR itself added does not refresh, even when the head is behind and the base changed that file"
+      proof: 'grep: test("W1-T7445: a diff-coverage red on lines the PR added goes to a strike, not a base refresh" in test/a-diff-coverage-red-on-the-prs-own-lines-takes-a-strike-not-a-refresh.test.ts'
+    - claim: "an uncovered line the PR did not add, in a file the base changed, still refreshes, and unreadable added-line evidence keeps today's refresh"
+      proof: 'grep: test("W1-T7445: an uncovered line outside the PR diff still refreshes, and unreadable added lines keep the refresh" in test/a-diff-coverage-red-on-the-prs-own-lines-takes-a-strike-not-a-refresh.test.ts'
+  falsifier: |
+    Leave `decideRedBaseRefresh` matching every diff-coverage path against the base's changed files: the fixture
+    with head behind by 3, base changing src/lib/affected-suites.ts, and the only uncovered line
+    src/lib/affected-suites.ts:412 inside the PR's added lines returns `refresh: true`, and the first test fails.

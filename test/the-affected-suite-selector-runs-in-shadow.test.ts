@@ -94,6 +94,19 @@ test("the claims-check suite is selected for each recorded plan-validation edge"
   }
 });
 
+test("the run-task git-leaf suite is selected for each recorded edge", () => {
+  const suite = "test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts";
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of [
+    "src/run-task.ts",
+    "test/check-proof-grep-cause.test.ts",
+    "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite}`);
+  }
+});
+
 test("W1-T6924: the now-view rederivation suite is selected for each recorded miss edge", () => {
   const suite = "test/now-view-rederives-only-dirtied-tasks.test.ts";
   const edges = [
@@ -118,6 +131,49 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
     files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
   });
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T7212: the prompt-render suite is selected for each recorded miss edge", () => {
+  const suite = "test/prompt-render.test.ts";
+  const edges = [
+    "src/lib/prompt-render.ts",
+    "src/run-task.ts",
+    "test/the-prerequisite-split-contract-has-no-optional-seam.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.reasons.includes(`${suite}: reads a changed file by path`), changed);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
+  });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T7475: the red-branch strike suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts";
+  const edges = ["src/lib/sweep.ts", "test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
 });
 
 test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {

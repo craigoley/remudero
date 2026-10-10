@@ -365,13 +365,32 @@ export interface MachineFilingAdmissionContext {
 
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
+/** What may own a ci-friction cause: code under src/ or scripts/, or — since the gardener resolves a
+ *  check to the workflow job that declares it (#10428) — that workflow file. A workflow-owned remedy
+ *  still parks for the judge; drain routes its build to an operator (W1-T5351). */
+const CI_FRICTION_OWNER = /^(?:src|scripts)\/|^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/** The machine remedy families whose record names the code that owns a cost plus the NEW regression
+ *  test proving it fell: ci-friction (a CI round's cause) and flow-regression (a slowed PR stage, owned
+ *  by the sweep or the CI workflow, flow-gardener.ts's STAGE_OWNER). */
+const CODE_OWNED_REMEDY_ORIGINS = ["ci-friction:", "flow-regression:"] as const;
+
 function isCiFrictionRemedyProposal(task: Task): boolean {
   const files = task.files ?? [];
   return (
-    task.origin?.startsWith("ci-friction:") === true &&
-    files.some((f) => /^(src|scripts)\//.test(f)) &&
-    files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
+    CODE_OWNED_REMEDY_ORIGINS.some((prefix) => task.origin?.startsWith(prefix) === true) &&
+    files.some((f) => CI_FRICTION_OWNER.test(f)) &&
+    files.every((f) => CI_FRICTION_OWNER.test(f) || NEW_TEST_FILE.test(f))
   );
+}
+
+/** A hot-file restructuring (W1-T4803): the hot file its origin names, first, plus the NEW regression
+ *  test proving two pull requests no longer conflict on it, and `.gitattributes` when a merge driver is
+ *  the remedy. The hot file is never a source module (hot-file-gardener.ts's hotFileRemedy). */
+function isHotFileRemedyProposal(task: Task): boolean {
+  const files = task.files ?? [];
+  const hot = task.origin?.startsWith("hot-file:") === true ? task.origin.slice("hot-file:".length) : undefined;
+  return hot !== undefined && files[0] === hot && files.slice(1).every((f) => NEW_TEST_FILE.test(f) || f === ".gitattributes");
 }
 
 function isFlowBlockerRemedyShape(task: Task): boolean {
@@ -399,19 +418,47 @@ function isJudgeReleasedFlowBlockerRemedy(task: Task): boolean {
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
-      (task.depends_on ?? []).length === 0 && isCiFrictionRemedyProposal(task)) return true;
+      (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
-    task.files?.length === 1 &&
-    ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
-      ((task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) &&
-        task.files[0] === "src/lib/affected-suites.ts") ||
-      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
-      (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))
+    (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
+      (task.files?.length === 1 &&
+        ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+          (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
+          (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
+}
+
+/** Where a narrow selector edge repair's regression test lives. Every narrow edge adds a line to
+ *  src/lib/affected-suites.ts that no existing test exercises, so the filer declares this test beside
+ *  it (#10457): #10073, #10250, #10306 and #10441 were each covered by hand. */
+export const SELECTOR_SHADOW_MISS_TEST_PATH = "test/the-affected-suite-selector-runs-in-shadow.test.ts";
+
+/** A selector-shadow edge repair: the selector alone (filed before #10457), or the selector and its
+ *  regression test, in that order, as selectorShadowMissTask writes it. */
+function isSelectorShadowEdgeShape(task: Task): boolean {
+  const files = task.files ?? [];
+  if (files[0] !== "src/lib/affected-suites.ts") return false;
+  if (task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) {
+    return files.length === 1 || (files.length === 2 && files[1] === SELECTOR_SHADOW_MISS_TEST_PATH);
+  }
+  return isSelectorShadowStructuralShape(task);
+}
+
+/** A structural selector repair (W1-T4839): the selector and the NEW regression test it must add. */
+function isSelectorShadowStructuralShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("selector-shadow-structural:") === true && files.length === 2 &&
+    files[0] === "src/lib/affected-suites.ts" && /^test\/affected-suites-selects-[\w.-]+\.test\.ts$/.test(files[1]!);
+}
+
+/** A flake incident (W1-T6406): the one existing test file whose intermittent failure it names. */
+function isFlakeIncidentShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("flake-incident:") === true && files.length === 1 && NEW_TEST_FILE.test(files[0]!);
 }
 
 function req<T>(v: T | undefined, field: string, id: string): T {
@@ -1247,8 +1294,11 @@ export function machineFilingAdmissionViolations(
 
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
-  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task);
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
+  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
+    isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
+  // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
+  const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

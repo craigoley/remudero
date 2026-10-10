@@ -16,7 +16,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import {
   buildOpenPrViews,
   buildSweepEffects,

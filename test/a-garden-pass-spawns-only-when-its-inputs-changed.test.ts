@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +9,9 @@ import { GARDEN_HOURLY_FLAG, GARDEN_PASS_STEP, gardenPacingPath, startGardenOffL
 import { evidenceCoverageStatePath } from "../src/lib/evidence-coverage-gardener.js";
 import { machineJudgeInputs } from "../src/lib/machine-filing-judge.js";
 import { CONFIG_TEND_INTERVAL_MS, configCanariesDue, configCanariesPath } from "../src/lib/config-gardener.js";
-import { gardenEffectsPath, gardenPassDue, gardenStatePath } from "../src/lib/gardener.js";
+import { gardenEffectsPath, gardenPassDue, gardenPendingSignal, gardenPendingWatchPath, gardenStatePath } from "../src/lib/gardener.js";
+import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
+import { readOriginMainSha } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, registeredGardenDueProbe, type GardenBuildContext } from "../src/run-task.js";
 
@@ -151,4 +154,29 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
   assert.equal(judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
   writeFileSync(join(stateDir, "operator-releases.json"), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));
   assert.equal(judge.due!(), true, "an operator release is judged now");
+});
+
+test("the daemon's export garden paces a pending PR on the board's open-PR snapshot", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-due-pending-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const prUrl = "https://github.com/o/r/pull/9";
+  const ctx = { config: { root: dir }, repoRoot: process.cwd(), owner: "o", repo: "r", log: () => {}, raiseDuplicate: () => "" } as unknown as GardenBuildContext;
+  const pass = await buildRegisteredGarden("export", ctx);
+  writeFileSync(gardenStatePath(stateDir, "export"), JSON.stringify({ classes: { "delete-unreferenced-export": { alpha: 3, beta: 1 } }, lastCheap: "none",
+    pending: { prUrl, actionClass: "delete-unreferenced-export", baseline: { trials: 0, successes: 0 } } }));
+  const snapshot = (head: string) => {
+    const path = boardOpenSnapshotPath(dir, "o", "r");
+    mkdirSync(dirname(path), { recursive: true });
+    const rows = [{ number: 9, url: prUrl, state: "OPEN", headRefName: "b", headRefOid: head, body: "", title: "t", updatedAt: `u-${head}`, autoMergeRequest: null }];
+    writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: new Date().toISOString(), rows }));
+    return gardenPendingSignal(prUrl, rows, readOriginMainSha(process.cwd()));
+  };
+  const now = Date.now();
+  writeFileSync(gardenPendingWatchPath(stateDir, "export"), JSON.stringify({ prUrl, signal: snapshot("aaa"),
+    lastPassAt: new Date(now).toISOString(), quietSince: new Date(now - 3_600_000).toISOString() }));
+  assert.equal(pass.due!(), false, "a quiet pending PR whose snapshot row has not moved is not due");
+  snapshot("bbb");
+  assert.equal(pass.due!(), true, "a moved head in the daemon's own snapshot makes it due");
 });

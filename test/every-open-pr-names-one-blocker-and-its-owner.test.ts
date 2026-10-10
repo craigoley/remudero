@@ -6,7 +6,7 @@ import {
 import {
   DEFAULT_SWEEP_POLICY, DISPOSITION_RULES, deriveDisposition, runSweep,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
@@ -36,8 +36,8 @@ test("W1-T5537: every disposition row declares a blocker from the closed set", (
     }
   };
   census(DISPOSITION_RULES);
-  assert.equal(PR_BLOCKERS.length, 14);
-  assert.equal(new Set(PR_BLOCKERS).size, 14);
+  assert.equal(PR_BLOCKERS.length, 15);
+  assert.equal(new Set(PR_BLOCKERS).size, 15);
   assert.deepEqual(Object.keys(PR_BLOCKER_OWNERS).sort(), [...PR_BLOCKERS].sort());
   assert.throws(() => census([{ disposition: "wait" }]), /row 0 \(wait\).*undefined/);
   assert.throws(() => census([{ disposition: "wait", blocker: "invented" }]), /invented/);
@@ -54,7 +54,12 @@ test("W1-T5537: one disposition splits into the blocker each PR actually waits o
   ];
   for (const [over, blocker, owner] of cases) {
     const view = pr(over);
-    const before = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+    // W1-T7096: the sweep's unwired stand-in rules a PR at the former ceiling a loop; the pure derivation is
+    // given that same ruling so both readers see one decision.
+    const ruled = (view.priorStrikes ?? 0) >= DEFAULT_SWEEP_POLICY.strikeCap
+      ? { ...view, progressEscalation: { loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound", judged: false } }
+      : view;
+    const before = deriveDisposition(ruled, DEFAULT_SWEEP_POLICY, NOW);
     const d = deps();
     const summary = await runSweep([view], d);
     const [row] = disposed(d);

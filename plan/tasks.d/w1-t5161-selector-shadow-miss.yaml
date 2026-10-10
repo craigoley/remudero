@@ -11,17 +11,20 @@
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/preflight-progress-streaming.test.ts"
-  files: [src/lib/affected-suites.ts]
-  note: "W1-T4439 first observed a narrow miss on coverage run 36895766446 for PR #8440 at 3a8347105317948ed193a9cb5a06eed151faac71: scripts/coverage-merge-ratchet.mjs, src/lib/ci-parity.ts, test/merge-lcov.test.ts, test/the-coverage-entry-shards-the-way-ci-does.test.ts -> test/preflight-progress-streaming.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 36895766446 for PR #8440 at 3a8347105317948ed193a9cb5a06eed151faac71: scripts/coverage-merge-ratchet.mjs, src/lib/ci-parity.ts, test/merge-lcov.test.ts, test/the-coverage-entry-shards-the-way-ci-does.test.ts -> test/preflight-progress-streaming.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/preflight-progress-streaming.test.ts for each edge: diff-coverage blocks an edge no test exercises."
   acceptance:
     - claim: "the narrow selector includes test/preflight-progress-streaming.test.ts when this edge is exercised"
       proof: "grep: test/preflight-progress-streaming\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/preflight-progress-streaming.test.ts for each recorded edge"
+      proof: "grep: test/preflight-progress-streaming\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.89
+    confidence: 0.92
     reasons:
-      - "The filed task names a specific missed test selector edge, and its declared file is the selector source named in the acceptance criterion."
-      - "The supplied gates state shows filingTime true and no concerning gate result. No actual change view was supplied, so this verdict assesses the filed task rather than unseen code."
-    judged_at: "2026-10-01T23:48:25.825Z"
-    pin: "f1dcefff211be82310101d143150b78ab77d57e955711994bd621a65b3262e84"
+      - "The filed plan scopes a selector-edge repair and regression coverage to two matching implementation/test files."
+      - "The supplied family track record reports 8 merged and 0 declined tasks, supporting established practice."
+      - "The filing-time gates report no concerning condition, and the stated scope identifies no operator-only decision or escalation-triggering action."
+    judged_at: "2026-10-09T23:04:13.055Z"
+    pin: "a881634b1191b820b1b5676cb1b5407f619173e6d4e23374e9299a685640f521"

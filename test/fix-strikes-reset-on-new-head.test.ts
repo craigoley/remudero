@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deriveStrikeHistory, priorStrikesFor, runFixRung } from "../src/run-task.js";
+import { deriveStrikeHistory, priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
 import type { WorkerResult } from "../src/lib/worker.js";

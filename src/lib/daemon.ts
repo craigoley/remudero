@@ -1121,6 +1121,9 @@ export interface DaemonDeps {
    *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
    *  Optional — omitted, this tick performs no artifact sweep. */
   sweepReclaimableArtifacts?: () => void;
+  /** W1-T7093: update this instance's shared host-memory reservation tree on every heartbeat.
+   *  Bookkeeping only; a failure is logged and never delays or gates work. */
+  sweepHostMemoryReservations?: () => void;
   /** Called on an idle tick whose census names at least one recoverable-class blocker — see
    *  {@link StarvationCensus}. Fires at most once per episode, and dispatch is already idle by then, so
    *  the hook is a pure notification. The real command wires an escalation with its own cross-boot
@@ -2013,6 +2016,16 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
+          // not merely by worker start/release calls. Best-effort, after the liveness row so a
+          // slow or failed ledger walk cannot erase this tick's heartbeat.
+          if (deps.sweepHostMemoryReservations) {
+            try {
+              deps.sweepHostMemoryReservations();
+            } catch (e) {
+              log("daemon.host_memory_reservation_sweep.error", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           // W1-T3378: a `review-PR*` worktree a SIGKILL stranded is never revisited by anything
           // in-process (materializeReviewWorktree/withMaterializedWorktree's teardown are both
           // `finally`-only), so this out-of-process sweep is what actually reclaims it. Best-
@@ -2786,6 +2799,16 @@ export async function runDaemon(
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     }
   };
+  // W1-T4939: every exit (operator stop, freshness restart, error, max) passes through `summary`, and the
+  // daemon restarts on merges long before most hourly windows close, so the open window is written out as a
+  // partial row rather than lost with the process. A window with no idle minute writes nothing: a restart
+  // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
+  const flushIdleLaneWindow = (): void => {
+    const atMs = idleLaneClock.now();
+    const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
+    idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
+    if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
+  };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
   const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
@@ -2808,6 +2831,9 @@ export async function runDaemon(
         tier: verdict.result.tier,
         trailing_merged_count: verdict.result.trailingMergedCount,
         trailing_opened_count: verdict.result.trailingOpenedCount,
+        base_wip_limit: verdict.result.baseWipLimit ?? verdict.result.wipLimit,
+        stuck_owned_count: verdict.result.stuckOwnedCount ?? 0,
+        headroom_fraction: verdict.result.headroomFraction ?? null,
         poll_interval_ms: pollIntervalMs,
       });
     } else if (verdict.kind === "memory") {
@@ -3040,6 +3066,7 @@ export async function runDaemon(
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
       });
     }
+    flushIdleLaneWindow();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;

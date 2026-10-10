@@ -18,7 +18,7 @@ import {
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-03T01:33:05Z");
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

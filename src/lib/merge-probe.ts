@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
-import { canonicalBuildInfo, publishBuildInfo, seedBuildInfo } from "./typecheck-buildinfo.js";
+import { canonicalBuildInfo, hasUsableTypecheckBuildInfo, publishBuildInfo, seedBuildInfo } from "./typecheck-buildinfo.js";
+import { acquireTestSlotAsync, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -59,6 +60,8 @@ export async function probeMerge(input: { headSha: string; mainSha: string; git:
 }
 
 /** PR numbers a `Stacked on #N` line names, as data only. */
+const dirtyFirst = (pr: OpenPrView): number => (pr.mergeableState === "dirty" ? 0 : 1);
+
 export function stackedOnNumbers(body: string | undefined): number[] {
   const line = (body ?? "").split(/\r?\n/).find((candidate) => /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\b/i.test(candidate));
   return line ? [...new Set([...line.matchAll(/#(\d+)/g)].map((m) => Number(m[1])))] : [];
@@ -101,7 +104,9 @@ export async function probeOpenPrMerges(
     );
     const targets = eligible
       .filter((pr) => !seen.has(`${pr.headSha}:${mainSha}`))
-      .sort((a, b) => a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
+      // A PR GitHub already reads as dirty is the one whose conflict evidence the sweep is waiting on,
+      // so it takes a slot before clean-looking PRs that merely changed since the last main.
+      .sort((a, b) => dirtyFirst(a) - dirtyFirst(b) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
     for (const pr of targets) {
       await git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
@@ -155,6 +160,7 @@ export type MergedTypecheckPorts = {
   spawn?: TypecheckSpawn;
   /** The ref the head is merged with. */
   mainRef?: string;
+  testSlot?: Omit<TestSlotOptions, "sleep">;
 };
 
 /** W1-T6155: the harness's OWN typescript, found from this module's location — never from a worktree, whose
@@ -190,12 +196,12 @@ export function mergedTypecheckArgv(tsc: string, buildInfo: string, config: stri
 }
 
 function harnessTypecheck(
-  tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo,
+  tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo, testSlot?: Omit<TestSlotOptions, "sleep">,
 ): (dir: string, nodeModules: string) => Promise<TypecheckRun> {
   let n = 0;
   let previous = state.canonical;
   let published = false;
-  return (dir) => new Promise((resolveRun) => {
+  return async (dir) => {
     n += 1;
     const home = join(scratch, `home-${n}`);
     mkdirSync(home);
@@ -204,32 +210,45 @@ function harnessTypecheck(
     // W1-T5658's check at about half the cold peak memory: tsc reuses only the results whose file hashes still match.
     const self = { root: dir, buildInfo: join(scratch, `typecheck-${n}.tsbuildinfo`) };
     if (previous !== undefined) seedBuildInfo(previous, self, state.tsVersion);
-    let output = "";
-    let timedOut = false;
-    let settled = false;
-    const finish = (status: number | null, extra = "") => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (status !== null && !timedOut) {
-        previous = self;
-        if (!published && state.canonical !== undefined) {
-          published = true;
-          publishBuildInfo(self, state.canonical, state.tsVersion);
+    const slot = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion)
+      ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", testSlot);
+    try {
+      return await new Promise<TypecheckRun>((resolveRun) => {
+        let output = "";
+        let timedOut = false;
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (status: number | null, extra = "") => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (status !== null && !timedOut) {
+            previous = self;
+            if (!published && state.canonical !== undefined) {
+              published = true;
+              publishBuildInfo(self, state.canonical, state.tsVersion);
+            }
+          }
+          resolveRun({ status, output: output + extra, timedOut });
+        };
+        try {
+          const child = spawnChild(process.execPath, mergedTypecheckArgv(tsc, self.buildInfo, config), {
+            cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
+          });
+          timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
+          const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };
+          child.stdout?.on("data", take);
+          child.stderr?.on("data", take);
+          child.on("error", (e) => finish(null, `\nspawn failed: ${e.message}`));
+          child.on("close", (code) => finish(code));
+        } catch (error) {
+          finish(null, `\nspawn failed: ${String(error)}`);
         }
-      }
-      resolveRun({ status, output: output + extra, timedOut });
-    };
-    const child = spawnChild(process.execPath, mergedTypecheckArgv(tsc, self.buildInfo, config), {
-      cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: proofChildEnv(home),
-    });
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
-    const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };
-    child.stdout?.on("data", take);
-    child.stderr?.on("data", take);
-    child.on("error", (e) => finish(null, `\nspawn failed: ${e.message}`));
-    child.on("close", (code) => finish(code));
-  });
+      });
+    } finally {
+      slot?.release();
+    }
+  };
 }
 
 /** Where a worktree's `node_modules` may resolve and still be read as type DATA: inside the worktree, the harness's own
@@ -285,7 +304,7 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     scratch = root;
     const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn, {
       canonical: canonicalBuildInfo(wt), tsVersion: harness.version,
-    });
+    }, ports.testSlot);
     const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
       const tar = join(root, `${name}.tar`);
       const dir = join(root, name);

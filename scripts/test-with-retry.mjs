@@ -52,7 +52,7 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -375,8 +375,22 @@ export function shouldAttemptRetry({ budgetSeconds, firstPassElapsedMs }) {
   return remainingSeconds >= firstPassSeconds;
 }
 
+/**
+ * W1-T7125: the label after `FLAKE-RETRY: <headline> — `. Names are normally joined with ", ", but a
+ * test title may itself contain ", " -- a consumer splitting on ", " would read one title as two
+ * incidents. So whenever the plain join would be ambiguous (a name containing ", ", or a label
+ * that would start with "[" and be mistaken for the array form) the names are written as a JSON
+ * string array instead. Consumers parse a "[...]" label as that array and still split the plain
+ * form, so logs written before this change stay readable.
+ */
+export function formatFlakeLabel(names) {
+  if (names.length === 0) return "(no test name parsed from output)";
+  const plain = names.join(", ");
+  return names.some((n) => n.includes(", ")) || plain.startsWith("[") ? JSON.stringify(names) : plain;
+}
+
 function recordFlakeEvidence(headline, names) {
-  const label = names.length > 0 ? names.join(", ") : "(no test name parsed from output)";
+  const label = formatFlakeLabel(names);
   const line = `FLAKE-RETRY: ${headline} — ${label}`;
   console.log(line);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
@@ -407,7 +421,7 @@ function rebuildCoverage(rawDir, args) {
     const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), ...options });
     collector.coverageDirectory = resolve(rawDir);
     const summary = collector.summary();
-    if (summary.files.length === 0) throw new Error("no source coverage remains after dropping empty files");
+    if (summary.files.length === 0) throw new Error("no source coverage remains after dropping unreportable files");
     writeFileSync(output, renderCoverageSummary(summary));
     return 0;
   } catch (error) {
@@ -419,8 +433,18 @@ function rebuildCoverage(rawDir, args) {
 function emptyCoverageFailure(cmd, args, output) {
   const count = (label) => Number(output.match(new RegExp(`^# ${label} (\\d+)$`, "m"))?.[1]);
   return isNodeCommand(cmd) && args.includes("--test") && args.includes("--experimental-test-coverage") &&
-    /ERR_OPERATION_FAILED[^\n]*coverage file is empty:/.test(output) &&
+    /ERR_OPERATION_FAILED[^\n]*(?:coverage file is empty:|failed to parse coverage file )/.test(output) &&
     count("tests") > 0 && count("tests") === count("pass") && count("fail") === 0 && count("cancelled") === 0;
+}
+
+// A child killed mid-write leaves a truncated report; it moves beside rawDir as evidence, never deleted.
+function unparseableCoverage(path) {
+  try {
+    JSON.parse(readFileSync(path, "utf8"));
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
@@ -429,12 +453,18 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
     for (const entry of readdirSync(rawDir, { withFileTypes: true })) {
       if (!entry.isFile() || !/^coverage-\d+-\d{13}-\d+\.json$/.test(entry.name)) continue;
       const path = join(rawDir, entry.name);
-      if (statSync(path).size !== 0) continue;
-      unlinkSync(path);
-      dropped.push(path);
+      if (statSync(path).size === 0) {
+        unlinkSync(path);
+        dropped.push(path);
+      } else if (unparseableCoverage(path)) {
+        const aside = `${resolve(rawDir)}-unparseable`;
+        mkdirSync(aside, { recursive: true });
+        renameSync(path, join(aside, entry.name));
+        dropped.push(`${path} (truncated, kept in ${aside})`);
+      }
     }
   } catch (error) {
-    console.error(`test-with-retry: could not drop empty coverage files: ${error.message}`);
+    console.error(`test-with-retry: could not drop empty or truncated coverage files: ${error.message}`);
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
   if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
@@ -448,7 +478,7 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
     if (code !== 0) recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
   }
   if (code === 0) {
-    const line = `FLAKE-RETRY-RECOVERED: dropped empty coverage file(s) — ${dropped.join(", ")}`;
+    const line = `FLAKE-RETRY-RECOVERED: dropped unreportable coverage file(s) — ${dropped.join(", ")}`;
     console.log(line);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
   }

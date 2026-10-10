@@ -24,7 +24,7 @@ import {
   pushFixRoundPrechecked,
   runFixRung,
   startShellLessMergeConflictMerge,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -350,3 +350,33 @@ function fakeReview(state: "success" | "failure", headSha: string): ReviewVerdic
 function issues(): IssueGateway {
   return { create: () => "https://github.com/acme/remudero/issues/1", listOpen: (): OpenIssue[] => [], comment: () => {} };
 }
+
+test("a leased fix push the remote outran is re-applied onto the moved tip and pushed once more", async () => {
+  const log: Array<{ step: string } & Record<string, unknown>> = [];
+  const pushes: Array<{ sha?: string; prior?: string }> = [];
+  const push = (_wt: string, _branch: string, sha?: string, prior?: string) => {
+    pushes.push({ sha, prior });
+    if (pushes.length === 1) throw new FixRoundPushError("run-error", undefined, "leased push of run-x expected mine, observed theirs");
+  };
+  const reapplyPorts = {
+    remoteTip: async () => "theirs",
+    headSha: async () => "mine",
+    isAncestor: async () => true,
+    merge: async () => ({ merged: true as const, head: "merged" }),
+  };
+  const ports = { conflictMarkers: () => [], changedFiles: () => [], select: () => ({ suites: [] }) } as never;
+  await pushFixRoundPrechecked((step, extra) => log.push({ step, ...(extra ?? {}) }), "/unused", "run-x", "mine", ports, push, "base",
+    { ports: reapplyPorts });
+  assert.deepEqual(pushes, [{ sha: "mine", prior: "base" }, { sha: "merged", prior: "theirs" }]);
+  assert.equal(log.filter((row) => row.step === "fix.round_reapplied").length, 1);
+
+  // A second refusal is not re-applied again, and a census refusal (the round's own red) never is.
+  const always = () => { throw new FixRoundPushError("run-error", undefined, "still outran"); };
+  await assert.rejects(pushFixRoundPrechecked(() => {}, "/unused", "run-x", "mine", ports, always, "base", { ports: reapplyPorts }),
+    /still outran/);
+  let reads = 0;
+  const census = () => { throw new FixRoundPushError("run-error", { text: "census", censuses: ["x"], offeredBaselines: [] }, "census"); };
+  await assert.rejects(pushFixRoundPrechecked(() => {}, "/unused", "run-x", "mine", ports, census, "base",
+    { ports: { ...reapplyPorts, remoteTip: async () => { reads += 1; return "theirs"; } } }), /census/);
+  assert.equal(reads, 0, "a census refusal is never re-applied");
+});

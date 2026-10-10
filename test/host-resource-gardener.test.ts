@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -276,6 +276,9 @@ test("W1-T4804: a torn sample line and an unreadable state file are survived, no
 
 test("W1-T4804: a filing lands the shard alone through a checkout, which is always disposed", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-resource-ws-`));
+  // The checkout holds the janitor the shard declares, as main does: lint-plan's admission reads it.
+  mkdirSync(join(root, "deploy"), { recursive: true });
+  writeFileSync(join(root, "deploy", "rmd-host-cleanup.sh"), "#!/bin/sh\n");
   try {
     const filing: ConsumerFiling = {
       host: "azure",

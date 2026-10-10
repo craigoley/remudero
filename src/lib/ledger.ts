@@ -557,6 +557,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
@@ -569,6 +570,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
+  "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
   "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
@@ -757,6 +760,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
+  // W1-T4939: `rmd status` sums these hourly (and restart-flushed partial) rows over the last 24 hours. The
+  // daemon restarts on merges, so each row is scarce and a rotation that archived it loses the account.
+  "lane.idle_summary",
   "sweep.post_fix_redriven",
   "sweep.stale_red_redrive.released",
   "sweep.strike_ladder.refreshed",

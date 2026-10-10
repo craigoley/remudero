@@ -15,7 +15,7 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { gardenLedgerBucket } from "./gardener.js";
 import { ledgerLivePath, ledgerRotationEntries } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
 
@@ -231,9 +231,18 @@ export function hotFileOrigin(file: string): string {
   return `hot-file:${file}`;
 }
 
-/** Where a restructuring's landing is recorded — a shard's acceptance proof points here. */
-export const HOT_FILE_REMEDIES_FILE = "docs/hot-file-remedies.md";
 const HOT_FILE_SLUG_MAX = 72;
+
+/** The shard's stem and its regression test's name, one slug: lint-plan's sizing reads a test named
+ *  after its own shard as that task's falsifier, not a second concern. */
+export function hotFileShardStem(file: string): string {
+  return kebabSlug(`two-prs-never-conflict-on-${file}`, HOT_FILE_SLUG_MAX).replace(/-+$/, "");
+}
+
+/** The NEW regression test a restructuring adds: two pull requests editing the file merge cleanly. */
+export function hotFileTestPath(file: string): string {
+  return `test/${hotFileShardStem(file)}.test.ts`;
+}
 /** A file this cheap is noise, not a hot file: nothing is filed below it. */
 export const HOT_FILE_MIN_MINUTES = 10;
 /** The window of main's history the metric and the backfill read. */
@@ -254,14 +263,20 @@ export function hotFileShardYaml(price: HotFilePrice, taskId: string): string {
   const remedy = hotFileRemedy(price.file);
   if (!remedy) throw new Error(`hot-file gardener: ${price.file} is never filed for restructuring`);
   const origin = hotFileOrigin(price.file);
+  const testPath = hotFileTestPath(price.file);
   const inferredNote = price.inferredMinutes > 0 ? ` (${price.inferredMinutes} of them inferred from git history, ${price.recordedMinutes} recorded)` : "";
   const rendered = renderMachineShard({
     taskId,
     title: `HOT FILE ${price.file} — its merge conflicts cost ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s), and nothing restructures it: ${remedy}`,
     origin,
-    files: [HOT_FILE_REMEDIES_FILE],
+    // The file itself, the regression test, and the .gitattributes a merge driver is declared in. A
+    // paragraph in a docs file is not a remedy, and the docs file this once named never existed.
+    files: [price.file, testPath, ...(remedy === "merge-driver" ? [".gitattributes"] : [])],
     cost: price.minutes,
-    acceptance: [{ claim: `${price.file} no longer strands pull requests in merge conflicts: ${HOT_FILE_REMEDY_TEXT[remedy]}`, proof: `grep: ${origin} in ${HOT_FILE_REMEDIES_FILE}` }],
+    acceptance: [{
+      claim: `${price.file} no longer strands pull requests in merge conflicts: ${HOT_FILE_REMEDY_TEXT[remedy]}`,
+      proof: `grep: test("${taskId}: two pull requests editing ${price.file} merge without a conflict" in ${testPath}`,
+    }],
     note: `Filed by the hot-file gardener (W1-T4803). BEFORE: ${price.file} cost ${price.minutes} recency-weighted PR minute(s) across ${price.rounds} conflict round(s) on ${price.prs} pull request(s)${inferredNote}. Remedy: ${HOT_FILE_REMEDY_TEXT[remedy]}. The gardener measures the same file again once this lands and credits or debits the ${remedy} class by whether it stopped conflicting. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
   });
   if (rendered.refused) throw new Error(`hot-file gardener: drafted record refused by lint (${rendered.refused})`);
@@ -336,6 +351,7 @@ export function hotFileGardenSpec(
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "hot-file",
+    landingRefusal: machineShardLandingGuard(deps),
     classes: HOT_FILE_REMEDIES,
     cheapFingerprint: () => {
       const head = spawnSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
@@ -386,7 +402,7 @@ export function hotFileGardenSpec(
       const contents = hotFileShardYaml(action.price, taskId);
       const verdict = ciFrictionRecordVerdict(contents, `hot-file:${taskId}`);
       if (!verdict.ok) throw new Error(`hot-file gardener: drafted record failed lint (${verdict.reason})`);
-      const stem = kebabSlug(`hot-file-${action.price.file}`, HOT_FILE_SLUG_MAX).replace(/-+$/, "");
+      const stem = hotFileShardStem(action.price.file);
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}-${stem}.yaml`);
       const relPath = relative(ws.root, shardPath);

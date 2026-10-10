@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { addedTestFilesAtHead, prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 function subject(checks: string[] = ["commitlint"], headSha = "head-a"): OpenPrView {
@@ -131,11 +132,13 @@ test("metadata repair writes a live title and body in one PR edit", async () => 
     ["commitlint", "acceptance-author-gate"],
     (_url, fields) => { writes.push(fields); },
     () => ({ title: "Broken title", body: "A short summary." }),
+    () => [],
+    () => ({ kind: "read" as const, files: ["test/a-suite-the-pr-adds.test.ts"] }),
   );
   assert.equal(result.repaired, true);
   const bodyOnly: Array<{ title?: string; body?: string }> = [];
   await repairPrMetadata(subject(), ["commitlint", "acceptance-author-gate"], (_url, fields) => { bodyOnly.push(fields); },
-    () => ({ title: "fix(pr): valid title", body: "A short summary." }));
+    () => ({ title: "fix(pr): valid title", body: "A short summary." }), () => [], () => ({ kind: "read" as const, files: ["test/a-suite-the-pr-adds.test.ts"] }));
   assert.equal(bodyOnly[0].title, undefined, "a title that already passes is left alone while the body is repaired");
   assert.match(bodyOnly[0].body ?? "", /Acceptance:/);
   assert.match(writes[0].title ?? "", /^fix\(pr\): broken title$/);
@@ -243,4 +246,50 @@ test("the sweep's metadata-repair effect reports an unwired implementation inste
   assert.ok(wired);
   assert.deepEqual(await wired(subject(), ["commitlint"]), { repaired: true, reason: "edited title" });
   assert.deepEqual(seen, [["commitlint"]]);
+});
+
+test("the metadata repair derives its proof from a test the diff adds, never the base-passing generic grep", async () => {
+  const writes: Array<{ title?: string; body?: string }> = [];
+  const result = await repairPrMetadata(
+    subject(["acceptance-author-gate"]),
+    ["acceptance-author-gate"],
+    (_url, fields) => { writes.push(fields); },
+    () => ({ title: "fix(pr): valid title", body: "A short summary." }),
+    () => [],
+    (headSha) => ({ kind: "read" as const, files: headSha === "head-a" ? ["test/the-suite-this-pr-adds.test.ts"] : [] }),
+  );
+  assert.equal(result.repaired, true);
+  assert.match(writes[0].body ?? "", /unit test: test\/the-suite-this-pr-adds\.test\.ts/);
+  assert.doesNotMatch(writes[0].body ?? "", /acceptanceAuthorTimeCheck/, "a proof main already satisfies can never discriminate");
+});
+
+test("the metadata repair escalates when the diff adds no test instead of writing a proof that passes at base", async () => {
+  let writes = 0;
+  const result = await repairPrMetadata(
+    subject(["acceptance-author-gate"]),
+    ["acceptance-author-gate"],
+    () => { writes++; },
+    () => ({ title: "fix(pr): valid title", body: "A short summary." }),
+    () => [],
+    () => ({ kind: "read" as const, files: [] }),
+  );
+  assert.equal(result.repaired, false);
+  assert.equal(result.noCure, true);
+  assert.match(result.reason, /misses at base/);
+  assert.equal(writes, 0);
+});
+
+test("added test files at head are read from the real diff against origin/main", () => {
+  const repo = gitRepo({ kind: "added-tests" });
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  mkdirSync(join(repo.dir, "test"), { recursive: true });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  writeFileSync(join(repo.dir, "test", "a-new-suite.test.ts"), "");
+  writeFileSync(join(repo.dir, "test", "helper.ts"), "");
+  writeFileSync(join(repo.dir, "src", "code.ts"), "");
+  repo.git("add", ".");
+  repo.git("commit", "--quiet", "-m", "add a suite");
+  assert.deepEqual(addedTestFilesAtHead(repo.git("rev-parse", "HEAD"), repo.dir), { kind: "read", files: ["test/a-new-suite.test.ts"] });
+  const unreadable = addedTestFilesAtHead("0".repeat(40), repo.dir);
+  assert.equal(unreadable.kind, "unreadable", "an unreadable head is never reported as a diff that adds no test");
 });

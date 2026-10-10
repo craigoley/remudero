@@ -22,7 +22,7 @@ import {
   type FixClaimDeclined,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";

@@ -25,7 +25,7 @@
 # own synthetic commit gets the full instrumented suite AND the slow tier, on the exact tree that
 # is about to land, with no separate wiring. `coverage-ratchet`'s few PR-scoped shell guards are
 # widened (never replaced — pull_request keeps every byte of its existing, separately-tested
-# behavior) to also treat `merge_group` as real work; see that job's own comments.
+# behavior) to also treat `merge_group` as real work. W1-T5940 since narrows a group to its affected suites.
 #
 # Why: the measurements, incidents and design arguments compacted out of this file are archived
 # verbatim in docs/forensics/ci-yml.md, per docs/comment-standard.md.
@@ -267,6 +267,21 @@ jobs:
             node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
             if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
           fi
+      - name: Select the merge group's suites (W1-T5940)
+        # Suites the combined diff and each member commit affect, or `full`; the base is a step env (push-safe).
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ] || [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
+          if [ "$(head -n 1 merge-group-suites.txt)" = "full" ]; then
+            echo "- W1-T5940: merge group selection: **full run** (the selection was unusable)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- W1-T5940: merge group selection: **$(grep -c . merge-group-suites.txt)** suite(s) of $(find test -maxdepth 1 -name '*.test.ts' | grep -c .)." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
         # `npm test`. A green run spawns the same command once; a red run retries it once and names
@@ -308,6 +323,11 @@ jobs:
           TIER_BASE="HEAD"
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
+          fi
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ]; then
+            cp merge-group-suites.txt affected-suites-selected.txt
+            CLASS="AFFECTED"
           fi
           # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
           # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
@@ -589,6 +609,12 @@ jobs:
         with:
           pattern: coverage-duration-*
           path: coverage-duration-shards
+      - name: Download the ledger snapshot the coverage shards weighed (W1-T4071; best-effort)
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-ledger-snapshot-*
+          path: coverage-ledger-snapshots
       - name: Build the instrumented next-manifest proposal the coverage split weighs (W1-T5923; never writes the checkout ledger)
         continue-on-error: true
         run: |
@@ -596,9 +622,11 @@ jobs:
           if [ "${#DURATION_FILES[@]}" -eq 0 ]; then
             echo "- W1-T5923: no instrumented duration evidence was available; no coverage-lane manifest proposal produced." >> "$GITHUB_STEP_SUMMARY"
           else
+            SNAPSHOT="$(find coverage-ledger-snapshots -type f -name 'ledger-snapshot.manifest' -print 2>/dev/null | sort | head -n 1)"
             node scripts/test-tier-manifest.mjs --manifest scripts/test-tier-coverage-manifest.json \
-              --record-evidence "${DURATION_FILES[@]}" --output test-tier-coverage-manifest.next.json
-            echo "- W1-T5923: attached an instrumented next-manifest proposal from ${#DURATION_FILES[@]} coverage shard artifact(s)." >> "$GITHUB_STEP_SUMMARY"
+              --record-evidence "${DURATION_FILES[@]}" ${SNAPSHOT:+--snapshot "$SNAPSHOT"} --ewma 0.5 \
+              --output test-tier-coverage-manifest.next.json
+            echo "- W1-T5923: attached an instrumented next-manifest proposal from ${#DURATION_FILES[@]} coverage shard artifact(s) (W1-T4071: EWMA onto ${SNAPSHOT:-the committed ledger})." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Publish the instrumented next duration manifest proposal
         continue-on-error: true
@@ -813,8 +841,23 @@ jobs:
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
         if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npx playwright install chromium
+      - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
+            && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
+            echo "W1-T5940: merge group selected $(grep -c . merge-group-suites.txt) suite(s); ci-shard runs them, slow tier included."
+            exit 0
+          fi
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
             echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its eight shards; suppressing duplicate execution."
             echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
@@ -1363,9 +1406,13 @@ jobs:
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
-          # W1-T4406: `merge_group` joins `pull_request` here — its own synthetic commit's first
-          # parent is the target branch's tip, exactly like a PR's, so HEAD^1...HEAD is the diff
-          # that is about to land, not a shallow guess.
+          # W1-T5940: each member already passed this instrumented run; NO_SRC is the existing skip class.
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            echo "W1-T5940: merge group — coverage-ratchet skips; ci-shard confirms the combination."
+            : > changed-files.txt
+            echo "class=NO_SRC" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
             git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else
@@ -1425,6 +1472,25 @@ jobs:
             exit 0
           fi
           npx playwright install chromium
+      - name: Resolve the CI ledger snapshot the coverage split weighs (W1-T4071)
+        # The newest proposal uploaded 10+ min before this run was created: one artifact for all eight shards.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p coverage "${RUNNER_TEMP}/coverage-ledger"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] \
+            && CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at 2>/dev/null)" \
+            && CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+            && LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" \
+              --jq "[.artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty" 2>/dev/null)" \
+            && [ -n "$LEDGER_ID" ] \
+            && gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${LEDGER_ID}/zip" > "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" 2>/dev/null \
+            && unzip -p "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" test-tier-coverage-manifest.next.json > coverage/ledger-snapshot.manifest 2>/dev/null; then
+            echo "W1-T4071: weighing the coverage split on CI ledger artifact ${LEDGER_ID} (uploaded before ${CUTOFF})."
+          else
+            rm -f coverage/ledger-snapshot.manifest
+            echo "W1-T4071: no CI ledger snapshot resolved; the committed instrumented ledger is weighed."
+          fi
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
@@ -1515,7 +1581,8 @@ jobs:
           echo "$SELECTION" > coverage-selection.txt
           # W1-T5923: weigh the split on this lane's own instrumented durations.
           if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
-            --instrumented-manifest scripts/test-tier-coverage-manifest.json \
+            --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
+            --workers 3 --selection-output coverage/selected-files.json \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
             cat coverage-shard-selection.log || true
             echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
@@ -1577,6 +1644,7 @@ jobs:
           mkdir -p coverage-artifact
           printf '%s\n' "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/class
           printf '%s\n' "$(cat coverage-selection.txt 2>/dev/null || echo all)" > coverage-artifact/selection
+          if [ -s coverage/selected-files.json ]; then cp coverage/selected-files.json coverage-artifact/selected-files.json; fi
           if [ -s coverage/lcov.info ]; then
             # W1-T5923: source-map every process report HERE, in parallel (~70% of the serial merge);
             # the aggregator replays the recorded line state and range merge in order, byte-identically.
@@ -1600,6 +1668,13 @@ jobs:
           name: coverage-duration-shard-${{ matrix.shard }}
           path: coverage/test-durations.json
           retention-days: 7
+          if-no-files-found: ignore
+      - name: Upload the ledger snapshot this coverage shard weighed (W1-T4071 — read by flake-retry-aggregate)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-ledger-snapshot-shard-${{ matrix.shard }}
+          path: coverage/ledger-snapshot.manifest
+          retention-days: 1
           if-no-files-found: ignore
       - name: Upload this coverage shard's flake-retry evidence (W1-T4398 — read by flake-retry-aggregate)
         # No YAML conditional (the #729 discipline above), so this runs only when the shard is
@@ -1762,6 +1837,15 @@ jobs:
               exit 1
             fi
           done
+          SELECTIONS=()
+          for SHARD in 1 2 3 4 5 6 7 8; do
+            if [ -s "coverage-shards/coverage-shard-${SHARD}/selected-files.json" ]; then SELECTIONS+=("coverage-shards/coverage-shard-${SHARD}/selected-files.json"); fi
+          done
+          if [ "${#SELECTIONS[@]}" -eq 8 ]; then
+            node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}"
+          else
+            echo "W1-T4071: ${#SELECTIONS[@]} of 8 shards recorded a full split; no partition (every file once, one ledger) to check."
+          fi
           EVENT="${EXPECTED%%:*}"
           CLASS="${EXPECTED#*:}"
           echo "event=${EVENT}" >> "$GITHUB_OUTPUT"

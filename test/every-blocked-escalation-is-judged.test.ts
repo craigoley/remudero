@@ -32,7 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
+import { daemonCommand, ledgerPathFor } from "./helpers/run-task-test.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import {
   escalateCircuitBreak,

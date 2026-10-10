@@ -13,8 +13,8 @@ import {
   type OpenPrView,
   type PostFixReverificationDeps,
   type RedriveResult,
-} from "../src/lib/sweep.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { sweepPostFixReverification } from "../src/run-task.js";

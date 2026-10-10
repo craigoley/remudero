@@ -17,7 +17,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
@@ -289,8 +289,14 @@ const unitLabel = (stat: FlowStageStat) => (stat.unit === "minutes" ? "min" : "p
 const origin = (key: string) => `flow-regression:${key}`;
 
 /** The follow-up record for one regressed stage, rendered and linted by the shared machine-filing path. */
+/** The follow-up's shard stem and its regression test's name, one slug: lint-plan's sizing reads a test
+ *  named after its own shard as that task's falsifier, not a second concern. */
+export function flowFollowUpStem(stat: Pick<FlowStageStat, "cls" | "stage">): string {
+  return `the-${stat.cls}-${stat.stage.replaceAll("_", "-")}-flow-stage-recovers`;
+}
+
 export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, population: readonly number[]): { text: string; refused?: string } {
-  const testPath = `test/the-${stat.cls}-${stat.stage.replaceAll("_", "-")}-flow-stage-recovers.test.ts`;
+  const testPath = `test/${flowFollowUpStem(stat)}.test.ts`;
   const surface = stat.surface === "all" ? "" : ` on the ${stat.surface} surface`;
   const u = unitLabel(stat);
   const numbers = `p50 ${stat.current!.p50} ${u} against a ${stat.baseline!.p50} ${u} baseline`;
@@ -480,9 +486,11 @@ async function landFollowUp(
     const taskId = mintTaskId(workspace.branch);
     const rendered = renderFlowFollowUp(stat, taskId, population);
     if (rendered.refused) throw new Error(`flow: follow-up record refused by lint (${rendered.refused})`);
-    const relativePath = join("plan", "tasks.d", `${taskId}-flow-${stat.key.replaceAll(":", "-").replaceAll("_", "-")}.yaml`);
+    const relativePath = join("plan", "tasks.d", `${taskId}-${flowFollowUpStem(stat)}.yaml`);
     mkdirSync(join(workspace.root, "plan", "tasks.d"), { recursive: true });
     writeAtomic(join(workspace.root, relativePath), rendered.text);
+    const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
+    if (refused !== undefined) throw new Error(`flow: follow-up record failed lint-plan's machine-filing admission: ${refused}`);
     const prUrl = await workspace.land({
       paths: [relativePath],
       title: `chore(plan): file the ${stat.cls} ${stat.stage} flow regression`,

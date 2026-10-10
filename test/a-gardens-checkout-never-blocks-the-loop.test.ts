@@ -374,6 +374,9 @@ function growingHost(dir: string): void {
 
 test("W1-T5740: the host-resource filing awaits the daemon's checkout, and a synchronous pass refuses it", async () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5740-host-`));
+  // The checkout holds the janitor the shard declares, as main does: lint-plan's admission reads it.
+  mkdirSync(join(dir, "deploy"), { recursive: true });
+  writeFileSync(join(dir, "deploy", "rmd-host-cleanup.sh"), "#!/bin/sh\n");
   try {
     const rows: Array<[string, Record<string, unknown> | undefined]> = [];
     let disposed = 0;

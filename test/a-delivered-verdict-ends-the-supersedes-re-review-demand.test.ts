@@ -17,7 +17,7 @@ import {
   type BuildSweepEffectsDeps,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T5813 ──────────────────────────────────────────────────────────────────────────────────

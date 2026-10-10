@@ -1,0 +1,33 @@
+- id: W1-T7446
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:capped review still has non-discriminating proofs, but every repair path is exhausted (body <n>/<n>, plan-shard repair <n>/<n>) cost 3.70 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.31
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:plan-proof-unrunnable:capped review still has non-discriminating proofs, but every repair path is exhausted (body <n>/<n>, plan-shard repair <n>/<n>)"
+  files:
+    - src/lib/pr-blocker.ts
+    - test/flow-plan-proof-unrunnable-capped-review-still-has-non-discriminating-proofs-but-ever.test.ts
+  acceptance:
+    - claim: "plan-proof-unrunnable:capped review still has non-discriminating proofs, but every repair path is exhausted (body <n>/<n>, plan-shard repair <n>/<n>) is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T7446: flow-plan-proof-unrunnable-capped-review-still-has-non-discriminating-proofs-but-ever clears without a person\" in test/flow-plan-proof-unrunnable-capped-review-still-has-non-discriminating-proofs-but-ever.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    plan-proof-unrunnable:capped review still has non-discriminating proofs, but every repair path is exhausted (body <n>/<n>, plan-shard repair <n>/<n>) cost 3.70 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #10298: 3.73 PR-hours — capped review still has non-discriminating proofs, but every repair path is exhausted (body 2/2, plan-shard repair 3/2)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.89
+    reasons:
+      - "high-risk verdict at confidence 0.89 — on the change's description/files alone, no diff was read — The filed plan requires automatic clearance of a review blocker after repair paths are exhausted, but does not specify the remedy or how review requirements will remain satisfied.; on the change's description/files alone, no diff was read — The supplied acceptance proof greps for a test declaration; it does not demonstrate successful repair or discriminating proof behavior. Safe clearance cannot be verified from what is shown, matching the gates' explicit escalation condition."
+    judged_at: "2026-10-09T23:03:18.583Z"
+    pin: "0b711207df8bb240ff517ff93cf85c3d4005828d6a6028835b245859de316408"

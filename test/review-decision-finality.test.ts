@@ -16,7 +16,7 @@ import {
   type ReviewVerdict,
 } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { runFixRung, type ReviewRunResult } from "../src/run-task.js";
+import { runFixRung, type ReviewRunResult } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dirname } from "node:path";
 import type { ArmReprobeFacts } from "../src/lib/arm-auto-merge.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { readLedgerLines } from "../src/lib/status.js";

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -26,7 +27,7 @@ import {
   renderImplementPrompt as compatRenderImplementPrompt,
   renderPrerequisitePrPrompt as compatRenderPrerequisitePrPrompt,
   renderReconPrompt as compatRenderReconPrompt,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 
 const TASK: Task = {
   id: "W1-T2886X",
@@ -201,24 +202,91 @@ const DISPATCH_ARGS = {
   taskId: "W1-T5810",
 };
 
-// Compiled by the test below, never invoked: omission must be a type error at both boundaries.
-function rejectedCalls() {
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const COMPILER = join(dirname(createRequire(import.meta.url).resolve("typescript/package.json")), "bin", "tsc");
+const TYPE_FLAGS = [
+  "--ignoreConfig", "--strict", "--skipLibCheck", "--esModuleInterop",
+  "--module", "nodenext", "--target", "ES2022", "--lib", "ES2023,DOM",
+];
+const REJECTED_CALLS = `
+  declare const args: Omit<Parameters<typeof buildPrerequisitePrDispatchArgs>[0], "prerequisiteBranch">;
+  buildPrerequisitePrDispatchArgs({ ...args, prerequisiteBranch: "run-unfiled-42" });
+  prerequisitePrAdmissionRefusal("url", "branch", {
+    readLiveHead: () => ({ ok: false }), fetchPrBody: async () => "",
+  });
   // @ts-expect-error W1-T5810: the dispatch builder requires the minted branch.
-  buildPrerequisitePrDispatchArgs(DISPATCH_ARGS);
+  buildPrerequisitePrDispatchArgs(args);
   // @ts-expect-error W1-T5810: the admission check requires a head reader.
-  prerequisitePrAdmissionRefusal(PREREQUISITE_URL, "run-unfiled-42", { fetchPrBody: async () => "" });
+  prerequisitePrAdmissionRefusal("url", "branch", { fetchPrBody: async () => "" });
   // @ts-expect-error W1-T5810: the admission check requires a body reader.
-  prerequisitePrAdmissionRefusal(PREREQUISITE_URL, "run-unfiled-42", { readLiveHead: () => ({ ok: false }) });
+  prerequisitePrAdmissionRefusal("url", "branch", { readLiveHead: () => ({ ok: false }) });
+`;
+
+function compileTypes(args: string[]) {
+  return spawnSync(process.execPath, [COMPILER, ...TYPE_FLAGS, ...args], {
+    encoding: "utf8", timeout: 60_000,
+  });
 }
 
-test(`${PROOF}: a type check rejects omitted branch and reader arguments`, () => {
-  const compiler = join(dirname(createRequire(import.meta.url).resolve("typescript/package.json")), "bin", "tsc");
-  const checked = spawnSync(process.execPath, [
-    compiler, "--ignoreConfig", "--noEmit", "--strict", "--skipLibCheck", "--esModuleInterop",
-    "--module", "nodenext", "--target", "ES2022", "--lib", "ES2023,DOM", fileURLToPath(import.meta.url),
-  ], { encoding: "utf8", timeout: 60_000 });
+// Check the real exported signatures, without making unrelated implementation diagnostics fail
+// this contract. The repository's separate typecheck still checks those implementation bodies.
+async function checkPrerequisiteTypes(root: string, entry: string) {
+  return withTempDir("w1-t7410-types", (dir) => {
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"), "dir");
+    writeFileSync(join(dir, "package.json"), '{"type":"module"}');
+    const emitted = compileTypes([
+      "--noCheck", "--declaration", "--emitDeclarationOnly", "--rootDir", root,
+      "--outDir", join(dir, "types"), entry,
+    ]);
+    assert.ifError(emitted.error);
+    assert.equal(emitted.status, 0, emitted.stdout + emitted.stderr);
+    const modulePath = "./types/" + relative(root, entry).split("\\").join("/").replace(/\.ts$/, ".js");
+    const fixture = join(dir, "contract.mts");
+    writeFileSync(fixture,
+      `import { buildPrerequisitePrDispatchArgs, prerequisitePrAdmissionRefusal } from ${JSON.stringify(modulePath)};\n` +
+      REJECTED_CALLS);
+    return compileTypes(["--noEmit", fixture]);
+  });
+}
+
+test(`${PROOF}: a type check rejects omitted branch and reader arguments`, async () => {
+  const checked = await checkPrerequisiteTypes(REPO_ROOT, join(REPO_ROOT, "src/run-task.ts"));
   assert.ifError(checked.error);
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+});
+
+test("W1-T7410 pins the cause of the intermittent failure", async () => {
+  await withTempDir("w1-t7410-order", async (dir) => {
+    mkdirSync(join(dir, "src"));
+    const entry = join(dir, "src/entry.ts");
+    const source = `
+      import "./unrelated.js";
+      export function buildPrerequisitePrDispatchArgs(args: { prerequisiteBranch: string }) { return args; }
+      export async function prerequisitePrAdmissionRefusal(url: string, branch: string, read: {
+        readLiveHead: (url: string) => { ok: false }; fetchPrBody: (url: string) => Promise<string>;
+      }) { return undefined; }
+    `;
+    writeFileSync(entry, source);
+    // Force an unrelated imported body to be broken BEFORE the contract check, as in run 37941672866.
+    writeFileSync(join(dir, "src/unrelated.ts"),
+      'const view: { readPaced: true } | (() => void) = () => {};\nview.readPaced;\n');
+    const poisoned = compileTypes(["--noEmit", entry]);
+    assert.ifError(poisoned.error);
+    assert.equal(poisoned.status, 1, poisoned.stdout + poisoned.stderr);
+    assert.match(poisoned.stdout + poisoned.stderr, /TS2339.*readPaced/);
+
+    const isolated = await checkPrerequisiteTypes(dir, entry);
+    assert.ifError(isolated.error);
+    assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
+
+    for (const required of ["prerequisiteBranch", "readLiveHead", "fetchPrBody"]) {
+      writeFileSync(entry, source.replace(`${required}:`, `${required}?:`));
+      const relaxed = await checkPrerequisiteTypes(dir, entry);
+      assert.ifError(relaxed.error);
+      assert.equal(relaxed.status, 1, relaxed.stdout + relaxed.stderr);
+      assert.match(relaxed.stdout + relaxed.stderr, /TS2578.*Unused '@ts-expect-error'/);
+    }
+  });
 });
 
 test(`${PROOF}: the dispatch uses the prerequisite renderer output`, () => {

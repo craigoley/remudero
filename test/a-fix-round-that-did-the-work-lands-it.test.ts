@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { COMMIT_LINE_RESUME_PROMPT, commitWorkerEdits, harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { COMMIT_LINE_RESUME_PROMPT, commitWorkerEdits, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";

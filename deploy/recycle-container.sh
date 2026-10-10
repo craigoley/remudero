@@ -1699,6 +1699,38 @@ if [ "${SMOKE_RC}" -ne 0 ]; then
   docker container rm -f "${SMOKE_NAME}" >/dev/null 2>&1 || true
   echo "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${PULLED_IMAGE_ID}." >&2
   echo "  ${SMOKE_LINE:-no WORKER-SMOKE verdict line was printed (hang, crash or timeout)}" >&2
+  if [ -z "${SMOKE_OUTPUT}" ]; then
+    echo "  smoke-output| (the smoke printed nothing)" >&2
+  else
+    # W1-T6171: keep Docker's cause, bounded by lines and 8 KiB including an oversized last line.
+    printf '%s\n' "${SMOKE_OUTPUT}" | LC_ALL=C awk -v lines="${RMD_RECYCLE_SMOKE_TAIL_LINES:-20}" '
+      BEGIN {
+        if (lines !~ /^[0-9]+$/ || lines + 0 < 1) lines = 20
+        first = 1
+        cap = 8192
+      }
+      {
+        tail[NR] = $0
+        bytes += length($0) + 1
+        while (NR - first + 1 > lines || (bytes > cap && first < NR)) {
+          bytes -= length(tail[first]) + 1
+          delete tail[first]
+          delete clipped[first]
+          first++
+        }
+        if (bytes > cap) {
+          clipped[NR] = bytes - cap
+          tail[NR] = substr(tail[NR], clipped[NR] + 1)
+          bytes = cap
+        }
+      }
+      END {
+        if (first > 1) printf "  smoke-output| (%d earlier lines omitted)\n", first - 1
+        if (clipped[first]) printf "  smoke-output| (%d earlier bytes omitted)\n", clipped[first]
+        for (i = first; i <= NR; i++) print "  smoke-output| " tail[i]
+      }
+    ' >&2
+  fi
   echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image — the replacement was NOT accepted." >&2
   clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
   exit 1
