@@ -1,0 +1,47 @@
+- id: W1-T7755
+  title: Close and escalate confirmed external PRs with bounded unknown-identity recovery
+  repo: remudero
+  depends_on: [W1-T7753, W1-T7754]
+  type: implement
+  verify: auto
+  author_class: operator
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "Owner chose close-and-escalate for outside contributions while external admission is closed; 2026-10-10 authorized filing and implementation, not live settings or infrastructure changes."
+  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/action-executor.ts, src/lib/feedback.ts, src/run-task.ts, test/close-and-escalate-external-prs.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: the existing action executor does not catalogue this destructive action. Unknown
+    identity is not observed external identity. INFERRED: a bare refusal without terminal recovery
+    would strand PRs and conflict with the owner's explicit no-stuck-PR requirement.
+  design: |
+    Add one scoped executor for confirmed external ordinary PRs. Immediately before closing, read
+    current state, origin, target and head; refuse stale or changed targets. Close the PR, never delete
+    a branch or alter checks. Write an executor-owned durable receipt and one deduplicated owner
+    escalation keyed to repo/PR/head/policy; merged/already-closed and replayed actions are no-ops.
+    Bound transient retries and identity reconciliation; persist the original reason across retries
+    and SHA changes. Unknown never becomes external on timeout: after its bounded reconciliation,
+    record an explicit owner-action terminal automation disposition, release lane occupancy and
+    report the unresolved PR honestly. Unrelated trusted work continues; owner adoption can resume
+    the current-head path. Test failure recovery before activation. Live policy rollout is separate.
+    No real external PR closures during development, settings changes, branch deletion, force merge,
+    synthetic green status, private-vulnerability-report handling or infrastructure mutation.
+  acceptance:
+    - claim: The scoped close executor calls the shared classifier on fresh origin
+      proof: 'grep: classifyContribution( in src/lib/action-executor.ts'
+    - claim: Only freshly confirmed external ordinary PRs can reach the close executor
+      proof: 'unit test: W1-T7755: close preflight rejects unknown trusted changed and terminal PRs'
+    - claim: Successful closure and escalation are durable and idempotent across retries
+      proof: 'unit test: W1-T7755: close and escalation replay produces one durable terminal receipt'
+    - claim: Failed identity reads terminate bounded automation without closing or stranding trusted PRs
+      proof: 'unit test: W1-T7755: unknown recovery is bounded without closing or blocking trusted PRs'
+    - claim: Owner adoption resumes a reconciled current-head flow without bypassing quality checks
+      proof: 'unit test: W1-T7755: owner adoption resumes flow with honest required checks'
+  falsifier: |
+    Close on unknown, old-head or already-merged evidence and the preflight trap fails. Replay with
+    a duplicate owner escalation and the receipt count fails. Leave a retry indefinitely occupying
+    a lane, or fake a required green check after owner adoption, and the recovery assertions fail.

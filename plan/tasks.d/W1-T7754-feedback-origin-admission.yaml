@@ -1,0 +1,42 @@
+- id: W1-T7754
+  title: Keep external contribution lineage through issue and comment feedback before autonomous adoption
+  repo: remudero
+  depends_on: [W1-T7753]
+  type: implement
+  verify: auto
+  author_class: operator
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "Operator-approved admission and close-and-escalate briefs, filed under the 2026-10-10 authorization; original origin must survive trusted bot summaries."
+  files: [src/lib/issues-intake.ts, src/lib/feedback.ts, src/lib/auto-triage.ts, src/lib/authority.ts, src/lib/contributor-admission.ts, test/feedback-origin-admission.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: issue normalization drops author identity; captureFeedback can publish upstream, and
+    auto-triage selects new records without original-origin admission. Machine risk judgment does
+    not itself prove the input was admitted. INFERRED: PR-only protection leaves a contribution path
+    through feedback, summaries, tasks and rulings. This record files that approved lineage requirement.
+  design: |
+    Preserve original issue/comment actor, source reference and admission evidence through capture,
+    summaries, feedback landing, triage and task/ruling generation. A trusted summarizer is not the
+    original contributor. Reconcile missing legacy origin per item; do not block every old trusted
+    record. Unknown/external input is evidence for owner attention, not autonomous implementation
+    authority. Preserve accepted owner/fleet/service flows and existing operator-refusal boundaries.
+    Do not automatically delete comments, close private vulnerability reports, or create a second
+    public issue intake. No settings, live configuration or infrastructure changes.
+  acceptance:
+    - claim: Feedback capture calls the shared classifier before autonomous adoption
+      proof: 'grep: classifyContribution( in src/lib/feedback.ts'
+    - claim: Original outside provenance survives a trusted bot summary and subsequent task proposal
+      proof: 'unit test: W1-T7754: a trusted summary cannot launder external contribution origin'
+    - claim: Trusted feedback remains usable and legacy unknowns reconcile without a global block
+      proof: 'unit test: W1-T7754: feedback admission preserves trusted and legacy reconciliation flow'
+    - claim: Unknown/external provenance cannot authorize an autonomous implementation or ruling
+      proof: 'unit test: W1-T7754: unresolved origin never supplies autonomous task authority'
+  falsifier: |
+    Replace original contributor with summarizer identity and the laundering fixture must become
+    red. Let unresolved origin authorize task/ruling generation and the effect trap must fail.
+    Globally quarantine historical trusted feedback and its compatibility fixture must fail.
