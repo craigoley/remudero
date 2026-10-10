@@ -1,0 +1,83 @@
+- id: W1-T7742
+  title: "A GARDEN FILING MINTS ITS TASK ID OFF THE DAEMON LOOP, UNDER AN ADAPTIVE BOUND — on 2026-10-10 one `ciLearningTaskIdMinter` reservation push held the core daemon loop for 617 s with no timeout, and every garden apply that files a shard still calls the synchronous minter from `spec.apply`, which `runGardenAsync` runs on the loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how a garden filing reserves its task id; it gates every machine-filed shard
+  band_meaning: span
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T1055, W1-T3091, W1-T5689, W1-T5718, W1-T5965]
+  files: [src/lib/gardener.ts, src/lib/ci-friction-gardener.ts, src/lib/hot-file-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/gate-gardener.ts, src/lib/flow-gardener.ts, src/lib/host-resource-gardener.ts, src/lib/scout-gardener.ts, src/run-task.ts, test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z it logged 10 `daemon.loop_lag` stalls,
+    about 5,990 s in total. About 44 min was the CI-learning rung, fixed by #10615. About 53 min is
+    unattributed. 171 `sync_spawn_top` entries (lower bounds) name the sync spawns still on the loop.
+    The worst single entry is the reservation push in `ciLearningTaskIdMinter`'s sync mint: 617 s.
+
+    READ on origin/main 4e1831b94.
+    - `ciLearningTaskIdMinter` (src/run-task.ts:25937). Its sync mint pushes the reservation through
+      `spawnSync("git", args, { cwd: root, encoding: "utf8" })` at :25942. There is no timeout.
+    - Its `.async` form runs the same mint in a child through `executeAsync` (`execFilePromise`). It passes
+      only `maxBuffer`, so it has no timeout either.
+    - #10615 moved the CI-learning LANDING onto `.async` (`mintTaskIdAsync`, wired at run-task.ts:36849
+      and used by src/lib/feedback-landing.ts `runAsync`). It did not touch the gardeners.
+    - `runGardenAsync` (src/lib/gardener.ts:970) drives the daemon's garden passes, but it calls
+      `spec.apply(ws, plan, scorecard)` synchronously (gardener.ts:1094). Every spec that mints inside
+      apply therefore runs the sync push on the loop.
+    - Sync mints inside apply today:
+      - `sources.mintTaskId(ws.branch)` in src/lib/ci-friction-gardener.ts:1290;
+      - src/lib/hot-file-gardener.ts:401;
+      - src/lib/flow-remedy-gardener.ts:382;
+      - src/lib/gate-gardener.ts:239;
+      - src/lib/flow-gardener.ts:486;
+      - src/lib/host-resource-gardener.ts:882;
+      - src/lib/scout-gardener.ts:320, wired by the scout pass at src/run-task.ts:37651.
+    - Already async, the model to follow: src/lib/selector-shadow-gardener.ts:1444 and
+      src/lib/flake-incident-gardener.ts:287 both `await (mintTaskId.async ?? mintTaskId)(branch)`.
+
+    OPEN PR #10698 (not merged when this was filed) edits ci-friction, flow-remedy, gate and hot-file gardener
+    files to read the checkout HEAD without a spawn, and tightens the sync-spawn census. Build on a main that
+    contains it, or rebase onto it. Cite symbols, not these line numbers.
+
+    NOT IN SCOPE, NOTED: flow-remedy-gardener.ts:383 also runs `gitCiFrictionOwnerSearch` over a sync
+    `execFileSync` git call inside the same apply. That is a second sync spawn, not a mint. It is a separate item.
+
+    SERIALIZED: this task and W1-T7743 and W1-T7744 all edit src/run-task.ts, so W1-T7743 depends on this one and W1-T7744 on W1-T7743.
+    Parallel agents editing one file broke main (#10349 and #10353 were each green and together reddened main,
+    2026-10-09).
+  design: |
+    1. MINT BEFORE APPLY, AWAITED. The garden pass reserves a spec's task id in an awaited step before
+       `spec.apply`, through `mintTaskId.async(ws.branch)`, and hands the held id to apply. The exact seam is the
+       builder's choice: a spec hook the pass awaits, or an id argument to apply. Under `runGardenAsync` no
+       spec's apply calls the sync minter. Specs that file nothing this pass reserve nothing.
+    2. EVERY SITE ABOVE. ci-friction, hot-file, flow-remedy, gate, flow, host-resource and scout all take the id
+       from that step. Selector-shadow and flake-incident keep their existing await.
+    3. ADAPTIVE BOUND ON THE PUSH. Both mint forms get a bound. It is derived, not picked:
+       - the bound is a multiple of the observed reservation durations kept in-process (a rolling quantile of
+         recent successful mints);
+       - before any mint has been observed, it is the daemon's poll interval;
+       - no fixed cap and no fixed floor.
+       On expiry, kill the child or the push. The pass files nothing this time and writes `garden.mint_timed_out`
+       with the spec name, the elapsed ms and the bound in force. The next pass retries. A reservation that
+       landed before the kill is HELD, per doctrine; never delete it.
+    4. The sync form stays for the CLI (`rmd ci-learning`) and carries the same derived bound as a spawn timeout.
+  acceptance:
+    - claim: "a garden pass driven by runGardenAsync reserves its task id through the minter's async form and never calls the sync minter"
+      proof: 'grep: test("W1-T7742: a runGardenAsync pass reserves its task id through the async minter and never the sync one" in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts'
+    - claim: "each named gardener (ci-friction, hot-file, flow-remedy, gate, flow, host-resource, scout) files with the id from the async minter while the sync minter throws"
+      proof: 'grep: test("W1-T7742: every minting gardener files with the async-minted id while the sync minter throws" in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts'
+    - claim: "a reservation that outlives its bound is abandoned, the pass files nothing, and a garden mint_timed_out row names the elapsed time and the bound"
+      proof: 'grep: test("W1-T7742: a mint past its bound is abandoned and writes a mint_timed_out row naming the elapsed time and the bound" in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts'
+    - claim: "the mint bound is derived from observed mint durations and the poll interval, not a constant"
+      proof: 'grep: test("W1-T7742: the mint bound scales with observed mint durations and starts from the poll interval" in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Leave `spec.apply` calling `sources.mintTaskId(ws.branch)`: a sync minter that throws fails the first two tests.
+    Leave the `.async` child with no timeout: a never-resolving fake push hangs, and the third test never sees
+    `garden.mint_timed_out`. Replace the derived bound with a constant: the fourth test sees no change in the
+    bound after the recorded durations change.

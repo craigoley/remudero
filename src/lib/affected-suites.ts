@@ -400,6 +400,10 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     pathReaders.push(mkdtempCensus);
   }
   const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
+  const declaredSenderCensus = "test/every-message-names-one-declared-sender.test.ts";
+  if (input.files.has(declaredSenderCensus) && changedSrcTypeScript) {
+    pathReaders.push(declaredSenderCensus);
+  }
   // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
   const errorCensus = "test/error-subclass-census.test.ts";
   if (input.files.has(errorCensus) && changedSrcTypeScript) {
@@ -500,6 +504,18 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   ];
   if (input.files.has(redBranchStrike) && files.some((f) => redBranchStrikeEdges.includes(f))) {
     pathReaders.push(redBranchStrike);
+  }
+  // W1-T4894: a coverage shard failed on this suite (run 36693671413, PR #7998) and the narrow selector missed it.
+  const wallClockBound = "test/a-wall-clock-bound-declares-itself.test.ts";
+  const wallClockBoundEdges = [
+    "src/lib/board.ts",
+    "src/lib/github-transport.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "test/board-github-off-loop.test.ts",
+  ];
+  if (input.files.has(wallClockBound) && files.some((f) => wallClockBoundEdges.includes(f))) {
+    pathReaders.push(wallClockBound);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

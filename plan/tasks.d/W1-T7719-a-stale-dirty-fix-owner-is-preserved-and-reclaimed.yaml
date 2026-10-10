@@ -1,0 +1,94 @@
+- id: W1-T7719
+  title: "A STALE DIRTY FIX OWNER IS KEPT FOREVER — on 2026-10-10 a dead 05:57Z fix round left sweep-W1-T7243-1791611477902 at PR #10551's old head c842d3b with a staged D and an untracked ?? of one test file, and every later fix claim was declined as dirty_worktree until the backstop held the PR for good"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a dead owner on a superseded head must not hold its PR's fix lane forever
+  band_meaning: span
+  origin: "operator session 2026-10-10: core ledger, PR #10551 (W1-T7243) sweep.fix.checkout_claim_declined rows; design approved by the operator 2026-10-10"
+  plan_refs: [W1-T6355, W1-T6362, W1-T5974, W1-T3822, W1-T4196, W1-T7243, W1-T100]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 in the core daemon's ledger. A fix round for PR #10551 (W1-T7243) at 05:57Z ended
+    and left its registered worktree /home/node/Remudero/worktrees/sweep-W1-T7243-1791611477902 at the
+    PR's OLD head c842d3b. The tree held a staged `D` and an untracked `??` of the same test file. The PR
+    has since moved to 3644414. Every later fix claim was declined: three sweep.fix.checkout_claim_declined
+    rows with reason registered_worktree_owner and owner_recovery_reason dirty_worktree. The claim-decline
+    backstop then held the PR for good.
+    READ on origin/main f76df1f45:
+      - src/run-task.ts decideRegisteredFixOwnerRecovery returns keep/dirty_worktree for treeState
+        "untracked_dirty" (untracked paths beside tracked work) BEFORE it looks at the claim, the process
+        census or the head. That is W1-T6355's deliberate safety design, and it is right for a tree at the
+        PR's current head or with a live owner.
+      - captureRegisteredFixOwnerSnapshot returns early on "untracked_dirty", so localSha, historyState,
+        claimState and processState are never read for this tree. The decision has no way to tell a dead
+        owner on a superseded head from a live one.
+      - Nothing else removes the owner. #10632 (merged, dbca9031a) made the backstop's hold honest and
+        lifts it once the owner is gone, but no path makes the owner go.
+    RELATED: W1-T6355 (untracked-only residue is preserved then released; untracked_dirty stays kept),
+    W1-T6362 and W1-T5974 (staged residue of a dead owner is preserved to a recovery ref and reclaimed),
+    W1-T3822 (tracked-dirty recovery), W1-T4196 (the withdrawn earlier filing of the moved-head dirty case).
+    This task closes the one shape those leave kept forever: tracked AND untracked work on a stale head.
+    OVERLAP. lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) as sharing src/run-task.ts and
+    src/lib/sweep.ts. That is the whole-file surface only: W1-T100 routes CI failures to a fix path and does not
+    touch registered fix-owner recovery, so neither shard supersedes the other.
+  design: |
+    Operator ruling: no hard thresholds. The age bound below must be derived from observed data, with a
+    documented fallback when there is none; no new fixed cap.
+    1. Probe the whole snapshot for an untracked_dirty tree. captureRegisteredFixOwnerSnapshot must keep
+       going past "untracked_dirty" to read localSha, the claim (readRegisteredFixOwnerClaim, with the
+       W1-T5955 round-ended check) and the process census (readBoundedProcessCwdCensus), exactly as it does
+       for the other tree states. Reuse those liveness proofs; add no new one.
+    2. A new decision arm in decideRegisteredFixOwnerRecovery, e.g. kind "preserve-stale-dirty". It fires
+       only when ALL hold: treeState is "untracked_dirty"; localSha is known and differs from the PR's
+       current head (snapshot.remoteSha); claimState is "clear"; processState is "clear"; and ageMs is past
+       the adaptive idle bound. Anything else stays keep/dirty_worktree exactly as today. That covers a tree
+       at the PR's CURRENT head, a live claim or process, an unreadable probe, and a tree younger than the
+       bound. The existing W1-T6355 keep cases must still pass unchanged.
+    3. Adaptive idle bound. Derive it from observed fix-round lengths already on the ledger, e.g. a high
+       quantile of recent fix-round claim-to-end spans (the rows fixRoundClaimEnded reads). Pass it into the
+       decision as an input (a snapshot field or a second argument) so tests can drive it. Use a documented
+       fallback when there is no history. The PR body names the signal it chose.
+    4. Preserve before removing. Before any reset or removal, save the owner's uncommitted state under a
+       durable path the janitors keep, e.g. join(config.root, "recovery", "fix-owner", <branch>,
+       "<localSha>-<epochMs>"): `git diff --binary` (worktree), `git diff --cached --binary` (index), and
+       the untracked files (`ls-files --others --exclude-standard`, as a tar or a patch built through a
+       temporary index the way preserveAndClearUntrackedFixOwner does). The path must sit outside every
+       reclaim scope: worktreesDir, deploy/rmd-host-cleanup.sh's roots, and disk-artifact-reclaim's
+       RECLAIMABLE_ARTIFACT_NAMES. Verify that every saved file exists and is non-empty where its source was
+       non-empty BEFORE anything is reset. A failed or unverified save declines by name
+       (owner_stale_dirty_preserve_failed), never removes.
+    5. Ledger row, then reclaim. Log sweep.fix.checkout_owner_stale_dirty_preserved with pr_number,
+       task_id, branch, worktree_path, local_sha_prefix, head_sha and preserved_path. Then reset/clean the
+       owner (never `git worktree remove --force`) and remove it with removeAbandonedFixWorktreeOwner, so
+       the claim proceeds in the same pass, as the other preserve arms do.
+    Tests go in a new file, test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive the decision with snapshots. Drive capture, preserve and
+    reclaim against a real gitRepo() fixture: a worktree on an old head holding a staged delete and an
+    untracked copy of the same file, which replays 10-10's shape. Assert the saved patch and untracked
+    content reproduce the owner's state.
+  acceptance:
+    - claim: "a dead untracked_dirty owner on a superseded head, idle past the bound, is preserved and reclaimed"
+      proof: 'grep: test("W1-T7719: a dead dirty owner on a stale head is preserved and reclaimed" in test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts'
+    - claim: "an untracked_dirty owner at the PR's current head stays kept as dirty_worktree"
+      proof: 'grep: test("W1-T7719: a dirty owner at the current head is still kept" in test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts'
+    - claim: "an untracked_dirty owner with a live claim or process stays kept"
+      proof: 'grep: test("W1-T7719: a dirty owner with a live claim or process is still kept" in test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts'
+    - claim: "the idle bound is derived from observed fix-round lengths, so two histories give two bounds"
+      proof: 'grep: test("W1-T7719: the idle bound follows observed fix-round lengths" in test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts'
+    - claim: "the staged diff, worktree diff and untracked files are saved and verified before removal"
+      proof: 'grep: test("W1-T7719: the owner state is saved and verified before removal" in test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts'
+    - claim: "the sweep logs a ledger row naming the saved path"
+      proof: 'grep: sweep\.fix\.checkout_owner_stale_dirty_preserved in src/lib/sweep.ts'
+  falsifier: |
+    Leave decideRegisteredFixOwnerRecovery returning keep/dirty_worktree for every untracked_dirty tree:
+    the stale-head test sees a decline and the worktree still registered. Leave the snapshot returning early
+    on untracked_dirty: the decision never sees a clear claim or a stale localSha, so the same test fails.
+    Use a fixed constant for the bound: the history test reads one bound for both histories. Remove the
+    save step: the saved-state test finds no file at preserved_path.

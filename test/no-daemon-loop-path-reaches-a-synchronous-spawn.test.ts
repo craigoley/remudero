@@ -21,28 +21,39 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-/** Loop-reachable functions that still call a synchronous spawn primitive, with the call count recorded
- *  at build time (2026-10-10, f49ee17d3). A new name, or a count above its row, fails the census; a
- *  count BELOW its row passes, so converting a site never needs an edit here. */
+/** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
+ *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
+ *  when the handed-over form began to count). A new name, or a count above its row, fails the census;
+ *  a count BELOW its row passes, so converting a site never needs an edit here. */
 const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   applyDefuseActions: 1,
+  applyGhReadCadence: 1,
+  assertOpenWeightToolBoundary: 1,
   assertWorkerEgressEnforcerVersion: 1,
   assessedReviewerFreshness: 1,
   authorBaseRef: 1,
+  baseBranchRequiresMergeQueue: 1,
   blobShaAtRef: 1,
   blockingSleep: 1,
   buildBatchedGithub: 1,
+  buildBehindMainByPr: 1,
   buildCommitTrailerIndex: 1,
-  buildRegisteredGarden: 1,
-  buildSweepEffects: 4,
+  buildProofAmendmentWritePorts: 2,
+  buildRegisteredGarden: 3,
+  buildSweepEffects: 6,
+  buildWipeTestCadenceDaemonHooks: 1,
+  changeView: 1,
   changedShardProofs: 2,
   checkCliFreshness: 1,
+  checkFixCensusSnapshot: 1,
   checkProofAtAuthorTime: 1,
-  ciFrictionGardenSpec: 1,
   ciLearningTaskIdMinter: 1,
   classifyHeadShaAvailability: 1,
   codeScanningJudgeDeps: 1,
   couldBeInterpolatedTitle: 1,
+  createGhCallPacer: 1,
+  createHeadRehomePorts: 1,
+  createTickReadProducer: 1,
   creditEvidenceRootFor: 1,
   currentBranch: 1,
   daemonCommand: 4,
@@ -103,24 +114,30 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   defaultUpstreamGit: 1,
   defaultWhich: 1,
   defuseCandidates: 1,
-  depReviewCommand: 1,
+  depReviewCommand: 4,
   discoverLiveLedgerRoot: 1,
   dispatchClaimReserverFor: 1,
   draftProposalBatch: 1,
+  ensureDeps: 1,
   ensureInstallFresh: 1,
-  ensureTaskTrailer: 1,
+  ensureTaskTrailer: 2,
   ensureWorktreeConfigEnabled: 2,
   execGhPrReview: 1,
   execGhStatusPost: 1,
+  execWhitelistedProof: 1,
   executeWorktreeRemoval: 2,
   extractReviewFindings: 1,
   fetchMergedCoverageArtifact: 4,
+  fetchNewestPrReview: 1,
+  fetchPrBodyViaGh: 1,
+  fetchPrDiffFilesViaGh: 1,
+  fetchPrLifecycle: 1,
   fileLine: 1,
   filingRef: 1,
+  fixCommand: 1,
+  fixRebaseMergeFactsFromRest: 2,
   fixRungCiFailures: 1,
-  flowGardenSpec: 2,
-  gardenCheckout: 2,
-  gateGardenSpec: 1,
+  gardenCheckout: 3,
   ghAlertGateway: 1,
   ghEscalationAnswerGateway: 1,
   ghExec: 4,
@@ -128,23 +145,27 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   ghGateway: 1,
   ghIssueGateway: 1,
   ghIssueListGateway: 1,
-  ghJson: 1,
+  ghJson: 2,
+  ghLiveHead: 1,
   ghLiveState: 1,
+  ghLiveStateByNumber: 1,
+  ghPrHeadGateway: 1,
   ghPrMergeSquash: 1,
   ghPrView: 1,
+  ghUpdateBranch: 2,
   git: 1,
   gitFailureReason: 1,
   gitGrepAnchorTrue: 1,
   grepFilesContaining: 1,
   grepProofHeldAt: 1,
   grepProofHolds: 1,
+  handedOffHeadRiskJudge: 1,
   hostWorktreeGit: 1,
-  hotFileGardenSpec: 1,
   idCitedInSrc: 1,
   imessageChannel: 1,
   installPinnedChromium: 1,
-  isGitWorktree: 1,
-  ladderGardenSpec: 2,
+  isPrMergedNow: 1,
+  ladderGardenSpec: 1,
   listRegisteredWorktrees: 1,
   listRuleSuites: 1,
   loadPlanAtRef: 1,
@@ -156,8 +177,12 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   manifestLastCommitMs: 1,
   materializeReviewerSnapshot: 1,
   mergeBaseFor: 1,
+  mergeDirectViaRest: 1,
+  mergeShaNow: 1,
   mergedPrsSince: 1,
   mergedTriageSubjects: 1,
+  openPrFileScopes: 1,
+  openPrMintTexts: 1,
   opportunityIntakePortsOver: 2,
   originUrlAtCut: 1,
   pinnedConfigValue: 1,
@@ -165,9 +190,13 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   planReloader: 1,
   planSafetyGitSync: 1,
   planTreeIsBehindMain: 1,
+  postReviewPending: 1,
   preserveFixHead: 3,
+  probeProofSandbox: 1,
   productionCiJudgePorts: 1,
   productionGardenerOverseerPorts: 1,
+  productionMachineFilingJudgePorts: 1,
+  productionOpportunityOutcomePorts: 1,
   projectionGithub: 1,
   proofLandingCommit: 1,
   proofRepairRoundRefusalInWorktree: 1,
@@ -180,6 +209,8 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readCiFrictionPlanState: 1,
   readCodeScanningAlerts: 1,
   readDispatchFilingSnapshot: 1,
+  readHeadShaRest: 2,
+  readLadderPlan: 1,
   readLocalOriginRefHead: 1,
   readMainHistory: 1,
   readMergeSubjectsByPr: 1,
@@ -187,20 +218,27 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readMutationVerdictZip: 1,
   readOperatorInterventions: 2,
   readOutcomes: 1,
-  readLadderPlan: 1,
+  readPushedRunBranchesOutput: 1,
   readRequiredStatusCheckContexts: 1,
-  realArmDeps: 4,
+  readRunBranchClosedPrsOutput: 1,
+  readTaskPrecondition: 1,
+  readyDraftViaGh: 1,
+  realArmDeps: 7,
   realDeployDeps: 1,
+  realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
+  redBaseRefreshFactsFromRest: 1,
   refCommitMatchesDirtyRecovery: 3,
   referencesOutside: 1,
   refreshKnowledgeAssertions: 2,
+  refreshProofToolchain: 1,
   registeredFixWorktreeOwner: 1,
   remotePlanCeilingOnRef: 1,
   removeAbandonedFixWorktreeOwner: 1,
-  removeBaseProofWorktree: 1,
+  renumberPlanPrIds: 1,
   repairPrMetadata: 2,
+  requeueActionsJobOutcome: 1,
   reservationBaselineIds: 1,
   reservationPolicyCurrency: 1,
   resolveClaudeBin: 1,
@@ -212,21 +250,29 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   resolveReviewSubjectCheckout: 1,
   retroShippedGithubGateway: 1,
   reuseDonor: 1,
+  reviewCommand: 1,
+  reviewerCodeRecoveryFromLoadedModule: 1,
   reviewerGit: 1,
   run: 1,
+  runCoverageImprovementCadence: 1,
+  runGhPrCreate: 1,
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
+  runReview: 1,
   runSuiteShifted: 1,
   runTaskBody: 2,
+  runWipeTestPair: 1,
   serviceGit: 1,
   shardAgeDays: 1,
   sleepSync: 3,
   sourceRepositoryFromCwd: 1,
   spawnPreparedProofSync: 1,
   sreOperatorEscalation: 1,
+  stackPrerequisiteFromRest: 1,
   startCheckSync: 1,
   sweepPostFixReverification: 1,
+  syncBoardReviewOpenPrs: 1,
   syncPlanFromOrigin: 2,
   taskIdDeclarationsAtRef: 1,
   taskIdOwnershipFindings: 1,
@@ -298,10 +344,19 @@ function topLevelFunctions(): Fn[] {
 const SYNC_SPAWN_CALL =
   /\b(?:execFileSync|spawnSync|execSync|ghExec|ghExecFile|ghJson|defaultBlockingSleepSync)\(|\bAtomics\.wait\(/g;
 
-/** Calls in one body; the sleep's own definition is not a call site. */
+/** The same primitives handed over as a VALUE: a seam's default (`exec = execFileSync`), a fallback
+ *  (`deps.run ?? spawnSync`), an argument (`fetchOpenPrsRest(o, r, ghJson)`). The call then happens
+ *  under a name {@link SYNC_SPAWN_CALL} cannot see. On 2026-10-10 `checkFixCensusSnapshot`
+ *  (`run: typeof spawnSync = spawnSync`, up to 5.9 s) and `mergeDirectViaRest` (`= execFileSync`,
+ *  2.7 s) held the daemon loop while this census counted both at zero. `typeof X`, a string and a
+ *  comparison (`exec === execFileSync`) hand nothing over. */
+const SYNC_SPAWN_VALUE =
+  /(?:(?<![=!<>])=|\?\?|\|\||[(,:])\s*(?:execFileSync|spawnSync|execSync|ghExec|ghExecFile|ghJson|defaultBlockingSleepSync)(?![\w$])(?!\s*\()/g;
+
+/** Calls and handed-over primitives in one body; the sleep's own definition is not a call site. */
 function syncSpawnCalls(fn: Fn): number {
   const defines = /^(?:export\s+)?function\s+defaultBlockingSleepSync\(/.test(fn.body) ? 1 : 0;
-  return (fn.body.match(SYNC_SPAWN_CALL) ?? []).length - defines;
+  return (fn.body.match(SYNC_SPAWN_CALL) ?? []).length + (fn.body.match(SYNC_SPAWN_VALUE) ?? []).length - defines;
 }
 
 /** Name-based fixed point: a function is reachable when its identifier appears in a reachable body. */
@@ -396,9 +451,42 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts â€
   assert.deepEqual(refusals(fns, { ...SYNC_SPAWN_LOOP_BASELINE, syncPlanFromOrigin: 9 }), []);
 });
 
+test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts â€” a sync primitive handed over as a seam default counts", () => {
+  // A primitive handed over as a value counts where it is handed over; a type, a string or a comparison does not.
+  for (const handed of ["exec = execFileSync,", "run: typeof spawnSync = spawnSync", "(deps.execFile ?? execFileSync)(a)",
+    "fetchOpenPrsRest(o, r, ghJson)", "ensureDeps(cwd, execFileSync, runner)", "{ exec: execSync }", "deps.git || ghExec"]) {
+    assert.equal(syncSpawnCalls({ name: "x", file: "x", body: `  ${handed};` }), 1, handed);
+  }
+  for (const inert of ["exec?: typeof execFileSync", "if (exec === execFileSync) return", 'const names = ["execFileSync", "spawnSync"]',
+    "exec !== spawnSync", "execFileSyncFn(a)", "ghJsonAsync"]) {
+    assert.equal(syncSpawnCalls({ name: "x", file: "x", body: `  ${inert};` }), 0, inert);
+  }
+
+  // The two loop stalls of 2026-10-10 that spawned through a seam default are counted and reached, never zero.
+  const fns = topLevelFunctions();
+  const pop = population(fns);
+  const reach = loopReachable(fns, "daemonCommand");
+  for (const seam of ["checkFixCensusSnapshot", "mergeDirectViaRest"]) {
+    assert.ok((pop.get(seam) ?? 0) > 0 && reach.has(seam), `${seam} hands a sync primitive to its own call and is reached`);
+  }
+
+  // Falsifier on the real source: a reached function with no row gains a seam that defaults to the primitive.
+  const seamed = fns.map((f) =>
+    f.name === "sweepLandingSteps" ? { ...f, body: f.body + "\n  const run = deps.run ?? spawnSync;" } : f,
+  );
+  const named = refusals(seamed, SYNC_SPAWN_LOOP_BASELINE);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^sweepLandingSteps makes 1 synchronous spawn call\(s\) and is reachable from the daemon loop/);
+
+  // The garden idle checks that froze the loop for up to 17.9 s hold no row: a sync HEAD read there is refused.
+  for (const spec of ["ciFrictionGardenSpec", "gateGardenSpec", "hotFileGardenSpec"]) {
+    assert.ok(reach.has(spec) && !(spec in SYNC_SPAWN_LOOP_BASELINE), `${spec} is reached and holds no sync-spawn row`);
+  }
+});
+
 test("an emptied population scan fails the positive control", () => {
   const fns = topLevelFunctions();
-  const blind = fns.map((f) => ({ ...f, body: f.body.replace(SYNC_SPAWN_CALL, "noop(") }));
+  const blind = fns.map((f) => ({ ...f, body: f.body.replace(SYNC_SPAWN_CALL, "noop(").replace(SYNC_SPAWN_VALUE, " noop") }));
   assert.ok(!population(blind).has("syncPlanFromOrigin"), "a scan that matches nothing finds no population");
   assert.ok(population(fns).has("syncPlanFromOrigin"), "the real scan finds the positive control");
 });

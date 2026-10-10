@@ -11,7 +11,7 @@ import { AssertionError } from "node:assert";
 // degrades to SILENCE here rather than flapping.
 //
 // BUILD-TIME CENSUS: test/a-wall-clock-bound-declares-itself.test.ts re-runs the declaration
-// query and records this branch's measured population: 26 files, 43 assertion sites. The stated
+// query and records this branch's measured population: 35 files, 55 assertion sites. The stated
 // floor is 3 files or 4 sites; below either, W1-T2811 should close unbuilt with that measurement
 // rather than carrying a seam for a class too small to express.
 //

@@ -18,13 +18,14 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { daemonMemoryTelemetryReader, type RunResult } from "../src/run-task.js";
 import { runDaemon, v8HeapStatistics, type DaemonDeps } from "../src/lib/daemon.js";
 import { activeWorkerCount } from "../src/lib/worker.js";
 import { drainInFlightReviews, inFlightReviewCount, trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { sampleCgroupMemory, sampleDaemonMemory, type DaemonMemorySources } from "../src/lib/daemon-memory-telemetry.js";
+import { sampleCgroupMemory, sampleDaemonMemory, type DaemonMemorySources, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -151,6 +152,38 @@ test("the production memory reader samples real process memory and live review w
     await drainInFlightReviews({ boundMs: 1_000 });
   }
   assert.equal(readMemoryTelemetry().in_flight_reviews, before.in_flight_reviews, "the same reader observes review settlement");
+});
+
+// W1-T7092: the PRODUCTION reader (run-task.ts), with the real worker-heaps registry and a real Worker.
+// It lives here because this module already imports run-task.ts; the reach ratchet counts each importer.
+test("the production reader names a real worker thread by creation site, role, thread id and generation", { timeout: 20_000 }, async () => {
+  const readMemoryTelemetry = daemonMemoryTelemetryReader(SHA, { generation: "DAEMON-1791542911631" }); // subscribes the registry first
+  const thread = new Worker("setInterval(() => {}, 1000);", { eval: true });
+  try {
+    await new Promise<void>((resolve) => thread.once("online", () => resolve()));
+    let row: Record<string, unknown> & WorkerHeapFields = readMemoryTelemetry();
+    assert.equal(row.mem_worker_heaps, "pending:first-read", "no request round has run before the first row");
+    readMemoryTelemetry.afterRow();
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      row = readMemoryTelemetry();
+      if (row.worker_heaps?.threads.some((t) => t.thread_id === thread.threadId && t.state === "fresh")) break;
+    }
+    const mine = row.worker_heaps?.threads.find((t) => t.thread_id === thread.threadId);
+    assert.ok(mine, `the real thread is reported (threads: ${JSON.stringify(row.worker_heaps?.threads)})`);
+    assert.match(mine.site, /^the-daemon-heartbeat-says-what-its-memory-is\.test:/, "named by the frame that spawned it");
+    assert.equal(mine.role, "unmapped", "a site outside the daemon's fixed map is unmapped, never guessed");
+    assert.equal(mine.state, "fresh");
+    for (const field of ["used_heap_bytes", "total_heap_bytes", "physical_heap_bytes", "heap_limit_bytes"] as const) {
+      assert.ok(Number.isSafeInteger(mine[field]) && (mine[field] as number) > 0, `${field} measures the worker's own isolate`);
+    }
+    assert.equal(row.worker_heaps?.generation, "DAEMON-1791542911631");
+    assert.ok((row.worker_heaps?.main?.total_heap_bytes ?? 0) > 0, "the main isolate is reported the same way");
+    assert.ok(Number.isSafeInteger(row.rss_bytes) && Number.isSafeInteger(row.vm_swap_bytes ?? 0), "rss and swap stay separate fields");
+    assert.doesNotMatch(JSON.stringify(row), /native/i, "no field is labelled native memory");
+  } finally {
+    await thread.terminate();
+  }
 });
 
 test("memory.max reading `max` is null, never a number standing in for unlimited", () => {

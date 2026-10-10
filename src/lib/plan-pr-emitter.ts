@@ -16,7 +16,7 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -780,6 +780,14 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
+function dropOrphanedWorktreeAdmin(tree: string, realTree: string): void {
+  const dotGit = join(tree, ".git");
+  if (!existsSync(dotGit)) return;
+  const admin = readFileSync(dotGit, "utf8").replace(/^gitdir:\s*/, "").trim();
+  const backLink = join(admin, "gitdir");
+  if (existsSync(backLink) && readFileSync(backLink, "utf8").trim() === join(realTree, ".git")) rmSync(admin, { recursive: true, force: true });
+}
+
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
 export function planPrPreflightAtCommit(
@@ -790,6 +798,7 @@ export function planPrPreflightAtCommit(
 ): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
     try {
@@ -800,7 +809,8 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree); // killed before HEAD: remove refuses, so drop our own admin dir
     rmSync(parent, { recursive: true, force: true });
   }
 }
@@ -814,6 +824,7 @@ export async function planPrPreflightAtCommitAsync(
 ): Promise<PlanPrPreflightResult> {
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
     const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
@@ -825,7 +836,8 @@ export async function planPrPreflightAtCommitAsync(
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
+    const removed = await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
+    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree);
     await rm(parent, { recursive: true, force: true });
   }
 }

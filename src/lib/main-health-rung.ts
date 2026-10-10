@@ -916,21 +916,27 @@ export function buildMainHealthRung(
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
       }
+      // EVERY check on the deciding run, judged alike: the advisory list and `decideBaseRed`'s census.
+      const everyCheck = mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging);
       const advisoryFailing =
-        required.size === 0
-          ? []
-          : mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging).failingChecks.filter(
-              (name) => !observation.failingChecks.includes(name),
-            );
+        required.size === 0 ? [] : everyCheck.failingChecks.filter((name) => !observation.failingChecks.includes(name));
       // Only CONCLUDED checks are a census `decideBaseRed` may read: a pending or skipped one is
-      // not evidence that main ran it green.
-      const notConcluded = new Set([...observation.pendingChecks, ...observation.nonEvidenceChecks]);
+      // not evidence that main ran it green. The census spans EVERY check, not only ci-gate's
+      // required aggregates: a PR's red names a shard ("coverage-shard (2/8)") that the required
+      // set ("ci", "test-slow") never names, so a required-only census read every shard red "absent"
+      // and held it as main's whenever main was red for any reason (2026-10-10, eight PRs held on
+      // dbca9031a, whose only failing shard was test-slow-shard (2/2)).
+      const notConcluded = new Set([
+        ...observation.pendingChecks, ...observation.nonEvidenceChecks,
+        ...everyCheck.pendingChecks, ...everyCheck.nonEvidenceChecks,
+      ]);
       const observedChecks = [
         ...new Set([
-          ...judgedRollup(evidenceRollup, required)
+          ...[...judgedRollup(evidenceRollup, required), ...evidenceRollup]
             .map((c) => c.name ?? c.context ?? "unknown")
             .filter((name) => !notConcluded.has(name)),
           ...observation.failingChecks,
+          ...advisoryFailing,
         ]),
       ];
       // W1-T5806: read once per red head; a failed read is named here and changes no escalation.

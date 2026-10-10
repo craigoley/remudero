@@ -79,9 +79,8 @@ function deps(overrides: Partial<SweepDeps> = {}) {
   return out;
 }
 
-test("W1-T3289: DEFAULT_SWEEP_POLICY collects the shipped plan row and keeps the switch off", () => {
+test("W1-T3289: DEFAULT_SWEEP_POLICY collects the shipped plan row, and an absent row keeps the switch off", () => {
   const shipped = loadPolicy(policyPath(REPO_ROOT));
-  assert.equal(shipped.values.sweep.recordableRatchetRepairEnabled, false);
   assert.equal(
     DEFAULT_SWEEP_POLICY.recordableRatchetRepairEnabled,
     shipped.values.sweep.recordableRatchetRepairEnabled,
@@ -89,12 +88,20 @@ test("W1-T3289: DEFAULT_SWEEP_POLICY collects the shipped plan row and keeps the
 
   const strippedPath = join(mkdtempSync(join(tmpdir(), "rmd-ratchet-policy-row-")), "policy.yaml");
   const stripped = readFileSync(policyPath(REPO_ROOT), "utf8").replace(
-    /\n  recordableRatchetRepairEnabled:\n    value: false\n    origin: "[^"]+"\n/,
+    /\n  recordableRatchetRepairEnabled:\n    value: (?:true|false)[^\n]*\n    origin: "[^"]+"\n/,
     "\n",
   );
   assert.doesNotMatch(stripped, /\n  recordableRatchetRepairEnabled:/);
   writeFileSync(strippedPath, stripped);
   assert.equal(loadPolicy(strippedPath).values.sweep.recordableRatchetRepairEnabled, false);
+});
+
+// Operator ruling 2026-10-10 ("lean into automation"): the shipped row is ON. The acting path stays fenced
+// by RATIFIED_BASELINE_RATCHET_REPAIRS, so the switch can only record a baseline, never lower a floor.
+test("operator ruling 2026-10-10: the shipped policy row switches recordable ratchet repair on", () => {
+  const shipped = loadPolicy(policyPath(REPO_ROOT));
+  assert.equal(shipped.values.sweep.recordableRatchetRepairEnabled, true);
+  assert.equal(DEFAULT_SWEEP_POLICY.recordableRatchetRepairEnabled, true);
 });
 
 test("W1-T3289: an absent or false flag still names the remedy and withholds the repair", async () => {
