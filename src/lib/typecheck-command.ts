@@ -60,10 +60,10 @@ function writableDir(dir: string): boolean {
  * a per-checkout file in TMPDIR — a Codex writer's sandbox binds the worktree's git dir read-only (W1-T6148), and an
  * incremental tsc that cannot write its buildinfo fails. Neither writable: the plain check, never a broken one.
  */
-export function typecheckBuildInfoFor(root: string, tmp: string = tmpdir()): string | undefined {
+export function typecheckBuildInfoFor(root: string, tmp: string = tmpdir(), writable: (dir: string) => boolean = writableDir): string | undefined {
   const own = worktreeBuildInfoPath(root);
-  if (own !== undefined && writableDir(dirname(own))) return own;
-  if (!writableDir(tmp)) return undefined;
+  if (own !== undefined && writable(dirname(own))) return own;
+  if (!writable(tmp)) return undefined;
   let key = root;
   try {
     key = realpathSync(root);
@@ -75,23 +75,23 @@ export function typecheckBuildInfoFor(root: string, tmp: string = tmpdir()): str
 
 /** The plan for `root` under `env`. Fleet means a slot directory is configured or the host scratch mount is present —
  *  exactly the places test-slot coordinates host-wide; anywhere else the old plain script runs unchanged. */
-export function planTypecheckCommand(
-  root: string,
-  env: NodeJS.ProcessEnv = process.env,
-  isDir?: (path: string) => boolean,
-  tmp?: string,
-): TypecheckCommandPlan {
-  const slots = resolveTestSlotDir(env, isDir);
+export function planTypecheckCommand(root: string, where: TypecheckWhere = {}): TypecheckCommandPlan {
+  const slots = resolveTestSlotDir(where.env ?? process.env, where.isDir);
   if (slots.scope !== "configured" && slots.scope !== "host-scratch") return { mode: "plain", args: typecheckArgs(undefined) };
-  const buildInfo = typecheckBuildInfoFor(root, tmp);
+  const buildInfo = typecheckBuildInfoFor(root, where.tmp, where.writable);
   if (buildInfo === undefined) return { mode: "fleet", args: typecheckArgs(undefined), slotDir: slots.dir };
   return { mode: "fleet", args: typecheckArgs(buildInfo), slotDir: slots.dir, buildInfo, seed: seedFromCanonical(root, buildInfo) };
 }
 
-export interface TypecheckCommandPorts {
+/** Seams for where the check runs; every field defaults to this process's real host. */
+export interface TypecheckWhere {
   env?: NodeJS.ProcessEnv;
   isDir?: (path: string) => boolean;
   tmp?: string;
+  writable?: (dir: string) => boolean;
+}
+
+export interface TypecheckCommandPorts extends TypecheckWhere {
   /** Extra argv after the fixed tail (`npm run typecheck -- --pretty false`). */
   extraArgs?: readonly string[];
   spawn?: (file: string, args: string[], options: { cwd: string; stdio: "inherit" }) => ChildProcess;
@@ -103,7 +103,7 @@ export interface TypecheckCommandPorts {
 /** Run the type-check for `root`, resolving to the exit code the npm script should end with. */
 export async function runTypecheckCommand(root: string, ports: TypecheckCommandPorts = {}): Promise<number> {
   const log = ports.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
-  const plan = planTypecheckCommand(root, ports.env, ports.isDir, ports.tmp);
+  const plan = planTypecheckCommand(root, ports);
   let slot: TestSlotLease | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   if (plan.mode === "fleet") {

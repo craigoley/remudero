@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { test, type TestContext } from "node:test";
 import { acquireTestSlot } from "../src/lib/test-slot.js";
-import { codexTestSlotArgs, planTypecheckCommand, runTypecheckCommand } from "../src/lib/typecheck-command.js";
+import { codexTestSlotArgs, planTypecheckCommand, runTypecheckCommand, typecheckBuildInfoFor } from "../src/lib/typecheck-command.js";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
 
@@ -51,6 +51,7 @@ function fleetEnv(fx: Fx, extra: Record<string, string> = {}): NodeJS.ProcessEnv
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_TEST_SLOT_DIR: fx.slots, RMD_TEST_SLOTS: "1", FAKE_TSC_OUT: fx.out };
   delete env.NODE_TEST_CONTEXT;
   delete env.RMD_TEST_SLOT_PARENT;
+  env.NODE_V8_COVERAGE = ""; // the wrapper child is production-shaped, not a coverage participant
   return { ...env, ...extra };
 }
 
@@ -119,18 +120,15 @@ test("a warm fleet typecheck takes no slot, and a sandbox's read-only git dir mo
   assert.equal(res.status, 0, res.stderr);
   assert.deepEqual(recorded(fx).labels, [], "a usable buildinfo is the cheap tier: no queue");
 
-  rmSync(buildInfo);
-  chmodSync(join(fx.root, ".git"), 0o555); // left empty, so the fixture sweep still removes it
-  const plan = planTypecheckCommand(fx.root, fleetEnv(fx), () => false, fx.tmp);
-  if (process.getuid?.() !== 0) {
-    assert.match(plan.buildInfo ?? "", new RegExp(`^${fx.tmp}/rmd-typecheck-[0-9a-f]{16}\\.tsbuildinfo$`));
-    assert.equal(plan.args.includes("--incremental"), true);
-  }
-  chmodSync(fx.tmp, 0o555);
-  if (process.getuid?.() !== 0) {
-    assert.deepEqual(planTypecheckCommand(fx.root, fleetEnv(fx), () => false, fx.tmp).args, ["-p", "tsconfig.json", "--noEmit"],
-      "nowhere writable: the plain check, never an incremental one that cannot write its buildinfo");
-  }
+  const gitDir = join(fx.root, ".git");
+  const readOnlyGit = (dir: string) => dir !== gitDir;
+  const plan = planTypecheckCommand(fx.root, { env: fleetEnv(fx), isDir: () => false, tmp: fx.tmp, writable: readOnlyGit });
+  assert.match(plan.buildInfo ?? "", new RegExp(`^${fx.tmp}/rmd-typecheck-[0-9a-f]{16}\\.tsbuildinfo$`));
+  assert.equal(plan.args.includes("--incremental"), true);
+  assert.deepEqual(planTypecheckCommand(fx.root, { env: fleetEnv(fx), isDir: () => false, tmp: fx.tmp, writable: () => false }).args,
+    ["-p", "tsconfig.json", "--noEmit"], "nowhere writable: the plain check, never an incremental one that cannot write its buildinfo");
+  assert.equal(planTypecheckCommand(fx.root, { env: fleetEnv(fx), isDir: () => false, tmp: fx.tmp }).buildInfo, buildInfo,
+    "a writable git dir keeps the buildinfo beside the checkout");
 });
 
 test("a slot holder in another pid namespace on the same host is aged by its lease, never by a pid probe", () => {
@@ -254,6 +252,8 @@ test("each way a fleet typecheck can end names its own exit code, and a held slo
     return child;
   }));
   assert.equal(killed, 129, "an unnamed signal still exits non-zero");
-  assert.match(planTypecheckCommand(join(fx.root, "absent"), fleetEnv(fx), () => false, fx.tmp).buildInfo ?? "",
+  assert.match(planTypecheckCommand(join(fx.root, "absent"), { env: fleetEnv(fx), isDir: () => false, tmp: fx.tmp }).buildInfo ?? "",
     /rmd-typecheck-[0-9a-f]{16}\.tsbuildinfo$/, "a root with no git dir keys its TMPDIR buildinfo by its spelled path");
+  assert.equal(typecheckBuildInfoFor(join(fx.root, "absent"), join(fx.tmp, "missing")), undefined,
+    "no git dir and a TMPDIR that is not there: nowhere to keep a buildinfo");
 });

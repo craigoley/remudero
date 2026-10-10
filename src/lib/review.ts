@@ -7850,6 +7850,10 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "W1-T4404's affected-suite selector in SHADOW: it prints what it WOULD run and exits 0 whatever it finds, after the " +
     "full suite has run, so no edit to it can change what a CI gate measures. Promote it to INSTRUMENT_SURFACE when " +
     "W1-T4406 lets a selection skip suites.",
+  "scripts/typecheck.mjs":
+    "`npm run typecheck`'s launcher (src/lib/typecheck-command.ts): it decides only WHEN tsc runs (a host slot) and " +
+    "WHERE its buildinfo lives, and passes tsc's exit code through untouched. CI's typecheck step runs `npx tsc` " +
+    "directly, so no edit here can change what a CI gate measures; tsc stays the instrument.",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "package-lock.json": "a dependency lockfile, not gate logic",
   "deploy/package.json": "the image's CLI manifest, an acr-build trigger input (IMAGE_BAKED_PATHS), not gate logic",
