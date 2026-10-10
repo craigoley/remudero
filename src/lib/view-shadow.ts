@@ -407,6 +407,24 @@ function classifyList(legacy: readonly unknown[], view: readonly unknown[], ev: 
   return { classification: top, reason: `every listed id differing or moved is explained (${breakdown})` };
 }
 
+/** An instant from an ISO string or an epoch-ms number; null for anything else. */
+function instantMs(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Whether a time leaf's two values differ by no more than the sources' as-of gap: both are instants (or
+ * both are ages/durations in ms) and sit within `gapMs` of each other. A time value days wrong, or one that
+ * is not a time at all, is not explained by the gap.
+ */
+function timeDiffWithin(legacy: unknown, view: unknown, gapMs: number): boolean {
+  const [a, b] = [instantMs(legacy), instantMs(view)];
+  return a !== null && b !== null && Math.abs(a - b) <= gapMs;
+}
+
 /**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
  * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
@@ -434,8 +452,10 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   }
   const agesDiffer = ev.legacyAsOfMs !== null && ev.viewAsOfMs !== null && ev.legacyAsOfMs !== ev.viewAsOfMs;
   const leaf = diff.path.split(/[.[]/).at(-1) ?? "";
-  if (agesDiffer && (TIME_LEAF.test(leaf) || any(ev.namedInGap))) {
-    return { classification: "timing", reason: `sources ${Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!)} ms apart; ${ev.rowsInGap} row(s) landed between` };
+  if (agesDiffer) {
+    const gapMs = Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!);
+    const explained = any(ev.namedInGap) || (TIME_LEAF.test(leaf) && timeDiffWithin(legacy, view, gapMs));
+    if (explained) return { classification: "timing", reason: `sources ${gapMs} ms apart; ${ev.rowsInGap} row(s) landed between` };
   }
   if (ev.legacyHorizonMs !== undefined && any(ev.namedBeforeHorizon)) {
     return { classification: "legacy_horizon", reason: "a row older than the legacy horizon names it (ruling Q1: the view is right)" };
