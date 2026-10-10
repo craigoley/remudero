@@ -41,3 +41,20 @@ export function budgetedSpawn(budgetMs: number): { timeout: number; killSignal: 
 export function killBudgetLeftovers(pid: number | undefined): void {
   if (pid !== undefined) killProcessGroup(pid);
 }
+
+/** A timeout is not a teardown receipt: wait for every process in the detached group to exit before removing its worktree. */
+export async function waitForProcessGroupExit(pgid: number | undefined, timeoutMs = 5_000): Promise<boolean> {
+  if (pgid === undefined || !Number.isInteger(pgid) || pgid <= 0) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      process.kill(-pgid, 0);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return true;
+      if (code !== "EPERM") return false;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}

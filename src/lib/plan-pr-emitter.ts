@@ -37,7 +37,7 @@ import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
-import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers } from "./in-tree-budget.js";
+import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -815,19 +815,38 @@ export async function planPrPreflightAtCommitAsync(
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
+  let leaveTreeForSafety = false;
   try {
     const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
     try {
       await add;
     } catch (e) {
-      return treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      const result = treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      if (result.timedOut !== undefined && !(await waitForProcessGroupExit(add.child.pid))) {
+        leaveTreeForSafety = true;
+        throw new Error(`timed-out plan-PR checkout still has live processes; leaving its worktree for safety: ${tree}`);
+      }
+      return result;
     }
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
-    await rm(parent, { recursive: true, force: true });
+    if (!leaveTreeForSafety) {
+      await removeTemporaryWorktree(repoDir, tree);
+      await rm(parent, { recursive: true, force: true });
+    }
   }
+}
+
+async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
+    const listed = await runChildAsync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], repoDir);
+    if (listed.status !== 0) throw new Error(`could not verify plan-PR worktree cleanup: ${listed.output.trim()}`);
+    if (!listed.output.split("\n").includes(`worktree ${tree}`)) return;
+    if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}`);
 }
 
 /** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`

@@ -11,7 +11,7 @@
  * never kills them, each case waits them out and then reads green, which is exactly the silent pass this refuses.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,23 @@ function hungTree(): GitRepo {
   repo.git("add", "scripts", "src");
   repo.git("commit", "-q", "-m", "chore: hung legs");
   return repo;
+}
+
+function holdPostCheckout(repo: GitRepo): string {
+  const hooks = join(repo.dir, "test-hooks");
+  const marker = join(repo.dir, "post-checkout-started");
+  mkdirSync(hooks, { recursive: true });
+  const hook = join(hooks, "post-checkout");
+  writeFileSync(hook, `#!/bin/sh\n: > '${marker}'\nsleep 30\n`);
+  chmodSync(hook, 0o755);
+  repo.git("config", "core.hooksPath", hooks);
+  return marker;
+}
+
+async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  return existsSync(path);
 }
 
 const PR = { title: "chore(plan): reconcile one shard", body: "## Acceptance\n- the shard reconciles | grep: status in plan/tasks.d/w1-t1.yaml" };
@@ -158,9 +175,13 @@ test("a tree whose checkout is killed at its budget is held, not pushed unchecke
     assert.deepEqual(sync.timedOut?.map((f) => f.check), ["tree"]);
     assert.equal(emitter.planPrPreflightAllows(sync, { lane: "x", branch: "y" }), false, "before this, an unmaterialized tree pushed with every check skipped");
 
-    const awaited = await emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
-      lintPlan: async () => GREEN, taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0, budgetMs: () => 1,
+    const marker = holdPostCheckout(repo);
+    const pending = emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
+      lintPlan: async () => GREEN, taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0, budgetMs: () => 1_000,
     });
+    const checkoutReachedPostCheckout = await waitForFile(marker, 2_000);
+    const awaited = await pending;
+    assert.ok(checkoutReachedPostCheckout, "the fault hook proves the timed-out checkout was already materialized and registered");
     assert.deepEqual(awaited.timedOut?.map((f) => f.check), ["tree"]);
     assert.equal(repo.git("worktree", "list").split("\n").length, 1, "the killed checkout is deregistered on the way out");
 
