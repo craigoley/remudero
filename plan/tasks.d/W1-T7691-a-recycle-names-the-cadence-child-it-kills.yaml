@@ -1,0 +1,65 @@
+- id: W1-T7691
+  title: "A CONTAINER RECYCLE NAMES THE MEASUREMENT-CADENCE CHILD IT KILLS — the detached cadence child lives in the daemon's container, so a recycle kills it with no exit line and the next boot's `measurement_cadence.child outcome=restarted` row reads exactly like a crash"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high # Rule 19: one concern — the restart row can tell a recycle kill of the cadence child from a crash
+  band_meaning: span
+  origin: "operator session 2026-10-10: the 09:55Z core recycle killed the in-flight measurement cadence child, and the 10:06Z restart row could not say so"
+  plan_refs: [W1-T5723, W1-T4766, W1-T1046]
+  files: [deploy/recycle-container.sh, src/lib/measurement-cadence.ts, src/lib/daemon.ts, test/a-recycle-names-the-cadence-child-it-kills.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 on the core host's ledger (operator session, read-only): 09:55:20Z PAUSE "container
+    recycle (deploy/recycle-container.sh)"; the new container 3bd6af00c0af started at 09:56:06Z; at 10:06:08Z the
+    daemon logged `measurement_cadence.child outcome=restarted attempt=2` for the SAME run id,
+    MEASUREMENT-CADENCE-CHILD-1791617178934. That id was minted at 07:26:18Z, so attempt 1 had run about 2 h 29 min
+    when the recycle killed it. Nothing in the restart row says a recycle did it.
+    MECHANISM (read at origin/main dbca9031a):
+      - childMeasurementCadenceSpawn spawns the child `detached: true` (src/lib/measurement-cadence.ts:3646), so
+        an in-place daemon restart leaves it running and the next boot adopts it (W1-T5723). It is still in the
+        container's pid namespace, so `docker stop` (deploy/recycle-container.sh:2050) kills it with the daemon.
+      - The only exit record is the PARENT's `child.once("exit")` append to the child's stderr log (:3654). A
+        recycle kills the parent too, so no exit line is written.
+      - On the next boot, `start()` finds status "running" with a dead pid, reads measurementCadenceChildDeathDetail
+        (:3419, the stderr tail) and returns `restarted` with rule restart_once (:3547-3551). startMeasurementCadenceChild
+        (src/lib/daemon.ts:818) logs that as previous_rule/previous_detail (:835). A recycle kill and a crash with
+        the parent gone are the same thing to this row: a dead pid with no exit line.
+      - The recycle's bounded drain does not see the child. worker_lines (deploy/recycle-container.sh:1411-1419)
+        matches claude, codex and the automated retro child (W1-T4766, #7787), not `--measurement-cadence-child`.
+        PAUSE to new container took 46 s, so the wait found nothing to wait on.
+    The recycle-killed attempt also spends the run's one restart (MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS = 2,
+    :3406). This task does not change that count; it only makes the cause legible.
+  design: |
+    1. The recycle records the kill. In deploy/recycle-container.sh, immediately before `docker stop`, when
+       `${STATE_DIR}/state/measurement-cadence-child.json` holds status "running" AND the container's process list
+       shows a live `--measurement-cadence-child` process carrying that run id, write
+       `${STATE_DIR}/state/measurement-cadence-child.recycled.json` ({runId, pid, container, at, by:
+       "deploy/recycle-container.sh"}) and append one `recycle.cadence_child_killed` ledger row (run_id
+       RECYCLE-<pid>, cadence_run_id, cadence_pid, attempt, container), the same way `recycle.hung_worker_passed`
+       is written. Positive facts only: no running state or no live process, no marker. Plain bash and docker,
+       bash 3.2-safe. Best-effort: a failed write never blocks or fails the recycle.
+    2. The restart row names the cause. In measurementCadenceChildRunner's dead-child branch, read the marker.
+       When its runId AND pid match the dead state, set `previous.cause = "recycled"` and lead `detail` with the
+       marker's container and time. Otherwise set `cause = "unexplained"` and leave `detail` as today. A marker
+       naming another run or pid is ignored, so it can never relabel a later crash, and the runner removes the
+       marker once it has read it. startMeasurementCadenceChild adds `previous_cause` to the
+       `measurement_cadence.child` row; the discard outcome carries it too.
+    3. Optional, only if it stays small: let section 5's bounded drain wait (WAIT_SECONDS / RMD_RECYCLE_WAIT_S)
+       count a live cadence child, so a child near its end can finish. It must never make the recycle refuse on its
+       own. The child runs 37 min to 2.5 h, longer than the drain's budget, so at that budget the recycle proceeds
+       past it and step 1 records the kill. No new bound.
+  acceptance:
+    - claim: "a recycle that stops a container with a live cadence child writes the recycled marker and a recycle.cadence_child_killed row before docker stop"
+      proof: 'grep: test("W1-T7691: a recycle records the live cadence child it is about to kill" in test/a-recycle-names-the-cadence-child-it-kills.test.ts'
+    - claim: "a dead cadence child whose run id and pid match the marker restarts with cause recycled; one with no matching marker restarts with cause unexplained"
+      proof: 'grep: test("W1-T7691: the restart row names a recycle kill and leaves an unexplained death unexplained" in test/a-recycle-names-the-cadence-child-it-kills.test.ts'
+  falsifier: |
+    Leave the recycle script unchanged: the fixture's stubbed container with a live `--measurement-cadence-child`
+    process is stopped with no marker and no ledger row, and the first test fails. Leave the runner unchanged: the
+    restart that matches the marker carries no `recycled` cause, and the second test fails.
