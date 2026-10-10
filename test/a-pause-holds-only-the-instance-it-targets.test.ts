@@ -20,6 +20,7 @@ import {
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { resolvePauseTarget } from "../src/lib/pause-target.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // W1-T7727 — core, site and console run ONE checkout against ONE origin, each from its own state root.
 // `rmd pause` used to push the fleet-wide refs/rmd-pause/hold, so pausing core for a serve window held
@@ -40,10 +41,6 @@ interface Fixture {
   homeFor: (name: Instance | "operator") => string;
 }
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
-}
-
 function registryText(dir: string, extra = ""): string {
   const row = (name: string, repo: string, project: string) =>
     `  ${name}:\n    repo: ${repo}\n    project: ${project}\n    github_repo: fixture/${repo}\n    state_dir: ${join(dir, name)}\n`;
@@ -59,18 +56,16 @@ function registryText(dir: string, extra = ""): string {
 
 function makeFixture(registry?: (dir: string) => string): Fixture {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}instance-pause-`));
-  const origin = join(dir, "origin.git");
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-  const checkout = join(dir, "checkout");
-  execFileSync("git", ["clone", "-q", origin, checkout]);
-  git(checkout, "config", "user.email", "fixture@invalid");
-  git(checkout, "config", "user.name", "fixture");
+  // One bare origin and one checkout of it, shared by every instance — the live host's shape.
+  const origin = gitRepo({ bare: true, kind: "instance-pause-origin" }).dir;
+  const shared = gitRepo({ cloneFrom: origin, kind: "instance-pause-checkout" });
+  const checkout = shared.dir;
   const registryPath = daemonInstanceRegistryPath(checkout);
   mkdirSync(dirname(registryPath), { recursive: true });
   writeFileSync(registryPath, registry ? registry(dir) : registryText(dir));
-  git(checkout, "add", "-A");
-  git(checkout, "commit", "-q", "-m", "fixture");
-  git(checkout, "push", "-q", "origin", "HEAD:main");
+  shared.git("add", "-A");
+  shared.git("commit", "-q", "-m", "fixture");
+  shared.git("push", "-q", "origin", "HEAD:main");
   for (const name of INSTANCES) mkdirSync(join(dir, name, "state"), { recursive: true });
   const homeFor = (name: Instance | "operator") => {
     const home = join(dir, `home-${name}`);
@@ -117,7 +112,7 @@ function sharedRefOnOrigin(fx: Fixture): string {
 
 /** Control rows in one instance's ledger. `cli.invoked` is the CLI's own audit of every invocation (written under the
  *  invoking config's root before any verb runs), not a pause or resume write, so it is not one. */
-function ledgerRows(fx: Fixture, name: Instance): Array<Record<string, unknown>> {
+function controlRows(fx: Fixture, name: Instance): Array<Record<string, unknown>> {
   const path = join(fx.root(name), "state", "ledger.ndjson");
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
@@ -142,11 +137,11 @@ test("W1-T7727: a pause through the real CLI holds only the instance it targets"
   assert.equal(flag.reason, "serve restoration window");
   assert.equal(typeof flag.sessionId, "string");
   assert.equal(typeof flag.expiresAt, "string", "a default expiry is recorded, as before");
-  const row = ledgerRows(fx, "core").find((r) => r.step === "fleet.pause");
+  const row = controlRows(fx, "core").find((r) => r.step === "fleet.pause");
   assert.equal(row?.scope, "instance");
   assert.equal(row?.instance, "core");
   for (const other of ["site", "console", "wild-trails"] as const) {
-    assert.equal(ledgerRows(fx, other).length, 0, `${other}'s ledger is untouched`);
+    assert.equal(controlRows(fx, other).length, 0, `${other}'s ledger is untouched`);
   }
 });
 
@@ -155,7 +150,7 @@ test("W1-T7727: pausing wild-trails holds no Remudero instance, and pausing core
   const wild = rmd(fx, "operator", "pause", "--instance", "wild-trails", "--reason", "wild-trails maintenance");
   assert.equal(wild.status, 0, wild.out);
   assert.deepEqual(await heldInstances(fx), ["wild-trails"]);
-  assert.equal(ledgerRows(fx, "wild-trails").find((r) => r.step === "fleet.pause")?.resolved_by, "--instance");
+  assert.equal(controlRows(fx, "wild-trails").find((r) => r.step === "fleet.pause")?.resolved_by, "--instance");
   const resumed = rmd(fx, "operator", "resume", "--instance", "wild-trails");
   assert.equal(resumed.status, 0, resumed.out);
   assert.deepEqual(await heldInstances(fx), []);
@@ -199,7 +194,7 @@ test("W1-T7727: a target that cannot be resolved unambiguously changes nothing",
     assert.match(res.out, /nothing was changed/, `${c.name}: the refusal says nothing changed`);
     for (const name of INSTANCES) {
       assert.equal(existsSync(pauseFilePath(fx.root(name))), false, `${c.name}: no PAUSE flag under ${name}`);
-      assert.equal(ledgerRows(fx, name).length, 0, `${c.name}: no ledger row under ${name}`);
+      assert.equal(controlRows(fx, name).length, 0, `${c.name}: no ledger row under ${name}`);
     }
     assert.equal(existsSync(join(fx.dir, "operator", "state", "PAUSE")), false, `${c.name}: no flag under the operator's own root`);
     assert.equal(sharedRefOnOrigin(fx), "", `${c.name}: no shared ref`);

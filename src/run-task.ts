@@ -47905,6 +47905,7 @@ function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: C
  */
 async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
+  const runId = `FLEET-${Date.now()}`;
   const reason = flagValue(rest, "--reason");
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
@@ -47913,7 +47914,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     }
     const result = requestFleetPause(realDeps().sharedPauseGit, reason);
     appendLedger(ledgerPathFor(config), {
-      run_id: `FLEET-${Date.now()}`,
+      run_id: runId,
       task_id: "FLEET",
       step: "fleet.pause",
       scope: "fleet",
@@ -47937,7 +47938,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
   if (!target) return 2;
   const info = requestPause(target.root, reason, undefined, { instance: target.instance });
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
-    run_id: `FLEET-${Date.now()}`,
+    run_id: runId,
     task_id: "FLEET",
     step: "fleet.pause",
     scope: "instance",
@@ -47964,6 +47965,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
  */
 async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   const config = loadConfig();
+  const runId = `FLEET-${Date.now()}`;
   if (rest.includes("--fleet")) {
     if (flagValue(rest, "--instance") !== undefined) {
       console.error("### rmd resume — REFUSED: --fleet clears the fleet-wide hold only; it cannot be combined with --instance — nothing was changed.");
@@ -47971,7 +47973,7 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     }
     const cleared = resumeFleetWide(realDeps().sharedPauseGit);
     appendLedger(ledgerPathFor(config), {
-      run_id: `FLEET-${Date.now()}`,
+      run_id: runId,
       task_id: "FLEET",
       step: "fleet.resume",
       scope: "fleet",
@@ -47984,7 +47986,7 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   if (!target) return 2;
   const result = resumeFleet(target.root);
   appendLedger(ledgerPathFor({ ...config, root: target.root }), {
-    run_id: `FLEET-${Date.now()}`,
+    run_id: runId,
     task_id: "FLEET",
     step: "fleet.resume",
     scope: "instance",

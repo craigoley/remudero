@@ -53,7 +53,8 @@ export function resolvePauseTarget(input: PauseTargetInput): PauseTargetResoluti
   try {
     live = new Set(parseInstanceRegistry(input.registryText).instances.filter((i) => i.live).map((i) => i.name));
   } catch (error) {
-    return refuse(`cannot tell which instance to act on: ${(error as Error).message} (${input.registryPath})`);
+    // A registry the parser refuses is not "no instances": it is a refusal that names the parser's reason.
+    return { ok: false, refusal: `cannot tell which instance to act on: ${(error as Error).message} (${input.registryPath}) — nothing was changed` };
   }
   const rows = daemonInstanceRows(input.registryText);
   const declared = [...live].filter((name) => rows.has(name)).sort();
