@@ -141,6 +141,26 @@ test("repeated organization policy ids cannot multiply admission reads", async (
   assert.equal(records[0].outcome, "confirmed-external");
 });
 
+test("verified membership avoids redundant organization reads on fresh and cached paths", async () => {
+  const admitted = { ...settings, policy: { ...settings.policy, version: "member-short-circuit", organizationIds: [9, 10] },
+    organizations: [{ id: 9, login: "first-org" }, { id: 10, login: "unavailable-org" }] };
+  let membershipReads = 0;
+  let originReads = 0;
+  const records: Record<string, unknown>[] = [];
+  const read: AdmissionRead = (path) => {
+    if (path.includes("/pulls/")) { originReads++; return { status: 200, body: row(8) }; }
+    membershipReads++;
+    if (path.includes("unavailable-org")) throw Error("unneeded organization outage");
+    return { status: 200, body: { state: "active", user: { id: 8 }, organization: { id: 9 } } };
+  };
+  for (let round = 0; round < 2; round++) {
+    await observeContributorAdmission(admitted, target, "review", (_step, fields) => records.push(fields), read, clockFromMillisFn(() => 10));
+  }
+  assert.equal(membershipReads, 1);
+  assert.equal(originReads, 4, "both actions still reread the PR before and after membership resolution");
+  assert.ok(records.every((fields) => fields.outcome === "trusted" && fields.reason === "organization-member"));
+});
+
 test("real synchronous and asynchronous arm defaults observe configured shadow policy without reaching GitHub", async () => {
   const shim = ghShim([{ when: "", stdout: `HTTP/2 200 OK\ncontent-type: application/json\n\n${JSON.stringify(row())}` }], { kind: "admission-arm-default" });
   const oldPath = process.env.PATH;

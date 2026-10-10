@@ -148,7 +148,7 @@ export function* contributorAdmissionSteps(
       if (!namespace || typeof actor.login !== "string" || !/^[A-Za-z0-9-]+$/.test(actor.login)) continue;
       const key = JSON.stringify([snapshot, actor.id, organizationId]);
       const cached = verifiedMembers.get(key);
-      if (cached && fresh(cached.observedAtMs, now(), settings.policy.maxEvidenceAgeMs)) { memberships.push(cached); continue; }
+      if (cached && fresh(cached.observedAtMs, now(), settings.policy.maxEvidenceAgeMs)) { memberships.push(cached); break; }
       verifiedMembers.delete(key);
       let state: MembershipEvidence["state"] = "unknown";
       try {
@@ -178,6 +178,7 @@ export function* contributorAdmissionSteps(
       if (state === "member") {
         if (verifiedMembers.size >= 256) verifiedMembers.clear();
         verifiedMembers.set(key, evidence);
+        break; // One verified admitted membership is sufficient; unrelated org outages add no authority.
       }
     }
   }
