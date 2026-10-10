@@ -613,8 +613,7 @@ commission_value_problem() {
   esac
   case "${v}" in *[[:cntrl:]]*) echo "contains a control character"; return ;; esac
   [ "${#v}" -le 256 ] || { echo "is longer than 256 characters"; return; }
-  # git strips these from either end of an ident, so the effective author would differ from the
-  # requested one and verification could never pass — refuse rather than commission a mismatch.
+  # git trims these from an ident's ends, so verification could never match: refuse up front.
   case "${v}" in [[:space:].,:\;\<\>\"\\\']*|*[[:space:].,:\;\<\>\"\\\']) echo "begins or ends with a character git strips from an identity"; return ;; esac
   if [ "${kind}" = "name" ]; then
     case "${v}" in *[\<\>]*) echo "contains '<' or '>'"; return ;; esac
