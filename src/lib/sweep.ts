@@ -37,15 +37,15 @@ import {
   armOutcomeReason,
   decideArmReprobeFromFacts,
   armFailureAction,
-  baseBranchRequiresMergeQueue,
+  baseBranchRequiresMergeQueueAsync,
   disarmAutoMerge,
   logArmAttribution,
-  mergeDirectViaRest,
-  readHeadShaRest as readArmHeadShaRest,
+  mergeDirectViaRestAsync,
+  readHeadShaRestAsync as readArmHeadShaRestAsync,
   readArmTimeline,
   readMergeQueueMembership,
   realArmDepsAsync,
-  stackPrerequisiteFromRest,
+  stackPrerequisiteFromRestMaybeAsync,
   type ArmAttemptResult,
   type ArmReprobeFacts,
   type MergeQueueMembership,
@@ -65,7 +65,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
@@ -1491,6 +1491,12 @@ export interface BuildSweepEffectsDeps {
    *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
    *  spawns `gh`. */
   ghJsonImpl?: GhApiFetcher;
+  /** W1-T7747 — the async sibling of `ghJsonImpl`: the reader and writer every effect awaits for
+   *  its own REST calls, so none of them holds the daemon loop. Defaults to `ghJsonAsync`. When a
+   *  test injects only the sync `ghJsonImpl`, the effects await that instead. */
+  ghJsonAsyncImpl?: (args: string[]) => Promise<unknown>;
+  /** W1-T7747 — the armed-idle direct merge's write, awaited. Defaults to `ghTextAsync`. */
+  ghTextAsyncImpl?: (args: string[]) => Promise<string>;
   ghBufferImpl?: (args: string[]) => Buffer;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
   boundedWorktreeOwnerPathImpl?: SweepRuntimeFn;
@@ -1981,6 +1987,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
+  // W1-T7747: the effects' own REST reads and writes, each awaited, so none holds the daemon loop.
+  // MEASURED 2026-10-10: `ghExecFile` held the loop 13 times (worst 5.1 s) and `mergeDirectViaRest`
+  // up to 2.7 s. A test's sync `ghJsonImpl` still answers when no async sibling is injected:
+  // awaiting a plain value is harmless. `ghJsonForBuild` remains only where a sync callee in another
+  // module takes the reader as a seam.
+  const ghAwaitForBuild = (args: string[]): unknown =>
+    deps.ghJsonAsyncImpl ? deps.ghJsonAsyncImpl(args) : deps.ghJsonImpl ? deps.ghJsonImpl(args) : ghJsonAsync(args);
+  const ghJsonAsyncForBuild = deps.ghJsonAsyncImpl ?? ghJsonAsync;
+  const ghTextForBuild = deps.ghTextAsyncImpl ?? ghTextAsync;
+
   // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
@@ -2158,7 +2174,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // an obsolete head.
     let live: { headRefName?: unknown; headRefOid?: unknown; body?: unknown };
     try {
-      live = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"]) as {
+      live = (await ghAwaitForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body"])) as {
         headRefName?: unknown;
         headRefOid?: unknown;
         body?: unknown;
@@ -2352,8 +2368,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
         ...realArmDepsAsync(() => config),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
-        headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
-          const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
+        // W1-T7747: the three overrides await the async transport, as the spread deps already do.
+        headSha: (prUrl) => readArmHeadShaRestAsync(prUrl, async (args) => {
+          const fresh = (await ghAwaitForBuild(args)) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
           if (fresh.state !== "open" || !fresh.auto_merge || fresh.head?.sha !== pr.headSha) {
             throw new Error("armed-idle PR is no longer open and armed at the observed head");
           }
@@ -2361,10 +2378,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }),
         armAuto: () => { throw new Error("Pull request is in clean status"); },
         armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
-        mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
-        mergeDirect: (prUrl) => {
+        mergeQueue: (prUrl) => baseBranchRequiresMergeQueueAsync(prUrl, async (args) => ghAwaitForBuild(args)),
+        mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          // The `sha` pin keeps a moved head refused on GitHub's side (W1-T5492).
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextForBuild([...args, "-f", `sha=${pr.headSha}`]));
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -2473,7 +2491,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     // W1-T4581 — a pre-existing GitHub auto-merge request can land without another arm attempt.
-    stackPrerequisite: (pr) => stackPrerequisiteFromRest(pr.prUrl, ghJsonForBuild, pr.body),
+    // W1-T7747: a listed unstacked body still answers with no read; each parent read is awaited.
+    stackPrerequisite: (pr) => stackPrerequisiteFromRestMaybeAsync(pr.prUrl, ghAwaitForBuild, pr.body),
     withdrawStackAutoMerge: (pr) => disarmImpl(pr.prUrl),
 
     repairMissingTaskTrailer: async (pr, repair) => {
@@ -3013,7 +3032,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let claim: InflightLockHandle | undefined;
       try {
         if (await dispatchFixPreflightStandDown(ghLiveState, pr, log)) return { outcome: "refused", reason: "the filing is terminal" };
-        const live = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as {
+        const live = (await ghAwaitForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`])) as {
           head: { ref: string; sha: string }; user: { login: string }; title: string; body: string;
         };
         if (live.head.sha !== pr.headSha || !isMachineLanePlanHead(live.head.ref) || !isFleetAppAuthor(live.user.login)) {
@@ -3051,9 +3070,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             },
           }),
           updateMetadata: async (metadata: { title: string; body: string }) => {
-            const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
+            const fresh = (await ghAwaitForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`])) as { head: { sha: string } };
             if (fresh.head.sha !== pr.headSha) throw new Error("the filing head moved before the metadata write");
-            ghJsonForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
+            await ghAwaitForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
               "-f", `title=${metadata.title}`, "-f", `body=${metadata.body}`]);
           },
           log,
@@ -3137,8 +3156,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // permanently unjudgeable. `files` rides the SAME call for the SAME reason
         // (W1-T4460): the synthetic task's own commit surface.
         const headReadStarted = performance.now();
-        const headRef = await (deps.ghJsonImpl
-          ? Promise.resolve(ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]))
+        const headRef = await (deps.ghJsonImpl || deps.ghJsonAsyncImpl
+          ? ghAwaitForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"])
           : readJsonImpl(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"])) as {
           headRefName?: string;
           headRefOid?: string;
@@ -3801,7 +3820,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // non-green — see runFixRung's own doc for why this must happen on
             // every strike, not just the first.
             fetchCiFailures: async (prUrlArg: string) => {
-              const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+              const v = (await ghJsonAsyncForBuild(["pr", "view", prUrlArg, "--json", "statusCheckRollup"])) as {
                 statusCheckRollup?: RollupCheck[];
               };
               return fetchCiFailures(owner, repo, v.statusCheckRollup);
@@ -3809,7 +3828,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // W1-T1278 (condition A): same RAW rollup shape as the run-loop call site above —
             // see that site's own comment for why this must stay separate from `fetchCiFailures`.
             readCiRollup: async (prUrlArg: string) => {
-              const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+              const v = (await ghJsonAsyncForBuild(["pr", "view", prUrlArg, "--json", "statusCheckRollup"])) as {
                 statusCheckRollup?: RollupCheck[];
               };
               return v.statusCheckRollup ?? [];
@@ -3876,7 +3895,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 signal,
                 intervalMs: fixSupersededPollMsOverride ?? DEFAULT_POLL_INTERVAL_MS,
                 read: async () => {
-                  const v = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
+                  const v = (await ghAwaitForBuild(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"])) as {
                     headRefOid?: string;
                     statusCheckRollup?: RollupCheck[];
                   };
@@ -3997,22 +4016,26 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     updateBranch: (pr) => updateBranchImpl(pr),
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
-    mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
+    // W1-T7747: both REST reads awaited; runSweep settles the answer before its selector asks.
+    mergeQueue: (prUrl) => baseBranchRequiresMergeQueueAsync(prUrl, async (args) => ghAwaitForBuild(args)),
 
     // W1-T6022 — a source at one head never changes, so a read is kept; a failed one is not.
+    // W1-T7747: a kept source answers at once; a fresh read is awaited.
     readPrFileSource: (pr, path) => {
       const key = `${owner}/${repo}@${pr.headSha}:${path}`;
       if (prFileSources.has(key)) return prFileSources.get(key);
-      try {
-        const file = ghJsonForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]) as
-          { content?: unknown; encoding?: unknown } | undefined;
-        if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
-        if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
-        prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
-        return prFileSources.get(key);
-      } catch {
-        return undefined; // unread: the ready arm names it ready-unknown, never "no overlap"
-      }
+      return (async () => {
+        try {
+          const file = (await ghAwaitForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`])) as
+            { content?: unknown; encoding?: unknown } | undefined;
+          if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
+          if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
+          prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
+          return prFileSources.get(key);
+        } catch {
+          return undefined; // unread: the ready arm names it ready-unknown, never "no overlap"
+        }
+      })();
     },
 
     readyDraft: (pr) => readyDraftImpl(pr),
@@ -4436,18 +4459,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
       }
     },
-    readPlanRepairFacts: (pr) => {
+    readPlanRepairFacts: async (pr) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
-      const row = ghJsonForBuild(["api", pulls]) as {
+      const row = (await ghAwaitForBuild(["api", pulls])) as {
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
       };
       const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
       if (!gardenRecordRefusalCandidate(pr) || row?.head?.sha !== pr.headSha || row.head.ref !== pr.headRefName) return facts;
-      const files = ghJsonForBuild(["api", `${pulls}/files?per_page=2`]) as { filename: string; status: string }[];
+      const files = (await ghAwaitForBuild(["api", `${pulls}/files?per_page=2`])) as { filename: string; status: string }[];
       if (!Array.isArray(files) || files.length !== 1 || files[0]?.status !== "added" ||
           !/^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(files[0].filename)) return facts;
       const path = files[0].filename;
-      const source = ghJsonForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]) as
+      const source = (await ghAwaitForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`])) as
         { content?: string; encoding?: string };
       if (source?.encoding !== "base64" || typeof source.content !== "string") return facts;
       facts.gardenRecordRefusal = gardenRecordRefusalFromSource(pr, Buffer.from(source.content, "base64").toString("utf8"));
@@ -4457,8 +4480,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       if (decision.action === "retitle") {
         // ci.yml reads the title LIVE, so the re-run of the job that failed observes the new one.
-        ghJsonForBuild(["api", "-X", "PATCH", pulls, "-f", `title=${decision.title}`]);
-        if (decision.jobId) ghJsonForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
+        await ghAwaitForBuild(["api", "-X", "PATCH", pulls, "-f", `title=${decision.title}`]);
+        if (decision.jobId) await ghAwaitForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
         return { outcome: "retitled" };
       }
       // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
@@ -9964,6 +9987,49 @@ export interface ReadyRefreshFacts {
   readSource?: (pr: OpenPrView, path: string) => string | undefined;
 }
 
+/** W1-T7747 — the answer an async read gives, held for the next run of a settled selection. */
+type SettledRead = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+/** How many times {@link selectWithSettledReads} reruns a selection whose answers revealed new reads. */
+const SETTLED_READ_ROUNDS = 8;
+
+/**
+ * W1-T7747 — run a SYNCHRONOUS selection whose readers may answer with a promise.
+ *
+ * `select` reaches each reader through `settle(key, read, pending)`. A read that answers at once is
+ * passed straight through, every time, so a synchronous reader gives the same calls and answers it
+ * always did. A read that answers with a promise yields `pending()` for now. Once the run ends, those
+ * promises are awaited and their answers held by key, and `select` runs again. The loop stops when a
+ * run asks for nothing new. A rejection is held and rethrown to the caller, as a sync throw would be.
+ * The selectors stay pure and synchronous; only the effect behind them awaits GitHub.
+ */
+export async function selectWithSettledReads<R>(
+  select: (settle: <V>(key: string, read: () => V | Promise<V>, pending: () => V) => V) => R,
+): Promise<R> {
+  const held = new Map<string, SettledRead>();
+  for (let round = 1; ; round++) {
+    const awaiting = new Map<string, Promise<void>>();
+    const settle = <V,>(key: string, read: () => V | Promise<V>, pending: () => V): V => {
+      const kept = held.get(key);
+      if (kept) {
+        if (!kept.ok) throw kept.error;
+        return kept.value as V;
+      }
+      if (awaiting.has(key)) return pending();
+      const answer = read();
+      if (!(answer instanceof Promise)) return answer;
+      awaiting.set(key, answer.then(
+        (value) => void held.set(key, { ok: true, value }),
+        (error: unknown) => void held.set(key, { ok: false, error }),
+      ));
+      return pending();
+    };
+    const result = select(settle);
+    if (awaiting.size === 0 || round >= SETTLED_READ_ROUNDS) return result;
+    await Promise.all(awaiting.values());
+  }
+}
+
 /** W1-T6022 — W1-T5696's overlap and baseline arms without the distance gate, plus one reach rule: a
  *  changed test file whose source names a path literal prefixing (at a segment) a main-changed path. */
 function readyRefreshCause(
@@ -11402,7 +11468,7 @@ export interface SweepDeps {
    *  zero times once that bit reads false. SAFE WHEN NOT ARMED, so no extra probe is needed. */
   disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
   /** W1-T4581 — inspect an already-armed PR's explicit stack chain before GitHub can merge it. */
-  stackPrerequisite?: (pr: OpenPrView) => StackPrerequisiteCheck;
+  stackPrerequisite?: (pr: OpenPrView) => StackPrerequisiteCheck | Promise<StackPrerequisiteCheck>;
   /** W1-T4581 — withdraw an already-armed PR whose declared parent chain is not fully merged. */
   withdrawStackAutoMerge?: (pr: OpenPrView) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
   /** W1-T4415 — mark one open draft PR ready for review. Called for EVERY draft, whatever its checks. */
@@ -11639,9 +11705,9 @@ export interface SweepDeps {
   /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
-  mergeQueue?: (prUrl: string) => boolean;
+  mergeQueue?: (prUrl: string) => boolean | Promise<boolean>;
   /** W1-T6022 — a changed file's source at the PR head, for the ready refresh's reach rule. */
-  readPrFileSource?: (pr: OpenPrView, path: string) => string | undefined;
+  readPrFileSource?: (pr: OpenPrView, path: string) => string | undefined | Promise<string | undefined>;
   /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
    *  one safe mechanical repair: rebase that head onto current main and push it back with an
    *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
@@ -13407,11 +13473,11 @@ export function stackParentHoldReason(check: StackPrerequisiteCheck): string | u
   return `declared stack parent(s) ${open.map((n) => `#${n}`).join(", ")} still open — fix round held until they merge or close`;
 }
 
-function stackParentHold(deps: SweepDeps, pr: OpenPrView): { reason?: string; fields?: Record<string, unknown> } {
+async function stackParentHold(deps: SweepDeps, pr: OpenPrView): Promise<{ reason?: string; fields?: Record<string, unknown> }> {
   if (!deps.stackPrerequisite) return {};
   let check: StackPrerequisiteCheck;
   try {
-    check = deps.stackPrerequisite(pr);
+    check = await deps.stackPrerequisite(pr);
   } catch {
     // A failed read is not evidence of an unstacked PR: no hold, but recorded so it is never silent.
     return { fields: { stack_parent_read: "unreadable" } };
@@ -14944,7 +15010,7 @@ export async function runSweep(
     ) {
       let check: StackPrerequisiteCheck;
       try {
-        check = deps.stackPrerequisite(pr);
+        check = await deps.stackPrerequisite(pr);
       } catch (e) {
         // A failed stack read must remain a refusal, not become permission for GitHub to merge.
         check = {
@@ -15802,7 +15868,7 @@ export async function runSweep(
               if (failedArm && facts) {
                 const freshLines = readLedger(deps.ledgerPath);
                 const refused = riskRefusalStands(freshLines, priorActionsFromLedger(freshLines).riskRefused, pr);
-                const stack = deps.stackPrerequisite?.(pr);
+                const stack = await deps.stackPrerequisite?.(pr);
                 const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
                 if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||
                     (stack && stack.state !== "ready" && stack.state !== "unstacked") || !parity.arm) {
@@ -16558,7 +16624,7 @@ export async function runSweep(
                 staleProofCloses += 1;
                 let carried = "no merged stack parent could be read";
                 try {
-                  const stack = deps.stackPrerequisite?.(pr);
+                  const stack = await deps.stackPrerequisite?.(pr);
                   if (stack?.state === "ready") carried = `merged stack parent ${stack.parentNumbers.map((n) => `#${n}`).join(", ")} carries its tests`;
                 } catch (error) {
                   const failed = String((error as Error)?.message ?? error);
@@ -16600,7 +16666,7 @@ export async function runSweep(
                 standDownReason = workerHold;
                 break;
               }
-              const stackHold = stackParentHold(deps, pr);
+              const stackHold = await stackParentHold(deps, pr);
               if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
               if (stackHold.reason) {
                 acted = false;
@@ -16745,7 +16811,7 @@ export async function runSweep(
                 standDownReason = workerHold;
                 break;
               }
-              const stackHold = stackParentHold(deps, pr);
+              const stackHold = await stackParentHold(deps, pr);
               if (stackHold.fields) extraDisposedFields = { ...extraDisposedFields, ...stackHold.fields };
               if (stackHold.reason) {
                 acted = false;
@@ -17538,27 +17604,45 @@ export async function runSweep(
         && line.outcome === "guarded" && line.counterfactual_selected_without_pending_guard === true)
         recordedPendingGuards.add(JSON.stringify([line.pr_url, line.pr_number, line.head_sha]));
     }
-    const readyFacts: ReadyRefreshFacts = {
-      incidentHold: readyCandidate && deps.readActionsStatusSummary !== undefined &&
-        actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold",
-      spentHeads: spentRefreshHeads,
-      readSource: deps.readPrFileSource,
-    };
+    const incidentHold = readyCandidate && deps.readActionsStatusSummary !== undefined &&
+      actionsIncidentHoldDecision(await readActionsIncident(), undefined, now) === "hold";
     // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
     // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
     // reads as "no queue", so the pre-queue refresh is unchanged.
-    const queuedPrNumbers = new Set<number>();
+    // W1-T7747: the queue and source reads may answer with a promise; both are settled before the
+    // synchronous selectors below decide.
     const mergeQueue = deps.mergeQueue;
-    if (mergeQueue) {
-      const skipped = queuedBehindMainSkips(refreshPrs, behindMainByPr, policy, (c) => {
+    const readSource = deps.readPrFileSource;
+    const selected = await selectWithSettledReads((settle) => {
+      const facts: ReadyRefreshFacts = {
+        incidentHold,
+        spentHeads: spentRefreshHeads,
+        readSource: readSource && ((pr, path) => settle(`source:${pr.prNumber}@${pr.headSha}:${path}`, () => readSource(pr, path), () => undefined)),
+      };
+      const skippedQueue = mergeQueue ? queuedBehindMainSkips(refreshPrs, behindMainByPr, policy, (c) => {
         try {
-          return mergeQueue(c.prUrl) === true;
+          return settle(`queue:${c.prUrl}`, () => mergeQueue(c.prUrl), () => false) === true;
         } catch {
           return false; // a queue read that fails is "no queue": the refresh below is unchanged
         }
-      }, deps.baseChangedFilesByPr, readyFacts);
-      for (const c of skipped) {
-        queuedPrNumbers.add(c.prNumber);
+      }, deps.baseChangedFilesByPr, facts) : [];
+      const queued = new Set<number>(skippedQueue.map((c) => c.prNumber));
+      const selection = selectUpdateBranchDecision(
+        refreshPrs,
+        now,
+        deps.inFlightTaskIds ?? new Set(),
+        deps.staleGateWorkflowsByPr ?? new Map(),
+        deps.updatedForWorkflow ?? new Set(),
+        behindMainByPr,
+        policy,
+        queued,
+        deps.baseChangedFilesByPr,
+        facts,
+      );
+      return { skippedQueue, selection };
+    });
+    if (mergeQueue) {
+      for (const c of selected.skippedQueue) {
         const already = ledgerLines.some(
           (l) => l.step === "sweep.update_branch.skipped_queue" && l.pr_number === c.prNumber && l.head_sha === c.headSha,
         );
@@ -17574,18 +17658,7 @@ export async function runSweep(
         });
       }
     }
-    const decision = selectUpdateBranchDecision(
-      refreshPrs,
-      now,
-      deps.inFlightTaskIds ?? new Set(),
-      deps.staleGateWorkflowsByPr ?? new Map(),
-      deps.updatedForWorkflow ?? new Set(),
-      behindMainByPr,
-      policy,
-      queuedPrNumbers,
-      deps.baseChangedFilesByPr,
-      readyFacts,
-    );
+    const decision = selected.selection;
     const { target, pendingGuard } = decision;
     if (pendingGuard && !recordedPendingGuards.has(JSON.stringify([pendingGuard.prUrl, pendingGuard.prNumber, pendingGuard.headSha]))) {
       appendLine(deps.ledgerPath, {
@@ -17696,8 +17769,10 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     const select = (ready: ReadyRefreshFacts): ArmedStalledPr[] =>
       openPrsBehindMain(openPrs, behindMainByPr, policy, new Set(), deps.baseChangedFilesByPr, ready)
         .filter((c) => c.updateReason === "ready-overlap");
-    const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
-    let candidates = select(facts);
+    // W1-T7747: a source read may answer with a promise; it is settled before the selector decides.
+    const readSource = deps.readPrFileSource;
+    let candidates = await selectWithSettledReads((settle) => select({ spentHeads,
+      readSource: readSource && ((pr, path) => settle(`source:${pr.prNumber}@${pr.headSha}:${path}`, () => readSource(pr, path), () => undefined)) }));
     if (candidates.length === 0) return undefined;
     if (deps.readActionsStatusSummary !== undefined) {
       const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
@@ -17706,13 +17781,16 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     }
     const mergeQueue = deps.mergeQueue;
     if (mergeQueue) {
-      candidates = candidates.filter((c) => {
-        let queued: boolean;
+      const queuedByPr = new Map<number, boolean>();
+      for (const c of candidates) {
         try {
-          queued = mergeQueue(c.prUrl) === true;
+          queuedByPr.set(c.prNumber, (await mergeQueue(c.prUrl)) === true);
         } catch {
-          queued = false; // an unread queue is "no queue", as in the full sweep
+          queuedByPr.set(c.prNumber, false); // an unread queue is "no queue", as in the full sweep
         }
+      }
+      candidates = candidates.filter((c) => {
+        const queued = queuedByPr.get(c.prNumber) === true;
         if (queued && !ledgerLines.some((l) => l.step === "sweep.update_branch.skipped_queue" &&
           l.pr_number === c.prNumber && l.head_sha === c.headSha)) {
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: c.taskId ?? "SWEEP",

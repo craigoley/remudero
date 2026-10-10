@@ -25,8 +25,7 @@
  */
 import { systemClock } from "./clock.js";
 import { createHash } from "node:crypto";
-import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
+import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -135,6 +134,61 @@ export function stackPrerequisiteFromRest(
   listedBody?: string,
 ): StackPrerequisiteCheck {
   return runStepsSync(stackPrerequisiteSteps(prUrl, fetch, listedBody));
+}
+
+/** W1-T7747 — {@link stackPrerequisiteFromRest} for a reader that may answer asynchronously
+ *  ({@link ghJsonAsync}). A check that needs no read (a listed unstacked body), or whose reader
+ *  answers synchronously, stays synchronous. The first read that answers with a promise is
+ *  awaited, and so is every read after it. */
+export function stackPrerequisiteFromRestMaybeAsync(
+  prUrl: string,
+  fetch: (args: string[]) => unknown = ghJsonAsync,
+  listedBody?: string,
+): StackPrerequisiteCheck | Promise<StackPrerequisiteCheck> {
+  return runStepsMaybeAsync(stackPrerequisiteSteps(prUrl, fetch, listedBody));
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return value !== null && (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function";
+}
+
+/** Drive `steps` synchronously until one effect answers with a promise, then await that answer
+ *  and every later one, as {@link runStepsAsync} does. */
+function runStepsMaybeAsync<R>(steps: Steps<R>): R | Promise<R> {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    if (isThenable(value)) return finishStepsAsync(steps, value);
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+async function finishStepsAsync<R>(steps: Steps<R>, pending: PromiseLike<unknown>): Promise<R> {
+  let next: IteratorResult<() => unknown, R>;
+  try {
+    next = steps.next(await pending);
+  } catch (error) {
+    next = steps.throw(error);
+  }
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = await next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
 }
 
 function* stackPrerequisiteSteps(prUrl: string, fetch: RestReader, listedBody?: string): Steps<StackPrerequisiteCheck> {
@@ -381,6 +435,14 @@ export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): st
   return runStepsSync(headShaSteps(prUrl, fetch));
 }
 
+/** W1-T7747 — {@link readHeadShaRest} with the REST read awaited ({@link ghJsonAsync}). */
+export function readHeadShaRestAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<string> {
+  return runStepsAsync(headShaSteps(prUrl, fetch));
+}
+
 function* headShaSteps(prUrl: string, fetch: RestReader): Steps<string> {
   const row = yield* step(() => fetch(headShaRestArgs(prUrl)));
   const sha = mapRestPr(row as RestPullRow).headRefOid;
@@ -422,12 +484,15 @@ export function mergeDirectViaRest(
   exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
 }
 
-const execFilePromise = promisify(execFile);
+/** W1-T7747: the default write goes through the gh transport ({@link ghTextAsync}), so the
+ *  sentinel-token refusal, the default timeout and the kill escalation apply as they do to the
+ *  sync {@link ghExec}. A raw `execFile` skipped all three. */
+const ghTransportMergeExec = (_file: string, args: string[]): Promise<string> => ghTextAsync(args);
 
 /** W1-T5284 — {@link mergeDirectViaRest} with the write awaited, for {@link realArmDepsAsync}. */
 export async function mergeDirectViaRestAsync(
   prUrl: string,
-  exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = execFilePromise,
+  exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = ghTransportMergeExec,
 ): Promise<void> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
