@@ -13,8 +13,6 @@
  * (never committed to git) may still carry the old spelling, and a rename that refuses it takes the fleet
  * down at the next boot. {@link canonicalWorkerProviderId} is the ONE read-boundary function that maps it
  * to "cash" — REMOVE "openweight" from this list once no live host config carries it any longer. */
-import type { AdmissionSettings } from "./contributor-admission.js";
-
 export const WORKER_PROVIDER_IDS = ["claude", "codex", "cash", "openweight"] as const;
 export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
 
@@ -45,7 +43,7 @@ export interface ModelApproval {
 }
 
 export interface Config {
-  contributorAdmission?: AdmissionSettings;
+  contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];

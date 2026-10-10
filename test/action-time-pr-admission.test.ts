@@ -128,6 +128,19 @@ test("shadow config has no default identities and cannot opt into enforcement", 
   await observeContributorAdmission(undefined, target, "repair", () => assert.fail("disabled means no records"), () => assert.fail("disabled means no reads"));
 });
 
+test("repeated organization policy ids cannot multiply admission reads", async () => {
+  let membershipReads = 0;
+  const repeated = { ...settings, policy: { ...settings.policy, version: "bounded-repeat", organizationIds: [9, 9, 9] } };
+  const records: Record<string, unknown>[] = [];
+  await observeContributorAdmission(repeated, target, "review", (_step, fields) => records.push(fields), (path) => {
+    if (path.includes("/pulls/")) return { status: 200, body: row(8) };
+    membershipReads++;
+    return { status: 200, body: { state: "pending", user: { id: 8 }, organization: { id: 9 } } };
+  }, clockFromMillisFn(() => 10));
+  assert.equal(membershipReads, 1);
+  assert.equal(records[0].outcome, "confirmed-external");
+});
+
 test("real synchronous and asynchronous arm defaults observe configured shadow policy without reaching GitHub", async () => {
   const shim = ghShim([{ when: "", stdout: `HTTP/2 200 OK\ncontent-type: application/json\n\n${JSON.stringify(row())}` }], { kind: "admission-arm-default" });
   const oldPath = process.env.PATH;

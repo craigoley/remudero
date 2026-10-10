@@ -143,7 +143,7 @@ export function* contributorAdmissionSteps(
   const actor = subject.origin?.actor;
   const initial = classify(subject, action, settings.policy, [], now());
   if (initial.reason === "membership-unresolved" && actor != null && validId(actor.id) && actor.type === "User") {
-    for (const organizationId of settings.policy.organizationIds) {
+    for (const organizationId of new Set(settings.policy.organizationIds)) {
       const namespace = settings.organizations.find((o) => o.id === organizationId);
       if (!namespace || typeof actor.login !== "string" || !/^[A-Za-z0-9-]+$/.test(actor.login)) continue;
       const key = JSON.stringify([snapshot, actor.id, organizationId]);
