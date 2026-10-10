@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,14 @@
     CI runs: 37865724208, 37919851949, 37946372738, 37951691763, 38052678654, 38063468054.
     Retry outcomes: 0 recovered on retry, 10 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files list names only one test file. The task is to fix a flaky test and add a pinning test there, so it does not touch secrets, auth, deletion, merge/deploy policy or infrastructure."
+      - "The acceptance criteria are specific and checkable by a unit test and a grep, so the result can be verified."
+      - "The flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89), and the gates state shows nothing concerning."
+      - "No bounded change view was supplied, so I cannot confirm the actual touched files. The description and the declared scope are consistent with each other."
+    judged_at: "2026-10-10T19:18:30.285Z"
+    pin: "c4ce98cb7704f1023de2d6dbf1c97f41de748109186dce71e118324be6d6a5a7"
