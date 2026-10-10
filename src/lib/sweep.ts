@@ -3851,7 +3851,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               // it must reach this SAME "already acted" path, never the "wrote no fix.* row"
               // rethrow meant for a dispatch that never got this far.
               if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
-              log(s, { task_id: task.id, ...extra });
+              log(s, { task_id: task.id,
+                ...(s === "fix.stood_down" && !dispatchStarted
+                  ? { pr_number: pr.prNumber, head_sha: pr.headSha } : {}), ...extra });
             },
             say,
             account: (r: WorkerResult) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
@@ -11789,6 +11791,8 @@ interface PriorActions {
   armed: Set<string>;
   /** `${prNumber}@${headSha}` — fix dispatch is head-keyed. */
   fixed: Set<string>;
+  /** `task@head` — a terminal stand-down with no dispatch marker; carries its own reason. */
+  fixStandDowns: Map<string, string>;
   closed: Set<number>;
   /** `pr@head` keys, exactly like the sibling sets (W1-T514). PR-number-only until then, which let
    *  one `acted:true` line at head A dedup the SAME PR forever, including a genuinely NEW block at
@@ -12499,6 +12503,8 @@ function priorActionsFromLedger(
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   const realFixDispatches = new Set<string>();
+  const fixStandDowns = new Map<string, string>();
+  const fixedTaskHeads = new Map<string, string>();
   const voidedFixes = new Map<string, string>();
   for (const line of lines) {
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
@@ -12613,6 +12619,15 @@ function priorActionsFromLedger(
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
     }
+    if (line.step === "fix.stood_down" && line.outcome !== "handed_off" &&
+        typeof line.task_id === "string" && typeof line.reason === "string") {
+      // Legacy escalation stand-downs name the full head in their reason, but carry no head field.
+      const heads = typeof line.head_sha === "string" ? [line.head_sha] : (openPrs ?? [])
+        .filter(pr => fixLedgerTaskIdFor(pr) === line.task_id &&
+          String(line.reason).includes(`head ${pr.headSha}, cause)`)).map(pr => pr.headSha);
+      for (const head of heads) fixStandDowns.set(`${line.task_id}@${head}`, line.reason);
+      continue;
+    }
     if (isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)) {
       voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
@@ -12639,7 +12654,9 @@ function priorActionsFromLedger(
         // fix-dispatch set, or the next pass would report "already dispatched" instead of reading
         // the judgment receipt.
         if (typeof line.progress_escalated_key !== "string") {
-          fixed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+          const prHead = `${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`;
+          fixed.add(prHead);
+          fixedTaskHeads.set(prHead, `${String(line.task_id)}@${String(line.head_sha)}`);
         }
         break;
       case "stale":
@@ -12663,6 +12680,8 @@ function priorActionsFromLedger(
     }
   }
   for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
+  for (const taskHead of realFixDispatches) fixStandDowns.delete(taskHead);
+  for (const [prHead, taskHead] of fixedTaskHeads) if (fixStandDowns.has(taskHead)) fixed.delete(prHead);
   // W1-T5840 — a delivered FAILURE that a newer GitHub success contradicts is not a standing
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
@@ -12672,6 +12691,7 @@ function priorActionsFromLedger(
   return {
     armed,
     fixed,
+    fixStandDowns,
     closed,
     escalated,
     depReviewed,
@@ -15629,6 +15649,12 @@ export async function runSweep(
           break;
         }
         // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
+        const fixStandDown = prior.fixStandDowns.get(`${fixLedgerTaskIdFor(pr)}@${pr.headSha}`);
+        if (fixStandDown !== undefined) {
+          alreadyDone = true;
+          dedupStandDownReason = fixStandDown;
+          break;
+        }
         const dispatchedThisHead = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T1110 — RE-ARM A STALLED DISPATCH: `dispatchedThisHead` records only that a fix was
         // DISPATCHED, never that it succeeded. When the ledger shows that rung already ENDED
