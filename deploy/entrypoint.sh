@@ -30,7 +30,26 @@ die() { log "$*"; exit 1; }
 # `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and fails outright if HOME does
 # not exist (the same trap recorded further down).
 mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitconfig and cannot without it}"
-if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
+# W1-T6160: A COMPLETE EXPLICIT PAIR IS AUTHORITATIVE. Both RMD_GIT_AUTHOR_* non-empty is the
+# container's declared identity (an ordinary recycle carries it across; `recycle-container.sh
+# --commission-git-author` is the one operation that replaces it), so it is written even when HOME
+# already holds a different identity — otherwise a bad persisted identity could never be replaced.
+# It is READ BACK and the boot dies on any write/read error or mismatch: a boot that cannot apply
+# its declared author must never continue as if it had. A partial pair or none keeps the old branch.
+if [ -n "${RMD_GIT_AUTHOR_NAME:-}" ] && [ -n "${RMD_GIT_AUTHOR_EMAIL:-}" ]; then
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME}" \
+    || die "git identity: FAILED to write user.name to the global config (\$HOME/.gitconfig) — refusing to boot on an unapplied author"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL}" \
+    || die "git identity: FAILED to write user.email to the global config (\$HOME/.gitconfig) — refusing to boot on an unapplied author"
+  applied_name="$(git -C / config --global --get user.name 2>/dev/null)" \
+    || die "git identity: FAILED to read user.name back from the global config — refusing to boot on an unverified author"
+  applied_email="$(git -C / config --global --get user.email 2>/dev/null)" \
+    || die "git identity: FAILED to read user.email back from the global config — refusing to boot on an unverified author"
+  if [ "${applied_name}" != "${RMD_GIT_AUTHOR_NAME}" ] || [ "${applied_email}" != "${RMD_GIT_AUTHOR_EMAIL}" ]; then
+    die "git identity: the global config does not hold the RMD_GIT_AUTHOR_* pair after writing it — refusing to boot on a mismatched author"
+  fi
+  log "git identity: ${applied_name} <${applied_email}> (explicit RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL pair, authoritative)"
+elif git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
   log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
 else
   # Under App auth the fallback is the fleet App's bot identity, which GitHub and Vercel map to an account;
