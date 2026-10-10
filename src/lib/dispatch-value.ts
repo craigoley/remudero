@@ -27,6 +27,8 @@ export interface DispatchValueContext {
   readonly costOfDelayByTaskId?: ReadonlyMap<string, number>;
   readonly stridePassByTaskId?: ReadonlyMap<string, number>;
   readonly costOfDelayFallback?: boolean;
+  /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
+  readonly costOfDelayUnscored?: readonly string[];
 }
 
 export interface CostOfDelaySnapshot {
@@ -58,6 +60,34 @@ export type DispatchValueCalibration =
 
 /** The ledger steps {@link estimateClassValues} reads, for the command layer's union filter. */
 export const DISPATCH_VALUE_LEDGER_STEPS = ["run.start", "verdict", "verdict.merged"] as const;
+
+/**
+ * Date each task id from `git log --first-parent --reverse --format=filing:%ct -p --unified=0` over the plan:
+ * an id's first added `id:` line under a `filing:<epoch>` header is its filing time. W1-T7534: the id token
+ * includes a letter suffix (W1-T12e, W1-T1B), as the plan loader accepts; a bare `\d+\b` stopped inside the
+ * token, left that task undated, and (before unscored tasks were contained) refused every task's cost of delay.
+ */
+export function filingDatesFromPlanHistory(history: string): Map<string, number> {
+  const filedAtByTaskId = new Map<string, number>();
+  let at = NaN;
+  for (const line of history.split("\n")) {
+    const timestamp = /^filing:(\d+)$/.exec(line);
+    if (timestamp) at = Number(timestamp[1]) * 1000;
+    const id = /^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+[A-Za-z]*)\b/.exec(line)?.[1];
+    if (id && Number.isFinite(at) && !filedAtByTaskId.has(id)) filedAtByTaskId.set(id, at);
+  }
+  return filedAtByTaskId;
+}
+
+/** W1-T7534: the `dispatch.cost_of_delay.ready` row. Its dedup key is per plan tree while any open task is
+ * unscored, so the undatable ids are ledgered once per tree without disabling the ordering. */
+export function costOfDelayReadyRow(
+  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored">,
+): { key: string; plan_tree_sha: string; unscored?: readonly string[] } {
+  const unscored = context.costOfDelayUnscored ?? [];
+  if (unscored.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
+  return { key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha, unscored };
+}
 
 /** A plan task's id (`W1-T123`, `CONSOLE-T7`); synthetic lane runs (RETRO, TRIAGE-…) are not build attempts. */
 const PLAN_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
@@ -281,7 +311,7 @@ function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -318,10 +348,16 @@ function costOfDelayContext(
   const prior = (valid + 1) / (total + 2);
   const costOfDelayByTaskId = new Map<string, number>();
   const stridePassByTaskId = new Map<string, number>();
+  const costOfDelayUnscored: string[] = [];
   for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     if (!openIds.has(task.id)) continue;
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
-    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > nowMs) return { kind: "refused", reasons: [`${task.id}:missing-filing-date`] };
+    // W1-T7534: one undatable task (an id the filing scan cannot read, a future date) is left unscored;
+    // compareDispatch orders it after the scored population, and every other task keeps its stride.
+    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > nowMs) {
+      costOfDelayUnscored.push(task.id);
+      continue;
+    }
     const estimate = estimates.get(deriveTaskClass(task));
     if (!estimate || estimate.costPerAttempt <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-cost`] };
     const age = nowMs - filedAt;
@@ -341,7 +377,10 @@ function costOfDelayContext(
     costOfDelayByTaskId.set(task.id, score);
     stridePassByTaskId.set(task.id, pass);
   }
-  return { kind: "ready", context: { costOfDelayByTaskId, stridePassByTaskId } };
+  return {
+    kind: "ready",
+    context: { costOfDelayByTaskId, stridePassByTaskId, ...(costOfDelayUnscored.length === 0 ? {} : { costOfDelayUnscored }) },
+  };
 }
 
 /** Return a task's trusted class score; absent stays absent rather than becoming a synthetic zero. */

@@ -6,8 +6,8 @@ import { join } from "node:path";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { decideBaseReproduction, probeCacheFromLedger, type BaseProbeFile } from "../src/lib/base-reproduction.js";
-import { buildBaseReproductionProbe, runFixRung } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildBaseReproductionProbe, runFixRung } from "./helpers/run-task-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 

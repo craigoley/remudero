@@ -10,7 +10,7 @@ import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects, DEFAULT_SWEEP_POLICY, fixRoundTally, fixRungStalledWithoutNewHead, runSweep,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 type Row = Record<string, unknown>;
 const HEAD = "a".repeat(40);

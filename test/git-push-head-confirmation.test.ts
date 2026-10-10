@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { gitPushRunBranch, LanePushForeignHeadError, type PushExec, type GitCapture } from "../src/lib/git-push.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { pushFixRound, runFixRung } from "../src/run-task.js";
+import { pushFixRound, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

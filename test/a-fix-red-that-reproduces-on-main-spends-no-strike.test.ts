@@ -12,7 +12,7 @@ import {
 } from "../src/lib/base-reproduction.js";
 import {
   BASE_RED_REFRESH_STEP, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildBaseReproductionProbe, deriveStrikeHistory, priorStrikesFor } from "../src/run-task.js";
 
 const NOW = Date.now();

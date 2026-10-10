@@ -12,7 +12,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T3359: the repeat-disposition bound could not reach its own threshold ─────────────────────

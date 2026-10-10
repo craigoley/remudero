@@ -12,7 +12,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { appendLedger } from "../src/lib/ledger.js";
 
 /**

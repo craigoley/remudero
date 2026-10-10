@@ -8,7 +8,7 @@ import { CI_REFRESH_GUARD_VERSION, observeCiRefreshDeferrals } from "../src/lib/
 import { meaningOfStep } from "../src/lib/ledger-steps.js";
 import type { LedgerLine } from "../src/lib/ledger.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, selectUpdateBranchDecision, selectUpdateBranchTarget,
-  type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+  type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00.000Z"), ASOF = new Date(NOW).toISOString();
 const START = new Date(NOW - 86_400_000).toISOString();

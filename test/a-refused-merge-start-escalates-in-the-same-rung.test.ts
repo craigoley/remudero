@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { MERGE_HEAD_ABSENT_REASON, runFixRung } from "../src/run-task.js";
+import { MERGE_HEAD_ABSENT_REASON, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -36,11 +36,26 @@ function fixture(root: string) {
     settingsFile: join(root, "settings.json"),
     config: { root, workerProviders: { harnessCommitsFix: true } } as Config,
     budgetUsd: 10, strikeCap: 5, initialReview: review("failure"),
+    progressDecision: { verdict: "continue", reason: "the sweep admitted this round" },
     mergeConflict: { files: [{ path: "conflict.txt", oursDeleted: 1, theirsDeleted: 1 }],
       oursLog: "ours", theirsLog: "theirs" },
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: MOUNT },
     escalationJudge: async () => ({ decision: "deliver", reason: "test" }),
     deps: {
+      fixProgressJudge: async (input) => {
+        const last = input.rounds.at(-1)!;
+        assert.equal(last.completed, true);
+        if (last.refusal) {
+          assert.deepEqual(last.redBefore, ["conflict:conflict.txt"]);
+          assert.equal(input.signals.refusedRounds, input.rounds.length);
+          assert.ok(input.parkedReason?.includes(last.refusal));
+          return input.rounds.length < 2
+            ? { verdict: "continue", reason: "retry the merge with new evidence" }
+            : { verdict: "escalate", loop: "repeated merge refusals", reason: "the merge did not progress" };
+        }
+        assert.equal(input.parkedReason, undefined);
+        return { verdict: "escalate", loop: "unchanged red after a worker round", reason: "no progress" };
+      },
       spawn: async () => {
         spawns++;
         return {
@@ -73,12 +88,12 @@ function fixture(root: string) {
 }
 
 describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => {
-  test("two merge-start refusals escalate in this rung before the strike cap, naming both reasons", () =>
+  test("the progress judge escalates two merge-start refusals in this rung, naming both reasons", () =>
     withTempDir("w1-t5867-refused", async (root) => {
       const f = fixture(root);
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "escalated");
-      assert.equal(outcome.reason, "merge_conflict_unresolved");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /repeated merge refusals/);
       assert.equal(outcome.strikes, 2);
       assert.deepEqual(f.counts(), { starts: 2, spawns: 0, pushes: 0 });
       assert.deepEqual(f.rows.filter((row) => row.step === "fix.dispatch").map((row) => row.reason),
@@ -115,8 +130,8 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
         return 0;
       };
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "escalated");
-      assert.equal(outcome.reason, "merge_conflict_unresolved");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /repeated merge refusals/);
       assert.equal(outcome.strikes, 2);
       assert.equal(starts, 2);
       assert.equal(f.counts().spawns, 1);
@@ -126,7 +141,7 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
       assert.ok(f.issues[0].body.includes(SECOND_REASON));
     }));
 
-  test("two consecutive MERGE_HEAD refusals also escalate before the strike cap", () =>
+  test("the progress judge sees two completed MERGE_HEAD refusals and escalates their loop", () =>
     withTempDir("w1-t5867-two-merge-heads", async (root) => {
       const f = fixture(root);
       let starts = 0;
@@ -136,17 +151,20 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
         return 0;
       };
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "escalated");
-      assert.equal(outcome.reason, "merge_conflict_unresolved");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /repeated merge refusals/);
       assert.equal(outcome.strikes, 2);
       assert.equal(starts, 2);
       assert.equal(f.counts().spawns, 2);
       assert.equal(f.counts().pushes, 0);
       assert.equal(f.issues.length, 1);
-      assert.equal(f.issues[0].body.split(MERGE_HEAD_ABSENT_REASON).length - 1, 2);
+      assert.ok(f.issues[0].body.includes(MERGE_HEAD_ABSENT_REASON));
+      assert.deepEqual(f.rows.filter((row) => row.step === "fix.commit_refused").map((row) => row.reason),
+        [MERGE_HEAD_ABSENT_REASON, MERGE_HEAD_ABSENT_REASON]);
+      assert.deepEqual(f.rows.filter((row) => row.step === "fix.progress_judged").map((row) => row.round_count), [1, 2]);
     }));
 
-  test("a normal unchanged-tree stand-down outside merge mode still spends only one worker", () =>
+  test("an unchanged round outside merge mode reaches the judge before another worker", () =>
     withTempDir("w1-t5867-normal", async (root) => {
       const f = fixture(root);
       f.run.mergeConflict = undefined;
@@ -155,14 +173,14 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
       f.run.deps.fetchCiFailures = async () => [{ name: "ci", logTail: "tsc: error TS2322" }];
       f.run.deps.runReview = async () => review("failure");
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "stood_down");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
       assert.equal(outcome.strikes, 1);
-      assert.match(outcome.standDownReason!, /byte-identical/);
+      assert.match(outcome.reason, /unchanged red after a worker round/);
       assert.deepEqual(f.counts(), { starts: 0, spawns: 1, pushes: 1 });
-      assert.equal(f.issues.length, 0);
+      assert.equal(f.issues.length, 1);
     }));
 
-  test("a successful commit clears the refusal exception for the next unchanged round", () =>
+  test("a successful commit clears consecutive refusal evidence before the next judgment", () =>
     withTempDir("w1-t5867-reset", async (root) => {
       const f = fixture(root);
       let starts = 0;
@@ -171,24 +189,24 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
       f.run.deps.waitForCiGreen = async () => "red";
       f.run.deps.fetchCiFailures = async () => [{ name: "ci", logTail: "tsc: error TS2322" }];
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "stood_down");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
       assert.equal(outcome.strikes, 2);
-      assert.match(outcome.standDownReason!, /byte-identical/);
+      assert.match(outcome.reason, /unchanged red after a worker round/);
       assert.equal(starts, 2);
       assert.equal(f.counts().spawns, 1);
       assert.equal(f.counts().pushes, 1);
-      assert.equal(f.issues.length, 0);
+      assert.equal(f.issues.length, 1);
     }));
 
-  test("a one-strike budget still escalates after one refusal without spending a worker", () =>
+  test("a former one-strike budget permits the judge to continue to a second merge refusal", () =>
     withTempDir("w1-t5867-one-strike", async (root) => {
       const f = fixture(root);
       f.run.strikeCap = 1;
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "escalated");
-      assert.equal(outcome.reason, "merge_conflict_unresolved");
-      assert.equal(outcome.strikes, 1);
-      assert.deepEqual(f.counts(), { starts: 1, spawns: 0, pushes: 0 });
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /repeated merge refusals/);
+      assert.equal(outcome.strikes, 2);
+      assert.deepEqual(f.counts(), { starts: 2, spawns: 0, pushes: 0 });
       assert.equal(f.issues.length, 1);
       assert.ok(f.issues[0].body.includes(FIRST_REASON));
     }));
@@ -200,13 +218,64 @@ describe("test/a-refused-merge-start-escalates-in-the-same-rung.test.ts", () => 
       f.run.deps.startShellLessMergeConflictMerge = () =>
         ++starts === 1 ? { started: false } : { started: false, reason: SECOND_REASON };
       const outcome = await runFixRung(f.run);
-      assert.equal(outcome.outcome, "escalated");
-      assert.equal(outcome.reason, "merge_conflict_unresolved");
+      assert.equal(outcome.outcome, "escalated", outcome.reason);
+      assert.match(outcome.reason, /repeated merge refusals/);
       assert.equal(outcome.strikes, 2);
       assert.equal(starts, 2);
       assert.equal(f.issues.length, 1);
       assert.ok(f.issues[0].body.includes("no reason reported"));
       assert.ok(f.issues[0].body.includes(SECOND_REASON));
+    }));
+
+  test("the judge can change approach and continue beyond two consecutive merge refusals", () =>
+    withTempDir("w1-t7096-merge-progress", async (root) => {
+      const f = fixture(root);
+      f.run.strikeCap = 1;
+      let starts = 0;
+      const decisions: number[] = [];
+      f.run.deps.startShellLessMergeConflictMerge = () => ++starts <= 3
+        ? { started: false, reason: starts % 2 ? FIRST_REASON : SECOND_REASON } : { started: true };
+      f.run.deps.fixProgressJudge = async (input) => {
+        decisions.push(input.rounds.length);
+        assert.equal(input.signals.refusedRounds, starts);
+        assert.equal(input.signals.incompleteRounds, 0);
+        assert.deepEqual(input.rounds.map((r) => r.refusal),
+          Array.from({ length: starts }, (_, i) => i % 2 ? SECOND_REASON : FIRST_REASON));
+        assert.deepEqual(input.currentRed, ["conflict:conflict.txt"]);
+        assert.equal(input.signals.identicalRedSets, starts);
+        return { verdict: "change-approach", approach: "verify fetch before merging", reason: "new evidence permits recovery" };
+      };
+      const spawn = f.run.deps.spawn;
+      f.run.deps.spawn = async (args) => {
+        assert.ok(args.prompt.includes("Progress judge approach: verify fetch before merging"));
+        return spawn(args);
+      };
+      const outcome = await runFixRung(f.run);
+      assert.equal(outcome.outcome, "fixed", outcome.reason);
+      assert.equal(outcome.strikes, 4);
+      assert.deepEqual(decisions, [1, 2, 3]);
+      assert.equal(starts, 4);
+      assert.deepEqual(f.counts(), { starts: 0, spawns: 1, pushes: 1 });
+      assert.equal(f.issues.length, 0);
+    }));
+
+  test("an unavailable merge-refusal judgment hands off without a second merge or worker", () =>
+    withTempDir("w1-t7096-merge-unavailable", async (root) => {
+      const f = fixture(root);
+      let judgments = 0;
+      f.run.deps.fixProgressJudge = async (input) => {
+        judgments++;
+        assert.equal(input.rounds.length, 1);
+        assert.equal(input.rounds[0].refusal, FIRST_REASON);
+        assert.equal(input.rounds[0].completed, true);
+        return undefined;
+      };
+      const outcome = await runFixRung(f.run);
+      assert.equal(outcome.outcome, "handed_off", outcome.reason);
+      assert.match(outcome.reason, /absent or unparseable/);
+      assert.equal(judgments, 1);
+      assert.deepEqual(f.counts(), { starts: 1, spawns: 0, pushes: 0 });
+      assert.equal(f.issues.length, 0);
     }));
 
   test("the retry still stands down when the PR closes after the first refusal", () =>

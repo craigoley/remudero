@@ -18,7 +18,7 @@ import {
   type CiFailure,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-05T00:00:00.000Z");
 

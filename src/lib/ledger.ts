@@ -760,6 +760,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
+  // W1-T4939: `rmd status` sums these hourly (and restart-flushed partial) rows over the last 24 hours. The
+  // daemon restarts on merges, so each row is scarce and a rotation that archived it loses the account.
+  "lane.idle_summary",
   "sweep.post_fix_redriven",
   "sweep.stale_red_redrive.released",
   "sweep.strike_ladder.refreshed",

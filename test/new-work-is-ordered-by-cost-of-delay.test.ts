@@ -118,11 +118,12 @@ test("W1-T4064: ranking leaves eligibility unchanged and remains a total order a
   }
 });
 
-test("W1-T4064: missing filing dates and unmeasured costs refuse the computed schedule", () => {
+test("W1-T4064: a missing filing date leaves that task unscored; unmeasured costs refuse the computed schedule", () => {
   const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: new Map([[old.id, NOW - DAY]]) };
+  // W1-T7534: one undatable task is left unscored instead of refusing every task's schedule.
   const missing = buildDispatchValueContext([old, fresh], history, new Set([old.id, fresh.id]), NOW, true, "seed", snapshot);
-  assert.equal(missing.kind, "refused");
-  assert.deepEqual(missing.reasons, [`${fresh.id}:missing-filing-date`]);
+  assert.equal(missing.kind, "ready");
+  assert.deepEqual(missing.context.costOfDelayUnscored, [fresh.id]);
   const noCosts = history.map(row => ({ ...row, cost_usd: undefined }));
   const unmeasured = buildDispatchValueContext([old], noCosts, new Set([old.id]), NOW, true, "seed", snapshot);
   assert.equal(unmeasured.kind, "refused");
@@ -194,7 +195,9 @@ test("W1-T4064: sparse age evidence stays positive and invalid numeric evidence 
     buildDispatchValueContext([old], rows, new Set([old.id]), nowMs, true, "seed", { ...snapshot, planTreeSha: treeSha, filedAtByTaskId });
   assert.deepEqual(build(history, NaN), { kind: "refused", reasons: ["unreadable-snapshot"] });
   assert.deepEqual(build(history, NOW, ""), { kind: "refused", reasons: ["unreadable-snapshot"] });
-  assert.deepEqual(build(history, NOW, "tree-sha", new Map([[old.id, NOW + DAY]])), { kind: "refused", reasons: [`${old.id}:missing-filing-date`] });
+  const future = build(history, NOW, "tree-sha", new Map([[old.id, NOW + DAY]]));
+  assert.equal(future.kind, "ready", "W1-T7534: a future filing date leaves the task unscored");
+  assert.deepEqual(future.context.costOfDelayUnscored, [old.id]);
   const tiny = history.map(row => row.cost_usd === undefined ? row : { ...row, cost_usd: 1e-310 });
   assert.deepEqual(build(tiny), { kind: "refused", reasons: [`${old.id}:unmeasured-score`] });
 });

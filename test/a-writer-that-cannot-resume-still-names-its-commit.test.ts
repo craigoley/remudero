@@ -11,7 +11,7 @@ import {
   missingCommitLinePrompt,
   resumeForMissingCommitLine,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

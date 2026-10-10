@@ -17,7 +17,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const PR = 7495;
 const TASK = "W1-T3980";

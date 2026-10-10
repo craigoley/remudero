@@ -50,7 +50,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInput } from "../src/lib/risk-judge.js";
-import { laneRunStartFields, runFixRung, runTask } from "../src/run-task.js";
+import { laneRunStartFields, runFixRung, runTask } from "./helpers/run-task-test.js";
 import { buildDigest } from "../src/lib/digest.js";
 import { groupSpendByAccount } from "../src/lib/ledger.js";
 import { liveRunSpend } from "../src/lib/status-stream-publisher.js";

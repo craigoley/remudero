@@ -27,7 +27,7 @@ import {
   fixRungWantsHeadContract,
   type BuildSweepEffectsDeps,
 } from "../src/lib/sweep.js";
-import { commitWorkerEdits, fixRungScopeStandDownReason } from "../src/run-task.js";
+import { commitWorkerEdits, fixRungScopeStandDownReason } from "./helpers/run-task-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const ID = "W1-T4051";

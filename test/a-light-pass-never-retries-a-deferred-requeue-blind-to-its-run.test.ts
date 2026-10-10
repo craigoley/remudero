@@ -29,7 +29,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { blockedFixableIsRequeueOnly, lightPassActionable } from "../src/run-task.js";
 
 const PR = 9392;

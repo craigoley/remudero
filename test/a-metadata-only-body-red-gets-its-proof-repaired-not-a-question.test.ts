@@ -25,7 +25,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import {
@@ -41,7 +41,7 @@ import {
   runFixRung,
   trailerBodyDivergenceRepair,
   wrappedGrepBodyRepair,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 
 const authorGate = (await import(pathToFileURL(join(fileURLToPath(new URL(".", import.meta.url)), "..", "scripts", "acceptance-author-gate.mjs")).href)) as {
   trailerBodyProofDivergenceRefusal: (input: {

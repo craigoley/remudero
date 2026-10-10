@@ -25,7 +25,7 @@ import {
   removeAbandonedFixWorktreeOwner,
   runFixRung,
   type BuildSweepEffectsDeps,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   acquireFixRoundClaim,

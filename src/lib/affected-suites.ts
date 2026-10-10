@@ -492,6 +492,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(promptRender) && files.some((f) => promptRenderEdges.includes(f))) {
     pathReaders.push(promptRender);
   }
+  // W1-T7475: a coverage shard failed on this suite at 49b4c36c and the narrow selector missed it.
+  const redBranchStrike = "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts";
+  const redBranchStrikeEdges = [
+    "src/lib/sweep.ts",
+    "test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts",
+  ];
+  if (input.files.has(redBranchStrike) && files.some((f) => redBranchStrikeEdges.includes(f))) {
+    pathReaders.push(redBranchStrike);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

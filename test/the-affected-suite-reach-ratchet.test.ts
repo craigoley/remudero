@@ -6,9 +6,12 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import * as selector from "../src/lib/affected-suites.js";
+// @ts-ignore executable census module has no declaration file.
+import { censusSnapshotPaths, readCensusSnapshot } from "../scripts/census-precheck.mjs";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const BASELINE = new URL("../scripts/affected-reach-baseline.json", import.meta.url);
+const SNAPSHOT = readCensusSnapshot();
+const ROOT = SNAPSHOT?.root ?? fileURLToPath(new URL("../", import.meta.url));
+const BASELINE = `${ROOT}/scripts/affected-reach-baseline.json`;
 const SUITE = /^test\/.*\.test\.ts$/;
 const CODE = /\.(?:ts|mts|mjs|js|cjs)$/;
 
@@ -99,11 +102,12 @@ export function reachVerdict(actual: Baseline, baseline: Baseline): { refused: s
 }
 
 export function readCodeTree(): Map<string, string> {
-  const paths = execFileSync("git", ["ls-files", "--", "src", "scripts", "bin", "test"], { cwd: ROOT, encoding: "utf8" })
-    .trim().split("\n").filter((p) => CODE.test(p));
+  const paths: string[] = (SNAPSHOT ? censusSnapshotPaths(SNAPSHOT) :
+    execFileSync("git", ["ls-files", "--", "src", "scripts", "bin", "test"], { cwd: ROOT, encoding: "utf8" })
+      .trim().split("\n")).filter((p: string) => /^(?:src|scripts|bin|test)\//.test(p) && CODE.test(p));
   // Include this new suite before the harness stages it; git lists it after the commit too.
   const own = "test/the-affected-suite-reach-ratchet.test.ts";
-  return new Map([...new Set([...paths, own])].map((p) => [p, readFileSync(new URL(p, new URL("../", import.meta.url)), "utf8")]));
+  return new Map([...new Set([...paths, own])].map((p) => [p, readFileSync(`${ROOT}/${p}`, "utf8")]));
 }
 
 const FIXTURE = new Map([
@@ -139,9 +143,11 @@ test("unit test: test/the-affected-suite-reach-ratchet.test.ts", () => {
 
 test("the recorded reach baseline may only shrink against origin/main", () => {
   const path = "scripts/affected-reach-baseline.json";
-  const exists = execFileSync("git", ["ls-tree", "--name-only", "origin/main", "--", path], { cwd: ROOT, encoding: "utf8" }).trim();
+  const exists = SNAPSHOT ? (SNAPSHOT.mainBlobs[path] === undefined ? "" : path) :
+    execFileSync("git", ["ls-tree", "--name-only", "origin/main", "--", path], { cwd: ROOT, encoding: "utf8" }).trim();
   if (exists === "") return; // Initial capture has no previous ceiling.
-  const previous = JSON.parse(execFileSync("git", ["show", `origin/main:${path}`], { cwd: ROOT, encoding: "utf8" })) as Baseline;
+  const previous = JSON.parse(SNAPSHOT ? SNAPSHOT.mainBlobs[path] :
+    execFileSync("git", ["show", `origin/main:${path}`], { cwd: ROOT, encoding: "utf8" })) as Baseline;
   const recorded = JSON.parse(readFileSync(BASELINE, "utf8")) as Baseline;
   assert.deepEqual(reachVerdict(recorded, previous).refused, [], "a recorded reach ceiling may only shrink");
 });

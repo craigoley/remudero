@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixRungTaskFor } from "../src/lib/sweep.js";
-import { commitWorkerEdits, runFixRung } from "../src/run-task.js";
+import { commitWorkerEdits, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Plan } from "../src/lib/plan.js";

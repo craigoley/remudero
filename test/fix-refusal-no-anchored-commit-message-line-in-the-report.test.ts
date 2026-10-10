@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

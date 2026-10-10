@@ -3601,11 +3601,18 @@ export function namedMeasurementCadenceChildConfig(env: NodeJS.ProcessEnv): Conf
   }
 }
 
+/** Attempt 1 records the fire; a restart of the SAME run must not spend a second rolling-24h `maxPerDay` slot. */
 export function measurementCadenceChildRun(
   env: NodeJS.ProcessEnv,
-  build: (config: Config | undefined) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
+  build: (config: Config | undefined, opts: { recordFire: boolean }) => { runMeasurementCadence: () => Promise<MeasurementCadenceRunResult> },
+  attempt = 1,
 ): () => Promise<MeasurementCadenceRunResult> {
-  return async () => build(namedMeasurementCadenceChildConfig(env)).runMeasurementCadence();
+  return async () => build(namedMeasurementCadenceChildConfig(env), { recordFire: attempt <= 1 }).runMeasurementCadence();
+}
+
+export function measurementCadenceChildAttempt(statePath: string, runId: string): number {
+  const read = readChildState(statePath);
+  return read.kind === "ok" && read.state.runId === runId && typeof read.state.attempt === "number" ? read.state.attempt : 1;
 }
 
 /** The production spawn: detached (a restart leaves it running), niced, stderr and exit kept in the child log. */

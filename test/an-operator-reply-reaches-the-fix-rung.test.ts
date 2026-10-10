@@ -22,7 +22,7 @@ import { createService } from "../src/lib/service.js";
 import { buildEscalationReplyRoute, type PanelActionDeps } from "../src/lib/panel-actions.js";
 import { appendThreadMessage, type ThreadIdentity } from "../src/lib/inbox-thread.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { operatorVerdictEvidence } from "../src/lib/sweep.js";
+import { operatorVerdictEvidence } from "./helpers/sweep-test.js";
 import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";

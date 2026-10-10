@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -21,6 +21,11 @@ import { decideDeployTrigger } from "../src/lib/deployer.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 const SCRIPT = "deploy/install-host-units.sh";
+const INPUT_ROOT = mkdtempSync(join(tmpdir(), "rmd-hostunits-inputs-"));
+const MEMINFO = join(INPUT_ROOT, "meminfo");
+const SESSION_UID = "42424";
+writeFileSync(MEMINFO, "MemTotal:       16371996 kB\n");
+after(() => rmSync(INPUT_ROOT, { recursive: true, force: true }));
 
 /** Run the installer against a throwaway tree so no test can touch real systemd. */
 function run(args: string[], env: Record<string, string>, root: string) {
@@ -37,28 +42,26 @@ function run(args: string[], env: Record<string, string>, root: string) {
       // rendering for, exactly as an operator must; a case that wants the refusal overrides this
       // with "" below.
       RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+      // The fixture must render the cap on both Linux and Mac, without reading host identity/RAM.
+      RMD_SERVICE_UID: SESSION_UID,
+      RMD_MEMINFO_PATH: MEMINFO,
       ...env,
     },
   });
 }
 
-function countFiles(dir: string): number {
-  let n = 0;
-  const walk = (d: string) => {
-    let entries: string[];
-    try { entries = readdirSync(d); } catch { return; }
-    for (const e of entries) {
-      const p = join(d, e);
-      try {
-        if (readdirSync(p).length >= 0) walk(p);
-      } catch { n += 1; }
-    }
-  };
-  walk(dir);
-  return n;
+function filesUnder(dir: string, prefix = ""): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const relative = prefix + entry.name;
+    if (entry.isDirectory()) return filesUnder(join(dir, entry.name), relative + "/");
+    assert.ok(entry.isFile(), `unexpected non-regular artifact: ${relative}`);
+    return [relative];
+  }).sort();
 }
 
-test("W1-T2877: check mode reports missing units and changes nothing", () => {
+const countFiles = (dir: string) => filesUnder(dir).length;
+
+test("W1-T2877: check mode reports missing units and changes nothing, including deterministic session-slice cap artifacts", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-"));
   try {
     const check = run([], {}, root);
@@ -70,11 +73,43 @@ test("W1-T2877: check mode reports missing units and changes nothing", () => {
 
     const install = run(["--install"], {}, root);
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
-    assert.equal(countFiles(root), 11, "install must also render the registry helper, service, and timer");
+    const dropinRelative = `systemd/user-${SESSION_UID}.slice.d/50-rmd-cap.conf`;
+    assert.deepEqual(filesUnder(root), [
+      "bin/acr-login.sh", "bin/rmd-reap-stray-containers", "bin/rmd-scratch-mounts", "rmd-relaunch.sh",
+      "systemd/rmd-acr-login.service", "systemd/rmd-acr-login.timer",
+      "systemd/rmd-fleet-watchdog.service", "systemd/rmd-fleet-watchdog.timer", "systemd/rmd-fleet.service",
+      "systemd/rmd-reap-stray.service", "systemd/rmd-reap-stray.timer", dropinRelative,
+    ].sort(), "install renders the exact units, helpers, launcher, and session slice drop-in");
+    const dropin = join(root, dropinRelative);
+    const cap = readFileSync(dropin, "utf8");
+    assert.match(cap, /^\[Slice\]$/m);
+    assert.match(cap, /^CPUWeight=30$/m);
+    assert.match(cap, /^MemoryHigh=6G$/m);
+    assert.doesNotMatch(cap, /MemoryMax/);
+    assert.equal(statSync(dropin).mode & 0o777, 0o644);
+    const snapshot = () => filesUnder(root).map((path) => {
+      const file = join(root, path), stat = statSync(file);
+      return { path, text: readFileSync(file, "utf8"), mode: stat.mode, mtime: stat.mtimeMs };
+    });
+    const installed = snapshot();
 
     const after = run([], {}, root);
     assert.equal(after.status, 0, "check after install must be clean");
     assert.match(after.stdout, /all units match this repo/);
+    assert.deepEqual(snapshot(), installed, "a clean check changes no artifact bytes, modes, or timestamps");
+
+    writeFileSync(dropin, "[Slice]\nCPUWeight=100\nMemoryMax=4G\n");
+    const tampered = snapshot();
+    const capDrift = run([], {}, root);
+    assert.equal(capDrift.status, 1);
+    assert.match(capDrift.stdout, /DRIFTED .*50-rmd-cap\.conf/);
+    assert.deepEqual(snapshot(), tampered, "check reports cap drift without repairing it");
+    rmSync(dropin);
+    const missing = snapshot();
+    const capMissing = run([], {}, root);
+    assert.equal(capMissing.status, 1);
+    assert.match(capMissing.stdout, /MISSING .*50-rmd-cap\.conf/);
+    assert.deepEqual(snapshot(), missing, "check reports a missing cap without recreating it");
 
     // DRIFT IS A FINDING, NOT ONLY ABSENCE: a unit edited by hand on the host diverges from what
     // this repo would provision, which is precisely the state W1-T2877 exists to end.
@@ -485,13 +520,16 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
     assert.doesNotMatch(launcher, /docker pull/, "the launcher itself must never pull — that is the recycle's job");
 
     // NO SECOND RECONCILER. The whole point of folding is one loop over one subject.
-    const units = readdirSync(join(root, "systemd"));
+    const entries = readdirSync(join(root, "systemd"), { withFileTypes: true });
     assert.deepEqual(
-      units.filter((u) => u.startsWith("rmd-deploy")),
+      entries.map((entry) => entry.name).filter((u) => u.startsWith("rmd-deploy")),
       [],
       "no separate deploy service or timer may be rendered",
     );
-    assert.deepEqual(units.sort(), [
+    assert.ok(entries.every((entry) => entry.isFile() || entry.isDirectory()), "no symlink or unclassified unit artifact");
+    assert.deepEqual(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+      [`user-${SESSION_UID}.slice.d`], "the only directory is the separately verified session cap drop-in");
+    assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
       "rmd-acr-login.service", "rmd-acr-login.timer", "rmd-fleet-watchdog.service",
       "rmd-fleet-watchdog.timer", "rmd-fleet.service", "rmd-reap-stray.service", "rmd-reap-stray.timer",
     ], "registry refresh adds only its service and timer to the existing units");

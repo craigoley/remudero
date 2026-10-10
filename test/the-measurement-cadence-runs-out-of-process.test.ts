@@ -21,6 +21,8 @@ import {
   MEASUREMENT_CADENCE_CHILD_FLAG,
   measurementCadenceChildLogPath,
   measurementCadenceChildAlive,
+  measurementCadenceChildAttempt,
+  measurementCadenceChildRun,
   measurementCadenceChildMain,
   measurementCadenceChildRunner,
   type MeasurementCadenceChildOutcome,
@@ -349,4 +351,29 @@ test("the real cadence spawn keeps the child's stderr and exit status in its log
   }
   assert.match(log, /FATAL ERROR: simulated heap abort/, "the child's own stderr reaches the log");
   assert.match(log, new RegExp(`child ${pid} exited: code=134 signal=null heap_limit_mb=64`), "and its exit status is appended");
+});
+
+test("a restarted cadence child does not record a second fire against the daily cap", { timeout: 5_000 }, async () => {
+  // 2026-10-09: two dead runs, each restarted once, recorded four fires (06:26, 06:57, 18:39, 18:47) and filled the
+  // rolling-24h maxPerDay of 4, so the 00:47Z run never came. One run is one fire, however many attempts it takes.
+  const statePath = join(scratch(), "state.json");
+  const children = fakeChildren();
+  const first = runnerFor(statePath, children).start({ fire: true });
+  void settledOf(first)?.catch(() => {});
+  assert.equal(measurementCadenceChildAttempt(statePath, "RUN-1"), 1);
+  children.alive.clear();
+  const restarted = runnerFor(statePath, children).start({ fire: false });
+  assert.equal(restarted.kind, "restarted");
+  void settledOf(restarted)?.catch(() => {});
+  assert.equal(measurementCadenceChildAttempt(statePath, "RUN-1"), 2, "the restarted child reads its own attempt");
+  assert.equal(measurementCadenceChildAttempt(statePath, "RUN-OTHER"), 1, "another run's state is never borrowed");
+
+  const recorded: boolean[] = [];
+  const build = (_config: unknown, opts: { recordFire: boolean }) => {
+    recorded.push(opts.recordFire);
+    return { runMeasurementCadence: async () => cadenceResult() };
+  };
+  await measurementCadenceChildRun({}, build, measurementCadenceChildAttempt(statePath, "RUN-1"))();
+  await measurementCadenceChildRun({}, build, 1)();
+  assert.deepEqual(recorded, [false, true], "only the first attempt spends a fire");
 });

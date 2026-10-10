@@ -6,7 +6,7 @@ import {
   DEFAULT_SWEEP_POLICY, detachSweepAction, drainDetachedSweepActions,
   drainInFlightReviews, inFlightReviewCount, runSweepLightPass,
   type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.now();
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));

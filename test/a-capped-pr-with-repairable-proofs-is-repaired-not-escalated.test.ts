@@ -10,7 +10,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 
 // #10298 (2026-10-09): a green, reviewed PR whose verdict was CAPPED on a comment-only grep sat for hours on

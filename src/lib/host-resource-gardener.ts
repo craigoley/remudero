@@ -84,6 +84,23 @@ export interface HostSample {
   janitorFreedKb?: number;
   /** Per whole disk: busy %, await and tps averaged over the beat interval; only devices read. */
   io?: Record<string, IoReading>;
+  /** Per daemon container: its memory.high, ceiling and page-cache churn over the beat; only containers read. */
+  memory?: Record<string, MemoryReading>;
+}
+
+/** One daemon container's memory over one beat (scripts/fleet-heartbeat.sh `mem_<container>_*`). */
+export interface MemoryReading {
+  highMib?: number;
+  maxMib?: number;
+  policyHighMib?: number;
+  fileMib?: number;
+  /** memory.events `high` over the beat: how often the kernel throttled it at memory.high. */
+  highEvents?: number;
+  /** memory.stat workingset_refault_file over the beat, in pages: evicted page cache read back. */
+  refaultFilePages?: number;
+  intervalS?: number;
+  /** deploy/memory-high-tuner.sh's last adjustment (grow, shrink, restore, floor, none). */
+  tunerAction?: string;
 }
 
 /** One block device over one beat interval, as the heartbeat published it. */
@@ -152,6 +169,7 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   const janitorTs = payload["janitor_last_ts"];
   const freed = parseSizeKb(payload["janitor_last_freed"]);
   const io = ioFromPayload(payload);
+  const memory = memoryFromPayload(payload);
   return {
     host,
     beatTs: fixedClock(tsMs).iso(),
@@ -163,6 +181,7 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
     ...(janitorTs && Number.isFinite(Date.parse(janitorTs)) ? { janitorTs } : {}),
     ...(freed !== undefined ? { janitorFreedKb: freed } : {}),
     ...(io ? { io } : {}),
+    ...(memory ? { memory } : {}),
   };
 }
 
@@ -190,6 +209,31 @@ export function ioFromPayload(payload: Record<string, string>): Record<string, I
     });
     if (readers.length) reading.readers = readers;
     if (Object.keys(reading).length) out[device] = reading;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** The `mem_<container>_*` keys of one beat; `unknown` stays absent, never 0. Undefined when no container was read. */
+export function memoryFromPayload(payload: Record<string, string>): Record<string, MemoryReading> | undefined {
+  const containers = (payload["mem_containers"] ?? "").split(",").filter((c) => /^[A-Za-z0-9._-]+$/.test(c));
+  const intervalS = digits(payload["mem_interval_s"]);
+  const out: Record<string, MemoryReading> = {};
+  for (const c of containers) {
+    const reading: MemoryReading = {};
+    const put = <K extends keyof MemoryReading>(key: K, v: MemoryReading[K] | undefined): void => {
+      if (v !== undefined) reading[key] = v;
+    };
+    put("highMib", digits(payload[`mem_${c}_high_mib`]));
+    put("maxMib", digits(payload[`mem_${c}_max_mib`]));
+    put("policyHighMib", digits(payload[`mem_${c}_policy_high_mib`]));
+    put("fileMib", digits(payload[`mem_${c}_file_mib`]));
+    put("highEvents", digits(payload[`mem_${c}_high_events_delta`]));
+    put("refaultFilePages", digits(payload[`mem_${c}_refault_file_pages_delta`]));
+    if (Object.keys(reading).length === 0) continue;
+    put("intervalS", intervalS);
+    const action = payload[`mem_${c}_tuner_action`];
+    if (action && action !== "unknown") reading.tunerAction = action;
+    out[c] = reading;
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -576,6 +620,119 @@ export function hostIoEscalation(f: IoFinding): Escalation {
   };
 }
 
+// ── a memory.high pinned at its ceiling ───────────────────────────────────────────────────────
+
+/**
+ * PRIMARY CONTROL: what "pinned" means. deploy/memory-high-tuner.sh grows a squeezed container's memory.high, but never past this share of
+ * its memory.max (deploy/resource-policy.sh RMD_MEMORY_HIGH_MAX_PCT). A container held there that
+ * still refaults its page cache is a squeeze the tuner can no longer relieve: only a larger memory.max
+ * or a smaller resident set can, and both are decisions for someone else.
+ */
+export const MEMORY_CEILING_PCT = 95;
+
+/**
+ * The tiers a SUSTAINED page-cache churn earns while pinned. Churn is the file pages a container read
+ * back in five minutes as a fraction of its whole page cache: at 0.1 a tenth of the cache is evicted
+ * and re-read every five minutes, at 0.5 half of it, at 1 all of it. A beat where the container is not
+ * pinned (the tuner still had room) or not throttled counts as 0, so the median only rises while the
+ * squeeze is one the tuner cannot answer. Recorded first, then handed to the SRE lane; it blocks
+ * nothing, and the episode ends on its own once the median falls.
+ */
+export const MEMORY_TIERS: ReadonlyArray<{ tier: Tier; windowHours: number; churn: number }> = [
+  { tier: "projected", windowHours: 1, churn: 0.5 },
+  { tier: "projected", windowHours: 3, churn: 0.25 },
+  { tier: "record", windowHours: 1, churn: 0.1 },
+];
+const PAGE_KIB = 4;
+
+export interface MemoryFinding {
+  host: string;
+  container: string;
+  tier: Tier;
+  windowHours: number;
+  /** Median churn across the window (see {@link MEMORY_TIERS}). */
+  churn: number;
+  points: number;
+  /** Median file refaults per five minutes across the window. */
+  refaultMibPer5Min: number;
+  highMib: number;
+  maxMib: number;
+  policyHighMib?: number;
+  fileMib?: number;
+  tunerAction?: string;
+}
+
+/** True when the reading's memory.high sits at the tuner's ceiling under its memory.max. */
+export function memoryPinned(r: MemoryReading): boolean {
+  return r.highMib !== undefined && r.maxMib !== undefined && r.highMib >= Math.floor((r.maxMib * MEMORY_CEILING_PCT) / 100);
+}
+
+/** The churn of one beat, or undefined when the beat could not measure it (never a guessed 0). */
+function memoryChurn(r: MemoryReading | undefined): { churn: number; refaultMibPer5Min: number } | undefined {
+  if (!r || r.refaultFilePages === undefined || r.highEvents === undefined || !r.intervalS || r.highMib === undefined || r.maxMib === undefined || !r.fileMib) return undefined;
+  const refaultMibPer5Min = (r.refaultFilePages * PAGE_KIB * 300) / 1024 / r.intervalS;
+  const squeezed = memoryPinned(r) && r.highEvents > 0;
+  return { churn: squeezed ? refaultMibPer5Min / r.fileMib : 0, refaultMibPer5Min };
+}
+
+/** Every daemon container of one host held at its memory.high ceiling while refaulting, sustained across a tier's window. */
+export function evaluateMemory(host: string, allSamples: readonly HostSample[], nowMs: number): MemoryFinding[] {
+  const samples = allSamples.filter((s) => s.host === host).sort((a, b) => a.tsMs - b.tsMs);
+  const last = samples[samples.length - 1];
+  if (!last || heartbeatStale(samples, nowMs)) return [];
+  const containers = [...new Set(samples.flatMap((s) => Object.keys(s.memory ?? {})))].sort();
+  const out: MemoryFinding[] = [];
+  for (const container of containers) {
+    const latest = last.memory?.[container];
+    // A container that is not pinned NOW is the tuner's to handle, whatever the window says.
+    if (!latest || !memoryPinned(latest)) continue;
+    let best: MemoryFinding | undefined;
+    for (const rule of MEMORY_TIERS) {
+      const from = last.tsMs - rule.windowHours * HOUR_MS;
+      const inWindow = samples.flatMap((s) => {
+        const c = s.tsMs > from ? memoryChurn(s.memory?.[container]) : undefined;
+        return c ? [{ tsMs: s.tsMs, ...c }] : [];
+      });
+      if (inWindow.length < MIN_POINTS) continue;
+      if (inWindow[inWindow.length - 1]!.tsMs - inWindow[0]!.tsMs < IO_MIN_COVERAGE * rule.windowHours * HOUR_MS) continue;
+      const churn = median(inWindow.map((p) => p.churn));
+      if (churn < rule.churn) continue;
+      if (best && TIER_RANK[best.tier] >= TIER_RANK[rule.tier]) continue;
+      best = {
+        host,
+        container,
+        tier: rule.tier,
+        windowHours: rule.windowHours,
+        churn,
+        points: inWindow.length,
+        refaultMibPer5Min: median(inWindow.map((p) => p.refaultMibPer5Min)),
+        highMib: latest.highMib!,
+        maxMib: latest.maxMib!,
+        ...(latest.policyHighMib !== undefined ? { policyHighMib: latest.policyHighMib } : {}),
+        ...(latest.fileMib !== undefined ? { fileMib: latest.fileMib } : {}),
+        ...(latest.tunerAction ? { tunerAction: latest.tunerAction } : {}),
+      };
+    }
+    if (best) out.push(best);
+  }
+  return out;
+}
+
+/** `incident#<sha256 of host-mem:<host>:<container>>`, distinct from the disk incidents. */
+export function memoryIncidentOrigin(host: string, container: string): string {
+  return `incident#${createHash("sha256").update(`host-mem:${host}:${container}`).digest("hex")}`;
+}
+
+export function memoryEvidenceText(f: MemoryFinding): string {
+  const policy = f.policyHighMib === undefined ? "" : ` (policy ${f.policyHighMib} MiB)`;
+  const cache = f.fileMib === undefined ? "" : ` of its ${f.fileMib} MiB page cache`;
+  return [
+    `Host ${f.host}, container ${f.container}: memory.high ${f.highMib} MiB${policy} is pinned at ${MEMORY_CEILING_PCT}% of its ${f.maxMib} MiB memory.max, ` +
+      `and it still refaulted a median ${Math.round(f.refaultMibPer5Min)} MiB per 5 min — churn ${Math.round(f.churn * 100)}%${cache} — across ${f.points} beats of the last ${f.windowHours} h.`,
+    `deploy/memory-high-tuner.sh cannot grow it further${f.tunerAction ? ` (its last adjustment: ${f.tunerAction})` : ""}: relief needs a larger memory.max or a smaller resident set in the container.`,
+  ].join("\n");
+}
+
 // ── the pass ─────────────────────────────────────────────────────────────────────────────────
 
 export interface HeartbeatRead {
@@ -917,13 +1074,41 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
       ports.log(`${HOST_RESOURCE}.io_escalated`, { ...row, issue_url: issueUrl });
     }
   }
+  for (const f of [...new Set(all.map((s) => s.host))].sort().flatMap((host) => evaluateMemory(host, all, nowMs))) {
+    const key = `${f.host}:mem:${f.container}`;
+    live.add(key);
+    const prior = state.episodes[key];
+    const episode = (state.episodes[key] ??= { tier: f.tier });
+    const row = {
+      host: f.host,
+      container: f.container,
+      tier: f.tier,
+      churn_pct: Math.round(f.churn * 100),
+      refault_mib_per_5min: Math.round(f.refaultMibPer5Min),
+      window_hours: f.windowHours,
+      high_mib: f.highMib,
+      max_mib: f.maxMib,
+      policy_high_mib: f.policyHighMib ?? null,
+      tuner_action: f.tunerAction ?? null,
+    };
+    if (!prior || prior.tier !== f.tier) ports.log(`${HOST_RESOURCE}.memory_pinned`, row);
+    episode.tier = f.tier;
+    if (f.tier !== "record" && !episode.handedOff && ports.handoff) {
+      const origin = memoryIncidentOrigin(f.host, f.container);
+      if (!(ports.openIncidentOrigins?.() ?? new Set<string>()).has(origin)) {
+        ports.handoff({ origin, id: `host-mem-${origin.slice("incident#".length, "incident#".length + 16)}`, raw: `host-mem:${f.host}:${f.container}\n\n${memoryEvidenceText(f)}` });
+      }
+      episode.handedOff = clock.iso();
+    }
+  }
   for (const key of Object.keys(state.episodes)) {
     const episode = state.episodes[key]!;
     const isJanitor = key.endsWith(":janitor");
     const isIo = key.includes(":io:");
-    if (live.has(key) && (isJanitor || isIo || episode.tier !== "record")) continue;
-    if (isIo) {
-      ports.log(`${HOST_RESOURCE}.io_recovered`, { key });
+    const isMem = key.includes(":mem:");
+    if (live.has(key) && (isJanitor || isIo || isMem || episode.tier !== "record")) continue;
+    if (isIo || isMem) {
+      ports.log(`${HOST_RESOURCE}.${isIo ? "io_recovered" : "memory_pinned_recovered"}`, { key });
       delete state.episodes[key];
       continue;
     }

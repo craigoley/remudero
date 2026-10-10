@@ -20,7 +20,7 @@ import {
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T126 — DAEMON SELF-FRESHNESS. The same small linear plan test/daemon.test.ts uses

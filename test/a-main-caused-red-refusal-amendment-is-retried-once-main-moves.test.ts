@@ -15,7 +15,7 @@ import {
   noPrVerdictRowsFromLedger,
   refusalIsMainCaused,
 } from "../src/lib/refusal-amendment.js";
-import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps, type SweepDeps } from "./helpers/sweep-test.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 
 // W1-T5531 — W1-T5405 records a red refusal-amendment preflight as the source run's outcome, and the

@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSweepEffects, FixRoundPushError, pushFixRound, runTask } from "../src/run-task.js";
+import { buildSweepEffects, FixRoundPushError, pushFixRound, runTask } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import { LanePushForeignHeadError } from "../src/lib/git-push.js";

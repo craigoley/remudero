@@ -16,7 +16,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const TRANSCRIPT = [
   "Artifact upload completed successfully!",

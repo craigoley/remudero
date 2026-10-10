@@ -6,7 +6,7 @@ import type { BaseProbeFile, BaseProbeResult } from "../src/lib/base-reproductio
 import {
   BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, DEFAULT_SWEEP_POLICY, baseRedHistoryFromLedger, decideBaseRed,
   mainLatestRunFromLedger, runSweep, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // W1-T6024: on 2026-10-06 main failed two tests under `ci`/`ci-shard (n/8)` while #9566 and #9567
 // failed the same two under `coverage-ratchet`. The check-name classifier never matched, so the

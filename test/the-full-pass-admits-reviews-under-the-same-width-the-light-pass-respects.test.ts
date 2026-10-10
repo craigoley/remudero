@@ -25,7 +25,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-06T12:00:00Z");

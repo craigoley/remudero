@@ -30,7 +30,7 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -38,6 +38,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
+import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
   readBaseline as readClockBaseline,
@@ -45,6 +46,7 @@ import {
 } from "./clock-signature-ratchet.mjs";
 import {
   CEILING_BUCKET_COMMENTS,
+  MEASURED_ROOTS,
   DEFAULT_BASELINE_RELATIVE_PATH as COMMENT_BASELINE,
   ceilingForComments,
   countCommentLines,
@@ -62,6 +64,42 @@ import {
 } from "./fixture-copy-census.mjs";
 
 export const FIXTURE_COPY_BASELINE = "scripts/fixture-copy-baseline.json";
+export const CENSUS_SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
+export const CENSUS_SNAPSHOT_ROOTS = [...MEASURED_ROOTS, "test", "plan"];
+
+export function readCensusSnapshot(path = process.env[CENSUS_SNAPSHOT_ENV]) {
+  if (!path) return null;
+  const snapshot = JSON.parse(readFileSync(path, "utf8"));
+  if (snapshot.version !== 1 || typeof snapshot.root !== "string" || typeof snapshot.mergeBase !== "string" ||
+      !Array.isArray(snapshot.headPaths) || !Array.isArray(snapshot.basePaths) ||
+      !snapshot.baseBlobs || typeof snapshot.baseBlobs !== "object" || Array.isArray(snapshot.baseBlobs) ||
+      !snapshot.mainBlobs || typeof snapshot.mainBlobs !== "object" || Array.isArray(snapshot.mainBlobs)) {
+    throw new Error("invalid census snapshot");
+  }
+  for (const name of [...snapshot.headPaths, ...snapshot.basePaths, ...Object.keys(snapshot.baseBlobs), ...Object.keys(snapshot.mainBlobs)]) {
+    if (typeof name !== "string" || posix.isAbsolute(name) || name.split("/").includes("..")) {
+      throw new Error("invalid census snapshot path");
+    }
+  }
+  if (snapshot.basePaths.some((p) => typeof snapshot.baseBlobs[p] !== "string") ||
+      Object.values(snapshot.mainBlobs).some((text) => typeof text !== "string")) throw new Error("invalid census snapshot blobs");
+  return snapshot;
+}
+
+// Include new census files before the harness stages them; deleted files disappear from the live population.
+export function censusSnapshotPaths(snapshot) {
+  const paths = new Set(snapshot.headPaths.filter((p) => existsSync(join(snapshot.root, p))));
+  function walk(dir) {
+    if (!existsSync(join(snapshot.root, dir))) return;
+    for (const entry of readdirSync(join(snapshot.root, dir), { withFileTypes: true })) {
+      const path = posix.join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|toml|txt)$/.test(path) || !posix.extname(path))) paths.add(path);
+    }
+  }
+  for (const dir of CENSUS_SNAPSHOT_ROOTS) walk(dir);
+  return [...paths].sort();
+}
 
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"];
 const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
@@ -509,11 +547,13 @@ const TEST_PRIORITY = await loadTestPriority();
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY }) {
+export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
-  const res = run(child.file, child.args, childOptions(root));
+  const options = childOptions(root);
+  if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
+  const res = run(child.file, child.args, options);
   assertChildFinished(res, "census suite");
   const stdout = String(res.stdout ?? "");
   const total = stdout.match(/^# tests (\d+)$/m);
@@ -863,6 +903,29 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
   }
 }
 
+function runSnapshotReach(snapshot, files) {
+  const reach = "test/the-affected-suite-reach-ratchet.test.ts";
+  if (files.some((file) => file !== reach)) throw new Error(`git-free snapshot reader unavailable for ${files.join(", ")}`);
+  const run = (snapshotPath) => runCensusSuitesViaChild({ root: SCRIPT_REPO, files, snapshotPath,
+    priority: { wrap: (file, args) => ({ file, args }) } });
+  const failing = run();
+  if (failing.length === 0) return [];
+  const temporary = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-base-"));
+  try {
+    for (const path of snapshot.basePaths) {
+      if (typeof snapshot.baseBlobs[path] !== "string") throw new Error(`snapshot lacks base blob ${path}`);
+      mkdirSync(dirname(join(temporary, path)), { recursive: true });
+      writeFileSync(join(temporary, path), snapshot.baseBlobs[path]);
+    }
+    const path = join(temporary, "snapshot.json");
+    writeFileSync(path, JSON.stringify({ ...snapshot, root: temporary, headPaths: snapshot.basePaths }), { mode: 0o444 });
+    const baseFailing = new Set(run(path));
+    return failing.filter((file) => !baseFailing.has(file));
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
@@ -879,11 +942,17 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   let changed;
   const unmeasured = [];
   try {
-    const mergeBase = gitOut(root, ["merge-base", "HEAD", values.base]).trim();
-    changed = gitOut(root, ["diff", "--name-only", "--no-renames", mergeBase]).split("\n").filter(Boolean);
+    const snapshot = readCensusSnapshot();
+    if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
+    const mergeBase = snapshot?.mergeBase ?? gitOut(root, ["merge-base", "HEAD", values.base]).trim();
+    changed = snapshot
+      ? [...new Set([...snapshot.basePaths, ...censusSnapshotPaths(snapshot)])]
+        .filter((p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null) !== (snapshot.baseBlobs[p] ?? null))
+      : gitOut(root, ["diff", "--name-only", "--no-renames", mergeBase]).split("\n").filter(Boolean);
     const readers = {
       readHead: (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null),
       readBase: (p) => {
+        if (snapshot) return snapshot.baseBlobs[p] ?? null;
         const res = git(["show", `${mergeBase}:${p}`], { cwd: root });
         return res.status === 0 ? res.stdout : null;
       },
@@ -891,7 +960,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     violations = evaluateCensusPrecheck({
       changed,
       ...readers,
-      measuredFiles: listMeasuredFiles(root),
+      measuredFiles: snapshot ? censusSnapshotPaths(snapshot).filter((p) => MEASURED_ROOTS.some((dir) => p.startsWith(`${dir}/`))) : listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
     });
@@ -899,7 +968,20 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       changed,
       readHead: readers.readHead,
       reportExcused: (line) => console.log(line),
-      measureInstrumentSurface: () => measure({ root, mergeBase }),
+      measureInstrumentSurface: () => {
+        if (snapshot) {
+          if (!Array.isArray(snapshot.instrumentSurface) || !snapshot.instrumentExclusions) {
+            throw new Error("snapshot lacks instrument-surface declarations");
+          }
+          return {
+            head: measureTree({ tracked: new Set(censusSnapshotPaths(snapshot)), readText: readers.readHead },
+              snapshot.instrumentSurface, snapshot.instrumentExclusions),
+            base: measureTree({ tracked: new Set(snapshot.basePaths), readText: readers.readBase },
+              snapshot.instrumentSurface, snapshot.instrumentExclusions),
+          };
+        }
+        return measure({ root, mergeBase });
+      },
     });
     violations.push(...instrument.violations);
     if (instrument.unmeasured !== null) unmeasured.push(`instrument-surface NOT MEASURED - ${instrument.unmeasured}`);
@@ -907,7 +989,10 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       changed,
       ...readers,
       loadMembers: () => admitted(root),
-      runSuites: (files) => runCausedCensusSuites({ root, files, mergeBase, runSuites }),
+      runSuites: (files) => {
+        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites });
+        return runSnapshotReach(snapshot, files);
+      },
     });
     violations.push(...suites.violations);
     if (suites.unmeasured !== null) unmeasured.push(`census suites NOT MEASURED - ${suites.unmeasured}`);

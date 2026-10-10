@@ -31,12 +31,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  runFixRung,
+  runFixRungJudged as runFixRung,
   worktreeSnapshotsEqual,
   unchangedTreeStandDownReason,
   captureWorktreeSnapshotViaGit,
   type WorktreeSnapshot,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -247,7 +247,7 @@ test("captureWorktreeSnapshotViaGit: an unreadable path (not a git worktree at a
 
 // ── the full rung, behaviorally — the five acceptance criteria ──────────────────────────────────
 
-test("runFixRung (criterion 1): a strike is REFUSED when the worktree content is identical to the snapshot taken at the previous failed gate for the same check", async () => {
+test("runFixRung: an identical worktree snapshot is evidence, not an automatic refusal", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const noReviewYet = fakeReview("failure", []);
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -279,17 +279,11 @@ test("runFixRung (criterion 1): a strike is REFUSED when the worktree content is
     },
   });
 
-  assert.equal(spawnCalls.length, 1, "exactly ONE strike — round 1's; round 2 is refused before it ever dispatches a fix worker");
-  assert.equal(outcome.outcome, "stood_down");
-  assert.equal(outcome.strikes, 1, "the strike counter never moves past round 1");
-  assert.match(outcome.standDownReason ?? "", /byte-identical/);
-  assert.match(outcome.standDownReason ?? "", /ci:ci/);
-
-  const stoodDown = logs.filter((l) => l.step === "fix.stood_down");
-  assert.equal(stoodDown.length, 1);
-  assert.equal(stoodDown[0].extra?.site, "rung.strike");
-  assert.equal(stoodDown[0].extra?.strike, 2, "named as the strike that was about to be spent");
-  assert.equal(stoodDown[0].extra?.reason, outcome.standDownReason);
+  assert.equal(spawnCalls.length, 3, "the test judge, not the identical snapshot, chooses to stop at its explicit fixture boundary");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(outcome.strikes, 3);
+  assert.match(outcome.reason ?? "", /fixture-selected former ceiling 3/);
+  assert.ok(logs.some((l) => l.step === "fix.progress_judged" && l.extra?.verdict === "escalate"));
 });
 
 for (const scenario of [
@@ -302,8 +296,8 @@ for (const scenario of [
     before: ["first.ts,second.ts", "third.ts"], after: ["first.ts", "second.ts,third.ts"], expectedSpawns: 2,
   },
   {
-    title: "reordering the same conflict files preserves the unchanged-tree stand-down",
-    before: ["first.ts", "second.ts"], after: ["second.ts", "first.ts"], expectedSpawns: 1,
+    title: "reordering the same conflict files still goes through the judge, not a snapshot stop",
+    before: ["first.ts", "second.ts"], after: ["second.ts", "first.ts"], expectedSpawns: 2,
   },
 ]) {
   test(`runFixRung: ${scenario.title}`, async () => {
@@ -341,10 +335,7 @@ for (const scenario of [
       assert.equal(spawns, scenario.expectedSpawns);
       assert.equal(outcome.strikes, scenario.expectedSpawns);
       assert.equal(outcome.outcome, scenario.expectedSpawns === 1 ? "stood_down" : "escalated");
-      if (scenario.expectedSpawns === 1) {
-        assert.match(outcome.standDownReason ?? "", /first\.ts/);
-        assert.doesNotMatch(outcome.standDownReason ?? "", /\[object Object\]/);
-      }
+      assert.match(outcome.reason ?? "", /fixture-selected former ceiling/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -520,7 +511,7 @@ test("runFixRung (criterion 3c): a THROWING capture degrades to unreadable rathe
   assert.equal(outcome.outcome, "escalated");
 });
 
-test("runFixRung (criterion 4): the refusal records a NAMED reason and never reports the gate as satisfied", async () => {
+test("runFixRung: the judge's handoff is named and never reports the gate as satisfied", async () => {
   const noReviewYet = fakeReview("failure", []);
   const unchangedSnapshot = snap();
 
@@ -545,9 +536,9 @@ test("runFixRung (criterion 4): the refusal records a NAMED reason and never rep
     },
   });
 
-  assert.equal(outcome.outcome, "stood_down", "never 'fixed' — a stand-down is a refusal, not a pass");
+  assert.equal(outcome.outcome, "escalated", "the judge's handoff is not reported as fixed");
   assert.notEqual(outcome.review.state, "success", "the underlying gate's own verdict is never rewritten to success");
-  assert.ok(outcome.standDownReason && outcome.standDownReason.length > 0, "the refusal names an explicit reason");
+  assert.match(outcome.reason ?? "", /fixture-selected former ceiling 3/);
 });
 
 test("runFixRung (criterion 5a): the strike cap and the escalation at the ceiling are UNCHANGED — a strikeCap of 1 still escalates after its one genuine strike", async () => {

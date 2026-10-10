@@ -9,7 +9,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // Every age below is read against this frozen NOW, never the wall clock.
 const NOW = Date.parse("2026-10-05T12:00:00Z");

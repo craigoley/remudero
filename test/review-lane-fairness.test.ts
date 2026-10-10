@@ -8,7 +8,7 @@ import {
   orderPendingReviews,
   validateReviewLanesRow,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // ── W1-T1218: the review lane starved older PRs by construction ──────────────────────────────
 //

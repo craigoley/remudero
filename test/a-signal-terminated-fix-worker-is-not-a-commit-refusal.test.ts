@@ -20,7 +20,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import { fixRoundTally } from "../src/lib/sweep.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";

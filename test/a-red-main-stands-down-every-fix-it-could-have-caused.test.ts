@@ -14,7 +14,7 @@ import {
   mainLatestRunFromLedger,
   runSweep,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const HEAD = "a".repeat(40);
 const LAST = "b".repeat(40);

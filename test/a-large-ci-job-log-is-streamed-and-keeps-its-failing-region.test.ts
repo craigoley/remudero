@@ -31,7 +31,7 @@ import {
   fixRungCiFailures,
   gateVerdictRetention,
   RETAINED_REMEDY_HEADER,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 
 const JOB = "7001";

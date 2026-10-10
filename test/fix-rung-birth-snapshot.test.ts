@@ -18,7 +18,7 @@ import {
   createFixRungWorktree,
   runFixRung,
   type WorktreeSnapshot,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

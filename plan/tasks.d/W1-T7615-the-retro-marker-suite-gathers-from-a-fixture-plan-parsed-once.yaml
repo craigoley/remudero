@@ -1,0 +1,84 @@
+- id: W1-T7615
+  title: "THE RETRO MARKER SUITE GATHERS FROM A FIXTURE PLAN, PARSED ONCE — every retroCommand call in test/retro-marker-atomic.test.ts re-parses the LIVE checkout's ~3,300-shard plan four times, ~6 s a call over 35 calls, and that file is now the floor of the coverage critical path (~852 s instrumented)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the retro gather parses one plan, its suite's own fixture plan, once
+  band_meaning: span
+  origin: "operator session 2026-10-09: coverage critical path after W1-T4071 (#10522)"
+  plan_refs: [W1-T4071, W1-T5902, W1-T6173, W1-T6086]
+  files: [src/run-task.ts, test/retro-marker-atomic.test.ts, scripts/test-tier-manifest.json, test/the-retro-gather-parses-its-plan-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    CONTEXT. W1-T4071 (#10522) packed the coverage shards by makespan; the slowest shard fell from 19.4 to
+    16.0 min mean. The new floor is test/retro-marker-atomic.test.ts: ~852 s in the instrumented ledger,
+    434 s and 629 s measured alone on shard 1. scripts/test-tier-manifest.json records it at 520000 ms.
+    MEASURED 2026-10-09 at origin/main 9512b9b50 on the operator Mac (this one file, nothing else running):
+    233.8 s wall for 42 tests. The 7 pure marker tests (claims 1-4, the resolver, the error constructor, the
+    corrupt-marker fail-closed) take under 0.2 s together. The other 35 each drive the real `retroCommand`
+    and take 5.7-8.3 s each (the three-variant repair test is 19.2 s).
+    WHERE THE TIME GOES. Not sleeps, polling, or the fixture's git. The `--dry-run` tests build no git fixture
+    and spawn nothing, yet still take 6.4 s each (test/retro-marker-atomic.test.ts:344, :427, :1404). The
+    full fixture tests take only ~0.6-1.5 s more. The cost is the gather: `retroCommand` reads `repoRoot`
+    (src/lib/repo-location.ts:83), which is the REAL checkout, not the fixture, and parses its whole plan
+    (plan/tasks.yaml plus 3,266 shards) on every call (src/ lines read at origin/main c6b2563d5):
+      - src/run-task.ts:32818 loadPlan for the "tasks" dedup source
+      - src/run-task.ts:32822 loadPlan again for the "classes" dedup source
+      - src/run-task.ts:32901 loadPlan again for the plan-health projection
+      - src/run-task.ts:32413 loadPlan again inside planHealthSweepSectionFor (called at :32931)
+      - src/run-task.ts:32861 readPlanCoherenceInputs reads every shard's text again for scanPlanCoherence
+    A CPU profile of the single `--dry-run` test (7.5 s) gives retroCommand 5.5 s. Of that, loadPlan is 3.6 s
+    (readMergedPlan -> parseShard 2.8 s), tryReadFollowupTitles 1.9 s (two of those loads), and
+    planHealthSweepSectionFor 1.1 s. scanPlanCoherence adds 0.7 s.
+    NATURAL CONTROL. The one retroCommand test whose mock makes plan/tasks.yaml unreadable
+    (test/retro-marker-atomic.test.ts:385) takes 184 ms against 5.7-6.4 s for its `--dry-run` siblings.
+    With the plan reads gone, retroCommand costs about 0.2 s.
+    The fixture already builds its own small repo (setupFakeRetroFixture, test/retro-marker-atomic.test.ts:491,
+    plan/tasks.yaml "[]" at :600), but the gather never reads it. Every call parses the live plan, and the
+    live plan grows with every filing. So this suite gets slower with each filed task, whatever the
+    retro code does.
+    OVERLAP. W1-T5902 (priority 1; branch run-W1-T5902-1791224659292 from 10-05, no PR) and W1-T6173
+    (depends on it) split this file by concern. They move the cost between files without removing it.
+    W1-T6086 copies git fixtures from a template, but the fixture's git is ~10% of each test here. This
+    task removes the shared cost, so whatever split lands later splits a cheap file.
+  design: |
+    1. Root cause, production: one retroCommand call parses its plan ONCE. Load plan/tasks.yaml a single time
+       at the top of the gather, best-effort as now. Feed the result to the "tasks" and "classes" dedup sources,
+       the plan-health projection, and planHealthSweepSectionFor (take the loaded tasks, or a loader, instead
+       of re-reading `repoRoot`). Each consumer keeps its OWN degrade path and its OWN named error. A failed
+       load must still be named per source (`followups.open_titles.tasks` etc.), as the dedup-throw test
+       (test/retro-marker-atomic.test.ts:385) asserts today. readPlanCoherenceInputs reads raw text by design
+       (W1-T2642), so leave it unless it can reuse the same read without changing what it checks.
+    2. The suite gathers from its own fixture. Add an injectable plan/checkout root to retroCommand's opts,
+       defaulting to `repoRoot`, which is unchanged in production. Every gather read under `repoRoot`
+       (LEARNINGS.md, plan/, MASTER-PLAN.md, mounts, the plan-coherence and net-state reads) uses it.
+       setupFakeRetroFixture passes its own seeded repo. The `--dry-run` tests pass a small fixture root too,
+       and the two dedup-source tests (:385, :427) mock that fixture root's paths instead of the live
+       checkout's. Seed only what each assertion needs. A file the gather already treats as best-effort may
+       stay absent.
+    3. Keep every test and every assertion. Each still drives the real retroCommand, and no title is
+       renamed, merged or dropped. Do not split the file; W1-T5902/W1-T6173 own that.
+    4. Refresh this file's scripts/test-tier-manifest.json row from a measured run of the file after the
+       change (the CI test-duration artifact, or a local `node --test` of the file), and quote the before and
+       after wall time in the PR body. Do NOT add a committed test that asserts a duration ceiling: the
+       manifest is refreshed from CI, and a fixed ceiling would redden an unrelated PR later. The two
+       structural tests below are the proof. Expected: the 35 retroCommand tests drop from ~6-8 s to ~1 s each,
+       and the file falls from ~234 s to well under a minute locally.
+    The new test file proves both mechanisms directly. One test counts plan parses (spy on the plan loader,
+    or on reads of the fixture's plan/tasks.yaml) across one retroCommand call. The other shows a fixture
+    retro's gather reads the fixture root (for example, a sentinel task title in the fixture plan reaches
+    the dedup source, and nothing reads the live checkout's plan/tasks.d).
+  acceptance:
+    - claim: "one retroCommand call parses its plan once, not once per gather section"
+      proof: 'grep: test("W1-T7615: one retro gather parses the plan once" in test/the-retro-gather-parses-its-plan-once.test.ts'
+    - claim: "a fixture retro gathers from the fixture's own plan root, never the live checkout's plan"
+      proof: 'grep: test("W1-T7615: a fixture retro gathers from its own plan root" in test/the-retro-gather-parses-its-plan-once.test.ts'
+  falsifier: |
+    Keep the four loadPlan calls: the parse-count test sees four parses of the fixture plan, and the first test
+    fails. Keep the gather reading module `repoRoot`: the fixture's sentinel title never reaches the dedup
+    source, and the second test fails.

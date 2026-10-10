@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.now();
 const INTERVAL = 60_000;

@@ -12,14 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "../src/run-task.js";
+import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "./helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
@@ -204,7 +204,11 @@ test("an ordinary fix.dispatch records its claim set, and its first exact recurr
     headSha: CURRENT_HEAD,
     autoMergeArmed: false,
   };
-  const disposition = deriveDisposition(repeated, DEFAULT_SWEEP_POLICY, NOW);
+  // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+  // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+  assert.equal(deriveDisposition(repeated, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable",
+    "an identical unmet set is a progress signal; unjudged it stays fixable for judgment");
+  const disposition = deriveDisposition({ ...repeated, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } }, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(disposition.disposition, "blocked-ambiguous");
   assert.match(disposition.reason, /identical unmet criteria/);
 });
@@ -223,7 +227,9 @@ test("the first exact Rule-25 recurrence escalates from structured paths, even a
   ]);
   try {
     assert.deepEqual(view.previousInstrumentEntanglementPaths, { instrumentPaths: INSTRUMENT_PATHS, srcPaths: SRC_PATHS });
-    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+    // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+    // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+    const disposition = deriveDisposition({ ...view, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } }, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(disposition.disposition, "blocked-ambiguous", "no elapsed time or recurrence count is consulted");
     const deps = sweepDeps();
     await runSweep([view], deps, DEFAULT_SWEEP_POLICY);

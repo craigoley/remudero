@@ -42,6 +42,7 @@ import {
 import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
+import { preDispatchContractRevision } from "./dispatch-repair.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -208,6 +209,8 @@ export interface StatusProjection {
   /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
   independentFailureBlocked?: true;
   categorizedRefusalRejoin?: CategorizedRefusalRejoin;
+  /** W1-T7533: a `failed`/`no_pr` latch released because its evidence changed and its back-off elapsed. */
+  independentBlockRelease?: IndependentBlockRelease;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
@@ -3429,6 +3432,48 @@ function environmentChangedSince(
   return before !== undefined && afterShas.some((sha) => sha !== before.sha);
 }
 
+/** W1-T7533: the first back-off a released `failed`/`no_pr` latch serves; each consecutive latch doubles it. */
+export const INDEPENDENT_BLOCK_BASE_BACKOFF_MS = 60 * 60 * 1000;
+/** W1-T7533: the ledger step a writer records once per released latch, keyed by `blocking_run_id`. */
+export const INDEPENDENT_BLOCK_RELEASED_STEP = "dispatch.independent_block_released";
+
+/** W1-T7533: why a `failed`/`no_pr` latch stopped excluding its task. A re-offer, never a credit: the
+ *  next dispatch's `run.start` clears the latch through the ordinary path. */
+export interface IndependentBlockRelease {
+  blockingRunId: string;
+  blockedAt: string;
+  evidence: "main_moved" | "contract_revised";
+  /** For `main_moved`: the first merge credit (any task) dated after the block. */
+  mergedTaskId?: string;
+  mergedAt?: string;
+  /** Consecutive `failed`/`no_pr` latches on this task, this one included. */
+  latchCount: number;
+  /** The back-off served: the base doubled for each earlier consecutive latch. */
+  backoffMs: number;
+  /** A {@link INDEPENDENT_BLOCK_RELEASED_STEP} row already names this blocking run, so it is not re-ledgered. */
+  receiptRecorded: boolean;
+}
+
+/** W1-T7533: the first merge credit (any task) dated strictly after `blockMs`, if main has moved since. */
+function firstMergeAfter(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  blockMs: number,
+  index: LedgerIndex | undefined,
+): { taskId: string; ts: string; ms: number } | undefined {
+  let first: { taskId: string; ts: string; ms: number } | undefined;
+  const rows = index?.rows === lines
+    ? [...indexedStepRows(lines, "verdict.merged", index), ...indexedStepRows(lines, "verdict", index)]
+    : lines;
+  for (const line of rows) {
+    if (!isMergeCreditLine(line) || typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (!Number.isFinite(ms) || ms <= blockMs || (first && ms >= first.ms)) continue;
+    const taskId = typeof line.task_id === "string" ? line.task_id : typeof line.task === "string" ? line.task : "";
+    first = { taskId, ts: line.ts, ms };
+  }
+  return first;
+}
+
 /** The latest durable independent-failure block if no later dispatch superseded it.
  *
  * `blocked_illformed` is a zero-cost admission refusal: run-task returns it before an inflight
@@ -3448,14 +3493,29 @@ function environmentChangedSince(
  * W1-T3978: a shell-less implement can leave a producer-owned refusal after substantive edits.
  * That exact terminal class gets one pending retry marker. The marker makes the task eligible
  * until the retry's `run.start`; after that start the marker is spent, so a second refusal stays
- * blocked. Ordinary `no_pr` rows never enter this state machine. */
+ * blocked. Ordinary `no_pr` rows never enter this state machine. W1-T7533: see {@link independentFailureLatch}. */
 export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
   nowMs?: number,
   categorizedRefusalRunId?: string,
+  currentContractRevision?: string | (() => string),
 ): boolean {
+  return independentFailureLatch(lines, taskId, index, nowMs, categorizedRefusalRunId, currentContractRevision).blocked;
+}
+
+/** W1-T7533: a `failed`/`no_pr` latch blocked the run.start that alone could clear it. It now releases
+ * once main moved (a merge credit after the block) or the task's contract revision changed, AND the block
+ * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules. */
+export function independentFailureLatch(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  nowMs?: number,
+  categorizedRefusalRunId?: string,
+  currentContractRevision?: string | (() => string),
+): { blocked: boolean; release?: IndependentBlockRelease } {
   let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
   // W1-T4597: the stage each run's verdict named, the current streak of consecutive environmental
   // blocks, and when the latest one landed.
@@ -3467,10 +3527,27 @@ export function latestIndependentFailureBlock(
   let retryPending = false;
   let retrySpent = false;
   const harnessRefusalRuns = new Set<string>();
+  // W1-T7533: the latest `failed`/`no_pr` latch, how many consecutive runs latched that way, and the
+  // contract revision each run's verdict saw. A run that ends without any block resets the streak.
+  const revisionByRun = new Map<string, unknown>();
+  const releasedRuns = new Set<string>();
+  let failureLatch: { runId: string; ts: string; ms: number } | undefined;
+  let failureStreak = 0;
+  let runOpen = false;
+  let runLatched = false;
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId && line.task !== taskId) continue;
+    if (line.step === INDEPENDENT_BLOCK_RELEASED_STEP && typeof line.blocking_run_id === "string") {
+      releasedRuns.add(line.blocking_run_id);
+    }
+    if (line.step === "run.start") {
+      if (runOpen && !runLatched) failureStreak = 0;
+      runOpen = true;
+      runLatched = false;
+    }
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
+      revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
@@ -3502,9 +3579,10 @@ export function latestIndependentFailureBlock(
             : line.verdict === "task_already_merged"
               ? "credit_refused" // W1-T4413: a refusal about credit, not a task failure
               : "blocked";
-      if (last === "blocked" && isEnvironmentalBlock(line.verdict, line.stage ?? stageByRun.get(runId))) {
+      const environmental = last === "blocked" && isEnvironmentalBlock(line.verdict, line.stage ?? stageByRun.get(runId));
+      const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (environmental) {
         environmentalStreak += 1;
-        const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
         environmentalBlockMs = Number.isFinite(ms) ? ms : undefined;
         environmentalBlockHost = typeof line.host === "string" ? line.host : undefined;
       } else if (last === "blocked") {
@@ -3512,6 +3590,14 @@ export function latestIndependentFailureBlock(
         environmentalBlockMs = undefined;
         environmentalBlockHost = undefined;
       }
+      if (last === "blocked" && !environmental && (line.verdict === "failed" || line.verdict === "no_pr") &&
+        runId && typeof line.ts === "string" && Number.isFinite(ms)) {
+        if (!runLatched) failureStreak += 1;
+        failureLatch = { runId, ts: line.ts, ms };
+      } else {
+        failureLatch = undefined;
+      }
+      runLatched = true;
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
       line.original_refusal === "harness_commit_refused" &&
@@ -3524,14 +3610,33 @@ export function latestIndependentFailureBlock(
       }
     }
   }
-  if (retryPending) return false;
-  if (harnessRefusal && retrySpent) return true;
-  if (harnessRefusal) return true;
+  if (retryPending) return { blocked: false };
+  // W1-T7533: the latest block is a task-caused `failed`/`no_pr` latch (any W1-T3978 retry already
+  // spent, since a pending one returned above) and not a W1-T6593 categorized refusal.
+  if (last === "blocked" && failureLatch !== undefined && failureLatch.runId !== categorizedRefusalRunId) {
+    const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? failureLatch.ms;
+    const latchCount = Math.max(1, failureStreak);
+    const backoffMs = INDEPENDENT_BLOCK_BASE_BACKOFF_MS * 2 ** (latchCount - 1);
+    if (now - failureLatch.ms >= backoffMs) {
+      const seenRevision = revisionByRun.get(failureLatch.runId);
+      const served = { blockingRunId: failureLatch.runId, blockedAt: failureLatch.ts, latchCount, backoffMs,
+        receiptRecorded: releasedRuns.has(failureLatch.runId) };
+      const current = typeof currentContractRevision === "function" ? currentContractRevision() : currentContractRevision;
+      if (typeof seenRevision === "string" && current !== undefined && seenRevision !== current) {
+        return { blocked: false, release: { ...served, evidence: "contract_revised" } };
+      }
+      const merge = firstMergeAfter(lines, failureLatch.ms, index);
+      if (merge) {
+        return { blocked: false, release: { ...served, evidence: "main_moved", mergedTaskId: merge.taskId, mergedAt: merge.ts } };
+      }
+    }
+  }
+  if (harnessRefusal) return { blocked: true };
   if (last === "blocked" && environmentalBlockMs !== undefined && environmentalStreak <= MAX_ENVIRONMENTAL_REOFFERS) {
     const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? environmentalBlockMs;
-    if (environmentChangedSince(lines, environmentalBlockMs, environmentalBlockHost, now, index)) return false;
+    if (environmentChangedSince(lines, environmentalBlockMs, environmentalBlockHost, now, index)) return { blocked: false };
   }
-  return last === "blocked";
+  return { blocked: last === "blocked" };
 }
 
 /** JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN (W1-T182). Returns `undefined` ONLY when the issue is
@@ -3595,7 +3700,11 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
 
   const taskRows = indexedTaskRows(ledgerLines, task.id, deps.ledgerIndex);
   const refusalSource = activeCategorizedRefusal(task.id, taskRows);
-  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now(), refusalSource?.runId)) {
+  const latch = independentFailureLatch(
+    ledgerLines, task.id, deps.ledgerIndex, now(), refusalSource?.runId, () => preDispatchContractRevision(task),
+  );
+  if (latch.release) projection.independentBlockRelease = latch.release;
+  if (latch.blocked) {
     const rejoin = categorizedRefusalRejoin(dirname(deps.ledgerPath), task, taskRows, refusalSource);
     if (rejoin) projection.categorizedRefusalRejoin = rejoin;
     else {
