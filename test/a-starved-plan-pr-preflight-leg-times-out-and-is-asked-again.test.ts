@@ -193,7 +193,8 @@ test("a checkout killed after materialization waits for its process group and de
   }
 });
 
-/** Model the registration Git leaves when `worktree add` is killed before it writes the admin HEAD file. */
+/** Model the registration Git leaves when `worktree add` is killed before it writes the admin HEAD file: removal then
+ *  refuses validation, and only the reciprocal admin pointer deregisters this tree without touching its neighbour. */
 function strandRegistration(tree: string): void {
   const admin = readFileSync(join(tree, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim();
   rmSync(join(admin, "HEAD"), { force: true });

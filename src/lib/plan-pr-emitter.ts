@@ -850,6 +850,7 @@ export async function planPrPreflightAtCommitAsync(
 ): Promise<PlanPrPreflightResult> {
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   let leaveTreeForSafety = false;
   try {

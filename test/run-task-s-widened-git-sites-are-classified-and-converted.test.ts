@@ -62,7 +62,6 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   censusMembershipCommand: { count: 1, cls: "CHECKOUT", reason: `${OWN}: deps.repoRoot ?? repoRoot` },
   ciLearningTaskIdMinter: { count: 1, cls: "CHECKOUT", reason: `${OWN}: the id-minting root` },
   defaultVerdictCalibrationGitLog: { count: 2, cls: "CHECKOUT", reason: `${OWN}: opts.cwd ?? repoRoot` },
-  removeBaseProofWorktree: { count: 1, cls: "CHECKOUT", reason: "the clone or process.cwd() that cut the base-proof tree, removing it; the tree itself was cut from main" },
   dispatchClaimReserverFor: { count: 1, cls: "CHECKOUT", reason: MANAGED },
   cloneTargetPlan: { count: 1, cls: "CHECKOUT", reason: "a fresh mkdtemp clone the harness makes of a target's plan" },
   buildReservationAuditReport: { count: 1, cls: "CHECKOUT", reason: OWN },

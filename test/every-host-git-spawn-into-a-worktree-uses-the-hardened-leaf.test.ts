@@ -226,7 +226,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "managed checkout",
   },
   "src/run-task.ts": {
-    count: 77,
+    count: 76,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
