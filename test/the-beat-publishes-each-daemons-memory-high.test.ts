@@ -20,7 +20,7 @@ interface Run {
  * One beat over fixture cgroup files shaped like the fleet host on 2026-10-10: core pinned at 95% of
  * its memory.max with a tuner record, console never tuned, site's cgroup unreadable.
  */
-function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: boolean } = {}): Run {
+function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: boolean; consoleHighMib?: number; registry?: "repo" | "env" } = {}): Run {
   const dir = makeTempDir("heartbeat-mem");
   try {
     for (const path of ["bin", "scripts", "home", "state-root/state", "tmp", "scratch"]) mkdirSync(join(dir, path), { recursive: true });
@@ -38,7 +38,7 @@ function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: bool
       writeFileSync(join(scope(id), "memory.stat"), `anon ${f.anon}\nfile ${f.file}\nkernel 1000\nworkingset_refault_anon 5\nworkingset_refault_file ${f.refault}\n`);
     };
     memory(CORE_ID, { high: String(8379 * MIB), max: String(8820 * MIB), current: 5690 * MIB, anon: 4146 * MIB, file: 1309 * MIB, high_events: 403_335, refault: 12_518_220 });
-    memory(CONSOLE_ID, { high: String(2560 * MIB), max: "max", current: 1946 * MIB, anon: 1607 * MIB, file: 278 * MIB, high_events: 0, refault: 14_289 });
+    memory(CONSOLE_ID, { high: String((opts.consoleHighMib ?? 2560) * MIB), max: "max", current: 1946 * MIB, anon: 1607 * MIB, file: 278 * MIB, high_events: 0, refault: 14_289 });
 
     const state = join(dir, "state-root/state");
     writeFileSync(join(state, "memory-high-tuned-remudero-daemon.json"),
@@ -47,6 +47,27 @@ function beatOnce(opts: { prevAgoS?: number; prevCoreId?: string; publish?: bool
       '{"ts":"2026-10-09T22:00:00.000Z","run_id":"HOST-MEMORY-HIGH","task_id":"HOST","step":"host.memory_high.adjusted","lane":"host","container":"remudero-site-daemon","action":"grow","before_mib":1536,"after_mib":1792,"policy_mib":1536,"tier":0,"write":"systemd","reason":"older"}',
       '{"ts":"2026-10-09T22:30:00.000Z","run_id":"HOST-MEMORY-HIGH","task_id":"HOST","step":"host.memory_high.adjusted","lane":"host","container":"remudero-site-daemon","action":"shrink","before_mib":1792,"after_mib":1536,"policy_mib":1536,"tier":3,"write":"systemd","reason":"tier 3 (host pressure)"}',
     ].join("\n") + "\n");
+    // Each instance's own state root, as the launchers read it from the registry: core lives at
+    // RMD_ROOT, console in a state_dir of its own — where its tuner records what it did.
+    if (opts.registry) {
+      const consoleState = join(dir, "console-state", "state");
+      mkdirSync(consoleState, { recursive: true });
+      writeFileSync(join(consoleState, "memory-high-tuned-remudero-console-daemon.json"),
+        '{"container":"remudero-console-daemon","high_mib":2816,"policy_mib":2048,"updated_at":"2026-10-10T02:12:41Z","reason":"grow: 24 high events and 1 MiB of file refaults per 5 min; step bounded by half the 3869 MiB headroom above two reserves"}\n');
+      const registry = join(dir, opts.registry === "repo" ? ".remudero" : "elsewhere", "daemon-instances.yaml");
+      mkdirSync(join(registry, ".."), { recursive: true });
+      writeFileSync(registry, [
+        "instances:",
+        "  core:",
+        "    repo: remudero",
+        "    container_name: remudero-daemon",
+        `    state_dir: ${join(dir, "state-root")}`,
+        "  console:",
+        "    repo: remudero-console  # the console app",
+        "    container_name: remudero-console-daemon",
+        `    state_dir: ${join(dir, "console-state")}`,
+      ].join("\n") + "\n");
+    }
     const prevAgoS = opts.prevAgoS ?? 300;
     if (prevAgoS > 0) {
       writeFileSync(join(state, "heartbeat-mem.txt"), [
@@ -90,6 +111,7 @@ esac`);
         RMD_DISKSTATS: join(dir, "no-diskstats"),
         RMD_CGROUP_ROOT: cg,
         RMD_JANITOR_LOGS: join(dir, "none.log"),
+        RMD_INSTANCE_REGISTRY: opts.registry === "env" ? join(dir, "elsewhere", "daemon-instances.yaml") : "",
       },
     });
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
@@ -154,4 +176,25 @@ test("a published beat keeps the raw counters so the next beat can take a delta"
   assert.match(snapshot, new RegExp(`^cg remudero-daemon ${CORE_ID} 403335 12518220$`, "m"));
   assert.doesNotMatch(snapshot, /remudero-site-daemon/, "an unreadable cgroup leaves no counters to subtract from");
   assert.match(beatOnce().snapshot ?? "", /403000/, "a dry run leaves the previous counters alone");
+});
+
+test("each instance's tuner record is read from its own registry state_dir, not the heartbeat's root", () => {
+  for (const registry of ["repo", "env"] as const) {
+    const { beat } = beatOnce({ consoleHighMib: 2816, registry });
+    assert.equal(beat["mem_remudero-console-daemon_tuner_action"], "grow", registry);
+    assert.equal(beat["mem_remudero-console-daemon_tuner_ts"], "2026-10-10T02:12:41Z", registry);
+    assert.match(beat["mem_remudero-console-daemon_tuner_reason"] ?? "", /^24 high events and 1 MiB of file refaults/);
+    assert.equal(beat["mem_remudero-console-daemon_policy_high_mib"], "2048", "its recorded policy, not the learned launch annotation");
+    assert.equal(beat["mem_remudero-console-daemon_policy_source"], "tuned_state");
+    assert.equal(beat["mem_remudero-daemon_tuner_action"], "grow", "core's own state_dir is still read");
+  }
+});
+
+test("a memory.high above policy with no tuner record found reads unknown, never none", () => {
+  const { beat } = beatOnce({ consoleHighMib: 2816 });
+  assert.equal(beat["mem_remudero-console-daemon_high_mib"], "2816");
+  assert.equal(beat["mem_remudero-console-daemon_policy_high_mib"], "2560");
+  assert.equal(beat["mem_remudero-console-daemon_tuner_action"], "unknown", "something raised it; none would be a false claim");
+  assert.equal(beat["mem_remudero-console-daemon_tuner_ts"], "unknown");
+  assert.equal(beatOnce().beat["mem_remudero-console-daemon_tuner_action"], "none", "at its policy with no record, none stays true");
 });
