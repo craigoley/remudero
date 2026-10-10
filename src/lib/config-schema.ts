@@ -390,6 +390,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
+  envEntry("RMD_CENSUS_SNAPSHOT", "Names the harness git snapshot a fix round's census precheck reads instead of running git (W1-T7182).", ["src/run-task.ts", "src/lib/prompt-render.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_API_KEY", "Daemon-only key for the bounded Foundry Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
