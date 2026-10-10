@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
-import { codexTestSlotArgs, spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
 import type { SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -60,54 +60,52 @@ async function codexArgv(cwd: string, tools: string[], sandboxIntent?: SpawnWork
   }
 }
 
-/** Run `body` as the fleet daemon would: the slot dir named, and NOT inside a test process. */
-async function asFleetDaemon<T>(body: () => Promise<T>): Promise<T> {
-  const saved = { dir: process.env.RMD_TEST_SLOT_DIR, slots: process.env.RMD_TEST_SLOTS, ctx: process.env.NODE_TEST_CONTEXT };
-  process.env.RMD_TEST_SLOT_DIR = SLOT_DIR;
-  process.env.RMD_TEST_SLOTS = "2";
-  delete process.env.NODE_TEST_CONTEXT;
-  try {
-    return await body();
-  } finally {
-    for (const [key, value] of [["RMD_TEST_SLOT_DIR", saved.dir], ["RMD_TEST_SLOTS", saved.slots], ["NODE_TEST_CONTEXT", saved.ctx]] as const) {
+/** Run `body` under `env` (an undefined value unsets), as the fleet daemon would by default: NOT inside a test process. */
+async function withEnv<T>(env: Record<string, string | undefined>, body: () => Promise<T>): Promise<T> {
+  const all = { NODE_TEST_CONTEXT: undefined, ...env };
+  const saved = Object.fromEntries(Object.keys(all).map((key) => [key, process.env[key]]));
+  const apply = (values: Record<string, string | undefined>) => {
+    for (const [key, value] of Object.entries(values)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  };
+  apply(all);
+  try {
+    return await body();
+  } finally {
+    apply(saved);
   }
 }
 
-test("a Codex writer is granted and told the host test slot dir so its npm run typecheck serialises on the host", async () => {
+const WRITER = ["Read", "Write", "Edit", "Bash"];
+const slotArgs = (args: string[]) => args.filter((arg, i) => arg.includes("RMD_TEST_SLOT") || arg === "--add-dir" || args[i - 1] === "--add-dir");
+
+test("a Codex writer alone is granted and told the host test slot dir so its npm run typecheck serialises on the host", async () => {
   const repo = gitRepo({ kind: "codex-slot" });
-  const args = await asFleetDaemon(() => codexArgv(repo.dir, ["Read", "Write", "Edit", "Bash"]));
+  const fleet = { RMD_TEST_SLOT_DIR: SLOT_DIR, RMD_TEST_SLOTS: "2" };
+  const args = await withEnv(fleet, () => codexArgv(repo.dir, WRITER));
   assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
-  const grant = args.indexOf("--add-dir");
-  assert.ok(grant >= 0, "the writer's bwrap must be able to write a slot record");
-  assert.equal(args[grant + 1], SLOT_DIR);
-  assert.ok(args.includes(`shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`), "the core-only shell must see the slot dir");
-  assert.ok(args.includes('shell_environment_policy.set.RMD_TEST_SLOTS="2"'), "the shell must count the same slots as the host");
-  assert.ok(args.indexOf("-C") > grant, "the grant precedes the cwd and prompt arguments");
-});
-
-test("a Codex reader and a disposable review get no host test slot grant", async () => {
-  const repo = gitRepo({ kind: "codex-slot" });
-  const reader = await asFleetDaemon(() => codexArgv(repo.dir, ["Read", "Bash"]));
-  assert.equal(reader[reader.indexOf("--sandbox") + 1], "read-only");
-  assert.equal(reader.includes("--add-dir"), false);
-  assert.equal(reader.some((arg) => arg.includes("RMD_TEST_SLOT")), false);
-  const review = await asFleetDaemon(() => codexArgv(repo.dir, ["Read", "Grep", "Glob", "Bash"], "disposable-review"));
-  assert.equal(review.includes("--add-dir"), false);
-  assert.equal(review.some((arg) => arg.includes("RMD_TEST_SLOT")), false);
-});
-
-test("codexTestSlotArgs grants nothing outside the fleet or inside a test process", () => {
-  assert.deepEqual(codexTestSlotArgs({ RMD_TEST_SLOT_DIR: SLOT_DIR, RMD_TEST_SLOTS: "2" }), [
+  assert.deepEqual(slotArgs(args), [
     "--add-dir", SLOT_DIR,
-    "-c", `shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`,
-    "-c", 'shell_environment_policy.set.RMD_TEST_SLOTS="2"',
-  ]);
-  assert.deepEqual(codexTestSlotArgs({ RMD_TEST_SLOT_DIR: SLOT_DIR, RMD_TEST_SLOTS: "zero" }), [
-    "--add-dir", SLOT_DIR, "-c", `shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`,
-  ]);
-  assert.deepEqual(codexTestSlotArgs({}), []);
-  assert.deepEqual(codexTestSlotArgs({ RMD_TEST_SLOT_DIR: SLOT_DIR, NODE_TEST_CONTEXT: "child-v8" }), []);
+    `shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`,
+    'shell_environment_policy.set.RMD_TEST_SLOTS="2"',
+  ], "the writer's bwrap must write a slot record, and its core-only shell must name the dir and the host's slot count");
+  assert.ok(args.indexOf("-C") > args.indexOf("--add-dir"), "the grant precedes the cwd and prompt arguments");
+
+  const reader = await withEnv(fleet, () => codexArgv(repo.dir, ["Read", "Bash"]));
+  assert.equal(reader[reader.indexOf("--sandbox") + 1], "read-only");
+  assert.deepEqual(slotArgs(reader), [], "a read-only worker runs no typecheck that needs the host slot");
+  const review = await withEnv(fleet, () => codexArgv(repo.dir, ["Read", "Grep", "Glob", "Bash"], "disposable-review"));
+  assert.deepEqual(slotArgs(review), [], "a disposable review keeps its own permission profile, unwidened");
+});
+
+test("a Codex writer drops a malformed slot count and gets no slot grant outside the fleet or inside a test process", async () => {
+  const repo = gitRepo({ kind: "codex-slot" });
+  const malformed = await withEnv({ RMD_TEST_SLOT_DIR: SLOT_DIR, RMD_TEST_SLOTS: "zero" }, () => codexArgv(repo.dir, WRITER));
+  assert.deepEqual(slotArgs(malformed), ["--add-dir", SLOT_DIR, `shell_environment_policy.set.RMD_TEST_SLOT_DIR="${SLOT_DIR}"`]);
+  const offFleet = await withEnv({ RMD_TEST_SLOT_DIR: undefined, RMD_TEST_SLOTS: undefined }, () => codexArgv(repo.dir, WRITER));
+  assert.deepEqual(slotArgs(offFleet), [], "no configured slot dir: nothing to grant");
+  const inTest = await withEnv({ RMD_TEST_SLOT_DIR: SLOT_DIR, NODE_TEST_CONTEXT: "child-v8" }, () => codexArgv(repo.dir, WRITER));
+  assert.deepEqual(slotArgs(inTest), [], "a suite run in a fleet container builds the same argv as on a Mac");
 });
