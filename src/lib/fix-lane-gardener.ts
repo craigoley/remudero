@@ -192,6 +192,7 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   const weight = new Map<DefectEvent, number>();
   const standalone: Array<{ i: OperatorIntervention; key: string }> = [];
   for (const i of list) {
+    // expiring-fixture: exempt -- `now` only caps the span; intervention fixtures pass a fixed now, so no outcome ages with the calendar.
     const at = Date.parse(i.at);
     const cause = [...events].reverse().find(e => e.pr === i.pr && i.pr > 0 && e.at <= at);
     if (cause) { weight.set(cause, (weight.get(cause) ?? 0) + 1); byClass.set(cause.key, (byClass.get(cause.key) ?? 0) + 1); }
