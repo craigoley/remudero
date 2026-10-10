@@ -106,7 +106,7 @@
     - claim: "a failed fleet anchor cannot delete an existing shared hold"
       proof: 'unit test: W1-T7727: a failed fleet anchor never clears an existing shared hold'
     - claim: "the real CLI refuses a rejected fleet hold update without reporting an existing hold absent"
-      proof: 'unit test: W1-T7727: the real CLI refuses a rejected fleet hold update without claiming an existing hold is absent'
+      proof: 'unit test: W1-T7727: the real CLI refuses a rejected fleet hold update'
   falsifier: |
     Restore the old propagation (requestPause called with the real shared git deps from pauseCommand). The isolation test then
     finds refs/rmd-pause/hold on the fixture's bare origin, and the site, console and wild-trails instances' production
