@@ -579,7 +579,11 @@ import {
 } from "./lib/open-prs-rest.js";
 import {
   buildMainHealthRung,
+  mainCeilingLogReducer,
   withMainHealthOnLightPass,
+  type MainCeilingLogVerdict,
+  type MainRatchetRecordOutcome,
+  type MainRatchetRecordRequest,
   type MainRepairFixRequest,
   type MainRepairLane,
   type MainRepairRevertOutcome,
@@ -1704,6 +1708,7 @@ import {
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
   checkJobId,
+  RATIFIED_BASELINE_RATCHET_REPAIRS,
   corroboratedIneligibility,
   currentPlanIneligibilityReason,
   defaultSweepGhRun,
@@ -38763,6 +38768,8 @@ export async function daemonCommand(
     readRequiredChecks: () => readCiGateRequiredChecks(targetCheckoutRoot),
     // W1-T6403: a located red is repaired through a priority fix PR, then a revert PR, never a push.
     repair: mainRepairLaneFor(target.owner, target.repo, config, ledgerPath, runId),
+    // A red that is only a ratified ceiling is read from the failing shard's own log, then recorded.
+    readCeilingVerdict: (check) => readMainCeilingVerdictAsync(target.owner, target.repo, check),
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
@@ -53055,11 +53062,235 @@ export async function openMainRepairRevertPr(
   }
 }
 
-/** W1-T6403 — the daemon's {@link MainRepairLane}: the fix worker and the revert PR above. */
+/** A failing check's whole job log, streamed through {@link mainCeilingLogReducer}; undefined with no job id. */
+export async function readMainCeilingVerdictAsync(
+  owner: string,
+  repo: string,
+  check: Pick<RollupCheckEntry, "detailsUrl" | "externalId">,
+  lines: typeof ghLinesAsync = ghLinesAsync,
+): Promise<MainCeilingLogVerdict | undefined> {
+  const jobId = checkJobId(check);
+  if (!jobId) return undefined;
+  const reducer = mainCeilingLogReducer();
+  await lines(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], (line) => reducer.push(line));
+  return reducer.finish();
+}
+
+/** `npm run --silent <script> [-- args]` off the event loop: a ceiling writer measures every tracked file. */
+export function runNpmScriptAsync(script: string, cwd: string, args: readonly string[] = []): Promise<{ status: number }> {
+  return new Promise((resolve) => {
+    const child = spawn("npm", ["run", "--silent", script, ...(args.length > 0 ? ["--", ...args] : [])], { cwd, stdio: "ignore" });
+    // A script that could not start is a red script: every caller below reads red as "do not record".
+    child.once("error", () => resolve({ status: 1 }));
+    child.once("close", (code) => resolve({ status: code ?? 1 }));
+  });
+}
+
+/** Every recorded-baseline PR the red-main repair lane opens is cut on this prefix. */
+export const MAIN_RATCHET_RECORD_BRANCH_PREFIX = "main-repair-ratchet-";
+
+/** How ci.yml's main-ceiling-drift runs each signal on main (`run_main_ceiling_gate`). On a branch cut
+ *  from main the bare signal reads main's own crossing as inherited and passes, so only main's form can
+ *  say whether main is red, or green again once recorded. A signal with no entry here is never recorded. */
+export const MAIN_CEILING_SIGNAL_ARGS: Readonly<Record<string, readonly string[]>> = {
+  "comment-load-signal": ["--base", "HEAD^", "--strict"],
+};
+
+/** The effects {@link recordMainRatchetBaseline} goes through; the daemon passes the real ones. */
+export interface MainRatchetRecordDeps {
+  fetch: GhApiFetcher;
+  git: (cwd: string, args: readonly string[]) => Promise<string>;
+  runScript: (script: string, cwd: string, args?: readonly string[]) => Promise<{ status: number }>;
+  worktreeAdd: (repoDir: string, worktreePath: string, branch: string) => Promise<void>;
+  worktreeRemove: (repoDir: string, worktreePath: string) => Promise<void>;
+  push: (worktreePath: string) => Promise<void>;
+}
+
+/** A baseline's numeric rows; undefined for a file that is absent or is not a JSON object. */
+function baselineRowsOf(text: string | undefined): Record<string, number> | undefined {
+  if (text === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+}
+
+/**
+ * The recorded-baseline PR for a main that is red only on a ratified ceiling. On a fresh branch off
+ * origin/main it re-measures main first (the signal must be red at the tip), then runs the SAME fenced
+ * writer the PR-side repair runs (W1-T4004's registry, so a coverage or mutation floor can never be
+ * written), and verifies the signal green. It stands down on an open PR whose baseline already carries
+ * every row this record raises -- a hand fix like #10712, or this lane's own earlier PR -- and opens
+ * nothing. Only after that does it commit the baseline path alone, push, and open the PR; an older PR
+ * of this lane's that no longer covers is then closed as superseded, so one is open at a time.
+ */
+export async function recordMainRatchetBaseline(
+  opts: {
+    owner: string;
+    repo: string;
+    repoDir: string;
+    worktreePath: string;
+    branch: string;
+    request: MainRatchetRecordRequest;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+  },
+  deps: MainRatchetRecordDeps,
+): Promise<MainRatchetRecordOutcome> {
+  const { owner, repo, worktreePath: wt, branch, request } = opts;
+  const unratified = request.scripts.filter((script) => !Object.hasOwn(RATIFIED_BASELINE_RATCHET_REPAIRS, script));
+  if (request.scripts.length === 0 || unratified.length > 0) {
+    return { declined: `not a ratified baseline writer: ${unratified.join(", ") || "(none named)"}` };
+  }
+  const repairs = request.scripts.map((script) => ({ script, ...RATIFIED_BASELINE_RATCHET_REPAIRS[script] }));
+  const readAt = (rev: string, path: string): Promise<string | undefined> =>
+    deps.git(wt, ["show", `${rev}:${path}`]).then(
+      (text) => text,
+      () => undefined, // The path is absent at that revision: it records no row.
+    );
+  await deps.worktreeAdd(opts.repoDir, wt, branch);
+  try {
+    const head = (await deps.git(wt, ["rev-parse", "HEAD"])).trim();
+    const declared = readPackageScriptsFor(wt);
+    for (const { script, signalScript } of repairs) {
+      const mainForm = MAIN_CEILING_SIGNAL_ARGS[signalScript];
+      if (!mainForm) return { declined: `no main-ceiling-drift form is known for ${signalScript}` };
+      if (typeof declared[script] !== "string" || typeof declared[signalScript] !== "string") {
+        return { declined: `${script} or ${signalScript} is not declared at ${head}` };
+      }
+      if ((await deps.runScript(signalScript, wt, mainForm)).status === 0) {
+        return { declined: `${signalScript} is green at main's tip ${head}: main no longer crosses that ceiling` };
+      }
+      if ((await deps.runScript(script, wt)).status !== 0) return { declined: `${script} could not record the ceiling at ${head}` };
+      if ((await deps.runScript(signalScript, wt, mainForm)).status !== 0) {
+        return { declined: `${signalScript} is still red at ${head} after ${script} recorded` };
+      }
+    }
+    const tracked = (await deps.git(wt, ["diff", "--name-only", "HEAD"])).split("\n").filter(Boolean);
+    const untracked = (await deps.git(wt, ["ls-files", "--others", "--exclude-standard"])).split("\n").filter(Boolean);
+    const changed = [...new Set([...tracked, ...untracked])].sort();
+    const allowed = new Set<string>(repairs.map((repair) => repair.baselinePath));
+    const stray = changed.filter((path) => !allowed.has(path));
+    if (stray.length > 0) return { declined: `the writers changed more than their baselines: ${stray.join(", ")}` };
+    // Only the rows this record RAISES are the claim; another open PR is redundant with it once it carries them all.
+    const raised = new Map<string, Record<string, number>>();
+    for (const path of changed) {
+      const before = baselineRowsOf(await readAt("HEAD", path)) ?? {};
+      const after = baselineRowsOf(readFileSync(join(wt, path), "utf8")) ?? {};
+      const up = Object.entries(after).filter(([row, value]) => value > (before[row] ?? Number.NEGATIVE_INFINITY));
+      if (up.length > 0) raised.set(path, Object.fromEntries(up));
+    }
+    if (raised.size === 0) return { declined: `the writers raised no ceiling at ${head}` };
+
+    const listed = (await deps.fetch(["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`])) as unknown;
+    if (!Array.isArray(listed)) throw new Error("GitHub's open pull request list was not a list");
+    const open = (listed as Array<{ number?: unknown; html_url?: unknown; head?: { ref?: unknown; sha?: unknown } }>).flatMap((pr) =>
+      typeof pr.number === "number" && typeof pr.html_url === "string" && typeof pr.head?.sha === "string"
+        ? [{ number: pr.number, url: pr.html_url, ref: String(pr.head.ref ?? ""), sha: pr.head.sha }]
+        : [],
+    );
+    if (open.length > 0) await deps.git(wt, ["fetch", "--quiet", "--no-tags", "origin", ...open.map((pr) => `refs/pull/${pr.number}/head`)]);
+    const superseded: string[] = [];
+    for (const pr of open) {
+      let covers = true;
+      for (const [path, rows] of raised) {
+        const theirs = baselineRowsOf(await readAt(pr.sha, path)) ?? {};
+        if (Object.entries(rows).some(([row, value]) => (theirs[row] ?? Number.NEGATIVE_INFINITY) < value)) covers = false;
+      }
+      if (covers) {
+        opts.log("main-repair.ratchet_standing", { pr_url: pr.url, head_sha: head });
+        return { standing: pr.url };
+      }
+      if (pr.ref.startsWith(MAIN_RATCHET_RECORD_BRANCH_PREFIX)) superseded.push(pr.url);
+    }
+
+    const gates = request.gates.join(", ");
+    await deps.git(wt, ["add", "--", ...changed]);
+    await deps.git(wt, ["commit", "--quiet", "-m", `chore(ci): record the ceiling main crossed at ${head.slice(0, 12)}`]);
+    await deps.push(wt);
+    const proofs = [...raised].flatMap(([path, rows]) =>
+      Object.entries(rows).map(([row, value]) => `- main's ceiling for ${row} is recorded at ${value} | grep: "${row}": ${value} in ${path}`),
+    );
+    const created = (await deps.fetch(
+      ratifyPrCreateRestArgs(owner, repo, {
+        title: `chore(ci): record the ceiling main crossed on ${gates}`.slice(0, 100),
+        body: [
+          `\`${request.branch}\` is red at \`${head}\` only because main itself crossed a recorded ceiling: ${gates}`,
+          "BLOCKED on main itself, with every test passing. No pull request is wrong; main is.",
+          "",
+          `Recorded by the ratified writer(s) ${request.scripts.join(", ")} and verified by their no-record signal(s);`,
+          "nothing else in the tree changed. Opened by the red-main repair lane, which closes it if main turns green without it.",
+          "",
+          "## Acceptance",
+          ...proofs,
+          "",
+          `Remudero-Task: ${mainRepairTaskId(head)}`,
+        ].join("\n"),
+        head: branch,
+        base: request.branch,
+      }),
+    )) as { html_url?: unknown };
+    if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
+    const prUrl = created.html_url;
+    opts.log("main-repair.ratchet_pr_opened", { pr_url: prUrl, branch, head_sha: head, rows: Object.fromEntries(raised) });
+    for (const url of superseded) {
+      const n = /\/pull\/(\d+)/.exec(url)?.[1];
+      await deps.fetch(["api", "--method", "POST", `repos/${owner}/${repo}/issues/${n}/comments`, "-f", `body=Superseded by ${prUrl}, which records main's ceiling at \`${head}\`.`]);
+      await deps.fetch(["api", "--method", "PATCH", `repos/${owner}/${repo}/pulls/${n}`, "-f", "state=closed"]);
+      opts.log("main-repair.ratchet_pr_superseded", { pr_url: url, by: prUrl });
+    }
+    return { opened: prUrl };
+  } finally {
+    try {
+      await deps.worktreeRemove(opts.repoDir, wt);
+    } catch (error) {
+      opts.log("main-repair.worktree_remove_failed", { error: String((error as Error)?.message ?? error) });
+    }
+  }
+}
+
+/** The daemon's {@link recordMainRatchetBaseline}: a fresh worktree of the target repo off origin/main. */
+export function openMainRatchetRecordPr(
+  owner: string,
+  repo: string,
+  config: Config,
+  request: MainRatchetRecordRequest,
+  ledgerPath: string,
+  runId: string,
+): Promise<MainRatchetRecordOutcome> {
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: mainRepairTaskId(request.headSha), step, lane: "main-repair", ...extra });
+  const branch = `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}${request.headSha.slice(0, 12)}-${systemClock.now()}`;
+  return recordMainRatchetBaseline(
+    {
+      owner,
+      repo,
+      repoDir: repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo),
+      worktreePath: join(worktreesDir(config), branch),
+      branch,
+      request,
+      log,
+    },
+    {
+      fetch: (args) => ghJsonAsync(args),
+      git: (cwd, args) => hostWorktreeGitAsync(cwd, args),
+      runScript: runNpmScriptAsync,
+      worktreeAdd: (dir, path, name) => worktreeAddAsync(dir, path, name, "origin/main", { log }),
+      worktreeRemove: worktreeRemoveAsync,
+      push: (path) => gitPushRunBranchAsync(path, { stdio: "ignore" }),
+    },
+  );
+}
+
+/** W1-T6403 — the daemon's {@link MainRepairLane}: the fix worker, the revert PR, and the recorded baseline above. */
 export function mainRepairLaneFor(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
   return {
     openFixPr: (request) => dispatchMainRepairFixRun(owner, repo, config, request, ledgerPath, runId),
     openRevertPr: (request) => openMainRepairRevertPr(owner, repo, config, request, ledgerPath, runId),
+    recordRatchet: (request) => openMainRatchetRecordPr(owner, repo, config, request, ledgerPath, runId),
   };
 }
 
