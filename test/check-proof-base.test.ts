@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -321,27 +321,36 @@ function twoCommitRepo(base: Record<string, string>, head: Record<string, string
   return dir;
 }
 
-test("R-11: a `grep:` proof is compared against a REAL worktree at --base <ref>, and the worktree is removed before the verb returns", () => {
+test("a `grep:` proof is compared against the REAL base blob at --base <ref> with no worktree added, and its base tree is removed before the verb returns", () => {
   const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE} already at the base\n` }, { "src/marker.txt": `${NEEDLE} still here at the head\n` });
+  const baseTree = join(mkdtempSync(join(tmpdir(), "rmd-check-proof-base-tree-")), "base");
   try {
-    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo);
+    let addWorktreeCalls = 0;
+    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo, {
+      baseBlobDeps: { makeDir: () => (mkdirSync(baseTree), baseTree), addWorktree: () => void addWorktreeCalls++ },
+    });
     assert.equal(code, CHECK_PROOF_EXIT.executedStale, out);
-    assert.match(out, /^base hits:\s+1$/m, "the base grep ran against the checked-out base file");
+    assert.match(out, /^base hits:\s+1$/m, "the base grep ran against the real base file");
     assert.match(out, /^base:\s+pass$/m);
     assert.match(out, /^discrimination:\s+executed_stale/m);
-    assert.equal(git(repo, "worktree", "list").split("\n").length, 1, "the base worktree was deregistered on the way out");
+    assert.equal(addWorktreeCalls, 0, "a grep proof reads its base blob; it never checks the base out");
+    assert.equal(git(repo, "worktree", "list").split("\n").length, 1, "no base worktree is registered");
+    assert.equal(existsSync(baseTree), false, "the base tree was removed on the way out");
   } finally {
+    rmSync(dirname(baseTree), { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
 test("R-11: a teardown that FAILS is reported on stderr and never masks the verdict already computed", () => {
-  const repo = twoCommitRepo({ "src/marker.txt": `${NEEDLE} already at the base\n` }, { "src/marker.txt": `${NEEDLE} still here at the head\n` });
+  // A `unit test:` proof: the one kind that still gets a merge-base worktree to tear down.
+  const passing = 'import { test } from "node:test";\ntest("passes on both commits", () => {});\n';
+  const repo = twoCommitRepo({ "test/stale.test.ts": passing }, { "test/stale.test.ts": passing });
   const errs: string[] = [];
   const realError = console.error;
   console.error = (...args: unknown[]) => void errs.push(args.map(String).join(" "));
   try {
-    const { code, out } = runCheckProof(["--base", "HEAD~1", ...PROOF_ARGV], repo, {
+    const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/stale.test.ts"], repo, {
       baseBlobDeps: {
         removeWorktree: () => {
           throw new Error("teardown refused by the fixture");
@@ -429,7 +438,8 @@ test("a base run that itself cannot execute (e.g. an unreadable base file on dis
     );
   } finally {
     rmSync(head, { recursive: true, force: true });
-    chmodSync(join(base, "src", "marker.txt"), 0o600); // restore write+read so rmSync can remove it
+    // restore write+read so rmSync can remove it, when the verb's own teardown has not already
+    if (existsSync(join(base, "src", "marker.txt"))) chmodSync(join(base, "src", "marker.txt"), 0o600);
     rmSync(base, { recursive: true, force: true });
   }
 });
