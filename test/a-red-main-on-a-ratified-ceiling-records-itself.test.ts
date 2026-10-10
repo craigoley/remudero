@@ -11,12 +11,11 @@
  * records it (the #10712 shape) makes the lane stand down.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { promisify } from "node:util";
 
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
 import {
@@ -33,12 +32,13 @@ import {
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   MAIN_RATCHET_RECORD_BRANCH_PREFIX,
+  openMainRatchetRecordPr,
   readMainCeilingVerdictAsync,
-  recordMainRatchetBaseline,
   runNpmScriptAsync,
-  type MainRatchetRecordDeps,
 } from "../src/run-task.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
@@ -363,7 +363,6 @@ test("the lane's own recorded-baseline PR is closed when main turns green withou
 
 const BASELINE = "scripts/comment-load-baseline.json";
 const MEASURED = 1760;
-const execFileAsync = promisify(execFile);
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
@@ -382,7 +381,10 @@ interface OpenPr {
   sweepRow?: number;
 }
 
+const FIXTURE_REPO = "fixture-repo";
+
 function openerFixture(openPrs: readonly OpenPr[] = []) {
+  const root = tmpRoot();
   const origin = gitRepo({ bare: true, kind: "ratchet-origin" });
   const seed = gitRepo({ kind: "ratchet-seed" });
   mkdirSync(join(seed.dir, "scripts"), { recursive: true });
@@ -404,78 +406,83 @@ function openerFixture(openPrs: readonly OpenPr[] = []) {
     shas.set(pr.number, seed.git("rev-parse", "HEAD"));
     seed.git("checkout", "--quiet", "main");
   }
-  const checkout = gitRepo({ cloneFrom: origin.dir, kind: "ratchet-checkout" });
+  // The daemon's managed checkout of a consumer repo: <config.root>/repos/<repo>, cloned from origin.
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", origin.dir, join(root, "repos", FIXTURE_REPO)], { env: GIT_ENV });
   const mainBefore = origin.git("rev-parse", "main");
-  const worktreePath = join(checkout.dir, "..", `${checkout.dir.split("/").pop()}-wt`);
   const created: Array<{ title: string; body: string; head: string; base: string }> = [];
   const closed: string[] = [];
   const scriptsRun: string[] = [];
   let strayWrite = false;
   const field = (args: string[], name: string): string => args.find((a) => a.startsWith(`${name}=`))!.slice(name.length + 1);
-  const deps: MainRatchetRecordDeps = {
-    fetch: ((args: string[]) => {
-      const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
-      if (path === `repos/${OWNER}/${REPO}/pulls?state=open&per_page=100`) {
-        return openPrs.map((pr) => ({
-          number: pr.number,
-          html_url: `https://github.com/${OWNER}/${REPO}/pull/${pr.number}`,
-          head: { ref: pr.ref, sha: shas.get(pr.number) },
-        }));
-      }
-      if (path === `repos/${OWNER}/${REPO}/pulls` && args.includes("POST")) {
-        created.push({ title: field(args, "title"), body: field(args, "body"), head: field(args, "head"), base: field(args, "base") });
-        return { html_url: LANE_PR, number: 10720 };
-      }
-      if (args.includes("PATCH")) {
-        closed.push(path);
-        return {};
-      }
-      if (args.includes("POST")) return {};
-      throw new Error(`unrouted gh api call: ${args.join(" ")}`);
-    }) as GhApiFetcher,
-    git: async (cwd, args) => (await execFileAsync("git", ["-C", cwd, ...args], { env: GIT_ENV })).stdout,
-    // The writer and its signal, as comment-load-ratchet behaves on main: src/lib/daemon.ts measures 1760.
-    runScript: async (script, cwd, args = []) => {
-      scriptsRun.push([script, ...args].join(" "));
-      const rows = JSON.parse(readFileSync(join(cwd, BASELINE), "utf8")) as Record<string, number>;
-      // Off a branch cut from main the bare signal reads main's own crossing as inherited and passes;
-      // only main's --strict form sees it, exactly as the real comment-load-ratchet.mjs does.
-      if (script === "comment-load-signal" && !args.includes("--strict")) return { status: 0 };
-      if (script === "comment-load-signal") return { status: rows["src/lib/daemon.ts"]! >= MEASURED ? 0 : 1 };
-      writeFileSync(join(cwd, BASELINE), baselineText(MEASURED));
-      if (strayWrite) writeFileSync(join(cwd, "src-stray.ts"), "// not a baseline\n");
-      return { status: 0 };
-    },
-    worktreeAdd: async (repoDir, path, branch) => {
-      await execFileAsync("git", ["-C", repoDir, "worktree", "add", "--quiet", "-b", branch, path, "origin/main"], { env: GIT_ENV });
-    },
-    worktreeRemove: async (repoDir, path) => {
-      await execFileAsync("git", ["-C", repoDir, "worktree", "remove", "--force", path], { env: GIT_ENV });
-    },
-    push: async (path) => {
-      await execFileAsync("git", ["-C", path, "push", "--quiet", "origin", "HEAD"], { env: GIT_ENV });
-    },
+  const fetch = ((args: string[]) => {
+    const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+    if (path === `repos/${OWNER}/${FIXTURE_REPO}/pulls?state=open&per_page=100`) {
+      return openPrs.map((pr) => ({
+        number: pr.number,
+        html_url: `https://github.com/${OWNER}/${REPO}/pull/${pr.number}`,
+        head: { ref: pr.ref, sha: shas.get(pr.number) },
+      }));
+    }
+    if (path === `repos/${OWNER}/${FIXTURE_REPO}/pulls` && args.includes("POST")) {
+      created.push({ title: field(args, "title"), body: field(args, "body"), head: field(args, "head"), base: field(args, "base") });
+      return { html_url: LANE_PR, number: 10720 };
+    }
+    if (args.includes("PATCH")) {
+      closed.push(path);
+      return {};
+    }
+    if (args.includes("POST")) return {};
+    throw new Error(`unrouted gh api call: ${args.join(" ")}`);
+  }) as GhApiFetcher;
+  // The writer and its signal, as comment-load-ratchet behaves on main: src/lib/daemon.ts measures 1760.
+  const runScript = async (script: string, cwd: string, args: readonly string[] = []): Promise<{ status: number }> => {
+    scriptsRun.push([script, ...args].join(" "));
+    const rows = JSON.parse(readFileSync(join(cwd, BASELINE), "utf8")) as Record<string, number>;
+    // Off a branch cut from main the bare signal reads main's own crossing as inherited and passes;
+    // only main's --strict form sees it, exactly as the real comment-load-ratchet.mjs does.
+    if (script === "comment-load-signal" && !args.includes("--strict")) return { status: 0 };
+    if (script === "comment-load-signal") return { status: rows["src/lib/daemon.ts"]! >= MEASURED ? 0 : 1 };
+    writeFileSync(join(cwd, BASELINE), baselineText(MEASURED));
+    if (strayWrite) writeFileSync(join(cwd, "src-stray.ts"), "// not a baseline\n");
+    return { status: 0 };
   };
-  const branch = `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}${"0".repeat(12)}-1`;
-  const run = (scripts: readonly string[] = ["comment-load-ratchet"]) =>
-    recordMainRatchetBaseline(
-      {
-        owner: OWNER,
-        repo: REPO,
-        repoDir: checkout.dir,
-        worktreePath,
-        branch,
-        request: { branch: "main", headSha: HEAD, scripts: scripts as MainRatchetRecordRequest["scripts"], gates: ["comment-load-signal"] },
-        log: () => {},
-      },
-      deps,
-    );
+  const identity = {
+    GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+  };
+  /** The production opener, with this fixture's identity and live writes allowed for its local origin. */
+  const run = async (scripts: readonly string[] = ["comment-load-ratchet"]) => {
+    const saved = { ...process.env };
+    Object.assign(process.env, identity);
+    try {
+      return await withLiveWritesAllowed(() =>
+        openMainRatchetRecordPr(
+          OWNER,
+          FIXTURE_REPO,
+          { root } as Config,
+          { branch: "main", headSha: HEAD, scripts: scripts as MainRatchetRecordRequest["scripts"], gates: ["comment-load-signal"] },
+          join(root, "ledger.ndjson"),
+          "DAEMON-RATCHET",
+          fetch,
+          runScript,
+        ),
+      );
+    } finally {
+      for (const key of Object.keys(identity)) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  };
+  const originBranches = () => origin.git("for-each-ref", "--format=%(refname:short)", "refs/heads").split("\n").filter(Boolean);
   return {
     run,
     created,
     closed,
     scriptsRun,
-    branch,
     mainBefore,
     strayWrites: () => {
       strayWrite = true;
@@ -485,15 +492,15 @@ function openerFixture(openPrs: readonly OpenPr[] = []) {
       writeFileSync(join(seed.dir, BASELINE), baselineText(2000));
       seed.git("commit", "--quiet", "-am", "the hand fix merged");
       seed.git("push", "--quiet", "origin", "main");
-      checkout.git("fetch", "--quiet", "origin");
     },
     originMain: () => origin.git("rev-parse", "main"),
-    originBranches: () => origin.git("for-each-ref", "--format=%(refname:short)", "refs/heads").split("\n").filter(Boolean),
+    originBranches,
+    laneBranches: () => originBranches().filter((b) => b !== "main"),
     fileOnBranch: (ref: string, path: string) => origin.git("show", `${ref}:${path}`),
     changedOnBranch: (ref: string) => origin.git("diff", "--name-only", `main...${ref}`).split("\n").filter(Boolean),
     cleanup: () => {
-      for (const repo of [origin, seed, checkout]) repo.cleanup();
-      rmSync(worktreePath, { recursive: true, force: true });
+      for (const repo of [origin, seed]) repo.cleanup();
+      rmSync(root, { recursive: true, force: true });
     },
   };
 }
@@ -505,12 +512,14 @@ test("the recorded-baseline PR carries only the baseline path at the value the f
     const mainForm = "comment-load-signal --base HEAD^ --strict";
     assert.deepEqual(fx.scriptsRun, [mainForm, "comment-load-ratchet", mainForm], "re-measured red in main's form, recorded, verified green");
     assert.equal(fx.originMain(), fx.mainBefore, "main itself is never written");
-    assert.deepEqual(fx.originBranches().filter((b) => b !== "main"), [fx.branch]);
-    assert.deepEqual(fx.changedOnBranch(fx.branch), [BASELINE], "nothing but the baseline rides the PR");
-    assert.equal(fx.fileOnBranch(fx.branch, BASELINE), baselineText(MEASURED).trimEnd());
+    const [branch] = fx.laneBranches();
+    assert.match(branch!, new RegExp(`^${MAIN_RATCHET_RECORD_BRANCH_PREFIX}688f222c0000-\\d+$`), "the push sends the lane's own new branch");
+    assert.equal(fx.laneBranches().length, 1);
+    assert.deepEqual(fx.changedOnBranch(branch!), [BASELINE], "nothing but the baseline rides the PR");
+    assert.equal(fx.fileOnBranch(branch!, BASELINE), baselineText(MEASURED).trimEnd());
     const [pr] = fx.created;
     assert.equal(pr?.base, "main");
-    assert.equal(pr?.head, fx.branch);
+    assert.equal(pr?.head, branch);
     assert.ok(pr!.title.length <= 100);
     assert.match(pr!.title, /^chore\(ci\): record the ceiling main crossed on comment-load-signal$/);
     assert.match(pr!.body, /^## Acceptance$/m);
@@ -540,7 +549,7 @@ test("an older recorded-baseline PR of the lane that no longer covers is closed 
   const fx = openerFixture([{ number: 10715, ref: `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}aaaaaaaaaaaa-1`, row: 1755 }]);
   try {
     assert.deepEqual(await fx.run(), { opened: LANE_PR });
-    assert.deepEqual(fx.closed, [`repos/${OWNER}/${REPO}/pulls/10715`]);
+    assert.deepEqual(fx.closed, [`repos/${OWNER}/${FIXTURE_REPO}/pulls/10715`]);
   } finally {
     fx.cleanup();
   }
