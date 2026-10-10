@@ -58,8 +58,10 @@ test("W1-T7752: pinned trusted identities survive an unknown membership read", (
   assert.equal(decide(subject(1), [membership("unknown")]).reason, "owner");
   assert.equal(decide(subject(2, "Bot"), []).reason, "scoped-service");
   assert.equal(classifyContribution(subject(2, "Bot"), "feedback", policy, [], NOW).outcome, "unknown");
-  assert.equal(decide(subject(1, "Bot"), []).outcome, "confirmed-external");
+  assert.equal(decide(subject(1, "Bot"), []).outcome, "unknown");
   assert.equal(decide(subject(2), []).outcome, "unknown");
+  assert.equal(classifyContribution(subject(2), "review", { ...policy, organizationIds: [] }, [], NOW).outcome, "unknown");
+  assert.equal(decide(subject(2), [membership()]).outcome, "unknown");
   assert.equal(decide(subject(900, "Bot"), []).outcome, "confirmed-external");
 });
 

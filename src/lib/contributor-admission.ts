@@ -29,6 +29,8 @@ export interface AdmissionSubject {
   observedAtMs: number;
   origin?: ContributionOrigin;
 }
+/** A credential-capable resolver must verify this state: a 403/404 alone does not prove
+ * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
 export interface MembershipEvidence {
   actorId: number;
   organizationId: number;
@@ -82,6 +84,10 @@ export function classifyContribution(
   if (!validId(actor?.id) || (actor?.type !== "User" && actor?.type !== "Bot")
     || !validId(origin?.headRepository?.id) || origin?.targetRepository?.id !== subject.repositoryId) {
     return decision("unknown", "incomplete-origin");
+  }
+  if ((actor.type === "Bot" && policy.ownerIds.includes(actor.id))
+    || (actor.type === "User" && policy.services.some((service) => service.id === actor.id))) {
+    return decision("unknown", "identity-type-mismatch");
   }
   if (actor.type === "User" && policy.ownerIds.includes(actor.id)) return decision("trusted", "owner");
   if (actor.type === "Bot") {
