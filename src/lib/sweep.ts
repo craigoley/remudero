@@ -5783,6 +5783,8 @@ export interface OpenPrView {
   progressEscalation?: { loop: string; reason: string; judged: boolean };
   /** W1-T7096: the progress judge ruled another round, or deferred the ruling to the fixable path. */
   progressContinue?: { reason: string; unavailable?: boolean };
+  /** The newest `fix.progress_judged` row for this PR; set by runSweep, absent when no judge has ruled. */
+  lastProgressJudgement?: ProgressJudgementLabel;
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
@@ -9037,10 +9039,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           `${base} — every red check is a RECORDABLE ratchet whose remedy is a recorded number (${how}) — ` +
           (taken
             ? "repairing deterministically instead of spending a fix round"
-            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`)
+            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`)
         );
       }
-      return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
+      return `${base} — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`; // W1-T2504: "red" is byte-identical; else names the specific check.
     },
   },
   {
@@ -9086,10 +9088,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy) => {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       if (pr.unmetCriteria.length > 0) {
-        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${ceiling}`;
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — ${fixRoundLabel(pr, ceiling)}`;
       }
       const n = pr.actionableGateFailures!.length;
-      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${ceiling}`;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — ${fixRoundLabel(pr, ceiling)}`;
     },
   },
   {
@@ -10370,6 +10372,31 @@ export function fixCeilingInForce(
     resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? clarifyPolicy.resetStrikeCounterOnAnswer,
   };
   return strikeCap + strikeCapForAnswer(strikeCap, clarify);
+}
+
+/** What a disposition reason shows for a judged fix lane: the round the judge ruled on and its verdict. */
+export interface ProgressJudgementLabel { round: number; verdict: string; reason: string }
+
+/** The newest `fix.progress_judged` row for `prNumber`, or undefined when the judge never ruled on it. */
+export function lastProgressJudgementFor(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+): ProgressJudgementLabel | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = lines[i]!;
+    if (row.step !== "fix.progress_judged" || row.pr_number !== prNumber) continue;
+    if (typeof row.verdict !== "string" || typeof row.round_count !== "number") continue;
+    return { round: row.round_count, verdict: row.verdict, reason: typeof row.reason === "string" ? row.reason : "" };
+  }
+  return undefined;
+}
+
+/** The fix-lane progress label: the judge's round and verdict once it has ruled, else the former strike ratio. */
+export function fixRoundLabel(pr: Pick<OpenPrView, "priorStrikes" | "lastProgressJudgement">, ceiling: number): string {
+  const judged = pr.lastProgressJudgement;
+  if (judged === undefined) return `strike ${pr.priorStrikes + 1}/${ceiling}`;
+  const why = judged.reason.length > 80 ? `${judged.reason.slice(0, 77)}...` : judged.reason;
+  return `fix round ${judged.round + 1} — judge: ${judged.verdict}${why ? ` (${why})` : ""}`;
 }
 
 /** W1-T2452 — THE STRIKE BUDGET TO DISPATCH: the REMAINDER against {@link fixCeilingInForce}, NEVER
@@ -13431,6 +13458,10 @@ export async function runSweep(
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
     : pr);
+  openPrs = openPrs.map((pr) => {
+    const judged = lastProgressJudgementFor(ledgerLines, pr.prNumber);
+    return judged === undefined ? pr : { ...pr, lastProgressJudgement: judged };
+  });
   // W1-T7096: judge every PR whose rounds reached the former ceiling BEFORE dispositions derive, so an
   // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
   const judgedContinue = new Map<number, FixProgressVerdict>();
