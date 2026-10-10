@@ -61,7 +61,7 @@ function filesUnder(dir: string, prefix = ""): string[] {
 
 const countFiles = (dir: string) => filesUnder(dir).length;
 
-test("W1-T2877: check mode reports missing units and changes nothing", () => {
+test("W1-T2877: check mode reports missing units and changes nothing, including deterministic session-slice cap artifacts", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-"));
   try {
     const check = run([], {}, root);
