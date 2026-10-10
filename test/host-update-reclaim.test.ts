@@ -902,7 +902,7 @@ test("MUTANT: dropping the serve publish from the REAL block is caught by the lo
 
 const isImagePrune = (c: Call) => c.bin === "docker" && c.argv[0] === "image" && c.argv[1] === "prune";
 
-test("--reclaim-only skips the image prune while another instance holds the host recycle lock", () => {
+test("the nightly reclaim skips the image prune while another instance holds the host recycle lock", () => {
   const lockRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-lock-`));
   const lock = join(lockRoot, "recycle-container.lock");
   mkdirSync(lock);
@@ -918,7 +918,7 @@ test("--reclaim-only skips the image prune while another instance holds the host
   assert.ok(existsSync(join(lock, "holder")), "the other instance's lock is left exactly as it was");
 });
 
-test("--reclaim-only takes the free host recycle lock around its image prune and releases it", () => {
+test("the nightly reclaim takes the free host recycle lock around its image prune and releases it", () => {
   const lockRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-lock-`));
   const lock = join(lockRoot, "recycle-container.lock");
   const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, {
