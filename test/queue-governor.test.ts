@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { adaptiveWipBound } from "../src/lib/adaptive-wip.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -457,12 +456,6 @@ test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR co
       trailingMergedCount: 0,
       headroomFraction: result!.headroomFraction,
     }));
-    const fixtureMode = process.env.QUEUE_FIXTURE_HEADROOM_CASE;
-    if (fixtureMode !== undefined) {
-      assert.ok(["low", "healthy", "unread"].includes(fixtureMode));
-      assert.equal(result!.headroomFraction, fixtureMode === "low" ? 0.27 : fixtureMode === "healthy" ? 0.6 : undefined);
-      assert.equal(result!.wipLimit, fixtureMode === "low" ? 9 : 10);
-    }
 
     const afterLog = readLedgerLines(ledgerPath);
     const deferLine = afterLog.find((l) => l.step === "dispatch_deferred_wip");
@@ -476,49 +469,69 @@ test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR co
   }
 });
 
-test("queue governor wiring preserves its base limit while host headroom adjusts the effective bound", () => {
-  const fixture = mkdtempSync(join(tmpdir(), "rmd-queue-governor-headroom-"));
-  const preload = join(fixture, "meminfo-control.mjs");
-  const title = "W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR count — at DEFAULT_SWEEP_POLICY.wipLimit it defers, and the call site itself ledgers dispatch_deferred_wip";
-  const pattern = `^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
-  const cwd = fileURLToPath(new URL("../", import.meta.url));
+/** Run `body` with ONLY `/proc/meminfo` replaced at the built-in fs reader — the very default reader
+ *  the real wiring (`readMemoryHeadroomFraction()`) calls. Every other path stays real. Returns how
+ *  many times the replaced reader was consulted, so a case can prove the wiring actually reached it.
+ *  In-process on purpose: a failure surfaces here as a named assertion rather than a bare child exit. */
+async function withControlledMeminfo(
+  mode: "low" | "healthy" | "unread",
+  body: () => Promise<void>,
+): Promise<number> {
+  const original = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = ((path: unknown, ...args: unknown[]) => {
+    if (path !== "/proc/meminfo") return (original as (...a: unknown[]) => unknown)(path, ...args);
+    reads += 1;
+    if (mode === "unread") throw Object.assign(new Error("controlled meminfo unavailable"), { code: "ENOENT" });
+    const text = `MemTotal: 1000000 kB\nMemAvailable: ${mode === "low" ? 270000 : 600000} kB\n`;
+    const opt = args[0] as { encoding?: string } | string | undefined;
+    return typeof opt === "string" || opt?.encoding ? text : Buffer.from(text);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
   try {
-    // Isolate the built-in reader replacement in a REAL child, before tsx imports
-    // run-task. Only /proc/meminfo is controlled; every other fs read stays real.
-    writeFileSync(preload, `
-import fs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
-const read = fs.readFileSync;
-const mode = process.env.QUEUE_FIXTURE_HEADROOM_CASE;
-const witness = process.env.QUEUE_FIXTURE_HEADROOM_WITNESS;
-fs.readFileSync = function(path, ...args) {
-  if (path !== "/proc/meminfo") return read.call(this, path, ...args);
-  fs.appendFileSync(witness, mode + "\\n");
-  if (mode === "unread") throw Object.assign(new Error("controlled meminfo unavailable"), { code: "ENOENT" });
-  const text = "MemTotal: 1000000 kB\\nMemAvailable: " + (mode === "low" ? 270000 : 600000) + " kB\\n";
-  return typeof args[0] === "string" || args[0]?.encoding ? text : Buffer.from(text);
-};
-syncBuiltinESMExports();
-`);
-    for (const mode of ["low", "healthy", "unread"] as const) {
-      const witness = join(fixture, `${mode}.reads`);
-      const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: "", QUEUE_FIXTURE_HEADROOM_CASE: mode, QUEUE_FIXTURE_HEADROOM_WITNESS: witness };
-      delete env.NODE_TEST_CONTEXT;
-      delete env.NODE_OPTIONS;
-      const output = execFileSync(process.execPath, [
-        "--import", preload, "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
-        "--test", "--test-concurrency=1", "--test-reporter=tap", `--test-name-pattern=${pattern}`,
-        "test/queue-governor.test.ts",
-      ], { cwd, env, encoding: "utf8", timeout: 30_000, maxBuffer: 1 << 20 });
-      assert.ok(output.includes(`ok 1 - ${title}`), `${mode}: the real named wiring test ran, not a wrapper`);
-      for (const [field, count] of Object.entries({ tests: 1, pass: 1, fail: 0, cancelled: 0, skipped: 0, todo: 0 })) {
-        assert.match(output, new RegExp(`^# ${field} ${count}$`, "m"), `${mode}: complete native test summary`);
-      }
-      const reads = readFileSync(witness, "utf8").trim().split("\n");
-      assert.ok(reads.length > 0 && reads.every(row => row === mode), `${mode}: positive default-reader witness`);
-    }
+    await body();
   } finally {
-    rmSync(fixture, { recursive: true, force: true });
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
+  }
+  return reads;
+}
+
+test("queue governor wiring preserves its base limit while host headroom adjusts the effective bound", async () => {
+  const cases = [
+    { mode: "low", headroom: 0.27, effective: 9 },
+    { mode: "healthy", headroom: 0.6, effective: 10 },
+    { mode: "unread", headroom: undefined, effective: 10 },
+  ] as const;
+  for (const { mode, headroom, effective } of cases) {
+    const config = queueGovernorFixtureConfig();
+    try {
+      const ledgerPath = join(config.root, "state", "ledger.ndjson");
+      const planPath = planWithOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+      const seen: { result?: QueueGovernorResult } = {};
+      const reads = await withControlledMeminfo(mode, async () => {
+        const deps = await captureDrainDepsWithLiveProjection(config, planPath, OPEN_GITHUB);
+        seen.result = deps.checkQueueGovernor!();
+      });
+      const result = seen.result;
+      assert.ok(reads > 0, `${mode}: the real wiring read the controlled default meminfo reader`);
+      assert.ok(result, `${mode}: ${DEFAULT_SWEEP_POLICY.wipLimit} open PRs reach the effective bound and defer`);
+      assert.equal(result.baseWipLimit, DEFAULT_SWEEP_POLICY.wipLimit, `${mode}: the nominal base limit is preserved`);
+      assert.equal(result.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
+      if (headroom === undefined) assert.equal(result.headroomFraction, undefined, `${mode}: unreadable memory is reported unread`);
+      else assert.ok(Math.abs((result.headroomFraction ?? NaN) - headroom) < 1e-9, `${mode}: headroom ${headroom}, got ${result.headroomFraction}`);
+      assert.equal(result.wipLimit, effective, `${mode}: effective bound`);
+      assert.equal(result.wipLimit, adaptiveWipBound({
+        baseLimit: DEFAULT_SWEEP_POLICY.wipLimit, trailingMergedCount: 0, headroomFraction: result.headroomFraction,
+      }));
+      const deferLine = readLedgerLines(ledgerPath).find((l) => l.step === "dispatch_deferred_wip");
+      assert.ok(deferLine, `${mode}: the call site ledgers the deferral`);
+      assert.equal(deferLine.base_wip_limit, DEFAULT_SWEEP_POLICY.wipLimit);
+      assert.equal(deferLine.wip_limit, effective);
+      assert.equal(deferLine.headroom_fraction, result.headroomFraction ?? null);
+    } finally {
+      rmSync(config.root, { recursive: true, force: true });
+    }
   }
 });
 
