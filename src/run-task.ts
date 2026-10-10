@@ -14442,7 +14442,8 @@ export function dispatchProofAmendmentWrite(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
     parseProofAmendmentProposalFn?: typeof parseProofAmendmentProposal;
     buildBaseProofDirFn?: typeof buildBaseProofDir;
-    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to the leaf it was cut through. */
+    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to
+     *  {@link releaseBaseProofDir}'s own remover, the hardened leaf it was cut through. */
     removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
   } = {},
 ): void {
@@ -14450,7 +14451,7 @@ export function dispatchProofAmendmentWrite(
     gitFn,
     parseProofAmendmentProposalFn = parseProofAmendmentProposal,
     buildBaseProofDirFn = buildBaseProofDir,
-    removeBaseWorktreeFn = (repoDir: string, worktreePath: string) => void hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath]),
+    removeBaseWorktreeFn,
     ...portsIo
   } = io;
   let baseProof: BaseProofDir | undefined;
@@ -26814,13 +26815,14 @@ function releaseBaseProofDir(
 /**
  * (R-11) `rmd check-proof --base`'s own teardown of the merge-base worktree {@link buildBaseProofDir}
  * added for it — best-effort, never masking the verdict already computed, mirroring
- * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree.
+ * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree. The default
+ * removes it through {@link hostWorktreeGit}, the hardened leaf the build added it through, so the
+ * caller's checkout (a PR head, for a proof amendment) is pinned and inherited git variables are dropped.
  */
 function removeBaseProofWorktree(
   repoDir: string,
   worktreePath: string,
-  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) =>
-    execFileSync("git", ["-C", dir, "worktree", "remove", "--force", wt], { stdio: ["ignore", "pipe", "pipe"] }),
+  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) => void hostWorktreeGit(dir, ["worktree", "remove", "--force", wt]),
 ): void {
   try {
     remove(repoDir, worktreePath);
@@ -45897,11 +45899,11 @@ export async function sweepPostFixReverification(
   // of a bare `prUrl` string.
   const readCiFailuresImpl =
     opts.readCiFailures ??
-    ((pr: OpenPrView) => {
+    (async (pr: OpenPrView) => {
       const v = ghJson(["pr", "view", pr.prUrl, "--json", "statusCheckRollup"]) as {
         statusCheckRollup?: RollupCheck[];
       };
-      return fetchCiFailures(owner, repo, v.statusCheckRollup);
+      return fetchCiFailuresAsync(owner, repo, v.statusCheckRollup);
     });
 
   const mergedFixPrNumbers = new Set<number>();
