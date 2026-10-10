@@ -253,7 +253,10 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
-    writeFileSync(join(root, "state", "ledger.ndjson"), history.map(row => JSON.stringify(row)).join("\n") + "\n");
+    // The daemon reads the real clock, and calibration only sees a 7-day window: re-anchor the
+    // fixture history one day before "now" so the test does not age out of that window.
+    const recent = new Date(Date.now() - DAY).toISOString();
+    writeFileSync(join(root, "state", "ledger.ndjson"), history.map(row => JSON.stringify({ ...row, ts: recent })).join("\n") + "\n");
     mkdirSync(join(repo.dir, "plan"));
     const planPath = join(repo.dir, "plan/tasks.yaml");
     const entry = (id: string) =>
